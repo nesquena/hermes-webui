@@ -460,6 +460,24 @@ def _is_gateway_mirror_entry(entry: dict | None) -> bool:
     return isinstance(entry, dict) and bool(entry.get(_GATEWAY_MIRROR_FLAG))
 
 
+def is_protected_approval(approval) -> bool:
+    """True for a consent prompt that session YOLO must never answer (#9108).
+
+    An MCP elicitation (``pattern_key: "mcp_elicitation"``, also carried in
+    ``pattern_keys``) or any approval whose ``surface`` is ``publish`` is a
+    consent prompt for an outbound send, a public post, a money change or a
+    destructive action. YOLO is a statement about *command* approvals only, so
+    both settle paths and the YOLO enable/release path must leave these to an
+    explicit answer.
+    """
+    if not isinstance(approval, dict):
+        return False
+    keys = [str(approval.get("pattern_key") or "")] + [
+        str(k) for k in (approval.get("pattern_keys") or [])
+    ]
+    return "mcp_elicitation" in keys or str(approval.get("surface") or "") == "publish"
+
+
 def _normalize_pending_queue_locked(session_key: str) -> list[dict]:
     """Return the session's polling queue as a mutable list under `_lock`."""
     queue_list = _pending.setdefault(session_key, [])
@@ -1205,7 +1223,13 @@ def resolve_gateway_pending_local_all(
     choice: str,
     reason: str | None = None,
 ) -> tuple[int, dict | None, int]:
-    """Resolve every parked local/no-run approval without touching remote runs."""
+    """Resolve every parked local/no-run approval without touching remote runs.
+
+    Protected consent prompts (elicitation / publish, ``is_protected_approval``)
+    are retained unpublished-for-answer instead of drained: the YOLO auto-answer
+    behind this drain must not sweep one up, whichever ordinary command
+    triggered the drain (#9108).
+    """
     targets = []
     removed_pending = False
     with _lock:
@@ -1215,7 +1239,7 @@ def resolve_gateway_pending_local_all(
         retained_gateway_queue = []
         for entry in gateway_queue:
             data = getattr(entry, "data", None) or {}
-            if str(data.get("run_id") or "").strip():
+            if str(data.get("run_id") or "").strip() or is_protected_approval(data):
                 retained_gateway_queue.append(entry)
             else:
                 targets.append(entry)
@@ -1229,8 +1253,11 @@ def resolve_gateway_pending_local_all(
         retained_pending = [
             entry
             for entry in entries
-            if _is_gateway_mirror_entry(entry)
-            and str(entry.get("run_id") or "").strip()
+            if (
+                _is_gateway_mirror_entry(entry)
+                and str(entry.get("run_id") or "").strip()
+            )
+            or is_protected_approval(entry)
         ]
         removed_pending = len(retained_pending) != len(entries)
         if retained_pending:
@@ -1261,7 +1288,7 @@ def settle_gateway_pending_local_notification(
     """
     with gateway_yolo_handoff(session_key):
         run_id = str((approval or {}).get("run_id") or "").strip()
-        if not run_id and is_session_yolo_enabled(session_key):
+        if not run_id and not is_protected_approval(approval) and is_session_yolo_enabled(session_key):
             _resolved, head, total = resolve_gateway_pending_local_all(
                 session_key,
                 "once",

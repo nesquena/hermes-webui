@@ -569,6 +569,7 @@ def _settle_gateway_run_approval(
     """
     from api.route_approvals import (
         gateway_yolo_handoff,
+        is_protected_approval,
         settle_gateway_pending_run,
         submit_gateway_pending_mirror,
     )
@@ -579,7 +580,7 @@ def _settle_gateway_run_approval(
     with gateway_yolo_handoff(session_id):
         if cancel_event is not None and cancel_event.is_set():
             return False, None, 0
-        if _gateway_session_yolo_enabled(session_id):
+        if not is_protected_approval(approval_data) and _gateway_session_yolo_enabled(session_id):
             try:
                 _auto_approve_gateway_run(
                     base_url,
