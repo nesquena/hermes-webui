@@ -409,15 +409,29 @@ def handle_upload(handler):
 
 
 # A single archive member path component longer than this makes the anchored
-# walk / leaf create fail with ENAMETOOLONG (macOS and Linux both cap one
-# component at 255 bytes). Used to tell an over-long-component
-# FileNotFoundError apart from a genuine missing file (#8826).
+# walk / leaf create fail with ENAMETOOLONG (Linux caps one component at 255
+# BYTES -- NAME_MAX -- while macOS caps it at 255 characters). Used to tell an
+# over-long-component FileNotFoundError apart from a genuine missing file
+# (#8826).
 _MAX_NAME_COMPONENT = 255
 
 
 def _archive_member_label(member_name: str) -> str:
     """Shorten a hostile member name for an error message (it can be 305+ chars)."""
     return member_name if len(member_name) <= 64 else member_name[:64] + '...'
+
+
+def _member_component_too_long(part: str) -> bool:
+    """True when one path component is over the filesystem's per-component limit.
+
+    The limit is a BYTE limit, not a character count: Linux's NAME_MAX is 255
+    bytes, so 128 "é" characters (256 UTF-8 bytes) are too long even though
+    they are only 128 characters. Measuring with ``len(part)`` lets such a
+    component through, the anchored walk then fails with ENAMETOOLONG, and the
+    member is classified as a generic missing file instead of a name problem.
+    ``os.fsencode`` measures the component the way the filesystem does.
+    """
+    return len(os.fsencode(part)) > _MAX_NAME_COMPONENT
 
 
 def _create_archive_member_fd(workspace: Path, member_path: Path, member_name: str) -> int:
@@ -436,7 +450,9 @@ def _create_archive_member_fd(workspace: Path, member_path: Path, member_name: s
       ``FileNotFoundError('Not found: ...')``. A genuine missing-file
       FileNotFoundError must NOT be reported as a name problem, so the mapping
       requires BOTH the walk's ``Not found:`` marker AND an over-long component
-      in the member name.
+      in the member name. "Over-long" is measured in BYTES
+      (``_member_component_too_long``), because that is how the filesystem
+      limits a path component -- a character count would miss a multibyte name.
 
     Each becomes a ValueError with a specific message, so the upload handlers'
     existing ValueError paths report a 400 / ``extract_error`` naming the member
@@ -458,7 +474,7 @@ def _create_archive_member_fd(workspace: Path, member_path: Path, member_name: s
         ) from None
     except FileNotFoundError as exc:
         if str(exc).startswith('Not found:') and any(
-            len(part) > _MAX_NAME_COMPONENT for part in Path(member_name).parts
+            _member_component_too_long(part) for part in Path(member_name).parts
         ):
             raise ValueError(
                 f'Archive member name too long: {_archive_member_label(member_name)}'
