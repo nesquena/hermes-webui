@@ -2010,7 +2010,21 @@ async function send(){
       }
     }
   }
-  if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+  if(!S.session){
+    // A delete-owned replacement chat can settle AFTER the user has already
+    // opened another conversation: newSession() then reports the POST as
+    // superseded and keeps its session off screen. This send joined that POST,
+    // so without looking at the result it would go on to send the captured
+    // prompt into whichever conversation the user opened meanwhile — and clear
+    // that conversation's draft. Drop this send instead; the composer still
+    // holds the text the user typed (nothing below has been cleared yet).
+    const _bootstrappedNewSession=await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});
+    if(_bootstrappedNewSession&&_bootstrappedNewSession.superseded) return;
+  }
+  if(!S.session){
+    _restoreComposerDraftAfterFailedSend(text,[...S.pendingFiles],null,null);
+    return;
+  }
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
