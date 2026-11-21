@@ -7849,6 +7849,14 @@ async function switchToProfile(name) {
     if (typeof _clearEmptyComposerModelOverride === 'function') _clearEmptyComposerModelOverride();
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    // A profile switch retires any session load still in flight for the
+    // previous profile. Without this, a late /api/session response can install
+    // the old profile's session, URL and workspace under the new one. The
+    // delete flow hits that window because it clears S.session before its
+    // replacement load starts, so the no-session branch below creates nothing
+    // that would replace the late install (#7898 review).
+    if (typeof _loadingSessionId !== 'undefined') _loadingSessionId = null;
+    if (typeof _loadSessionGeneration === 'number') _loadSessionGeneration++;
     // The switch's optimistic chip already claims the new profile, but the
     // localStorage hidden_tabs / tab_order mirror still holds the PREVIOUS
     // profile's snapshot until _refreshProfileSwitchBackground()'s

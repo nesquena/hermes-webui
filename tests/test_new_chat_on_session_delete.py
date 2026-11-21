@@ -186,6 +186,32 @@ class TestSendAfterSupersededDelete:
         )
 
 
+class TestProfileSwitchRetiresInFlightLoad:
+    """A profile switch accepted while the delete replacement load is pending
+    must retire that load. The delete flow clears S.session before calling
+    loadSession() for a remembered draft, so switchToProfile() takes its
+    no-session path and creates nothing that would replace a late install; the
+    stale response would then paint the old profile's session, draft and
+    workspace under the new profile (Greptile P1, 2026-11-21T00:20:05Z)."""
+
+    def test_switch_retires_the_load_before_reading_the_session(self):
+        panels = read('static/panels.js')
+        start = panels.index('async function switchToProfile(name) {')
+        end = panels.index('function openProfileCreate(', start)
+        body = panels[start:end]
+        accept = body.index('S.activeProfile = data.active || name;')
+        target = body.index('const targetActiveProfile', accept)
+        retirement = body[accept:target]
+        assert '_loadingSessionId = null' in retirement, (
+            'the accepted profile switch must clear the in-flight load id so '
+            'its continuation cannot install the previous profile session'
+        )
+        assert '_loadSessionGeneration++' in retirement, (
+            'the accepted profile switch must advance the load generation so '
+            'every stale loadSession() continuation bails before installing'
+        )
+
+
 _DRIVER_SRC = r"""
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[2], 'utf8');
