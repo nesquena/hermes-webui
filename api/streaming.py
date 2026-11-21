@@ -19252,6 +19252,7 @@ def _run_agent_streaming(
                         else:
                             _error_payload['message'] = 'Task cancelled.'
                         _error_payload['hint'] = _cancelled_turn_hint(
+                            _preferred_agent_display_name_for_session(s),
                             initiator=(
                                 CANCEL_INITIATOR_SERVER if _server_reason else CANCEL_INITIATOR_USER
                             ),

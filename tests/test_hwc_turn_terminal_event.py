@@ -788,6 +788,7 @@ def test_stop_won_error_first_apperror_carries_the_cancelled_hint(tmp_path, monk
     until the worker's terminal is queued, so no real sleep is involved.
     """
     sid, stream_id = "stop_won_error_first_hint", "stream-stop-won-error-first"
+    monkeypatch.setattr(streaming, "_preferred_agent_display_name_for_session", lambda _s: "Research")
 
     def _stop(_captured, sid_stream):
         assert streaming.cancel_stream(sid_stream) is True
@@ -804,7 +805,7 @@ def test_stop_won_error_first_apperror_carries_the_cancelled_hint(tmp_path, monk
     assert len(apperrors) == 1, names
     assert apperrors[0].get("type") == "cancelled"
     assert apperrors[0].get("message") == "Task cancelled."
-    assert apperrors[0].get("hint") == streaming._cancelled_turn_hint()
+    assert apperrors[0].get("hint") == streaming._cancelled_turn_hint("Research")
     assert not {"details", "reason"} & set(apperrors[0]), apperrors[0]
 
 
