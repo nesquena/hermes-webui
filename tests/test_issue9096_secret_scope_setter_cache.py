@@ -110,6 +110,7 @@ def test_a_stale_cache_does_not_leak_across_modules(monkeypatch, tmp_path):
     with _enter("background_worker"):
         pass
     assert calls[-1][0] == "stamped", calls[-1]
+    assert calls[-1][2] == str(_home)
 
 
 def test_the_cached_entry_records_both_the_module_and_the_setter(monkeypatch, tmp_path):
