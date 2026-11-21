@@ -76,7 +76,7 @@ const HAS_SLOT = __HAS_SLOT__;
 const MODE     = __MODE__;
 let REJECT_START = false;
 
-const POSTED = [], QUEUE = [];
+const POSTED = [], QUEUE = [], SERVER_QUEUE = [];
 let UPLOAD_GATE = null;
 let GENERIC_ERR = false;
 const el = () => ({ value:'', style:{}, dataset:{}, classList:{add(){},remove(){},toggle(){},contains(){return false;}},
@@ -116,6 +116,11 @@ const target = {
     return [];
   },
   queueSessionMessage: (sid, entry) => { QUEUE.push(entry); },
+  // Server-side follow-up FIFO (text-only, non-continuation messages): recorded separately so the
+  // test can prove a genuine message never reaches the token-carrying browser queue.
+  enqueueServerFollowup: async (sid, text) => { SERVER_QUEUE.push(text); return true; },
+  _canServerQueue: (sid, files, goalId) => !(files && files.length) && !goalId,
+  _clearComposerIfStillSubmitted(){}, _cancelStreamById: async () => true,
   shiftQueuedSessionMessage: () => null,
   updateQueueBadge(){}, renderTray(){}, autoResize(){}, renderMessages(){}, setBusy(){},
   showToast(){}, hideApprovalCard(){}, hideClarifyCard(){}, removeThinking(){}, setStatus(){},
@@ -249,6 +254,11 @@ vm.runInContext(SEND_SRC, ctx);
       entries.find(e => e.text === 'continuation body ' + mode)?.id ?? 'NOT_QUEUED'));
     console.log(mode.toUpperCase() + '_GENUINE=' + JSON.stringify(
       entries.find(e => e.text === 'plain user message ' + mode)?.id ?? 'NOT_QUEUED'));
+    console.log(mode.toUpperCase() + '_GENUINE_SERVER=' + JSON.stringify(
+      SERVER_QUEUE.includes('plain user message ' + mode) ? 'yes' : 'no'));
+    console.log(mode.toUpperCase() + '_CONT_SERVER=' + JSON.stringify(
+      SERVER_QUEUE.includes('continuation body ' + mode) ? 'yes' : 'no'));
+    SERVER_QUEUE.length = 0;
   }
 })().catch(e => console.log('HARNESS_ERR ' + e.message));
 """
@@ -410,7 +420,15 @@ def test_busy_queue_modes_carry_the_id_for_a_continuation_only(tmp_path):
         assert _field(stdout, mode + "_CONT") == "0123ffff", (
             f"the {mode.lower()} busy-queue path dropped the continuation ID"
         )
-        assert _field(stdout, mode + "_GENUINE") == "", (
-            f"a genuine message queued in {mode.lower()} mode carried a continuation ID"
+        # A genuine text-only message goes to the server FIFO (no token can ride on it) and
+        # never into the browser queue; a continuation must stay browser-side with its token.
+        assert _field(stdout, mode + "_GENUINE") == "NOT_QUEUED", (
+            f"a genuine message in {mode.lower()} mode must not use the token-carrying browser queue"
+        )
+        assert _field(stdout, mode + "_GENUINE_SERVER") == "yes", (
+            f"a genuine message in {mode.lower()} mode should be accepted by the server queue"
+        )
+        assert _field(stdout, mode + "_CONT_SERVER") == "no", (
+            f"a goal continuation in {mode.lower()} mode must not go to the server queue"
         )
 

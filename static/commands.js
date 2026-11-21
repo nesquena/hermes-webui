@@ -1716,6 +1716,15 @@ async function cmdGoal(args){
  * /queue <message> — Explicitly queue a message for the next turn.
  * Works regardless of the default message mode setting.
  */
+// Put a slash command back in the composer after its queue request failed, without clobbering
+// a newer draft or landing in a different chat.
+function _restoreSlashDraft(sid,text){
+  const inp=$('msg');
+  if(!inp||!S.session||S.session.session_id!==sid||String(inp.value||'').trim()!=='') return;
+  inp.value=text;
+  if(typeof autoResize==='function') autoResize();
+}
+
 async function cmdQueue(args){
   const msg=(args||'').trim();
   if(!msg){showToast(t('cmd_queue_no_msg'));return;}
@@ -1727,9 +1736,16 @@ async function cmdQueue(args){
     return;
   }
   if(!S.session){showToast(t('no_active_session'));return;}
-  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
-  updateQueueBadge(S.session.session_id);
-  S.pendingFiles=[];renderTray();
+  const _sid=S.session.session_id;
+  if(_canServerQueue(_sid,S.pendingFiles,'')){
+    // Text-only: backend FIFO (durable, drained server-side). send() already cleared the composer,
+    // so on failure put the command back (never over a newer draft) next to the helper's error toast.
+    if(!await enqueueServerFollowup(_sid,msg)){_restoreSlashDraft(_sid,'/queue '+msg);return;}
+  } else {
+    queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
+    updateQueueBadge(S.session.session_id);
+    S.pendingFiles=[];renderTray();
+  }
   showToast(t('cmd_queue_confirm'),2000);
 }
 
@@ -1748,13 +1764,23 @@ async function cmdInterrupt(args){
     return;
   }
   if(!S.session){showToast(t('no_active_session'));return;}
-  // Queue the message first (before cancel sets busy=false and drains)
-  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
-  updateQueueBadge(S.session.session_id);
-  S.pendingFiles=[];renderTray();
-  // Cancel the active stream; setBusy(false) will drain the queue
+  // Queue the message first (before cancel sets busy=false and drains). Capture the owning chat
+  // and its stream: the user may switch chats while the enqueue is in flight.
+  const _sid=S.session.session_id;
+  const _streamId=S.activeStreamId;
+  if(_canServerQueue(_sid,S.pendingFiles,'')){
+    // Not accepted: keep the command and do not cancel the running turn.
+    if(!await enqueueServerFollowup(_sid,msg)){_restoreSlashDraft(_sid,'/interrupt '+msg);return;}
+  } else {
+    queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
+    updateQueueBadge(S.session.session_id);
+    S.pendingFiles=[];renderTray();
+  }
+  // Cancel the active stream; the queue (server-side for text) starts the follow-up
   if(typeof cancelStream==='function'){
-    if(await cancelStream('slash-interrupt')) showToast(t('cmd_interrupt_confirm'),2000);
+    const _onScreen=S.session&&S.session.session_id===_sid&&S.activeStreamId===_streamId;
+    const _cancelled=_onScreen?await cancelStream('slash-interrupt'):await _cancelStreamById(_streamId);
+    if(_cancelled) showToast(t('cmd_interrupt_confirm'),2000);
     else showToast(t('cancel_failed'),null,'error');
   }
 }
