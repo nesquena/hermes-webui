@@ -843,3 +843,66 @@ def test_late_ordinary_command_is_answered_by_the_next_round(
         f"the late approval must be answered exactly once, got {runner_spy!r}"
     )
     assert runner_spy[1]["approval_id"] == "prompt-9108-late", runner_spy
+
+
+# ── One prompt id, two generations: the markers must not travel ─────────────
+
+
+def test_a_newer_generation_does_not_inherit_the_old_consent_markers(
+    sid, yolo_state, runner_spy
+):
+    """A prompt id may describe a different command at a newer generation.
+
+    The Gateway re-publishes one prompt id at a newer execution generation, and
+    the newer generation can describe an ORDINARY command. The consent
+    markers of the older generation must not be copied onto it: that would
+    park an ordinary command for a manual answer under session YOLO.
+    """
+    yolo_state["enabled"].add(sid)
+
+    # Generation 7: a consent prompt under this prompt id.
+    relayed, _sink = _relay_gateway_event(
+        sid,
+        _gateway_event_payload(ELICITATION, prompt_id="prompt-9108", generation=7),
+    )
+    assert relayed is True
+    assert runner_spy == [], "the consent prompt must not be answered"
+
+    # Generation 9 re-uses the prompt id for an ordinary command.
+    newer = _gateway_projection_payload(COMMON, prompt_id="prompt-9108", generation=9)
+    relayed, _sink = _relay_gateway_event(
+        sid, newer, run_id="run-9108"
+    )
+
+    assert relayed is True
+    assert len(runner_spy) == 1, (
+        "the newer generation is an ordinary command and must stay answerable; "
+        f"remote answers: {runner_spy!r}"
+    )
+    assert runner_spy[0]["choice"] == "once"
+
+
+def test_the_same_generation_keeps_the_consent_markers(
+    sid, yolo_state, runner_spy
+):
+    """The control: the SAME generation is the same prompt and stays protected."""
+    yolo_state["enabled"].add(sid)
+
+    relayed, _sink = _relay_gateway_event(
+        sid,
+        _gateway_event_payload(ELICITATION, prompt_id="prompt-9108", generation=7),
+    )
+    assert relayed is True
+    assert runner_spy == []
+
+    # The projection of the SAME prompt: no pattern key, same generation.
+    relayed, _sink = _relay_gateway_event(
+        sid,
+        _gateway_projection_payload(ELICITATION, prompt_id="prompt-9108", generation=7),
+    )
+
+    assert relayed is True
+    assert runner_spy == [], (
+        "the same prompt must stay protected on the projection path; "
+        f"remote answers: {runner_spy!r}"
+    )

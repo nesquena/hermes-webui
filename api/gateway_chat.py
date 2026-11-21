@@ -873,19 +873,26 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
     }
 
 
-def _recover_gateway_consent_markers(session_id: str, approval_data: dict) -> dict:
+def _recover_gateway_consent_markers(
+    session_id: str,
+    approval_data: dict,
+    *,
+    run_id: str = "",
+) -> dict:
     """Restore the consent markers a Gateway left out of one approval.
 
     The Gateway describes the same prompt twice: the ``approval.request``
     event carries the Agent's ``pattern_key``, while the ``pending_controls``
-    authority projection carries that prompt WITHOUT one. A projection that
+    authority projection carries the same prompt WITHOUT one. A projection that
     arrives for a prompt WebUI already mirrored therefore has no consent
     marker to judge it by, and would hand a consent prompt straight to
     session YOLO.
 
     Recovering the markers WebUI already recorded for that prompt keeps the
     protection identical on both descriptions. The payload's own values win:
-    nothing is recovered for a payload that carries a marker already.
+    nothing is recovered for a payload that carries a marker already. The
+    recovery is fenced by the run and the execution generation, because one
+    prompt id may describe a different command at a newer generation.
     """
     if not session_id or not isinstance(approval_data, dict):
         return approval_data
@@ -893,9 +900,12 @@ def _recover_gateway_consent_markers(session_id: str, approval_data: dict) -> di
         return approval_data
     from api.route_approvals import known_approval_consent_markers
 
+    generation = approval_data.get("_gateway_execution_generation")
     known_keys, known_surface = known_approval_consent_markers(
         session_id,
         str(approval_data.get("approval_id") or ""),
+        execution_generation=generation if type(generation) is int else None,
+        run_id=run_id or str(approval_data.get("run_id") or ""),
     )
     if not known_keys and not known_surface:
         return approval_data
@@ -983,8 +993,10 @@ def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, 
     approval_data = _gateway_runs_approval_event(payload)
     if not approval_data:
         return False
-    approval_data = _recover_gateway_consent_markers(session_id, approval_data)
     approval_data["run_id"] = run_id
+    approval_data = _recover_gateway_consent_markers(
+        session_id, approval_data, run_id=run_id
+    )
     approval_data["_gateway_agent_identity_v1"] = _gateway_approval_identity_v1(
         approval_data, base_url, api_key
     )

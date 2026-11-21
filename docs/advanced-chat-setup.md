@@ -467,10 +467,14 @@ Concretely:
 - **Enabling YOLO is refused while a protected approval is parked.** The
   request answers `409` with `{"code": "gateway_protected_approval_pending",
   "error": "A protected approval (an MCP elicitation or a publish action) is
-  still pending; answer it explicitly before enabling YOLO."}`. Nothing is
-  enabled and no parked approval is released: the refusal happens before any
-  relay, so a protected approval that lands while the enable is in flight
-  refuses the whole enable rather than being answered.
+  still pending; answer it explicitly before enabling YOLO."}`. YOLO is not
+  enabled and no protected approval is released: the refusal happens before
+  any relay, so a protected approval that lands while the enable is in flight
+  refuses the whole enable rather than being answered. Note that an ordinary
+  remote approval relayed **before** the protected prompt arrived has already
+  been answered — that answer cannot be undone — so a `409` is not proof that
+  nothing ran; it means YOLO was not enabled and the protected prompt is
+  still waiting.
 - **A protected approval stays visible and stays answerable.** It keeps its
   card in the approval queue and a manual answer reaches the Gateway exactly
   as it would without YOLO. Answer it explicitly, then retry the enable.

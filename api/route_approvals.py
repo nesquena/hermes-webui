@@ -534,7 +534,12 @@ def is_protected_approval(approval) -> bool:
     return _is_protected_surface(str(approval.get("surface") or "").strip())
 
 
-def known_approval_consent_markers(session_key: str, *identifiers: str) -> tuple[list[str], str]:
+def known_approval_consent_markers(
+    session_key: str,
+    *identifiers: str,
+    execution_generation: int | None = None,
+    run_id: str = "",
+) -> tuple[list[str], str]:
     """The consent markers WebUI already knows for one parked approval.
 
     A Gateway may re-describe a prompt that WebUI has already seen: the
@@ -545,6 +550,14 @@ def known_approval_consent_markers(session_key: str, *identifiers: str) -> tuple
     would let session YOLO answer a consent prompt that the event path
     protects.
 
+    A prompt id alone is not enough to call it the same prompt: the Gateway
+    may re-publish one id at a newer execution generation, and the newer
+    generation can describe a DIFFERENT command. Copying the older
+    generation's consent markers onto it would park an ordinary command for a
+    manual answer. The markers are therefore recovered only for the same
+    run AND the same execution generation, and never for a prompt whose
+    generation is unknown on either side.
+
     Returns ``(pattern_keys, surface)`` — the pattern keys and the surface
     this session already recorded for a prompt matching any of *identifiers*
     (the approval id, the prompt id or the request id). Both are empty when
@@ -554,6 +567,7 @@ def known_approval_consent_markers(session_key: str, *identifiers: str) -> tuple
     wanted.discard("")
     if not wanted:
         return [], ""
+    wanted_run_id = str(run_id or "").strip()
     pattern_keys: list[str] = []
     surface = ""
     with _lock:
@@ -569,6 +583,25 @@ def known_approval_consent_markers(session_key: str, *identifiers: str) -> tuple
             }
             if not (ids & wanted):
                 continue
+            # The same prompt id may describe a different command at a newer
+            # execution generation, so the markers are only recoverable for the
+            # very same prompt: same run, same generation, and a generation
+            # this side knows on both.
+            if wanted_run_id:
+                entry_run_id = str(entry.get("run_id") or "").strip()
+                if entry_run_id and entry_run_id != wanted_run_id:
+                    continue
+            if type(execution_generation) is int:
+                entry_generation = entry.get(_GATEWAY_EXECUTION_GENERATION)
+                if type(entry_generation) is not int:
+                    continue
+                if entry_generation != execution_generation:
+                    continue
+            else:
+                # An unknown generation cannot be proven to be the same
+                # prompt, and a newer generation may be a different command.
+                if entry.get(_GATEWAY_EXECUTION_GENERATION) is not None:
+                    continue
             for key in entry.get("pattern_keys") or []:
                 key = str(key or "").strip()
                 if key and key not in pattern_keys:
