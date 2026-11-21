@@ -126,10 +126,6 @@ def no_agent(monkeypatch):
     """Make ``from agent.redact import ...`` raise ImportError for this test."""
     monkeypatch.setitem(sys.modules, "agent", None)
     monkeypatch.setitem(sys.modules, "agent.redact", None)
-    # Actually drop the entries so the import machinery (not a None shortcut)
-    # fails, exactly like a machine without the Agent installed.
-    monkeypatch.delitem(sys.modules, "agent", raising=False)
-    monkeypatch.delitem(sys.modules, "agent.redact", raising=False)
 
 
 # ── 1. with the Agent: userinfo URL is masked ───────────────────────────────
@@ -160,8 +156,7 @@ def test_no_agent_uses_plain_formatter_and_does_not_raise(no_agent, clean_root_l
     assert lr.install_server_log_redaction(stream=buf) is True
 
     handler = _webui_handler(clean_root_logging)
-    assert isinstance(handler.formatter, logging.Formatter)
-    assert not isinstance(handler.formatter, _FakeRedactingFormatter)
+    assert type(handler.formatter) is logging.Formatter
 
     # WARNING+ still reaches the stderr channel — the fix masks, it must not
     # make log lines disappear.
