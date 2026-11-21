@@ -842,6 +842,153 @@ class TestMediaEndpointUnit(unittest.TestCase):
             self.assertIn("sandbox", handler.headers.get("content-security-policy", ""))
             self.assertIn(b"Report", handler.body)
 
+
+    def test_handle_media_session_authorizes_xlsx_artifact_outside_roots(self):
+        """Office artifacts outside the media roots are downloadable when the
+        owning session emitted an exact MEDIA: token, and ``inline=1`` still
+        forces Content-Disposition: attachment (no inline preview)."""
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+                self.body = b""
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, k, v):
+                self.headers[k.lower()] = v
+            def end_headers(self):
+                pass
+            class _W:
+                def __init__(self, owner):
+                    self.owner = owner
+                def write(self, b):
+                    self.owner.body += b
+                def flush(self):
+                    pass
+            @property
+            def wfile(self):
+                return self._W(self)
+
+        cases = (
+            ("report.xlsx", "spreadsheetml"),
+            ("report.xls", "vnd.ms-excel"),
+            ("report.docx", "wordprocessingml"),
+            ("report.doc", "application/msword"),
+            ("report.pptx", "presentationml"),
+            ("report.ppt", "vnd.ms-powerpoint"),
+        )
+        with tempfile.TemporaryDirectory() as home, _outside_allowed_roots_dir() as outside:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            for name, mime_marker in cases:
+                with self.subTest(name=name):
+                    path = pathlib.Path(outside) / name
+                    path.write_bytes(b"PK\x03\x04fake-office")
+                    session = SimpleNamespace(
+                        messages=[{"role": "assistant", "content": f"**MEDIA:{path}**"}]
+                    )
+                    with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home), "MEDIA_ALLOWED_ROOTS": ""}), \
+                         mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                         mock.patch.object(routes, "get_session", return_value=session), \
+                         mock.patch("api.auth.is_auth_enabled", lambda: False):
+                        handler = _Handler()
+                        routes._handle_media(
+                            handler,
+                            SimpleNamespace(
+                                query=(
+                                    f"path={urllib.parse.quote(str(path.resolve()))}"
+                                    "&session_id=s-media&inline=1"
+                                ),
+                                path="/api/media",
+                            ),
+                        )
+
+                    self.assertEqual(handler.status, 200)
+                    self.assertIn(mime_marker, handler.headers.get("content-type", ""))
+                    disposition = handler.headers.get("content-disposition", "")
+                    self.assertIn("attachment", disposition)
+                    self.assertNotIn("inline", disposition.split(";", 1)[0])
+                    self.assertIn(b"fake-office", handler.body)
+
+        from api.config import MIME_MAP
+        for macro_ext in (".xlsm", ".docm", ".pptm"):
+            self.assertNotIn(macro_ext, MIME_MAP)
+
+    def test_handle_media_does_not_follow_symlink_swapped_after_check(self):
+        """A symlink planted between the allow check and the open must not
+        serve a forbidden session transcript (404, never the transcript bytes)."""
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+                self.body = b""
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, k, v):
+                self.headers[k.lower()] = v
+            def end_headers(self):
+                pass
+            class _W:
+                def __init__(self, owner):
+                    self.owner = owner
+                def write(self, b):
+                    self.owner.body += b
+                def flush(self):
+                    pass
+            @property
+            def wfile(self):
+                return self._W(self)
+
+        secret = b"FORBIDDEN-SESSION-TRANSCRIPT-MARKER"
+        with tempfile.TemporaryDirectory() as home, _outside_allowed_roots_dir() as outside:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            transcript = hermes_home / "sessions" / "secret.json"
+            transcript.parent.mkdir()
+            transcript.write_bytes(secret)
+            office = pathlib.Path(outside) / "report.xlsx"
+            office.write_bytes(b"PK\x03\x04fake-office")
+            office_resolved = office.resolve()
+            session = SimpleNamespace(
+                messages=[{"role": "assistant", "content": f"**MEDIA:{office}**"}]
+            )
+            real_open = routes._open_file_read_fd
+
+            def _swap_then_open(target, anchor_root=None):
+                if pathlib.Path(target) == office_resolved:
+                    pathlib.Path(target).unlink()
+                    pathlib.Path(target).symlink_to(transcript)
+                return real_open(target, anchor_root)
+
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home), "MEDIA_ALLOWED_ROOTS": ""}), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                 mock.patch.object(routes, "get_session", return_value=session), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False), \
+                 mock.patch.object(routes, "_open_file_read_fd", side_effect=_swap_then_open):
+                handler = _Handler()
+                routes._handle_media(
+                    handler,
+                    SimpleNamespace(
+                        query=(
+                            f"path={urllib.parse.quote(str(office_resolved))}"
+                            "&session_id=s-media&inline=1"
+                        ),
+                        path="/api/media",
+                    ),
+                )
+
+            self.assertEqual(handler.status, 404)
+            self.assertNotIn(secret, handler.body)
+            self.assertNotIn(b"fake-office", handler.body)
+
     def test_handle_media_session_authorizes_safe_text_artifacts_outside_roots(self):
         from api import routes
 
