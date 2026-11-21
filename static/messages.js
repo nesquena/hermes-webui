@@ -7017,13 +7017,27 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _preSettleMessagesTruncated=(typeof _messagesTruncated!=='undefined')&&!!_messagesTruncated;
           const _preSettle=Array.isArray(S.messages)?S.messages:[];
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          // #8989 — the settled payload embeds the FULL transcript, so adopting it
+          // un-bounds a deliberately truncated session (rows 53 -> 1,064 on ~1,100
+          // messages). Keep the "loaded + appended" window a same-session reload
+          // asks for, sliced off the settled tail with its absolute offset; nothing
+          // is sent to the server and only resident rows are windowed.
+          const _doneTailWindow=(typeof _boundedDoneTailWindow==='function')
+            ? _boundedDoneTailWindow(_preSettleSession,_preSettleOldestIdx,_preSettleMessagesTruncated,_preSettle,d.session)
+            : null;
+          const _doneSettledSession=_doneTailWindow?_doneTailWindow.session:d.session;
+          if(_doneTailWindow){
+            // Re-run the #3018 carry-forward on the windowed slice.
+            S.messages=_carryForwardEphemeralTurnFields(_preSettle,_doneTailWindow.messages);
+            if(typeof _messagesTruncated!=='undefined')_messagesTruncated=_doneTailWindow.truncated;
+          }
           if(_pendingTitleUpdates.has(completedSid)){
             applySessionTitleUpdate(completedSid, _pendingTitleUpdates.get(completedSid), {expectedCurrent:_pendingTitleExpectedCurrent.get(completedSid)});
             _pendingTitleUpdates.delete(completedSid);
             _pendingTitleExpectedCurrent.delete(completedSid);
           }
           const _doneMergeOptions=(typeof _doneResidentMergeOptions==='function')
-            ? _doneResidentMergeOptions(_preSettleSession,_preSettleOldestIdx,d.session)
+            ? _doneResidentMergeOptions(_preSettleSession,_preSettleOldestIdx,_doneSettledSession)
             : null;
           // #6112 settle guard. The options helper is optional in older isolated
           // harnesses; when absent, the adoption stub keeps its legacy contract.
@@ -7031,7 +7045,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             ? _adoptDoneSnapshotMessages(_preSettle,S.messages,_doneFinalAnswer,_doneMergeOptions)
             : _adoptDoneSnapshotMessages(_preSettle,S.messages,_doneFinalAnswer);
           const _doneOffsetIsValid=!_doneMergeOptions||_doneMergeOptions.offsetIsValid;
-          const _doneOffset=_doneMergeOptions?_doneMergeOptions.offset:d.session._messages_offset;
+          const _doneOffset=_doneMergeOptions?_doneMergeOptions.offset:(_doneTailWindow?_doneTailWindow.offset:d.session._messages_offset);
           S.messages=_doneAdoption.messages;
           if(_doneAdoption.mergedResidentPrefix){
             // #4720: the merged array still starts at the resident origin, not
@@ -7153,8 +7167,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             return hasTc||hasPartialTc||hasTu;
           });
           if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
-            S.toolCalls=d.session.tool_calls.map(tc=>tc);
-            S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(d.session.tool_calls);
+            // #8994-F1 — d.session.tool_calls carries FULL-transcript
+            // assistant_msg_idx values, but the card renderer resolves them
+            // against the RESIDENT array (which the done handler just trimmed
+            // to a bounded tail window / filtered recovery rows). Rebase to
+            // the resident coordinate space by message identity and drop
+            // owners that did not survive the window.
+            const _settledFull=Array.isArray(d.session.messages)?d.session.messages:[];
+            const _remapped=typeof _remapDoneToolCallsToResident==='function'
+              ? _remapDoneToolCallsToResident(d.session.tool_calls,_settledFull,S.messages||[])
+              : d.session.tool_calls;
+            S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(_remapped);
           } else {
             if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
             S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
@@ -7993,6 +8016,172 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     return pre.slice(0,anchor).concat(settled);
+  }
+  // #8994-F1 — the `done` listener's settled session-level tool_calls carry
+  // FULL-transcript coordinates, but the card renderer reads S.toolCalls'
+  // assistant_msg_idx as a RESIDENT-array index. When the settled full
+  // transcript is adopted behind a bounded tail window (positive offset) or
+  // after legacy recovery rows were filtered out, full→resident is not an
+  // identity (nor a fixed rebase): a full-index 9 can land on an unrelated
+  // resident assistant row at local index 9. Rebase each settled tool card
+  // against the ACTUAL adopted resident messages by message identity, and drop
+  // any card whose owner did not survive into the resident set (evicted by the
+  // window, or removed by the recovery filter). Returns [] when nothing maps.
+  function _remapDoneToolCallsToResident(toolCalls, settledFull, resident){
+    if(!Array.isArray(toolCalls)||!toolCalls.length) return [];
+    if(!Array.isArray(settledFull)||!Array.isArray(resident)) return toolCalls.slice();
+    // Identity→resident index (first occurrence). An ambiguous duplicate key
+    // cannot name a unique visible owner, so it is left out of the map and its
+    // card is dropped rather than attached to a guess.
+    const residentByIdentity=new Map();
+    const ambiguousIdentities=new Set();
+    for(let i=0;i<resident.length;i++){
+      const key=_messageIdentityKey(resident[i]);
+      if(!key) continue;
+      if(!residentByIdentity.has(key)) residentByIdentity.set(key,i);
+      else ambiguousIdentities.add(key);
+    }
+    const out=[];
+    for(const tc of toolCalls){
+      if(!tc||typeof tc!=='object') continue;
+      const fullIdx=typeof tc.toolIdx==='number'?tc.toolIdx:parseInt(tc.assistant_msg_idx,10);
+      if(!Number.isFinite(fullIdx)||fullIdx<0||fullIdx>=settledFull.length) continue;
+      const owner=settledFull[fullIdx];
+      if(!owner||owner.role!=='assistant') continue;
+      // Locate the same message in the resident array by identity — the
+      // authoritative bridge, because the settle's recovery filter shifts
+      // local indices away from any fixed full−offset rebase.
+      const ownerKey=_messageIdentityKey(owner);
+      if(!ownerKey||ambiguousIdentities.has(ownerKey)) continue;
+      const localIdx=residentByIdentity.get(ownerKey);
+      if(typeof localIdx!=='number'||localIdx<0) continue; // evicted or filtered — drop
+      const next={...tc};
+      if(typeof next.toolIdx==='number') next.toolIdx=localIdx;
+      else next.assistant_msg_idx=localIdx;
+      out.push(next);
+    }
+    return out;
+  }
+  if(typeof window!=='undefined'){
+    window._remapDoneToolCallsToResident=_remapDoneToolCallsToResident;
+  }
+  // #8989 — a settled `done` payload embeds the FULL transcript
+  // (api/streaming.py::_session_payload_with_full_messages), so the wholesale
+  // adoption in the `done` listener silently converts a bounded tail window into
+  // a fully loaded session. Every later transcript re-render, height-cache sync
+  // and scroll computation then runs over the whole history instead of the
+  // window the session was opened with, and it stays that way until a reload:
+  // measured on a ~1,100-message session the resident row count went 53 -> 1,064
+  // and the transcript scroll height 3,744px -> 110,616px the moment the reply
+  // settled (a re-render took 156ms vs 22ms on a 1,714-message copy).
+  //
+  // When the resident window was already truncated, keep it bounded: slice the
+  // settled transcript to the width a same-session reload would ask for — the
+  // same rule _messageReloadLimitForSession() (static/sessions.js) applies, and
+  // the same shape as #7925's widening re-fetch (`max(heldLen, message_count -
+  // _oldestIdx, 30)`): how many rows were already loaded plus how many this turn
+  // appended. The absolute offset / truncation flag of the slice are reported so
+  // Load-earlier paging (_loadOlderMessages, msg_before=_oldestIdx) keeps
+  // working. A reader who intentionally loaded older history keeps it: the width
+  // never shrinks below what is already resident, and the server msg_limit
+  // ceiling is deliberately NOT applied here — it clamps *requested* windows,
+  // while this path issues no request and clamping down would drop resident rows
+  // (the #7925 failure mode).
+  //
+  // Returns null whenever there is nothing to protect: an empty settled snapshot
+  // (the #6112 guard owns that), a settled payload that is already a bounded
+  // window (positive _messages_offset or an explicit truncation flag — the
+  // _mergeResidentPrefix path owns that), a settled transcript that already fits
+  // inside the window (nothing to trim), or a resident window that was never
+  // truncated (the whole transcript is resident already).
+  //
+  // Optional-helper contract, same as _doneResidentMergeOptions: the caller
+  // guards the call with `typeof`, so harnesses that predate this helper keep
+  // the previous behaviour instead of failing to load.
+  function _boundedDoneTailWindow(preSettleSession,preSettleOldestIdx,preSettleMessagesTruncated,preSettleMessages,dSession){
+    if(!dSession||!Array.isArray(dSession.messages)||!dSession.messages.length) return null;
+    const residentOrigin=Number(preSettleOldestIdx);
+    const residentBounded=preSettleMessagesTruncated===true||(Number.isFinite(residentOrigin)&&residentOrigin>0);
+    if(!residentBounded) return null;
+    if(dSession._messages_truncated===true) return null;
+    const settledOffsetRaw=dSession._messages_offset;
+    if(settledOffsetRaw!=null&&Number(settledOffsetRaw)>0) return null;
+    const settled=dSession.messages;
+    const pre=Array.isArray(preSettleMessages)?preSettleMessages:[];
+    const loadedMessageCount=pre.length;
+    // Renderable floor, same filter as the fallback in
+    // _currentLoadedRenderableMessageCount(): tool rows never consume the
+    // visible-message budget. Counted from the resident array (not the live DOM)
+    // so the window is deterministic at settle time.
+    let loadedRenderableCount=0;
+    for(const m of pre){
+      if(m&&m.role&&m.role!=='tool') loadedRenderableCount++;
+    }
+    const previousMessageCount=Math.max(0,Number(preSettleSession&&preSettleSession.message_count)||0);
+    const currentMessageCount=Math.max(0,Number(dSession.message_count)||0);
+    const appendedMessageCount=Math.max(0,currentMessageCount-previousMessageCount);
+    // #8994 — `pre` is NOT a raw transcript span. The settle that produced it
+    // already ran _filterRecoveryControlMessages() (the `done` listener's final
+    // filter), so supported legacy recovery rows the reader never saw are
+    // missing from `pre.length` while residentOrigin still points at the raw
+    // origin. A width measured from loadedMessageCount then starts the next
+    // window that many rows late and evicts ordinary rows that are still
+    // resident: on the maintainer's 200-row replay (recovery text at raw
+    // 180-182, two consecutive settlements, counts 204 then 208) the origin
+    // marched 146 -> 148 and ordinary rows 146/147 disappeared. When the
+    // coordinates are authoritative, the trusted raw span is
+    // previousMessageCount - residentOrigin — the same quantity #7925's
+    // widening re-fetch uses (`message_count - _oldestIdx`) — and the width
+    // keeps all of it. Authority means: an integer origin strictly inside
+    // (0, previousMessageCount), safe counts that did not shrink, and the same
+    // transcript_generation on both sides (rotation/compaction renumbers the
+    // raw space, so an old origin must not be carried across it).
+    // `_oldestIdx` is the coordinate authority. The session's
+    // `_messages_offset` snapshots the last SAVED page, not the live pager
+    // position: Load earlier lowers `_oldestIdx` without rewriting it, so
+    // requiring the two to agree rejected a legitimately widened window and
+    // shrank the width back to the resident cardinality — evicting ordinary
+    // rows that never left the array. A stale offset may only ever WIDEN the
+    // window, never veto it, so it is not consulted here at all. Anything
+    // less trustworthy keeps the resident cardinality, which is all an
+    // unverifiable coordinate may claim.
+    let trustedRawSpan=0;
+    const preGeneration=preSettleSession?preSettleSession.transcript_generation:null;
+    if(
+      typeof preSettleOldestIdx==='number'&&Number.isSafeInteger(preSettleOldestIdx)&&
+      preSettleOldestIdx>0&&preSettleOldestIdx<previousMessageCount&&
+      Number.isSafeInteger(previousMessageCount)&&Number.isSafeInteger(currentMessageCount)&&
+      currentMessageCount>=previousMessageCount&&
+      Number.isSafeInteger(preGeneration)&&Number.isSafeInteger(dSession.transcript_generation)&&
+      preGeneration===dSession.transcript_generation
+    ){
+      trustedRawSpan=previousMessageCount-preSettleOldestIdx;
+    }
+    // Floor constant is owned by static/sessions.js and reached through the
+    // shared classic-script scope; the static fallback mirrors _MSG_LIMIT_MAX's
+    // documented convention for harnesses that load messages.js alone.
+    const initialLimit=(typeof _INITIAL_MSG_LIMIT==='number'&&_INITIAL_MSG_LIMIT>0)?_INITIAL_MSG_LIMIT:30;
+    const width=Math.max(initialLimit,loadedRenderableCount,loadedMessageCount+appendedMessageCount,trustedRawSpan+appendedMessageCount);
+    if(settled.length<=width) return null;
+    const messages=settled.slice(settled.length-width);
+    const offset=settled.length-messages.length;
+    return {
+      messages:messages,
+      offset:offset,
+      truncated:offset>0,
+      // Paging view of the settled session: the true full message_count, the
+      // windowed array, and the slice's own origin. Handed to
+      // _doneResidentMergeOptions() so its offset/count/generation checks see
+      // exactly what the client is about to adopt.
+      session:Object.assign({},dSession,{
+        messages:messages,
+        _messages_offset:offset,
+        _messages_truncated:offset>0,
+      }),
+    };
+  }
+  if(typeof window!=='undefined'){
+    window._boundedDoneTailWindow=_boundedDoneTailWindow;
   }
   function _doneResidentMergeOptions(preSettleSession,preSettleOldestIdx,dSession){
     const preGeneration=preSettleSession&&preSettleSession.transcript_generation;
