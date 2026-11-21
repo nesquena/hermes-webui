@@ -10,6 +10,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 CONFIG_PY = (REPO / "api" / "config.py").read_text(encoding="utf-8")
 STREAMING_PY = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
+MODELS_PY = (REPO / "api" / "models.py").read_text(encoding="utf-8")
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
@@ -21,8 +22,8 @@ CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 def test_tps_renders_in_message_header_not_global_titlebar():
     assert "msg-tps-inline" in UI_JS, "assistant message headers need a TPS chip hook"
     assert "msg-tps-inline" in CSS, "TPS header chip needs an explicit CSS hook"
-    assert "_assistantRoleHtml(tsTitle='', tpsText='')" in UI_JS, (
-        "assistant role/header rendering should accept the per-message TPS text"
+    assert "_assistantRoleHtml(tsTitle='', tpsText='', toolText='')" in UI_JS, (
+        "assistant role/header rendering should accept per-message TPS and tool-time text"
     )
     assert "_formatTurnTps" in UI_JS, "TPS formatting should be centralized"
     assert "_turnTps" in UI_JS, "settled assistant messages should render final TPS from message metadata"
@@ -82,6 +83,54 @@ def test_done_payload_persists_final_tps_when_exact_usage_available():
     )
     assert "d.usage.tps" in MESSAGES_JS, "done handler should read final TPS from the usage payload"
     assert "lastAsst._turnTps" in MESSAGES_JS, "done handler should persist final TPS on the last assistant message"
+
+
+def test_final_tps_uses_per_turn_completion_delta():
+    """A cached agent accumulates session_completion_tokens across turns.
+
+    Reusing that session total as the numerator while dividing by one turn's
+    duration reports TPS far above the model's real throughput on every turn
+    after the first. Final TPS must divide THIS turn's delta instead.
+    """
+    assert "turn_output_tokens = max(0, output_tokens - prev_output_tokens)" in STREAMING_PY, (
+        "turn completion delta should be derived from the agent's cumulative counters"
+    )
+    assert "float(turn_output_tokens) / _turn_duration_seconds" in STREAMING_PY, (
+        "final TPS numerator must be the per-turn completion delta"
+    )
+    assert "float(output_tokens) / _turn_duration_seconds" not in STREAMING_PY, (
+        "session-cumulative completion tokens must not be divided by a single turn's duration"
+    )
+
+
+def test_final_tps_reports_pure_generation_speed():
+    """The settled chip reports model generation speed, not whole-turn wall clock.
+
+    The agent keeps one (completion_tokens, request_seconds) entry per provider
+    call; this turn's slice of those histories is the pure generation rate.
+    The whole-turn average stays in the payload as ``tps_turn`` so the header can
+    show tool/wait time next to it instead of folding it into the model number.
+    """
+    assert "_api_output_history" in STREAMING_PY and "_api_latency_history" in STREAMING_PY, (
+        "pure generation TPS must come from the agent's per-call histories"
+    )
+    assert "_turn_api_calls_base" in STREAMING_PY, (
+        "the per-turn slice needs a call-count baseline so cached agents do not leak prior turns"
+    )
+    assert "usage['tps_turn']" in STREAMING_PY, "whole-turn average should stay in the usage payload"
+    assert "usage['tool_seconds']" in STREAMING_PY, "tool wall time should be reported separately"
+    assert "usage['api_seconds']" in STREAMING_PY, "provider-call time should be reported separately"
+    assert "'_turnToolSeconds'" in STREAMING_PY, "tool time must persist on the assistant message"
+    assert "_tool_seconds_total" in STREAMING_PY, "tool durations must be accumulated server-side"
+    assert "msg-toolsec-inline" in UI_JS, "tool time needs its own header chip"
+    assert "function _formatToolSeconds(" in UI_JS, "tool time formatting should be centralized"
+    assert "d.usage.tool_seconds" in MESSAGES_JS, "done handler should read the tool-time field"
+    assert "'_turnToolSeconds'" in MESSAGES_JS, (
+        "ephemeral-field carry-forward must keep the tool chip across session reloads"
+    )
+    assert '"_turnToolSeconds"' in MODELS_PY, (
+        "session display-metadata allowlist must pass the tool chip through the API"
+    )
 
 
 def test_backend_marks_streaming_metering_availability_explicitly():

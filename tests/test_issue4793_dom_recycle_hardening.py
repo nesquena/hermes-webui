@@ -89,6 +89,7 @@ const S = { session: { session_id: 'sess-1' } };
 const _assistantRoleHtml = (title, tps) => `role:${title}:${tps}`;
 const isTpsDisplayEnabled = () => true;
 const _formatTurnTps = value => `tps:${value}`;
+const _formatToolSeconds = value => (value ? `tool:${value}` : '');
 const latestRenderedAssistantRawIdx = rawIdx;
 function _setLatestAssistantTurnLandmark() {}
 eval(recycleChunk);
@@ -160,6 +161,7 @@ const S = { session: { session_id: 'sess-1' } };
 const _assistantRoleHtml = (title, tps) => `role:${title}:${tps}`;
 const isTpsDisplayEnabled = () => true;
 const _formatTurnTps = value => `tps:${value}`;
+const _formatToolSeconds = value => (value ? `tool:${value}` : '');
 const latestRenderedAssistantRawIdx = rawIdx;
 function _setLatestAssistantTurnLandmark() {}
 eval(recycleChunk);
