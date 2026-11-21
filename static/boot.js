@@ -2973,10 +2973,12 @@ function _hasFinePointerCoexisting(){
   try{ return matchMedia('(any-pointer:fine)').matches; }catch(_){ return false; }
 }
 // Prompt history (#8665): ArrowUp recalls prompts already sent in this chat,
-// like a terminal. It starts only with the caret at the very start of the
-// text, so normal multiline editing keeps its arrow keys. While browsing, Up
-// goes older from the first line and Down goes newer from the last line;
-// Down past the newest prompt brings back what you were typing.
+// like a terminal. Up only takes over with the caret at the very start of the
+// text and Down only at the very end, where the arrow has nowhere left to go,
+// so moving through hard or soft-wrapped lines always stays native. Up leaves
+// the caret at the start of the older prompt and Down at the end of the newer
+// one, so pressing the same key again keeps walking. Down past the newest
+// prompt brings back what you were typing.
 let _promptHistory=null; // {sid, index, draft, shown}
 function _sentPromptsForHistory(messages){
   const out=[];
@@ -3036,8 +3038,8 @@ function _handlePromptHistoryKey(e, el){
   const itemsKey=items.join('\u0000');
   if(_promptHistory&&_promptHistory.itemsKey!==itemsKey) _promptHistory={..._promptHistory, index:items.length};
   if(e.key==='ArrowUp'){
-    if(_promptHistory? value.slice(0, start).includes('\n') : start!==0) return false;
-  }else if(!_promptHistory||value.slice(end).includes('\n')){
+    if(start!==0) return false;
+  }else if(!_promptHistory||end!==value.length){
     return false;
   }
   const step=_promptHistoryStep(_promptHistory, e.key==='ArrowUp'?-1:1, value, items);
@@ -3045,7 +3047,8 @@ function _handlePromptHistoryKey(e, el){
   e.preventDefault();
   _promptHistory=step.state?{...step.state, sid, itemsKey}:null;
   el.value=step.value;
-  el.setSelectionRange(el.value.length, el.value.length);
+  const caretAt=e.key==='ArrowUp'?0:el.value.length;
+  el.setSelectionRange(caretAt, caretAt);
   if(typeof updateSendBtn==='function') updateSendBtn();
   if(typeof autoResize==='function') autoResize();
   return true;
