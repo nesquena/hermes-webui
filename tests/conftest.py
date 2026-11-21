@@ -208,6 +208,33 @@ _SANDBOX_HOME_CREATED = not SANDBOX_HOME.exists()
 _LOCALAPPDATA = pathlib.Path(os.environ.get('LOCALAPPDATA', '').strip() or HOME / 'AppData' / 'Local')
 (SANDBOX_HOME / '.hermes').mkdir(parents=True, exist_ok=True)
 (SANDBOX_HOME / 'AppData' / 'Local' / 'hermes').mkdir(parents=True, exist_ok=True)
+
+
+def _agent_checkout_links(home, localappdata, xdg_data_home):
+    """(real dir, sandbox-relative path) for every Agent checkout that moving HOME into the sandbox would hide.
+
+    api/startup.py discovers the Agent at <HERMES_HOME>/hermes-agent, <repo>/../hermes-agent, the platform
+    default root's hermes-agent, ~/hermes-agent and $XDG_DATA_HOME/hermes-agent (default ~/.local/share);
+    LOCALAPPDATA/hermes/hermes-agent mirrors Windows' native root. The XDG one is mirrored only when it
+    lives under *home*, since only then does the sandbox have a same-relative-place to link it at.
+    """
+    links = [
+        (home / '.hermes' / 'hermes-agent', '.hermes/hermes-agent'),
+        (home / 'hermes-agent', 'hermes-agent'),
+        (localappdata / 'hermes' / 'hermes-agent', 'AppData/Local/hermes/hermes-agent'),
+    ]
+    xdg = pathlib.Path(xdg_data_home).expanduser() if xdg_data_home else home / '.local' / 'share'
+    try:
+        rel = os.path.relpath(os.path.realpath(xdg), os.path.realpath(home))
+    except ValueError:  # another drive on Windows
+        rel = os.pardir
+    if rel != os.curdir and not rel.startswith(os.pardir):
+        links.append((xdg / 'hermes-agent',
+                      pathlib.PurePosixPath(pathlib.Path(rel).as_posix(), 'hermes-agent').as_posix()))
+    return links
+
+
+_AGENT_CHECKOUT_LINKS = _agent_checkout_links(HOME, _LOCALAPPDATA, os.environ.get('XDG_DATA_HOME'))
 # Playwright's default browser cache follows HOME (LOCALAPPDATA on Windows), which moves here: link the real caches
 # in, so Playwright's own lookup (PLAYWRIGHT_BROWSERS_PATH, npm config, XDG_CACHE_HOME) is unchanged.
 _PLAYWRIGHT_CACHES = (
@@ -216,9 +243,8 @@ _PLAYWRIGHT_CACHES = (
     (pathlib.Path(os.environ.get('LOCALAPPDATA') or HOME / 'AppData' / 'Local') / 'ms-playwright',
      'AppData/Local/ms-playwright'),
 )
-_LINK_FAILED = _hermes_root_guard.link_real_dirs(SANDBOX_HOME, (
-    (HOME / '.hermes/hermes-agent', '.hermes/hermes-agent'), (HOME / 'hermes-agent', 'hermes-agent'),
-    (_LOCALAPPDATA / 'hermes/hermes-agent', 'AppData/Local/hermes/hermes-agent')) + _PLAYWRIGHT_CACHES)
+_LINK_FAILED = _hermes_root_guard.link_real_dirs(
+    SANDBOX_HOME, tuple(_AGENT_CHECKOUT_LINKS) + _PLAYWRIGHT_CACHES)
 _PLAYWRIGHT_FALLBACK = (WINDOWS and 'AppData/Local/ms-playwright' in _LINK_FAILED
                         and _hermes_root_guard.playwright_uses_default_cache(os.environ))
 if _PLAYWRIGHT_FALLBACK:  # no symlink privilege: point Playwright at the original cache directly

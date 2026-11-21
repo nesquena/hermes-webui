@@ -3,6 +3,7 @@ import os
 import pathlib
 import shutil
 import sqlite3
+import subprocess
 import sys
 import urllib.parse
 from contextlib import contextmanager
@@ -18,13 +19,14 @@ def _simulated_real_root(tmp_path):
     root = tmp_path / "real home" / ".hermes"  # the space must survive sqlite URI encoding
     (root / "profiles" / "default").mkdir(parents=True)
     (root / "config.yaml").write_text("original")
-    saved = list(guard.PROTECTED), list(guard.ALLOWED), len(guard.VIOLATIONS)
+    saved = list(guard.PROTECTED), list(guard.ALLOWED), len(guard.VIOLATIONS), dict(guard._STATE["profiles"])
     guard.PROTECTED[:] = [os.path.realpath(root)]
     guard.ALLOWED[:] = [os.path.realpath(root / "allowed-scratch")]
     try:
         yield root
     finally:
         guard.PROTECTED[:], guard.ALLOWED[:] = saved[0], saved[1]
+        guard._STATE["profiles"] = saved[3]  # install() snapshots this fake root for the session; drop it again
         del guard.VIOLATIONS[saved[2]:]  # expected refusals must not fail this test
 
 
@@ -145,6 +147,40 @@ def test_installing_again_keeps_paths_allowed_earlier(tmp_path, monkeypatch):
         assert guard.violation(root / "profiles" / "new") is not None
 
 
+def test_installing_again_keeps_the_first_profiles_snapshot(tmp_path, monkeypatch):
+    """conftest.py can run again mid-session (a test loads it by path), which calls install() again. The
+    session-end listing check must still compare each root with the snapshot from the FIRST install: a
+    profile that a child process created after it (audit hooks never cross processes) has to be reported."""
+    root = pathlib.Path(os.path.realpath(tmp_path / "real home" / ".hermes"))
+    (root / "profiles" / "default").mkdir(parents=True)
+    monkeypatch.setenv(guard.ENV, str(root))  # the fake real root, as conftest.py publishes it
+    saved = list(guard.PROTECTED), list(guard.ALLOWED), dict(guard._STATE["profiles"]), guard._STATE["active"]
+    try:
+        guard._STATE["profiles"] = {}
+        guard.install([])
+        subprocess.run([sys.executable, "-c", "import pathlib, sys; pathlib.Path(sys.argv[1]).mkdir()",
+                        str(root / "profiles" / "leaked")], check=True)  # a child writes, unguarded
+        guard.install([])  # a re-executed conftest
+        problems = guard.finish()
+    finally:
+        guard.PROTECTED[:], guard.ALLOWED[:] = saved[0], saved[1]
+        guard._STATE["profiles"], guard._STATE["active"] = saved[2], saved[3]
+    assert any("leaked" in p and str(root) in p and "profiles changed" in p for p in problems), problems
+
+
+def test_installing_does_not_allow_a_path_that_equals_or_contains_a_real_root(tmp_path, monkeypatch):
+    """A ``--basetemp`` equal to a real root, or to a parent of one, must not turn the whole root into an
+    allowed subtree: install() drops such an entry, the rule violation() already applies to checkouts."""
+    with _simulated_real_root(tmp_path) as root:
+        monkeypatch.setattr(guard, "real_roots", lambda: [os.path.realpath(root)])
+        for too_broad in (root, root.parent):  # equal to the protected root, and a parent of it
+            guard.install([too_broad])
+            assert guard.violation(root / "profiles" / "new") is not None, too_broad
+            with pytest.raises(guard.RealHermesRootWriteError):
+                (root / "profiles" / "new").mkdir()
+            assert not (root / "profiles" / "new").exists()
+
+
 def test_bytecode_under_a_discovered_agent_checkout_is_not_refused(tmp_path):
     """Discovery prefers <HERMES_HOME>/hermes-agent, so a profile home's checkout sits at
     <root>/profiles/<name>/hermes-agent; importing it writes bytecode there."""
@@ -200,6 +236,30 @@ def test_link_real_dirs_mirrors_existing_dirs_into_the_sandbox(tmp_path):
     assert os.path.realpath(sandbox / ".cache" / "ms-playwright") == os.path.realpath(real / "cache" / "ms-playwright")
     assert not os.path.lexists(sandbox / "Library")
     assert (sandbox / "kept").is_dir() and not (sandbox / "kept").is_symlink()
+
+
+def test_sandbox_mirrors_the_xdg_data_home_agent_checkout(tmp_path):
+    """api/startup.py also discovers the Agent at $XDG_DATA_HOME/hermes-agent (default ~/.local/share), but
+    HOME moves into the sandbox: that checkout must be linked at the same relative place, or discovery
+    degrades once HOME is sandboxed."""
+    conftest = _conftest_module()
+    home, appdata, sandbox = tmp_path / "real-home", tmp_path / "AppData" / "Local", tmp_path / "sandbox"
+    xdg = home / ".local" / "share"
+    (xdg / "hermes-agent").mkdir(parents=True)
+    links = conftest._agent_checkout_links(home, appdata, xdg)
+    assert (xdg / "hermes-agent", ".local/share/hermes-agent") in links
+    assert guard.link_real_dirs(sandbox, tuple(links)) == []
+    assert os.path.realpath(sandbox / ".local" / "share" / "hermes-agent") == os.path.realpath(xdg / "hermes-agent")
+    # unset XDG_DATA_HOME means the ~/.local/share default, and an XDG dir outside HOME has no place to mirror at
+    assert (home / ".local" / "share" / "hermes-agent", ".local/share/hermes-agent") in \
+        conftest._agent_checkout_links(home, appdata, None)
+    assert len(conftest._agent_checkout_links(home, appdata, tmp_path / "xdg-outside-home")) == len(links) - 1
+    # the live session mirrors the XDG data home it resolved before HOME moved
+    live = {rel: src for src, rel in conftest._AGENT_CHECKOUT_LINKS}
+    live_xdg = pathlib.Path(os.environ.get("XDG_DATA_HOME", "").strip() or conftest.HOME / ".local" / "share").expanduser()
+    rel = os.path.relpath(os.path.realpath(live_xdg), os.path.realpath(conftest.HOME))
+    if rel != os.curdir and not rel.startswith(os.pardir):
+        assert live[pathlib.PurePosixPath(pathlib.Path(rel).as_posix(), "hermes-agent").as_posix()] == live_xdg / "hermes-agent"
 
 
 def test_session_keeps_playwrights_default_browser_cache():
