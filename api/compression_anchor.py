@@ -33,6 +33,10 @@ an automatic/compression-aware pipeline, and ``False`` (default) for manual
 compression contexts.
 """
 
+from __future__ import annotations
+
+import re
+
 
 def _content_text(content, *, part_types):
     if isinstance(content, list):
@@ -53,24 +57,316 @@ def _content_has_part_type(content, part_types):
     )
 
 
+# Compaction carrier vocabulary (single owner for the WebUI server).
+#
+# When context compaction folds the summary into the first retained tail row,
+# the Agent prepends this header and appends the summary behind the delimiter,
+# setting ``_compressed_summary`` on the row. The authentic retained text of the
+# row sits BETWEEN the header and the delimiter (#8709).
+COMPACTION_HANDOFF_HEADER_PREFIX = "[prior context"
+COMPACTION_HANDOFF_DELIMITER_PREFIX = "[end of prior context"
+COMPACTION_PROMPT_CARD_PREFIX = "[context compaction"
+
+
+def _marker_text(message):
+    """Return the lower-cased, left-trimmed text of a transcript message."""
+    return _content_text(
+        message.get("content", ""),
+        part_types={"text", "input_text", "output_text"},
+    ).lower().lstrip()
+
+
 def is_context_compression_marker(message):
-    """Return true for synthetic compression/reference cards, not user turns."""
+    """Return true for synthetic compression/reference cards, not user turns.
+
+    This is the ONE owner of the compaction-prefix vocabulary for the WebUI
+    server; ``api/models.py`` and ``static/ui.js`` mirror it instead of keeping
+    their own copies. ``[PRIOR CONTEXT ...]`` is the merged-carrier header the
+    Agent prepends when it folds the summary into a retained tail row (#8709);
+    the row also carries ``_compressed_summary``, which is the flag the state.db
+    reader now selects so this predicate receives the signal.
+    """
     if not isinstance(message, dict):
         return False
     role = message.get("role")
     if not role or role == "tool":
         return False
-    text = _content_text(
-        message.get("content", ""),
-        part_types={"text", "input_text", "output_text"},
-    ).lower().lstrip()
+    text = _marker_text(message)
     synthetic_unbracketed_marker = bool(message.get("_compressed_summary"))
-    return (
-        text.startswith("[context compaction")
+    if (
+        text.startswith(COMPACTION_PROMPT_CARD_PREFIX)
         or (synthetic_unbracketed_marker and text.startswith("context compaction"))
         or text.startswith("[your active task list was preserved across context compression]")
         or text.startswith("[session arc summary")
-    )
+    ):
+        return True
+    if text.startswith(COMPACTION_HANDOFF_HEADER_PREFIX):
+        close = text.find("]")
+        if close >= 0:
+            after_close = text[close + 1:].lstrip()
+            if (
+                COMPACTION_HANDOFF_DELIMITER_PREFIX in text
+                or after_close.startswith(COMPACTION_PROMPT_CARD_PREFIX)
+                or after_close.startswith("context compaction")
+                or synthetic_unbracketed_marker
+            ):
+                return True
+    return False
+
+
+def is_prompt_compaction_marker(message):
+    """Return true only for prompt-compaction summary cards.
+
+    Compression-adjacent summaries (session arc, preserved task list) share the
+    generic marker predicate but are not prompt compaction summaries. Callers
+    that make fail-closed replay decisions must use this narrower predicate;
+    it replaces the duplicated ``[context compaction`` prefix test that used to
+    live in ``api/models.py``.
+    """
+    if not is_context_compression_marker(message):
+        return False
+    text = _marker_text(message)
+    return text.startswith(COMPACTION_PROMPT_CARD_PREFIX) or text.startswith("context compaction")
+
+
+def is_compaction_handoff_carrier(message):
+    """Return true when *message* carries a synthetic compaction handoff blob.
+
+    Durable shapes produced by the Agent compressor:
+
+    * standalone summary card - content starts with ``[context compaction`` (the
+      unbracketed form is accepted when ``_compressed_summary`` is set);
+    * merged carrier - the summary was folded into the first retained tail row,
+      whose content starts with the ``[PRIOR CONTEXT ...]`` header, keeps the
+      authentic row text, then reaches the summary behind the delimiter. The
+      row still carries ``_compressed_summary``.
+    """
+    if not isinstance(message, dict):
+        return False
+    role = message.get("role")
+    if not role or role == "tool":
+        return False
+    text = _marker_text(message)
+    if text.startswith(COMPACTION_PROMPT_CARD_PREFIX) or text.startswith(
+        COMPACTION_HANDOFF_HEADER_PREFIX
+    ):
+        return True
+    if not message.get("_compressed_summary"):
+        return False
+    return text.startswith("context compaction") or COMPACTION_HANDOFF_DELIMITER_PREFIX in text
+
+
+def _find_ascii_case_insensitive(needle: str, text: str) -> int:
+    """Return the start index of needle in text using ASCII case-insensitive matching, or -1."""
+    match = re.search(re.escape(needle), text, flags=re.IGNORECASE | re.ASCII)
+    return match.start() if match else -1
+
+
+def compaction_handoff_remainder(message):
+    """Return the authentic retained text of a merged handoff carrier.
+
+    The summary (and with it the handoff header/delimiter envelope) is removed;
+    whatever the retained row said before the fold survives. An empty result
+    means the row is synthetic only, with no authentic turn to render.
+    """
+    if not is_compaction_handoff_carrier(message):
+        return ""
+    content = message.get("content")
+    if not isinstance(content, str):
+        return ""
+    text = content.strip()
+    low = text.lower()
+    if low.startswith(COMPACTION_PROMPT_CARD_PREFIX) or low.startswith("context compaction"):
+        return ""
+    delimiter = _find_ascii_case_insensitive(COMPACTION_HANDOFF_DELIMITER_PREFIX, text)
+    if delimiter < 0:
+        return ""
+    head = text[:delimiter].lstrip()
+    if head.lower().startswith(COMPACTION_HANDOFF_HEADER_PREFIX):
+        close = head.find("]")
+        if close >= 0:
+            head = head[close + 1:]
+    return head.strip()
+
+
+_CARRIER_NOT_A_CARRIER = "not_carrier"
+_CARRIER_PROVEN_SYNTHETIC = "proven_synthetic"
+_CARRIER_AUTHENTIC_REMAINDER = "authentic_remainder"
+
+# Display-only marker set by ``project_compaction_carrier_for_display`` when a
+# row projected to nothing but a proven synthetic handoff. The paginated window
+# reads it so an emptied carrier cannot consume the visible-row budget (#8748);
+# it never reaches storage.
+PURE_CARRIER_DISPLAY_FLAG = "_pure_compaction_carrier"
+
+
+def _compaction_carrier_envelope_decision(content_text: str) -> tuple[str, str]:
+    """Three-outcome decision on compaction carrier envelope evidence.
+
+    Outcomes:
+    - (_CARRIER_NOT_A_CARRIER, ""): not a carrier or missing/truncated envelope.
+    - (_CARRIER_PROVEN_SYNTHETIC, ""): proven pure synthetic carrier only.
+    - (_CARRIER_AUTHENTIC_REMAINDER, authentic_head): merged carrier with authentic text.
+    """
+    if not isinstance(content_text, str):
+        return _CARRIER_NOT_A_CARRIER, ""
+
+    text = content_text.strip()
+    low = text.lower()
+    if not low.startswith(COMPACTION_HANDOFF_HEADER_PREFIX):
+        return _CARRIER_NOT_A_CARRIER, ""
+
+    close = text.find("]")
+    if close < 0:
+        return _CARRIER_NOT_A_CARRIER, ""
+
+    after_close = text[close + 1:]
+    rest = after_close.strip()
+
+    delimiter_idx = _find_ascii_case_insensitive(COMPACTION_HANDOFF_DELIMITER_PREFIX, after_close)
+    if delimiter_idx >= 0:
+        head = after_close[:delimiter_idx].strip()
+        if not head:
+            return _CARRIER_PROVEN_SYNTHETIC, ""
+        low_head = head.lower()
+        if low_head.startswith(COMPACTION_PROMPT_CARD_PREFIX) or low_head.startswith("context compaction"):
+            return _CARRIER_PROVEN_SYNTHETIC, ""
+        return _CARRIER_AUTHENTIC_REMAINDER, head
+
+    low_rest = rest.lower()
+    if low_rest.startswith(COMPACTION_PROMPT_CARD_PREFIX) or low_rest.startswith("context compaction"):
+        return _CARRIER_PROVEN_SYNTHETIC, ""
+
+    return _CARRIER_NOT_A_CARRIER, ""
+
+
+def _projected_content_has_surviving_text(content) -> bool:
+    """Return True if content contains any non-empty surviving text."""
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, str):
+                if part.strip():
+                    return True
+            elif isinstance(part, dict):
+                part_type = part.get("type")
+                if part_type in {"text", "input_text", "output_text"} or (
+                    part_type is None and ("text" in part or "content" in part)
+                ):
+                    val = part.get("text") or part.get("content")
+                    if isinstance(val, str) and val.strip():
+                        return True
+    return False
+
+
+def project_compaction_carrier_for_display(message):
+    """Display-only projection: drop the handoff, keep the authentic row.
+
+    Model-facing history must keep the full carrier (the Agent needs the
+    summary for replay), so this never mutates the input and belongs only at
+    the WebUI display boundary.
+
+    Only MERGED carriers and proven synthetic carriers are rewritten.
+    Standalone summary cards (``[context compaction ...]``) are returned
+    untouched - the transcript renderer already treats them as a compaction
+    card and needs the summary text for that card.
+    """
+    if not isinstance(message, dict):
+        return message
+    role = message.get("role")
+    if role not in ("user", "assistant"):
+        return message
+
+    content = message.get("content")
+    if isinstance(content, str):
+        decision, remainder = _compaction_carrier_envelope_decision(content)
+        if decision == _CARRIER_NOT_A_CARRIER:
+            return message
+        projected = dict(message)
+        projected["content"] = remainder
+        # The flag describes the handoff we just removed; keeping it would let a
+        # downstream mirror treat the authentic remainder as a synthetic card.
+        projected.pop("_compressed_summary", None)
+        if decision == _CARRIER_PROVEN_SYNTHETIC:
+            projected[PURE_CARRIER_DISPLAY_FLAG] = True
+        return projected
+
+    if isinstance(content, list):
+        has_carrier_block = False
+        proven_synthetic_only = True
+        new_content = []
+        for part in content:
+            if isinstance(part, dict):
+                part_type = part.get("type")
+                if part_type in {"text", "input_text", "output_text"} or (
+                    part_type is None and ("text" in part or "content" in part)
+                ):
+                    text_key = "text" if "text" in part else ("content" if "content" in part else None)
+                    if text_key and isinstance(part[text_key], str):
+                        raw_text = part[text_key]
+                        decision, remainder = _compaction_carrier_envelope_decision(raw_text)
+                        if decision in (
+                            _CARRIER_PROVEN_SYNTHETIC,
+                            _CARRIER_AUTHENTIC_REMAINDER,
+                        ):
+                            has_carrier_block = True
+                            if decision == _CARRIER_AUTHENTIC_REMAINDER:
+                                proven_synthetic_only = False
+                            new_part = dict(part)
+                            new_part[text_key] = remainder
+                            new_content.append(new_part)
+                            continue
+            elif isinstance(part, str):
+                decision, remainder = _compaction_carrier_envelope_decision(part)
+                if decision in (_CARRIER_PROVEN_SYNTHETIC, _CARRIER_AUTHENTIC_REMAINDER):
+                    has_carrier_block = True
+                    if decision == _CARRIER_AUTHENTIC_REMAINDER:
+                        proven_synthetic_only = False
+                    new_content.append(remainder)
+                    continue
+            new_content.append(part)
+
+        if not has_carrier_block:
+            return message
+        projected = dict(message)
+        projected["content"] = new_content
+        projected.pop("_compressed_summary", None)
+        if proven_synthetic_only and not _projected_content_has_surviving_text(new_content):
+            projected[PURE_CARRIER_DISPLAY_FLAG] = True
+        return projected
+
+    return message
+
+
+def project_compaction_carriers_for_display(messages):
+    """Return *messages* with every compaction handoff carrier stripped."""
+    if not isinstance(messages, list):
+        return messages
+    return [project_compaction_carrier_for_display(message) for message in messages]
+
+
+def is_proven_pure_synthetic_carrier(message):
+    """Return true when *message* renders nothing but a proven synthetic handoff.
+
+    Two sources count as proof: the display marker the projector sets on an
+    emptied carrier, and a raw row whose content the canonical-envelope ladder
+    classifies as proven synthetic. Authored text that merely starts with the
+    header prefix is not proof (#8748), so callers can use this to keep such a
+    row out of the visible-row budget without deleting it from the transcript.
+    """
+    if not isinstance(message, dict):
+        return False
+    if message.get(PURE_CARRIER_DISPLAY_FLAG):
+        return True
+    role = message.get("role")
+    if role not in ("user", "assistant"):
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        decision, _ = _compaction_carrier_envelope_decision(content)
+        return decision == _CARRIER_PROVEN_SYNTHETIC
+    return False
 
 
 def _is_context_compression_marker(message):
