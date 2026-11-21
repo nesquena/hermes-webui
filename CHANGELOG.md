@@ -39,6 +39,8 @@
 
 ### Fixed
 
+- **The gateway-sync reset tests run on newer Hermes Agent versions too (#9261, closes #9258).** Two tests that check a reset conversation stays separate from its parent built their fixture with storage calls newer Agents no longer have, so they failed against current Agents. The fixture now writes its rows and ends the parent session through calls every supported Agent provides.
+
 - **On a server launched under a named profile, values from that profile's `.env` are recognised however the line is written (#9212).** WebUI now compares launch values with the profile's `.env` as WebUI, the launcher and the Agent each read it, so a value loaded from that file is never taken for the operator's own launch setting. The Gateway settings check uses the same comparison. Servers launched as root are unchanged.
 
 - **Login and read-aloud rate limits ignore a forwarded client address that carries an IPv6 zone (#9211).** Behind a trusted proxy, a forwarded IPv6 client address with a scope ID now falls back to the connecting peer, as other unusable forwarded values already did. Unscoped addresses and deployments without a trusted proxy are unchanged.
