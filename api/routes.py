@@ -25,6 +25,7 @@ import sqlite3
 import stat as _stat
 import subprocess
 import sys
+import itertools
 import threading
 import time
 import uuid
@@ -441,6 +442,145 @@ def _session_counts_toward_pin_quota(session) -> bool:
             "default_hidden": _session_field(session, "default_hidden", False),
         }
     return not _hide_from_default_sidebar(row)
+
+
+# Save-order tickets per (state.db path, field, row id): a lineage mirror writes rows other
+# session ids own, so a mirror whose save predates the last write to any of them is stale.
+# Check-and-write is serialised per state.db, so a busy database never stalls another.
+_MIRROR_TICKET_LOCK = threading.Lock()
+_MIRROR_TICKETS = itertools.count(1)
+_MIRRORED_TICKET: dict = {}
+_MIRROR_DB_LOCKS: dict = {}
+
+
+def _mirror_ticket() -> int:
+    """Take right after the sidecar save, under the session lock (in-memory only)."""
+    with _MIRROR_TICKET_LOCK:
+        return next(_MIRROR_TICKETS)
+
+
+def _mirror_db_lock(db_key: str) -> threading.Lock:
+    with _MIRROR_TICKET_LOCK:
+        return _MIRROR_DB_LOCKS.setdefault(db_key, threading.Lock())
+
+
+def _mirror_to_state_db(session, field: str, value, ticket=None) -> None:
+    """Best-effort: the sidecar is authoritative; Desktop and the CLI read ``state.db``.
+
+    Runs under the session lock: the current sidecar value is resolved first and a
+    superseded value is dropped BEFORE state.db is written, so an older mirror can never
+    reverse the latest action. A session deleted meanwhile is left alone (neither store is
+    written, nothing is re-saved). The value state.db holds after the attempt is recorded on
+    the sidecar so the sidebar can tell a Desktop/CLI edit (state.db moved off the recorded
+    value) from a lost mirror.
+    """
+    from api.state_sync import _resolve_state_db_path, mirror_target_ids, sync_session_field
+    if ticket is None:
+        ticket = _mirror_ticket()
+    sid = str(_session_field(session, "session_id", "") or "").strip()
+    profile = str(_session_field(session, "profile", None) or "").strip() or "default"  # legacy rows are root's
+    try:
+        def resolve():
+            with LOCK:
+                found = SESSIONS.get(sid)
+            if found is None:
+                found = Session.load(sid) if sid else None
+            return _ensure_full_session_before_mutation(sid, found) if found is not None else None
+
+        norm = bool if field in ("pinned", "archived") else (lambda v: v)
+
+        def superseded(found) -> bool:
+            held = _session_field(found, field)
+            if field == "title" and not _session_field(found, "manual_title", False):
+                held = None  # an automatic title is mirrored as a reset
+            return norm(held) != norm(value)
+
+        with _get_session_agent_lock(sid):
+            current = resolve()
+            if current is None:
+                return  # deleted (or never persisted): do not resurrect it anywhere
+            if superseded(current):
+                return  # a newer operation owns the field: do not write or record this value
+            db_path = _resolve_state_db_path(profile)
+            db_key = str(db_path.resolve()) if db_path is not None else f"missing:{profile}"
+            with _mirror_db_lock(db_key):
+                targets = mirror_target_ids(sid, field, profile)
+                keys = [(db_key, field, i) for i in targets or ()]
+                if any(_MIRRORED_TICKET.get(k, 0) > ticket for k in keys):
+                    return  # a later save of another lineage member already mirrored
+                landed = targets is not None and sync_session_field(sid, field, value, profile=profile)
+                if landed:
+                    _MIRRORED_TICKET.update(dict.fromkeys(keys, ticket))
+            if not landed and field not in ("pinned", "archived"):
+                return
+            # A missed flag write records state.db as still holding the opposite, so an
+            # older acknowledgement cannot override this action. Never fails the request.
+            current = resolve()  # the resident copy may have been evicted/replaced meanwhile
+            if current is None or superseded(current):
+                return
+            recorded = value if landed else not norm(value)
+            current.state_db_mirror = {**(getattr(current, "state_db_mirror", None) or {}), field: recorded}
+            try:
+                current.save(touch_updated_at=False)
+            except Exception:
+                logger.warning("state.db mirror acknowledgement not saved for %s.%s", sid, field, exc_info=True)
+    except Exception:
+        logger.warning("state.db mirror skipped for %s.%s", sid, field, exc_info=True)
+
+
+def _mirror_session_title(session, ticket=None) -> None:
+    """Mirror a manual rename as a user title; a reset clears it so auto titles apply again."""
+    _mirror_to_state_db(session, "title", session.title if session.manual_title else None, ticket)
+
+
+def _adopt_state_db_flag(sidecar: bool, mirrored, db: bool) -> bool:
+    """The flag to show: state.db wins only when it moved off the last value WebUI mirrored."""
+    if db == sidecar:
+        return sidecar
+    if mirrored is None:
+        return sidecar or db  # never mirrored: Desktop/CLI additions show, nothing is lost
+    return db if db != mirrored and mirrored == sidecar else sidecar
+
+
+def _stamp_state_db_flags(rows: list[dict], profiles) -> None:
+    """Overlay each owner's own state.db pinned/archived onto sidebar rows (see above).
+
+    Only the requested profiles are read, and only for reading; flags are keyed by the
+    database, so root aliases share one and a copied id cannot borrow another's.
+    """
+    from api.state_sync import _resolve_state_db_path, read_state_db_flags
+
+    owners: dict[str, Path | None] = {}
+
+    def owner_of(profile) -> Path | None:
+        name = str(profile or "").strip() or "default"
+        if name not in owners:
+            owners[name] = _resolve_state_db_path(name)
+        return owners[name]
+
+    ids_by_owner: dict[Path, set[str]] = {}
+    for row in rows:
+        sid = str(row.get("session_id") or "").strip() if isinstance(row, dict) else ""
+        owner = owner_of(row.get("profile")) if sid else None
+        if owner is not None:
+            ids_by_owner.setdefault(owner, set()).add(sid)
+
+    flags_by_owner: dict[Path, dict[str, dict]] = {}
+    for name in profiles:
+        owner = owner_of(name)
+        if owner is not None and owner not in flags_by_owner and ids_by_owner.get(owner):
+            flags_by_owner[owner] = read_state_db_flags(str(name or "").strip() or "default", ids_by_owner[owner])
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sid = str(row.get("session_id") or "").strip()
+        flags = flags_by_owner.get(owner_of(row.get("profile")), {}).get(sid)
+        if not sid or not flags:
+            continue
+        mirrored = row.get("state_db_mirror") or {}
+        for field, db_value in flags.items():
+            row[field] = _adopt_state_db_flag(bool(row.get(field)), mirrored.get(field), db_value)
 
 
 def _session_row_lineage_root_id(session, sessions_by_id) -> str:
@@ -3545,6 +3685,9 @@ def _build_session_list_cache_payload(
         deduped_cli = []
     diag_stage("sort_sessions")
     merged = webui_sessions + deduped_cli
+    # The sidecar is authoritative; state.db pinned/archived are read so Desktop and CLI edits show.
+    diag_stage("state_db_flags")
+    _stamp_state_db_flags(merged, {s.get("profile") for s in merged} if all_profiles else {active_profile})
     merged.sort(
         key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
         reverse=True,
@@ -21102,7 +21245,9 @@ def handle_post(handler, parsed) -> bool:
                 SESSIONS[sid] = s
                 SESSIONS.move_to_end(sid)
                 _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+            ticket = _mirror_ticket()
         _sync_session_title_to_insights(s, rename=True)
+        _mirror_session_title(s, ticket)
         publish_session_list_changed(
             "session_rename",
             profile=getattr(s, "profile", None),
@@ -22979,6 +23124,8 @@ def handle_post(handler, parsed) -> bool:
             s.pinned = pin_requested
             s.save()
             _publish_saved_session(body["session_id"], s)
+            ticket = _mirror_ticket()
+        _mirror_to_state_db(s, "pinned", pin_requested, ticket)
         publish_session_list_changed(
             "session_pin",
             profile=getattr(s, "profile", None),
@@ -23231,6 +23378,8 @@ def handle_post(handler, parsed) -> bool:
                 SESSIONS[sid] = s
                 SESSIONS.move_to_end(sid)
                 _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+            ticket = _mirror_ticket()
+        _mirror_to_state_db(s, "archived", bool(s.archived), ticket)
         publish_session_list_changed(
             "session_archive",
             profile=getattr(s, "profile", None),
