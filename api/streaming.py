@@ -14371,6 +14371,78 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
             rt['is_anthropic_oauth'] = getattr(agent, '_is_anthropic_oauth')
 
 
+def _start_turn_start_watchdog(*, stream_id, session_id, channel):
+    """Surface a worker that never reaches the running phase.
+
+    A worker can block on a process-wide lock (model-catalog rebuild, another
+    turn's session lock) long before it publishes its first SSE frame. Without
+    this, the browser keeps showing its processing placeholder forever and
+    nothing records why: the turn journal only ever holds ``worker_started``.
+
+    The watchdog logs once and pushes a ``warning`` frame so the tab can say
+    what happened. It deliberately does NOT kill the worker (Python cannot
+    interrupt a thread parked on a lock) and does NOT release locks it does not
+    own — releasing another thread's lock would corrupt the very invariant the
+    lock protects. Recovery still requires a process restart; this only makes
+    the stall visible and attributable.
+
+    ``HERMES_WEBUI_TURN_START_TIMEOUT`` overrides the 120s default; ``0`` or a
+    negative value disables the watchdog.
+    """
+    try:
+        timeout = float(os.getenv("HERMES_WEBUI_TURN_START_TIMEOUT", "120"))
+    except (TypeError, ValueError):
+        timeout = 120.0
+    if timeout <= 0:
+        return None
+    done = threading.Event()
+
+    def _watch():
+        if done.wait(timeout):
+            return
+        logger.warning(
+            "turn start watchdog: stream=%s session=%s has not reached the "
+            "running phase after %.0fs — the worker is blocked before its "
+            "first agent call (most likely a process-wide lock)",
+            stream_id,
+            session_id,
+            timeout,
+        )
+        if channel is None:
+            return
+        payload = {
+            'type': 'turn_start_timeout',
+            'message': (
+                'This turn has not started after %.0f seconds: the worker is '
+                'blocked on a server-side lock. Restart the WebUI process to '
+                'recover.' % timeout
+            ),
+            'stream_id': stream_id,
+            'session_id': session_id,
+            'timeout_seconds': timeout,
+        }
+        try:
+            item = (
+                ('warning', payload, None)
+                if hasattr(channel, "subscribe_with_snapshot")
+                else ('warning', payload)
+            )
+            channel.put_nowait(item)
+        except Exception:
+            logger.debug(
+                "turn start watchdog could not queue its warning for %s",
+                stream_id,
+                exc_info=True,
+            )
+
+    threading.Thread(
+        target=_watch,
+        daemon=True,
+        name=f"turn-start-watchdog-{str(stream_id)[:8]}",
+    ).start()
+    return done
+
+
 def _run_agent_streaming(
     session_id,
     msg_text,
@@ -14834,6 +14906,12 @@ def _run_agent_streaming(
         except Exception:
             logger.debug("Failed to put event to queue")
 
+    _turn_start_watchdog_done = _start_turn_start_watchdog(
+        stream_id=stream_id,
+        session_id=session_id,
+        channel=q,
+    )
+
     _last_runtime_model_identity = None
     _runtime_model_session_id = session_id
 
@@ -15042,6 +15120,8 @@ def _run_agent_streaming(
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
         _active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
         update_active_run(stream_id, phase="running", session_id=session_id)
+        if _turn_start_watchdog_done is not None:
+            _turn_start_watchdog_done.set()
         s.workspace = _turn_workspace_cwd
         _last_persisted_model = None
         _last_persisted_provider = None
