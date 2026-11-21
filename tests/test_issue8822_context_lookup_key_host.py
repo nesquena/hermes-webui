@@ -397,6 +397,20 @@ def test_a_caller_key_without_a_url_does_not_own_the_fixed_host_of_an_id_a_recor
     assert (got.base_url, got.api_key) == ("", "")
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize("field", _SPELLINGS)
+@pytest.mark.parametrize("pid", sorted(_ALIASES))
+def test_a_fallback_key_without_a_url_follows_the_caller_key_rule_for_a_routed_id(pid, field, enabled, monkeypatch):
+    """The Agent's fallback key with no URL owns its provider's fixed hosts only while no ENABLED record named like that
+    provider declares its own endpoint, the same rule as a caller key. A switched-off record leaves it owning them."""
+    _agent_view(monkeypatch)
+    record = {field: L} if enabled else {field: L, "enabled": False}
+    cfg = {"model": {"provider": pid}, "providers": {_ALIASES[pid]: {"request_timeout_seconds": 60}, pid: record}}
+    got = _lookup(cfg, pid, fallback_api_key="AGENT-KEY", fallback_base_url="", fallback_provider=pid)
+    assert got.base_url == ""
+    assert got.api_key == ("" if enabled else "AGENT-KEY")
+
+
 # ── The Copilot row with a URL (#8822 d-i) ─────────────────────────────────────
 #
 # Older Agents call their Copilot live-models step with the key alone once the lookup reaches the

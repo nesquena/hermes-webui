@@ -10193,13 +10193,22 @@ def _context_length_lookup_inputs_for_model(
         else str(fallback_api_key or "").strip()
     )
     if not effective_api_key and fallback_key:
-        fallback_owned = _context_lookup_owned_origins(
-            fallback_base_url,
-            own_provider=(
-                "" if str(fallback_base_url or "").strip()
-                else _canonical_context_provider(fallback_provider)
-            ),
+        fallback_own_provider = (
+            "" if str(fallback_base_url or "").strip()
+            else _canonical_context_provider(fallback_provider)
         )
+        # The caller-key rule above, for the fallback's own provider: with no URL the key owns
+        # that provider's fixed hosts only while no enabled record named like it declares its
+        # own endpoint (the Agent then routes the id through that record).
+        if fallback_own_provider and isinstance(providers_cfg, dict) and any(
+            isinstance(record, dict)
+            and _providers_match_for_context(record_key, fallback_own_provider)
+            and api_config._raw_provider_record_enabled(record)
+            and _context_lookup_record_declares_endpoint(record)
+            for record_key, record in providers_cfg.items()
+        ):
+            fallback_own_provider = ""
+        fallback_owned = _context_lookup_owned_origins(fallback_base_url, own_provider=fallback_own_provider)
         if _context_lookup_contacted_origins(effective_provider, effective_base_url) <= fallback_owned:
             effective_api_key = fallback_key
 
