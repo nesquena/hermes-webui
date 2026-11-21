@@ -253,6 +253,12 @@ def _observe_overlap(monkeypatch, tmp_path, *, alpha_exits_first: bool) -> dict:
     Alpha reads its own custom key *after* beta is inside its body, which is the
     window the wider scrub used to black out. The caller releases the exit order
     under test; both workers then report the process env they left behind.
+
+    #9244: the exit order under test is enforced by OBSERVING it, not by the
+    order the release signals were sent in. Each worker raises its ``*_exited``
+    event only after it has left its scope, and the first worker is not
+    released until the second one has actually left — so the case proves which
+    worker exited first instead of assuming it.
     """
     _setup_server(monkeypatch, tmp_path)
     _install_fake_secret_scope(monkeypatch, [])
@@ -263,8 +269,14 @@ def _observe_overlap(monkeypatch, tmp_path, *, alpha_exits_first: bool) -> dict:
     observed: dict = {}
     alpha_entered = threading.Event()
     beta_entered = threading.Event()
+    alpha_exited = threading.Event()
+    beta_exited = threading.Event()
     release_alpha = threading.Event()
     release_beta = threading.Event()
+    # The OBSERVED exit order: each worker appends its name once it has really
+    # left its scope. Appending under the lock keeps the order unambiguous.
+    exit_log: list[str] = []
+    exit_log_lock = threading.Lock()
 
     def alpha_body() -> None:
         try:
@@ -274,9 +286,16 @@ def _observe_overlap(monkeypatch, tmp_path, *, alpha_exits_first: bool) -> dict:
                 beta_entered.wait(60)
                 observed["alpha_read"] = os.environ.get("ALPHA_CUSTOM_KEY")
                 release_alpha.wait(60)
+            # Raised only after the scope is really gone.
+            with exit_log_lock:
+                exit_log.append(ALPHA)
+            alpha_exited.set()
         except BaseException as exc:  # pragma: no cover - surfaced below
             observed["alpha_error"] = exc
             alpha_entered.set()
+            with exit_log_lock:
+                exit_log.append(ALPHA)
+            alpha_exited.set()
 
     def beta_body() -> None:
         try:
@@ -284,9 +303,15 @@ def _observe_overlap(monkeypatch, tmp_path, *, alpha_exits_first: bool) -> dict:
             with _enter_background_worker(BETA):
                 beta_entered.set()
                 release_beta.wait(60)
+            with exit_log_lock:
+                exit_log.append(BETA)
+            beta_exited.set()
         except BaseException as exc:  # pragma: no cover - surfaced below
             observed["beta_error"] = exc
             beta_entered.set()
+            with exit_log_lock:
+                exit_log.append(BETA)
+            beta_exited.set()
 
     workers = [
         threading.Thread(target=alpha_body, daemon=True),
@@ -303,19 +328,35 @@ def _observe_overlap(monkeypatch, tmp_path, *, alpha_exits_first: bool) -> dict:
             break
         threading.Event().wait(0.01)
 
-    if alpha_exits_first:
-        release_alpha.set()
-        release_beta.set()
-    else:
-        release_beta.set()
-        release_alpha.set()
+    # Release ONE worker, wait until it has really left its scope, and only
+    # then release the other one — so the exit order is the order that was
+    # observed, not the order the signals were sent in.
+    first, second = (
+        (release_alpha, release_beta) if alpha_exits_first else (release_beta, release_alpha)
+    )
+    first_exited, second_exited = (
+        (alpha_exited, beta_exited) if alpha_exits_first else (beta_exited, alpha_exited)
+    )
+    still_running = BETA if alpha_exits_first else ALPHA
+
+    first.set()
+    assert first_exited.wait(60), "the first worker never left its scope"
+    observed["second_still_live"] = still_running
+    observed["second_live_read"] = os.environ.get(f"{still_running.upper()}_CUSTOM_KEY")
+
+    second.set()
+    assert second_exited.wait(60), "the second worker never left its scope"
 
     for worker in workers:
         worker.join(10)
+        assert not worker.is_alive(), "a worker thread did not terminate"
 
     assert "alpha_error" not in observed, observed.get("alpha_error")
     assert "beta_error" not in observed, observed.get("beta_error")
     observed["final"] = os.environ.get("ALPHA_CUSTOM_KEY")
+    observed["alpha_exited"] = alpha_exited.is_set()
+    observed["beta_exited"] = beta_exited.is_set()
+    observed["exit_order"] = list(exit_log)
     return observed
 
 
@@ -342,4 +383,42 @@ def test_overlapping_workers_restore_the_true_baseline(
     assert observed["final"] is None, (
         "a finished worker's credential survived both scopes (exit order: "
         f"{'alpha-first' if alpha_exits_first else 'beta-first'}): {observed['final']!r}"
+    )
+
+
+# ── #9244: the exit order under test must be OBSERVED, not assumed ──────────
+
+
+@pytest.mark.parametrize("alpha_exits_first", [True, False], ids=["alpha-first", "beta-first"])
+def test_overlapping_workers_exit_in_the_observed_order(
+    monkeypatch, tmp_path, alpha_exits_first
+):
+    """The workers must really leave their scopes in the order under test.
+
+    The release signals used to be sent back-to-back, so either worker could
+    finish first in BOTH parameter cases — the cases could not tell an
+    order-sensitive bug from an order-insensitive one. Each worker now reports
+    the moment it has left its scope, and the case asserts the observed order.
+    """
+    observed = _observe_overlap(monkeypatch, tmp_path, alpha_exits_first=alpha_exits_first)
+    expected_order = [ALPHA, BETA] if alpha_exits_first else [BETA, ALPHA]
+    assert observed["exit_order"] == expected_order, (
+        "the workers did not leave their scopes in the order under test "
+        f"(expected {expected_order}, observed {observed['exit_order']})"
+    )
+    assert observed["alpha_exited"], "alpha never reported that it left its scope"
+    assert observed["beta_exited"], "beta never reported that it left its scope"
+
+
+@pytest.mark.parametrize("alpha_exits_first", [True, False], ids=["alpha-first", "beta-first"])
+def test_the_still_running_worker_keeps_its_own_credential(
+    monkeypatch, tmp_path, alpha_exits_first
+):
+    """While the second worker is still live, it keeps reading its own key."""
+    observed = _observe_overlap(monkeypatch, tmp_path, alpha_exits_first=alpha_exits_first)
+    still_running = observed["second_still_live"]
+    expected = SECRET_A if still_running == ALPHA else SECRET_B
+    assert observed["second_live_read"] == expected, (
+        f"the still-running worker ({still_running}) lost its own credential "
+        f"after the other worker exited: {observed['second_live_read']!r}"
     )
