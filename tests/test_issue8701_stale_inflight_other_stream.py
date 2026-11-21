@@ -15,10 +15,11 @@ and merge helpers from static/sessions.js and the real pending-prompt producer f
 
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests import _node_script
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
@@ -152,7 +153,13 @@ def _prelude() -> str:
 
 
 def _node(script: str) -> dict:
-    done = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False, cwd=ROOT, timeout=60)
+    # The harness splices real loadSession()/_ensureMessagesLoaded() (and the
+    # ui.js producers) into one script. Handing it to node as `node -e` puts the
+    # whole thing in ONE argv entry, and execve caps one argument at
+    # MAX_ARG_STRLEN (128 KB on Linux) -- so any further growth of those
+    # functions turns this into OSError(E2BIG) before node runs. Run it from a
+    # file instead (see tests/_node_script.py).
+    done = _node_script.run_node_script(script, node=str(NODE), cwd=ROOT, timeout=60)
     assert done.returncode == 0, done.stderr or done.stdout
     return json.loads(done.stdout.strip().splitlines()[-1])
 
