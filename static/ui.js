@@ -26682,7 +26682,7 @@ function fileIcon(name, type){
   if(e==='.js'||e==='.ts'||e==='.jsx'||e==='.tsx') return li('zap',14);
   if(e==='.json'||e==='.yaml'||e==='.yml'||e==='.toml') return li('settings',14);
   if(e==='.sh'||e==='.bash') return li('terminal',14);
-  if(e==='.pdf') return li('download',14);
+  if(e==='.pdf') return li('file-text',14);
   return li('file-text',14);
 }
 
@@ -27816,6 +27816,30 @@ function _showFileContextMenu(e, item){
     menu.appendChild(dlItem);
   }
 
+  // Download action for files lives in the context menu (2026-10-28 review:
+  // no explorer makes the leading type icon a distinct download control, and
+  // on touch the icon sits inside the row's tap target). The icon keeps its
+  // plain file-type glyph; the row's own click flow (preview / whole-row
+  // download for DOWNLOAD_EXTS) is unchanged.
+  // Display-only external symlinks (#4581: target outside the workspace) are
+  // excluded — downloadFile() builds an ordinary /api/file/raw URL that the
+  // raw resolver 404s for unauthorized outside-workspace targets, so the item
+  // would be a dead action. Their row click keeps the established escape-grant
+  // flow (2026-10-29 review P2).
+  const isDisplayOnlyExternalLink=item.type==='symlink'&&!!item.target_outside_workspace;
+  if(!isDirLike && !isReadOnlyEscape && !isDisplayOnlyExternalLink){
+    const fileDlItem=document.createElement('div');
+    fileDlItem.textContent=t('media_download');
+    fileDlItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+    fileDlItem.onmouseenter=()=>fileDlItem.style.background='var(--hover-bg)';
+    fileDlItem.onmouseleave=()=>fileDlItem.style.background='';
+    fileDlItem.onclick=()=>{
+      menu.remove();
+      if(typeof downloadFile==='function') downloadFile(item.path);
+    };
+    menu.appendChild(fileDlItem);
+  }
+
   if(!isReadOnlyEscape){
     const sep=document.createElement('hr');
     sep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
@@ -27830,6 +27854,28 @@ function _showFileContextMenu(e, item){
   }
 
   document.body.appendChild(menu);
+  // Clamp to the ACTUAL rendered bounds. The pre-append estimate above cannot
+  // know the real menu size (it varies with the item set: directories add
+  // Download Folder, files add Download, read-only/external-link menus
+  // shrink), so a pointer near the lower edge left the last rows — e.g.
+  // Delete — below the fold. Measure after insertion and correct; when the
+  // menu is taller than the viewport itself, pin it to the edge and let it
+  // scroll rather than overflow.
+  const mrect=menu.getBoundingClientRect();
+  const edge=8;
+  if(mrect.bottom>vh-edge||mrect.top<edge){
+    const maxH=vh-edge*2;
+    if(mrect.height>maxH){
+      menu.style.top=edge+'px';
+      menu.style.maxHeight=maxH+'px';
+      menu.style.overflowY='auto';
+    }else{
+      menu.style.top=Math.max(edge,Math.min(mrect.top,vh-edge-mrect.height))+'px';
+    }
+  }
+  if(mrect.right>vw-edge||mrect.left<edge){
+    menu.style.left=Math.max(edge,Math.min(mrect.left,vw-edge-mrect.width))+'px';
+  }
   const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
   setTimeout(()=>document.addEventListener('click',dismiss),0);
 }
