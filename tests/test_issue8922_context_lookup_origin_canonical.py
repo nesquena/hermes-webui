@@ -30,8 +30,6 @@ from urllib.parse import urlsplit
 
 import pytest
 
-import httpx
-
 from api import routes
 
 A = "https://a.model-url.test/v1"
@@ -101,6 +99,7 @@ def _split_spelling(session_url, record_url, key="KB"):
 
 def _wire_host(url):
     """The host httpx 0.28 puts on the wire for ``url``, or None when it refuses the URL (nothing is sent)."""
+    httpx = pytest.importorskip("httpx")
     try:
         request = httpx.Request("GET", url)
     except httpx.InvalidURL:
