@@ -444,6 +444,45 @@ no session-YOLO toggle, so a request briefly reaches the approval boundary befor
 it, and Agent-owned policy such as unrestricted computer-use mode is unchanged.
 Native API session YOLO is tracked in [Hermes Agent PR #61946](https://github.com/NousResearch/hermes-agent/pull/61946).
 
+#### Consent prompts are never answered by YOLO
+
+YOLO is a statement about *command* approvals only. A **protected approval** —
+a consent prompt rather than a command — is never answered by YOLO. An approval
+is protected when it is an MCP elicitation (`pattern_key: mcp_elicitation`), a
+plugin's own approval rule (`pattern_key: plugin_rule:<rule_key>`), a write to a
+protected instruction file (`pattern_key: protected_instruction_file`), a
+computer-use action (`pattern_key: cua:<action>:<mode>`), or an approval that
+arrives on a consent surface (`publish`, `mcp-elicitation`, `mcp-trust/<server>`,
+`vault-payment`). Plugins raise these to ask before an outbound send, a public
+post, a money change or a destructive action; turning YOLO on for command
+approvals does not agree to those.
+
+Concretely:
+
+- **Both settle paths leave protected approvals alone.** A protected approval
+  that arrives while YOLO is already enabled stays a card; it is not
+  auto-answered on the Runs API path and not released by the local/no-run
+  drain. An ordinary command approval next to it is still answered, and a
+  later ordinary command does not release an older protected one.
+- **Enabling YOLO is refused while a protected approval is parked.** The
+  request answers `409` with `{"code": "gateway_protected_approval_pending",
+  "error": "A protected approval (an MCP elicitation or a publish action) is
+  still pending; answer it explicitly before enabling YOLO."}`. YOLO is not
+  enabled and no protected approval is released: the refusal happens before
+  any relay, so a protected approval that lands while the enable is in flight
+  refuses the whole enable rather than being answered. Note that an ordinary
+  remote approval relayed **before** the protected prompt arrived has already
+  been answered — that answer cannot be undone — so a `409` is not proof that
+  nothing ran; it means YOLO was not enabled and the protected prompt is
+  still waiting.
+- **A protected approval stays visible and stays answerable.** It keeps its
+  card in the approval queue and a manual answer reaches the Gateway exactly
+  as it would without YOLO. Answer it explicitly, then retry the enable.
+
+An ordinary command approval that lands after the enable took its snapshot is
+not relayed by that round: it stays parked and is answered by the next round,
+when the session flag is already active.
+
 Some WebUI entry points still execute the agent in the WebUI process and have no Gateway transport yet. In gateway mode they answer `409` with `{"error": "<route> is unavailable on gateway-backed sessions", "code": "gateway_mode_unsupported", "feature": "<route>"}` instead of attempting an in-process turn: `POST /api/btw`, `POST /api/background`, `POST /api/session/compress/start` and `POST /api/session/compress`, `POST /api/chat` (the non-streaming fallback), `POST /api/updates/summary`, and `POST /api/git/commit-message` / `POST /api/git/commit-message-selected`. Before this refusal they either failed with provider-credential errors (when the WebUI has no model key, which is the recommended gateway deployment) or silently ran a turn outside the Gateway. The refusal happens before any session, stream or compression job is created. Routing these features through the Gateway is separate work.
 
 `POST /api/session/handoff-summary` is the exception. It exists specifically for gateway sessions, so in gateway mode it returns its deterministic local fallback (`"fallback": true`, computed from the WebUI's transcript copy) instead of constructing an in-process agent or answering `409`.

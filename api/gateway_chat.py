@@ -569,6 +569,7 @@ def _settle_gateway_run_approval(
     """
     from api.route_approvals import (
         gateway_yolo_handoff,
+        is_protected_approval,
         settle_gateway_pending_run,
         submit_gateway_pending_mirror,
     )
@@ -579,7 +580,7 @@ def _settle_gateway_run_approval(
     with gateway_yolo_handoff(session_id):
         if cancel_event is not None and cancel_event.is_set():
             return False, None, 0
-        if _gateway_session_yolo_enabled(session_id):
+        if not is_protected_approval(approval_data) and _gateway_session_yolo_enabled(session_id):
             try:
                 _auto_approve_gateway_run(
                     base_url,
@@ -849,6 +850,11 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
         allow_permanent = "always" in choices
     if not (tool or command or description):
         return None
+    # The consent markers travel with the approval: a Gateway that marks a
+    # consent prompt by its surface (``publish`` and the Agent's own consent
+    # surfaces) must not lose that mark here, or the YOLO guard could not
+    # recognise the prompt as protected.
+    surface = str(payload.get("surface") or "").strip()
     return {
         "tool": tool,
         "command": command,
@@ -863,7 +869,53 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
         "_gateway_execution_generation": execution_generation,
         "choices": choices,
         "allow_permanent": bool(allow_permanent),
+        "surface": surface,
     }
+
+
+def _recover_gateway_consent_markers(
+    session_id: str,
+    approval_data: dict,
+    *,
+    run_id: str = "",
+) -> dict:
+    """Restore the consent markers a Gateway left out of one approval.
+
+    The Gateway describes the same prompt twice: the ``approval.request``
+    event carries the Agent's ``pattern_key``, while the ``pending_controls``
+    authority projection carries the same prompt WITHOUT one. A projection that
+    arrives for a prompt WebUI already mirrored therefore has no consent
+    marker to judge it by, and would hand a consent prompt straight to
+    session YOLO.
+
+    Recovering the markers WebUI already recorded for that prompt keeps the
+    protection identical on both descriptions. The payload's own values win:
+    nothing is recovered for a payload that carries a marker already. The
+    recovery is fenced by the run and the execution generation, because one
+    prompt id may describe a different command at a newer generation.
+    """
+    if not session_id or not isinstance(approval_data, dict):
+        return approval_data
+    if approval_data.get("pattern_key") or approval_data.get("pattern_keys"):
+        return approval_data
+    from api.route_approvals import known_approval_consent_markers
+
+    generation = approval_data.get("_gateway_execution_generation")
+    known_keys, known_surface = known_approval_consent_markers(
+        session_id,
+        str(approval_data.get("approval_id") or ""),
+        execution_generation=generation if type(generation) is int else None,
+        run_id=run_id or str(approval_data.get("run_id") or ""),
+    )
+    if not known_keys and not known_surface:
+        return approval_data
+    recovered = dict(approval_data)
+    if known_keys:
+        recovered["pattern_keys"] = list(known_keys)
+        recovered["pattern_key"] = known_keys[0]
+    if known_surface:
+        recovered["surface"] = known_surface
+    return recovered
 
 
 def _gateway_approval_key(payload) -> str:
@@ -942,6 +994,9 @@ def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, 
     if not approval_data:
         return False
     approval_data["run_id"] = run_id
+    approval_data = _recover_gateway_consent_markers(
+        session_id, approval_data, run_id=run_id
+    )
     approval_data["_gateway_agent_identity_v1"] = _gateway_approval_identity_v1(
         approval_data, base_url, api_key
     )
@@ -3526,6 +3581,9 @@ def _run_gateway_chat_streaming(
                     if _payload_event in {"hermes.approval.request", "approval.request"}:
                         approval_data = _gateway_runs_approval_event(payload)
                         if approval_data:
+                            approval_data = _recover_gateway_consent_markers(
+                                session_id, approval_data
+                            )
                             # Record the gateway run_id so /api/approval/respond
                             # can relay the choice back and resume the parked run
                             # (legacy path never creates a local run; without this

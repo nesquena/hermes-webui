@@ -14881,6 +14881,7 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     resolve_gateway_approval,
     enable_session_yolo,
     disable_session_yolo,
+    is_protected_approval,
     is_session_yolo_enabled,
     _approval_sse_subscribers,
     _approval_sse_subscribe,
@@ -35046,6 +35047,10 @@ _GATEWAY_APPROVAL_RELAY_UNAVAILABLE = (
     "Gateway approval could not be relayed because the active run is unavailable. "
     "Reopen the session or retry after it reconnects."
 )
+_GATEWAY_PROTECTED_APPROVAL_PENDING = (
+    "A protected approval (an MCP elicitation or a publish action) is still "
+    "pending; answer it explicitly before enabling YOLO."
+)
 _GATEWAY_APPROVAL_RELAY_IN_PROGRESS = (
     "Another approval response for this Gateway run is already in progress. "
     "Wait for it to finish, then retry if the card is still visible."
@@ -35453,6 +35458,17 @@ def _enable_session_yolo_and_release_pending(
             run_mirrors = gateway_pending_mirrors(sid)
             relayed = 0
             for mirror in run_mirrors:
+                # The protection decision must cover the actual relay snapshot: a
+                # protected mirror published through a path that does not take the
+                # YOLO handoff can land between the snapshot above and this relay,
+                # and must refuse the whole enable instead of being relayed or
+                # left for a later YOLO answer (#9108).
+                if _has_pending_protected_approval(sid):
+                    payload, status = _protected_approval_enable_refusal(
+                        sid, choice, yolo_transition
+                    )
+                    yolo_transition = None
+                    return payload, status
                 relay_payload, relay_status = _relay_gateway_run_approval(
                     sid,
                     mirror,
@@ -35471,6 +35487,13 @@ def _enable_session_yolo_and_release_pending(
                         **session_yolo_state(sid),
                     }, relay_status
                 relayed += 1
+
+            if _has_pending_protected_approval(sid):
+                payload, status = _protected_approval_enable_refusal(
+                    sid, choice, yolo_transition
+                )
+                yolo_transition = None
+                return payload, status
 
             resolve_gateway_pending_local_all(
                 sid,
@@ -35529,6 +35552,45 @@ def _session_has_pending_approval(sid: str) -> bool:
             return True
         gw_queue = _gateway_queues.get(sid)
         return bool(gw_queue)
+
+
+def _has_pending_protected_approval(sid: str) -> bool:
+    """True when any parked approval (run mirror or local waiter) is protected.
+
+    Scans both storages directly — the live gateway queue and the polling
+    projection every mirror (run-backed or not) is published into — so the
+    YOLO enable/release path sees the same consent prompts either settle path
+    protects, re-read at each relay so a mirror published without the YOLO
+    handoff cannot slip past an earlier snapshot (#9108).
+    """
+    with _lock:
+        for entry in _gateway_queues.get(sid) or []:
+            if is_protected_approval(getattr(entry, "data", None) or {}):
+                return True
+        queue = _pending.get(sid)
+        entries = queue if isinstance(queue, list) else [queue] if queue else []
+        return any(is_protected_approval(entry) for entry in entries if isinstance(entry, dict))
+
+
+def _protected_approval_enable_refusal(
+    sid: str,
+    choice: str,
+    yolo_transition,
+) -> tuple[dict, int]:
+    """Roll a pending YOLO enable back and refuse while a protected approval is parked.
+
+    The enable commits nothing: the transition token is retired unsuccessful, so
+    the shared session flag stays untouched and no parked approval is answered.
+    """
+    finish_session_yolo_transition(sid, yolo_transition, succeeded=False)
+    return _gateway_approval_failure(
+        sid,
+        choice,
+        code="gateway_protected_approval_pending",
+        error=_GATEWAY_PROTECTED_APPROVAL_PENDING,
+        status=409,
+        enable_yolo=True,
+    )
 
 
 def _handle_approval_respond(handler, body):
