@@ -18945,8 +18945,10 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/session/delegations":
         # #8019: advisory read-only live-delegation snapshot for one session.
-        # Counts only; an unreadable ledger is reported as unknown, never zero,
+        # Counts stay as they were; an unreadable ledger is unknown, never zero,
         # so a pre-switch guard cannot mistake "could not check" for "safe".
+        # `children` adds live tool-name metadata when the in-process registry
+        # can be read, and null when it cannot.
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
             return bad(handler, "Missing session_id")

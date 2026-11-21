@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **The chat shows when background subagents are still working.** After `delegate_task` returns, the composer stays usable and the parent turn ends, so a long fan-out used to look idle. A bar above the composer now says how many delegated children are still running and the latest tool name, or that results are on their way back, or that work is still running when the last step cannot be read (for example right after a restart). Expanded subagent rows use the same running indicator as forked conversations. The existing `GET /api/session/delegations` counts are unchanged; `children` is added only when the in-process registry can be read, and is null otherwise. Each child is an id, a status, a tool name, a count, and an age — no goal, transcript, path, or result.
+
 ### Performance
 
 - **Fork a scheduled-job (cron) conversation into your own editable chat.** Cron-run sessions are read-only (the scheduler owns them), so you couldn't continue one. You can now branch/fork a cron session into a new WebUI-owned conversation — the original read-only session is never modified, and the fork picks up its history so you can carry on. Only genuine cron sessions qualify (verified by the server-side source, not a guessable id), and every other read-only session stays unbranchable. Thanks @rodboev. (#5555, #5477)
