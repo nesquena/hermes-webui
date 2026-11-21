@@ -1062,6 +1062,14 @@ def _claim_for_profile(
             # The Agent's own claim keeps its bookkeeping and multiplex refusal; only an
             # accepted claim makes this home the owner.
             if not original(provider, home, *args, **kwargs):
+                # #9061 (item 2): the Agent dropped the provider and keeps built-in
+                # memory. Record the refusal for the construction in progress, the
+                # same way the guard's own refusal below does; without it the caller
+                # reads an empty list once the constructor has returned and caches
+                # an agent whose provider is gone.
+                refusals = _construction_refusals.get()
+                if refusals is not None:
+                    refusals.append(getattr(provider, "name", "?"))
                 return False
             if owner is None:
                 _prune_dead_owners()
