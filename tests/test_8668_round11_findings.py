@@ -12,7 +12,11 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
+import types
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
@@ -45,14 +49,34 @@ def test_recovered_session_render_clears_busy_first():
     )
 
 
-def test_missing_chromium_is_reported_as_a_skip():
-    assert "SKIP: playwright chromium executable is unavailable" in DRIVER_SOURCE
-    launch_at = DRIVER_SOURCE.index("playwright.chromium.launch(")
-    # The skip branch must return 2 (the pytest callers' skip contract) before
-    # the broad driver-error handler turns the same condition into exit 1.
-    window = DRIVER_SOURCE[launch_at : launch_at + 1600]
-    assert "return 2" in window
-    assert "Executable doesn't exist at" in window
+@pytest.mark.parametrize(
+    ("message", "exit_code"),
+    [
+        ("BrowserType.launch: Executable doesn't exist at /example/chromium", 2),
+        ("BrowserType.launch: Timeout 30000ms exceeded", 1),
+        ("BrowserType.launch: Chromium crashed at startup", 1),
+    ],
+)
+def test_chromium_launch_errors_distinguish_missing_executable(monkeypatch, capsys, message, exit_code):
+    from contextlib import nullcontext
+
+    driver = _load_driver()
+
+    def fail_launch(**_kwargs):
+        raise RuntimeError(message)
+
+    fake_api = types.ModuleType("playwright.sync_api")
+    browser = types.SimpleNamespace(launch=fail_launch)
+    fake_api.sync_playwright = lambda: nullcontext(types.SimpleNamespace(chromium=browser))
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_api)
+    monkeypatch.setattr(driver, "_start_webui_server", lambda *_: (None, None, None, ""))
+
+    assert driver.main() == exit_code
+    stderr = capsys.readouterr().err
+    if exit_code == 2:
+        assert "chromium executable is unavailable" in stderr
+    else:
+        assert message in stderr and "GATE FAILED" in stderr
 
 
 def test_apperror_gate_requires_the_frame_and_the_previous_answer():

@@ -628,11 +628,7 @@ def main() -> int:
                 # (#8668 review 2026-11-18). Failures AFTER a successful
                 # launch still count as failures.
                 message = str(launch_error)
-                if (
-                    "Executable doesn't exist at" in message
-                    or "playwright install" in message
-                    or "BrowserType.launch" in message
-                ):
+                if "Executable doesn't exist at" in message:
                     print(
                         "SKIP: playwright chromium executable is unavailable; "
                         "run `playwright install chromium`",
