@@ -242,3 +242,104 @@ def test_both_scope_paths_install_the_same_secret_scope(monkeypatch, tmp_path):
         "the two scope paths disagree for the same profile: "
         f"{installed['background_worker']} vs {installed['active_request_readonly']}"
     )
+
+
+# 3 ── overlapping worker lifetimes must not blindfold the live owner ───────────
+
+
+def _observe_overlap(monkeypatch, tmp_path, *, alpha_exits_first: bool) -> dict:
+    """Run alpha's worker and beta's checkpoint scope concurrently on real threads.
+
+    Alpha reads its own custom key *after* beta is inside its body, which is the
+    window the wider scrub used to black out. The caller releases the exit order
+    under test; both workers then report the process env they left behind.
+    """
+    _setup_server(monkeypatch, tmp_path)
+    _install_fake_secret_scope(monkeypatch, [])
+
+    import os
+    import threading
+
+    observed: dict = {}
+    alpha_entered = threading.Event()
+    beta_entered = threading.Event()
+    release_alpha = threading.Event()
+    release_beta = threading.Event()
+
+    def alpha_body() -> None:
+        try:
+            with _enter_background_worker(ALPHA):
+                alpha_entered.set()
+                # Only meaningful once beta's context is live.
+                beta_entered.wait(60)
+                observed["alpha_read"] = os.environ.get("ALPHA_CUSTOM_KEY")
+                release_alpha.wait(60)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            observed["alpha_error"] = exc
+            alpha_entered.set()
+
+    def beta_body() -> None:
+        try:
+            alpha_entered.wait(60)
+            with _enter_background_worker(BETA):
+                beta_entered.set()
+                release_beta.wait(60)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            observed["beta_error"] = exc
+            beta_entered.set()
+
+    workers = [
+        threading.Thread(target=alpha_body, daemon=True),
+        threading.Thread(target=beta_body, daemon=True),
+    ]
+    for worker in workers:
+        worker.start()
+    assert beta_entered.wait(120), "beta never entered its worker scope"
+
+    # Drive the exit order under test only after alpha has read inside beta's body.
+    deadline = 20.0
+    for _ in range(int(deadline / 0.01)):
+        if "alpha_read" in observed or "alpha_error" in observed:
+            break
+        threading.Event().wait(0.01)
+
+    if alpha_exits_first:
+        release_alpha.set()
+        release_beta.set()
+    else:
+        release_beta.set()
+        release_alpha.set()
+
+    for worker in workers:
+        worker.join(10)
+
+    assert "alpha_error" not in observed, observed.get("alpha_error")
+    assert "beta_error" not in observed, observed.get("beta_error")
+    observed["final"] = os.environ.get("ALPHA_CUSTOM_KEY")
+    return observed
+
+
+@pytest.mark.parametrize("alpha_exits_first", [True, False], ids=["alpha-first", "beta-first"])
+def test_overlapping_workers_keep_the_live_owner_readable(
+    monkeypatch, tmp_path, alpha_exits_first
+):
+    """Alpha still reads its own credential while beta's checkpoint scope is live."""
+    observed = _observe_overlap(monkeypatch, tmp_path, alpha_exits_first=alpha_exits_first)
+    assert observed["alpha_read"] == SECRET_A, (
+        "beta's checkpoint scope removed alpha's credential from the process env "
+        f"while alpha was still inside its body (exit order: "
+        f"{'alpha-first' if alpha_exits_first else 'beta-first'}): "
+        f"{observed['alpha_read']!r}"
+    )
+
+
+@pytest.mark.parametrize("alpha_exits_first", [True, False], ids=["alpha-first", "beta-first"])
+def test_overlapping_workers_restore_the_true_baseline(
+    monkeypatch, tmp_path, alpha_exits_first
+):
+    """Neither exit order may leave a finished worker's credential behind."""
+    observed = _observe_overlap(monkeypatch, tmp_path, alpha_exits_first=alpha_exits_first)
+    assert observed["final"] is None, (
+        "a finished worker's credential survived both scopes (exit order: "
+        f"{'alpha-first' if alpha_exits_first else 'beta-first'}): {observed['final']!r}"
+    )

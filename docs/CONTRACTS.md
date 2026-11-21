@@ -127,6 +127,14 @@ contributor guidance; it does not change runtime behavior or CI gates.
   retarget or transient resolve fallback is always observed on the next call.
   Start here before widening this cache's scope or adding a similar
   call-scoped cache elsewhere (#7636).
+- [`docs/architecture/profile-env-mirror.md`](architecture/profile-env-mirror.md):
+  current contract for the background worker's process-env mirror: the visible
+  (runtime env) versus hidden (declared credential names) claim sets, the
+  per-name live-claim registry that makes overlapping worker lifetimes
+  order-independent, the baseline restored when the last scope leaves, and the
+  deployment consequence for a value whose name a profile declares as a
+  credential. Start here before changing `profile_env_for_background_worker`,
+  the credential-name scrub, or the per-`config.yaml` declaration cache (#9187).
 - [`docs/architecture/session-archive-cross-profile.md`](architecture/session-archive-cross-profile.md):
   current contract for `POST /api/session/archive`: the request fields
   (`all_profiles` plus the required validated `profile` owner claim), the rule
