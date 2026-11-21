@@ -906,7 +906,13 @@ def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], li
     if b"\r" in data:
         return None
     events: list[dict] = []
-    malformed = [m for m in idx["malformed"] if m["line"] <= line_no]
+    # Serve fresh diagnostic dictionaries: callers own their response, so a
+    # malformed row coming from the cached prefix must never alias the dict
+    # stored in ``_after_seq_index`` (nor a previous response's dict). The
+    # full reader returns independent dicts on every call; an indexed read
+    # must too, or an in-process caller edit would rewrite the shared index
+    # and change a later replay's diagnostics without any journal change.
+    malformed = [dict(m) for m in idx["malformed"] if m["line"] <= line_no]
     off = start
     prefix_max = idx["maxes"][pos]
     for raw_b in data.split(b"\n"):
@@ -943,9 +949,12 @@ def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], li
                         idx["_segment_hash"] = hashlib.sha256()
                         idx["lines"].append(line_no)
             else:
-                malformed.append({"line": line_no, "raw": raw})
+                # The response's dict belongs to the caller; store a separate
+                # copy in the index so neither side can mutate the other.
+                entry = {"line": line_no, "raw": raw}
+                malformed.append(entry)
                 if extend:
-                    idx["malformed"].append(malformed[-1])
+                    idx["malformed"].append(dict(entry))
                     idx["malformed_bytes"] += len(raw_b)
         if extend:
             idx["size"] = line_end
@@ -2387,6 +2396,19 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
                 if str(Path(value[1]).parent) == dir_key
             ]:
                 del _RUN_PATH_CACHE[cache_key]
+        # Drop the after-seq offset-index entries for the removed runs too. The
+        # index retains derived malformed-row diagnostics in-process; after a
+        # confirmed deletion those diagnostics must not stay resident (a run
+        # re-created at the same path must not inherit them). Same parent-dir
+        # match as the caches above; `_after_seq_index` is keyed by the full
+        # run-file path, so its entries' parent equals ``dir_key`` exactly.
+        with _after_seq_index_lock:
+            for cache_key in [
+                entry
+                for entry in _after_seq_index
+                if str(Path(entry).parent) == dir_key
+            ]:
+                del _after_seq_index[cache_key]
     return removed
 
 

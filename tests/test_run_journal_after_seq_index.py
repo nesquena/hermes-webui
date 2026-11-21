@@ -448,3 +448,55 @@ def test_microbenchmark_tail_read(tmp_path):
     print(f"\n[after_seq bench] {path.stat().st_size / 1e6:.1f} MB, {n} events: "
           f"full={before * 1000:.1f} ms indexed={after * 1000:.2f} ms")
     assert after < before
+
+
+def test_returned_malformed_diagnostics_do_not_alias_the_index(tmp_path):
+    """A caller owns its response: mutating a returned malformed diagnostic
+    must not change what a later indexed read (or the full reader) reports,
+    even though the diagnostic is cached in-process."""
+    path = rj._run_path(SID, RID, session_dir=tmp_path)
+    damaged = "{not json"
+    _write(
+        path,
+        "".join(_row(i) for i in range(1, 301))
+        + damaged + "\n"
+        + "".join(_row(i) for i in range(301, 601)),
+    )
+    first = rj.read_run_events(SID, RID, after_seq=580, session_dir=tmp_path)
+    oracle = _oracle(path, 580)
+    assert first == oracle
+    assert first["malformed"] == [{"line": 301, "raw": damaged}]
+    # The second read must actually hit the cached index (line 301 sits before
+    # the scanned suffix's checkpoint), not silently fall back to full parses.
+    assert str(path) in rj._after_seq_index
+    first["malformed"][0]["raw"] = "reviewer_response_redaction"
+    second = rj.read_run_events(SID, RID, after_seq=580, session_dir=tmp_path)
+    assert second == _oracle(path, 580)
+    assert second["malformed"][0]["raw"] == damaged
+    # Nothing stored in the index ever became the caller's dict.
+    assert all(
+        m["raw"] != "reviewer_response_redaction"
+        for cached in rj._after_seq_index.values()
+        for m in cached["malformed"]
+    )
+
+
+def test_delete_run_journal_evicts_after_seq_index_entries(tmp_path):
+    path = rj._run_path(SID, RID, session_dir=tmp_path)
+    damaged = "{not json"
+    _write(path, "".join(_row(i) for i in range(1, 301)) + damaged + "\n" + _row(301))
+    got = rj.read_run_events(SID, RID, after_seq=250, session_dir=tmp_path)
+    assert got == _oracle(path, 250)
+    assert str(path) in rj._after_seq_index
+    assert rj.delete_run_journal(SID, session_dir=tmp_path) is True
+    # A confirmed deletion must not leave derived diagnostics resident.
+    assert str(path) not in rj._after_seq_index
+    assert rj.read_run_events(SID, RID, after_seq=250, session_dir=tmp_path) == {
+        "session_id": SID,
+        "run_id": RID,
+        "events": [],
+        "malformed": [],
+    }
+    # A no-op delete (already gone) reports False and still leaves no entry.
+    assert rj.delete_run_journal(SID, session_dir=tmp_path) is False
+    assert str(path) not in rj._after_seq_index
