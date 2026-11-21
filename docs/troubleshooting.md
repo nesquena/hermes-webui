@@ -283,6 +283,23 @@ The on-disk locations below assume the default `~/.hermes/webui` state directory
 
 ---
 
+## "Storage on the server is full" (HTTP 507) (#9167)
+
+**Symptom.** Sending a message, or any action that saves, fails with "Storage on the server is full. Free up space and try again." The request returns HTTP 507.
+
+**Cause.** A write hit `ENOSPC` (no space left on device) or `EDQUOT` (disk quota exceeded) on the filesystem that holds the WebUI state. Before this change it surfaced as a generic "Internal server error".
+
+**Recovery.** Free space on that filesystem and retry; no restart is needed.
+
+```bash
+df -h ~/.hermes/webui
+du -sh ~/.hermes/webui/sessions ~/.hermes/webui/sessions/_run_journal*
+```
+
+In a container the state usually lives on a volume: check that path, not `/`. If the run journal is what grew, see the next section.
+
+**Note.** The error and the message that failed to save exist only in the browser; reloading the session removes them, and the typed text stays in the composer.
+
 ## Run journal is large / disk keeps filling (#7613)
 
 **Symptom.** `sessions/_run_journal/` grows without bound — hundreds of MB to several GB on installs with long-lived sessions or many long runs. Every run appends one `{run_id}.jsonl` and nothing removes them, so the directory only ever grows.
