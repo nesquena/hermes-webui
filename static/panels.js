@@ -9663,6 +9663,12 @@ let _settingsSpeechChangedKeys=new Set();
 let _settingsSpeechDesiredValues={};
 let _settingsSpeechRefusedKeys=new Set();
 let _unappliedSpeechServerValues={};
+// #9113: an accepted voice can drop out of the spoken catalog (a
+// `voiceschanged` rebuild, a shorter server list). Remember which engine
+// accepted the stored voice so the select can keep showing it instead of
+// collapsing to Default, and so switching engines does not carry one engine's
+// voice into another.
+let _settingsTtsVoiceKnownEngine='';
 
 function _captureSpeechPreferenceOwnership(settings){
   _settingsSpeechPersistedKeys=new Set(Array.isArray(settings&&settings.persisted_speech_keys)?settings.persisted_speech_keys:[]);
@@ -9670,6 +9676,7 @@ function _captureSpeechPreferenceOwnership(settings){
   _settingsSpeechChangedKeys=new Set();
   _settingsSpeechDesiredValues={};
   _settingsSpeechRefusedKeys=new Set();
+  _settingsTtsVoiceKnownEngine='';
   Object.entries(_SETTINGS_SPEECH_STORAGE_KEYS).forEach(([settingKey,storageKey])=>{
     try{if(localStorage.getItem(storageKey)!==null) _settingsSpeechLocalStorageKeys.add(settingKey);}catch(_){}
   });
@@ -9907,6 +9914,29 @@ function _preferencesPayloadFromUi(){
   return payload;
 }
 
+// #9113: the native select cannot always represent the accepted voice (a
+// `voiceschanged` rebuild drops it, or the panel could not populate the control
+// at all). An empty select therefore only means Default when the user actually
+// edited the control or moved to another engine; otherwise the still-desired
+// voice wins so an unrelated autosave cannot overwrite an accepted preference
+// with "".
+function _ttsVoicePayloadFromUi(ttsVoiceSel){
+  const shown=String((ttsVoiceSel&&ttsVoiceSel.value!==undefined?ttsVoiceSel.value:'')||'');
+  if(shown) return shown;
+  if(_settingsSpeechChangedKeys.has('tts_voice')){
+    const desired=Object.prototype.hasOwnProperty.call(_settingsSpeechDesiredValues,'tts_voice')?_settingsSpeechDesiredValues['tts_voice']:'';
+    return (desired===undefined||desired===null)?'':String(desired);
+  }
+  const engineSel=$('settingsTtsEngine');
+  const engine=String((engineSel&&engineSel.value)||'browser');
+  if(_settingsTtsVoiceKnownEngine&&_settingsTtsVoiceKnownEngine===engine){
+    let stored=null;
+    try{stored=localStorage.getItem('hermes-tts-voice');}catch(_){stored=null;}
+    if(stored) return stored;
+  }
+  return '';
+}
+
 function _speechPreferencesPayloadFromUi(){
   const payload={};
   const ttsEnabledCb=$('settingsTtsEnabled');
@@ -9916,7 +9946,7 @@ function _speechPreferencesPayloadFromUi(){
   const ttsEngineSel=$('settingsTtsEngine');
   if(ttsEngineSel) _setOwnedSpeechPayload(payload,'tts_engine',ttsEngineSel.value||'browser');
   const ttsVoiceSel=$('settingsTtsVoice');
-  if(ttsVoiceSel) _setOwnedSpeechPayload(payload,'tts_voice',ttsVoiceSel.value||'');
+  if(ttsVoiceSel) _setOwnedSpeechPayload(payload,'tts_voice',_ttsVoicePayloadFromUi(ttsVoiceSel));
   const ttsRateSlider=$('settingsTtsRate');
   if(ttsRateSlider) _setOwnedSpeechPayload(payload,'tts_rate',parseFloat(ttsRateSlider.value));
   const ttsPitchSlider=$('settingsTtsPitch');
@@ -10899,6 +10929,9 @@ async function loadSettingsPanel(){
       }
       ttsEngineSel.value=saved;
       _syncSpeechPreferenceCache('tts_engine',saved);
+      // #9113: the persisted voice belongs to the persisted engine, so this is
+      // the engine its value may be kept for while the catalog stops offering it.
+      if(_speechPreferenceIsOwned('tts_voice')) _settingsTtsVoiceKnownEngine=saved;
       ttsEngineSel.onchange=function(){
         const mirrorOk=_writeSettingsStorageMirror('hermes-tts-engine',this.value);
         _markSpeechPreferenceChanged('tts_engine');
@@ -10980,6 +11013,21 @@ async function loadSettingsPanel(){
           ttsVoiceSel.appendChild(opt);
         });
       }
+      // #9113: an accepted voice can leave the catalog (a `voiceschanged`
+      // rebuild, a shorter Edge list). Keep it as a selectable "(unavailable)"
+      // option instead of letting the native select fall back to the Default
+      // option, which a later unrelated autosave would persist as an explicit
+      // "". Only for catalog-driven engines and only while the value belongs to
+      // this engine, so switching engines never carries a voice across.
+      const catalogDriven=engine!=='elevenlabs'&&engine!=='openai';
+      const offered=Array.from(ttsVoiceSel.options||[]).some(o=>o.value===current);
+      if(catalogDriven&&current&&offered) _settingsTtsVoiceKnownEngine=engine;
+      if(catalogDriven&&current&&!offered&&_settingsTtsVoiceKnownEngine===engine){
+        const unavailableOpt=document.createElement('option');
+        unavailableOpt.value=current;
+        unavailableOpt.textContent=current+' (unavailable)';
+        ttsVoiceSel.appendChild(unavailableOpt);
+      }
       // Sync only to an offered voice: a value with no option blanks the native
       // select (selectedIndex -1) instead of keeping its labelled default.
       if(Array.from(ttsVoiceSel.options||[]).some(o=>o.value===current)) ttsVoiceSel.value=current;
@@ -10993,6 +11041,9 @@ async function loadSettingsPanel(){
       ttsVoiceSel.onchange=function(){
         const mirrorOk=_writeSettingsStorageMirror('hermes-tts-voice',this.value);
         _markSpeechPreferenceChanged('tts_voice');
+        // #9113: the voice now belongs to the engine that is selected, so it may
+        // be kept if this engine's catalog stops offering it.
+        _settingsTtsVoiceKnownEngine=localStorage.getItem('hermes-tts-engine')||'browser';
         delete _unappliedSpeechServerValues['tts_voice'];
         _setControlUnappliedNote(this,!mirrorOk);
         _schedulePreferencesAutosave();
