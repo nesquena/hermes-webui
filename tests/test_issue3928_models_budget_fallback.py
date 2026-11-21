@@ -281,6 +281,9 @@ def test_budget_exceeded_uses_shape_only_stale_cache_before_static_fallback(
     expected_fallback.pop("_schema_version")
     expected_fallback.pop("_webui_version")
     expected_fallback.pop("_source_fingerprint")
+    # #7777: the loaders also restore the picker-exclude policy. This fixture
+    # configures none, so the stale-cache fallback carries an empty map.
+    expected_fallback["picker_excludes"] = {}
     result = cfg.get_available_models()
 
     assert any(
