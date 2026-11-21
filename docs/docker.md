@@ -88,6 +88,10 @@ If your mounted `~/.hermes/hermes-agent` is a git checkout that the Agent may re
 
 When opt-in auto-install is enabled (`HERMES_WEBUI_AUTO_INSTALL=1`), an already-selected staged Agent is used directly without a stage-copy warning. A different staged directory still has to pass the ownership, ancestry, source-identity, and freshness checks.
 
+The staged copy must also pass a per-file check before pip may install from it. Every install input pip could read — `pyproject.toml`, `requirements.txt`, and `setup.py` — has to be a regular file owned by the container user and not group- or world-writable, and its sha256 must still match the digest that the stage manifest (`.hermes-webui-stage-source`) recorded for the authorized Agent at copy time. On a fast restart, startup strips group/world write from an existing stage's install inputs but does not compare their contents; the manifest digest is what rejects a copy a peer user edited while it was writable (#8472, #8501).
+
+If any of those checks fails, startup logs `Ignoring staged agent copy ...` and auto-install falls back to the mounted agent source. In the documented `:ro` compose stacks that mount is read-only, so the fallback cannot install and pip fails with `Read-only file system`; recreate the container (`docker compose up -d --force-recreate`) so it copies a fresh stage from the Agent.
+
 For troubleshooting, reinstall, or onboarding reproduction trials, do not mount
 your real `~/.hermes` unless you intentionally want to test real state. Use an
 isolated Hermes home and follow
