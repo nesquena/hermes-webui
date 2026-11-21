@@ -39,7 +39,7 @@
 
 ### Fixed
 
-- **The gateway-sync reset tests run on newer Hermes Agent versions too (#9261, closes #9258).** Two tests that check a reset conversation stays separate from its parent built their fixture with storage calls newer Agents no longer have, so they failed against current Agents. The fixture now writes its rows and ends the parent session through calls every supported Agent provides.
+- **The gateway-sync reset test runs on newer Hermes Agent versions too (#9261, closes #9258).** Both cases of the test that checks a reset conversation stays separate from its reopened parent failed against current Agents, because their fixture used storage calls newer Agents no longer have. The fixture now writes rows with `append_message`, ends the parent session through whichever reset call the installed Agent provides, and checks that the reset took effect.
 
 - **On a server launched under a named profile, values from that profile's `.env` are recognised however the line is written (#9212).** WebUI now compares launch values with the profile's `.env` as WebUI, the launcher and the Agent each read it, so a value loaded from that file is never taken for the operator's own launch setting. The Gateway settings check uses the same comparison. Servers launched as root are unchanged.
 
