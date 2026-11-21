@@ -1044,7 +1044,7 @@ def _open_gateway_run_events(base_url, headers, run_id, last_seq: int = -1, read
 
 def _relay_gateway_run_events(
     resp, session_id, stream_id, run_id, base_url, api_key,
-    *, put_gateway_event, cancel_event, delta_redactor, on_seq=None, final_text="", stop_on_truncated=False,
+    *, put_gateway_event, cancel_event, delta_redactor=None, on_seq=None, final_text="", stop_on_truncated=False,
     surfaced_approval_ids=None, output_is_authoritative=False, approval_is_current=None,
     watchdog_secs=None,
 ):
@@ -1077,6 +1077,11 @@ def _relay_gateway_run_events(
     latch finishes the turn as "ended" instead of probing (round-4 review: the
     frame is terminal; Greptile round-3: the latch must leave an exit).
     """
+    if delta_redactor is None:
+        # #8901: the redactor is per-stream state. A caller that already owns a
+        # stream passes its own in; a direct caller gets a fresh one so the
+        # relay still redacts instead of failing on a missing argument.
+        delta_redactor = StreamDeltaRedactor()
     usage: dict = {}
     outcome = "eof"
     seq = None
@@ -1320,13 +1325,18 @@ def _gateway_run_headers(session_id, api_key) -> dict:
 def _run_gateway_runs_api_streaming(
     session_id, msg_text, model, workspace, stream_id,
     base_url, api_key, prefill_messages, body_extras,
-    *, put_gateway_event, cancel_event, delta_redactor,
+    *, put_gateway_event, cancel_event, delta_redactor=None,
     attachments=None, cfg=None, session=None,
     active_provider: str = "",
     on_run_id=None,
     on_seq=None,
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
+    if delta_redactor is None:
+        # #8901: the redactor is per-stream state. Callers that already own a
+        # stream pass theirs in; a direct caller (upstream's own tests call
+        # this function directly) gets a fresh one so the relay still redacts.
+        delta_redactor = StreamDeltaRedactor()
     try:
         url_runs = f"{base_url.rstrip('/')}/v1/runs"
         headers = _gateway_run_headers(session_id, api_key)
@@ -2045,7 +2055,7 @@ def _restore_relayed_gateway_state(session_id: str, stream_id: str) -> int | Non
 
 def _await_gateway_run_result(
     session_id, stream_id, run_id, base_url, api_key,
-    *, put_gateway_event, cancel_event, delta_redactor, resume_seq=None,
+    *, put_gateway_event, cancel_event, delta_redactor=None, resume_seq=None,
 ):
     """Resume a run started by a previous WebUI process; same return contract as _run_gateway_runs_api_streaming.
 
