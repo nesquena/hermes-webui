@@ -158,7 +158,11 @@ function createTab(server, name, overrides = null, extraSrc = []) {
     'function __state(){ const pill=$("yoloPill"); return {sid: S.session && S.session.session_id, yolo: _yoloEnabled,',
     '  pillVisible: pill.style.display !== "none" && !pill.classList.contains("composer-control-hidden"),',
     '  pillSession: pill.getAttribute("data-yolo-session"),',
-    '  gen: _loadSessionGeneration, loading: _loadingSessionId}; }',
+    '  gen: _loadSessionGeneration, loading: _loadingSessionId,',
+    // The view\'s own ordering state: which server run it holds, at which
+    // revision, and which runs this tab has confirmed.
+    '  epoch: _yoloView.epoch, rev: _yoloView.rev, reqGen: _yoloView.reqGen,',
+    '  knownRuns: Array.from(_yoloKnownRuns).slice().sort()}; }',
     ...extraSrc,
   ].join('\n');
   vm.runInContext(src, ctx, { filename: name + '-harness.js' });
@@ -1215,6 +1219,107 @@ const scenarios = {
     const out = { beforeAnswer, afterAnswer, afterOld2, after: tab.state(), server: server.state('B'),
       recovery: recovery && recovery.answer, posts: posts(tab), toasts: tab.toasts };
     check(synced(tab, server, 'B'), 'older OFF reads around /yolo hid the pill while the server is ON', out);
+    return out;
+  },
+
+  // (r22) review round 9 (Greptile P1 "Current server answers stay blocked"):
+  // the FIRST sync of a tab overlaps a server restart. The NEW process's
+  // answer lands first and is applied (its epoch is the server's current
+  // one). The OLD process's delayed answer then lands: the tab has never
+  // confirmed that old run, so the answer is accepted and the view is rolled
+  // BACK to the dead process. The new process is now a run the tab
+  // "confirmed", so every later answer of the CURRENT process is rejected and
+  // the pill stays wrong until the page reloads.
+  //
+  // Expected: the old process's late answer must not change the current
+  // state, and a later answer from the current process must still be applied.
+  async r22_late_old_process_answer_never_blocks_the_current_process() {
+    const server = createServer({ B: {} });
+    const tab = createTab(server, 'tab1');
+    const fetchB = () => vm.runInContext('_fetchYoloState("B")', tab.ctx);
+    // The install read of the OLD process is held; its answer is late.
+    server.shouldHold = yoloGet('B');
+    await tab.loadSession('B'); await tick();
+    const oldRead = tab.held.shift();
+    check(!!oldRead, 'precondition: the old process\'s install read is in flight', tab.calls);
+    // The server restarts; the NEW process answers a read sent now.
+    server.restart(); server.yolo.B = true;
+    const fresh = fetchB(); await tick();
+    const newRead = tab.held.shift();
+    check(!!newRead && newRead.answer.yolo_epoch === server.epoch && newRead.answer.yolo_enabled === true,
+      'precondition: the new process answered ON', tab.calls);
+    // The new process's answer lands first: it is the server's current state.
+    server.shouldHold = null;
+    newRead.release(); await fresh; await tick();
+    const afterNew = tab.state();
+    check(afterNew.pillVisible === true && afterNew.epoch === server.epoch,
+      'precondition: the current process\'s answer is shown', afterNew);
+    // Now the OLD process's delayed answer lands. It must not roll the view
+    // back to the dead process.
+    oldRead.release(); await tick(20);
+    const afterOld = tab.state();
+    const out = { afterNew, afterOld, server: server.state('B') };
+    check(afterOld.epoch === server.epoch && afterOld.pillVisible === true && afterOld.rev === afterNew.rev,
+      'the old process\'s late answer replaced the current process\'s state', out);
+    // The current process must still be able to update the indicator.
+    server.yolo.B = false;
+    await fetchB(); await tick(20);
+    const afterCurrent = tab.state();
+    out.afterCurrent = afterCurrent;
+    check(afterCurrent.epoch === server.epoch && afterCurrent.pillVisible === false && afterCurrent.rev > afterNew.rev,
+      'the current process\'s later answer was rejected after the old process\'s late answer', out);
+    check(synced(tab, server, 'B'), 'the pill does not match the server', out);
+    return out;
+  },
+
+  // (r23) review round 9 (Greptile P1 "Older answers hide the warning"):
+  // inside ONE server run, a read confirms revision N (ON). A WRITE answer
+  // computed at an OLDER revision (N-1, OFF) lands afterwards and overwrites
+  // the confirmed state: the warning (the ON pill) disappears while YOLO is
+  // still on. The confirmation read that follows a write cannot repair it
+  // when it fails, and it is not the only guard against a rollback.
+  //
+  // Expected: no answer (read, write, or a 409 carrying the current state)
+  // may roll the confirmed revision back.
+  async r23_older_write_answer_never_rolls_back_a_confirmed_revision() {
+    const server = createServer({ B: {} });
+    const tab = createTab(server, 'tab1');
+    const fetchB = () => vm.runInContext('_fetchYoloState("B")', tab.ctx);
+    // The server is ON at revision 3: three changes already happened.
+    server.yolo.B = true;
+    server.counter = 3;
+    server.recorded.B = { rev: 3, enabled: true };
+    await tab.loadSession('B'); await tick();
+    const before = tab.state();
+    check(before.pillVisible === true && before.rev === 3, 'precondition: the read confirmed ON at revision 3', before);
+    const confirmedRev = before.rev;
+    // A write answer computed at an OLDER revision (OFF, revision 2) lands
+    // late: the write was issued when the server was at revision 2. The
+    // answer is computed when the request is sent, so the server is patched
+    // BEFORE the write goes out.
+    const staleAnswer = { ok: true, yolo_enabled: false, yolo_revision: confirmedRev - 1, yolo_epoch: server.epoch };
+    const realHandle = server.handle;
+    server.handle = (m, p, b) => (m === 'POST' && p === '/api/session/yolo' ? staleAnswer : realHandle(m, p, b));
+    server.shouldHold = (name, method, p) => method === 'POST' && p === '/api/session/yolo';
+    const cmd = tab.cmdYolo(); await tick();
+    const write = tab.held.shift();
+    check(!!write, 'precondition: the write answer is in flight', tab.calls);
+    server.shouldHold = null;
+    // The confirmation read that follows the write FAILS: it cannot repair
+    // the rollback, so the write answer itself must not roll the view back.
+    server.failGet = true;
+    write.release(); await cmd; await tick(20);
+    const afterWrite = tab.state();
+    const out = { before, afterWrite, staleAnswer, server: server.state('B') };
+    check(afterWrite.rev === confirmedRev && afterWrite.pillVisible === true,
+      'the older write answer rolled the confirmed revision back', out);
+    // A later read that succeeds still confirms the same state.
+    server.failGet = false;
+    await fetchB(); await tick(20);
+    const afterRead = tab.state();
+    out.afterRead = afterRead;
+    check(afterRead.rev === confirmedRev && afterRead.pillVisible === true,
+      'the confirmed state did not survive', out);
     return out;
   },
 
