@@ -21,6 +21,7 @@ These tests reuse the node harness from
 `tests/test_issue8708_refused_storage_hydration.py` (real `panels.js` source
 blocks executed in node against a `Storage` whose `setItem` throws
 `DOMException('QuotaExceededError')`).
+
 """
 
 from tests import test_issue8708_refused_storage_hydration as _upstream
@@ -37,7 +38,7 @@ def test_voice_catalog_follows_the_selector_after_a_refused_engine_edit():
   REFUSE = false;
   hydrateNative('browser', 'Old Voice');
   assert.strictEqual(els.settingsTtsEngine.value, 'browser');
-  const browserVoices = """ + _voice_values() + """.join(',');
+  const browserVoices = """ + _voice_values() + r""".join(',');
   assert.ok(browserVoices.indexOf('Old Voice') >= 0, 'the browser catalog lists its own voices');
 
   // A refused engine edit: the selector keeps the desired engine, the raw
@@ -51,11 +52,12 @@ def test_voice_catalog_follows_the_selector_after_a_refused_engine_edit():
     'the selector still shows the desired engine');
 
   window._populateTtsVoices();
-  const edgeVoices = """ + _voice_values() + """.join(',');
+  const edgeVoices = """ + _voice_values() + r""".join(',');
   assert.ok(edgeVoices.indexOf('zh-CN-XiaoxiaoNeural') >= 0,
     'the catalog must offer the SELECTED engine voices, got: ' + edgeVoices);
   assert.ok(edgeVoices.indexOf('Old Voice') < 0,
     'the catalog must not offer the previous engine voices, got: ' + edgeVoices);
+
 """)
 
 
@@ -74,6 +76,7 @@ def test_the_refused_cache_entry_is_not_pretended_to_have_applied():
     'a refused write must not change the cache entry');
   assert.strictEqual(els.settingsTtsEngine.value, 'edge',
     'the desired engine is still the explicit user choice');
+
 """)
 
 
@@ -88,8 +91,11 @@ def test_the_refresh_dispatch_still_decides_on_the_effective_cache_entry():
     and the recovered voice's mirror would never land -- exactly the
     regression #9114 pins.
 
-    This test pins the behaviour that is actually shipped, so the decision
-    point stays visible for the maintainer to arbitrate.
+    This test fires the REAL listener the production block registers and
+    pins the behaviour that is actually shipped, so the decision point stays
+    visible for the maintainer to arbitrate: with the effective cache entry
+    still on `browser` the listener DOES rebuild, and the rebuilt catalog
+    follows the SELECTED engine (the #9115 fix), not the cache entry.
     """
     _upstream._run_native_select_scenario(r"""
   REFUSE = false;
@@ -103,6 +109,69 @@ def test_the_refresh_dispatch_still_decides_on_the_effective_cache_entry():
   // left alone.
   assert.strictEqual(store.get('hermes-tts-engine'), 'browser',
     'the refused engine write left the cache entry alone');
+
+  // Instrument the real renderer (after the onchange already repopulated
+  // once) so the assertions below see the LISTENER's dispatch, not a direct
+  // call to the renderer.
+  let populateCalls = 0;
+  const realPopulate = window._populateTtsVoices;
+  window._populateTtsVoices = function(){ populateCalls += 1; return realPopulate.apply(this, arguments); };
+
+  // Fire the REAL voiceschanged listener registered by the production block.
+  assert.ok(voiceschangedListeners.length > 0, 'the voiceschanged listener must be registered');
+  voiceschangedListeners.forEach((fn) => fn());
+
+  // The effective cache entry is 'browser', so the listener must rebuild.
+  assert.strictEqual(populateCalls, 1,
+    'the listener must rebuild the catalog through the effective cache entry');
+
+  // The rebuilt catalog offers the SELECTED engine's voices (#9115), not the
+  // cache entry's.
+  const rebuilt = """ + _voice_values() + r""".join(',');
+  assert.ok(rebuilt.indexOf('zh-CN-XiaoxiaoNeural') >= 0,
+    'the rebuilt catalog must offer the SELECTED engine voices, got: ' + rebuilt);
+  assert.ok(rebuilt.indexOf('Old Voice') < 0,
+    'the rebuilt catalog must not offer the previous engine voices, got: ' + rebuilt);
+
+""")
+
+
+def test_the_refresh_dispatch_skips_the_browser_refresh_for_a_non_browser_engine():
+    """#9115 scope note, other half: with the effective cache entry on a
+    NON-browser engine the `voiceschanged` listener must not run the browser
+    voice refresh -- even when the user's desired engine is `browser`.
+
+    The dispatch's `engine === 'browser'` test reads the effective cache
+    entry; a desired-but-refused engine edit must not pull the refresh onto
+    the desired value, because that decision is #9114's recovery path.
+    """
+    _upstream._run_native_select_scenario(r"""
+  REFUSE = false;
+  hydrateNative('edge', '');
+
+  REFUSE = true;
+  els.settingsTtsEngine.value = 'browser';
+  els.settingsTtsEngine.onchange.call(els.settingsTtsEngine);
+  assert.strictEqual(store.get('hermes-tts-engine'), 'edge',
+    'the refused engine write left the cache entry alone');
+  assert.strictEqual(els.settingsTtsEngine.value, 'browser',
+    'the selector still shows the desired engine');
+
+  // Instrument after the onchange's own repopulation so only the LISTENER's
+  // dispatch is counted.
+  let populateCalls = 0;
+  const realPopulate = window._populateTtsVoices;
+  window._populateTtsVoices = function(){ populateCalls += 1; return realPopulate.apply(this, arguments); };
+
+  assert.ok(voiceschangedListeners.length > 0, 'the voiceschanged listener must be registered');
+  voiceschangedListeners.forEach((fn) => fn());
+
+  // The effective cache entry is 'edge', so the listener must not run the
+  // browser refresh -- taking the desired 'browser' here would be exactly the
+  // dispatch rewrite #9114 pins against.
+  assert.strictEqual(populateCalls, 0,
+    'a non-browser effective engine must not run the browser voice refresh');
+
 """)
 
 
@@ -113,10 +182,11 @@ def test_an_unchanged_engine_keeps_using_the_effective_cache_entry():
   REFUSE = false;
   hydrateNative('browser', 'Old Voice');
   assert.strictEqual(els.settingsTtsEngine.value, 'browser');
-  const before = """ + _voice_values() + """.join(',');
+  const before = """ + _voice_values() + r""".join(',');
   window._populateTtsVoices();
-  const after = """ + _voice_values() + """.join(',');
+  const after = """ + _voice_values() + r""".join(',');
   assert.strictEqual(after, before, 'an unchanged engine must not change the catalog');
+
 """)
 
 
@@ -138,4 +208,5 @@ def test_a_refused_engine_edit_keeps_the_truthful_refusal_indication():
     'the refused engine edit must still set the title');
   assert.strictEqual(els.settingsTtsEngine.dataset.unapplied, 'true',
     'the refused engine edit must still mark the control unapplied');
+
 """)
