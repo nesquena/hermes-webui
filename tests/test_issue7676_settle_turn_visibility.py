@@ -95,7 +95,10 @@ class TestTerminalSettlementOwnership:
               {guard}
               return !!_preservedLiveTurn;
             }}
-            const node={{dataset:{{sessionId:'s1'}}, querySelector:()=>({{}})}};
+            // children: the guard's #8559 Steer capture reads
+            // getElementById('msgInner').children — a real element always has
+            // one; the stub models "no live Steer rows" with an empty array.
+            const node={{dataset:{{sessionId:'s1'}}, querySelector:()=>({{}}), children:[]}};
             const liveProjection=[{{role:'assistant',content:'final',_live:true}}];
             const settledProjection=[{{role:'assistant',content:'final'}}];
             // SETTLED pane (idle, no live stream) + live markers still on the
