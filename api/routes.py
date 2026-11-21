@@ -9232,7 +9232,13 @@ def _clean_session_model_provider(value: str | None) -> str | None:
     return provider or None
 
 
-def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
+def _split_provider_qualified_model(
+    model: str,
+    *,
+    session_provider: str | None = None,
+    generic_custom: bool = False,
+    config_obj: dict | None = None,
+) -> tuple[str, str | None]:
     """Split an ``@provider:model`` hint into ``(bare_model, provider)``.
 
     Delegates the grammar to ``config._parse_provider_qualified_model_id()``,
@@ -9243,7 +9249,10 @@ def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
     the gateway request path resolve the same provider/model pair (#6722).
     """
     model = str(model or "").strip()
-    parsed = _parse_provider_qualified_model_id(model)
+    is_generic = generic_custom or (str(session_provider or "").strip().lower() == "custom")
+    parsed = _parse_provider_qualified_model_id(
+        model, generic_custom=is_generic, config_obj=config_obj
+    )
     if parsed:
         bare_model, provider_hint = parsed
         provider = _clean_session_model_provider(provider_hint)
@@ -11255,7 +11264,9 @@ def _session_context_length_lookup_state(
         from api.config import resolve_model_provider
 
         model_for_resolution = model_with_provider_context(model_for_lookup, provider_for_lookup or None)
-        resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model_for_resolution)
+        resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
+            model_for_resolution, session_provider=provider_for_lookup or None
+        )
         model_for_lookup = str(resolved_model or model_for_lookup).strip()
         provider_for_lookup = str(resolved_provider or provider_for_lookup or "").strip()
         base_url_for_lookup = str(resolved_base_url or "").strip()
@@ -11328,14 +11339,14 @@ def _session_model_identity_matches(
     if not stored or not resolved:
         return False
 
-    def _split_model_identity(value: str) -> tuple[str, str | None]:
+    def _split_model_identity(value: str, provider_context: str | None = None) -> tuple[str, str | None]:
         # Handle BOTH provider-qualified shapes so a slash-prefixed session model
         # (e.g. ``deepseek/deepseek-v4-1m``, OpenRouter-style) compares equal to its
         # resolved bare id. ``_split_provider_qualified_model`` only handles the
         # ``@provider:model`` form; without the slash case a reload of a
         # slash-stored model is wrongly treated as a model change, bypassing the
         # #4248 256k-clobber guard (Codex regression gate, v0.51.x).
-        bare, prov = _split_provider_qualified_model(value)
+        bare, prov = _split_provider_qualified_model(value, session_provider=provider_context)
         if prov is None and "/" in value:
             prefix, rest = value.split("/", 1)
             prefix = prefix.strip()
@@ -11344,8 +11355,8 @@ def _session_model_identity_matches(
                 return rest, prefix
         return bare, prov
 
-    stored_bare, stored_explicit_provider = _split_model_identity(stored)
-    resolved_bare, resolved_explicit_provider = _split_model_identity(resolved)
+    stored_bare, stored_explicit_provider = _split_model_identity(stored, stored_provider)
+    resolved_bare, resolved_explicit_provider = _split_model_identity(resolved, resolved_provider)
     stored_provider_norm = _canonical_context_provider(stored_explicit_provider or stored_provider)
     resolved_provider_norm = _canonical_context_provider(resolved_explicit_provider or resolved_provider)
     if stored == resolved and stored_provider_norm == resolved_provider_norm:
@@ -32952,7 +32963,8 @@ def _handle_chat_sync(handler, body):
             from api.config import resolve_model_provider
 
             _model, _provider, _base_url = resolve_model_provider(
-                model_with_provider_context(s.model, getattr(s, "model_provider", None))
+                model_with_provider_context(s.model, getattr(s, "model_provider", None)),
+                session_provider=getattr(s, "model_provider", None),
             )
             # Resolve API key via Hermes runtime provider (matches gateway behaviour)
             _api_key = None
@@ -33897,7 +33909,9 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
             if session_model
             else get_effective_default_model()
         )
-        _main_model, _main_provider, _main_base_url = resolve_model_provider(model_for_resolution)
+        _main_model, _main_provider, _main_base_url = resolve_model_provider(
+            model_for_resolution, session_provider=session_provider
+        )
         _main_api_key = None
         _rt = None
         try:
@@ -36280,7 +36294,8 @@ def _handle_session_compress(handler, body):
         AIAgent = require_ai_agent_class()
 
         resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(
-            _cfg.model_with_provider_context(s.model, getattr(s, "model_provider", None))
+            _cfg.model_with_provider_context(s.model, getattr(s, "model_provider", None)),
+            session_provider=getattr(s, "model_provider", None),
         )
 
         resolved_api_key = None
@@ -37005,7 +37020,9 @@ def _handle_handoff_summary(handler, body):
         model_for_resolution = _cfg.model_with_provider_context(
             resolved_model, session_model_provider
         )
-        resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(model_for_resolution)
+        resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(
+            model_for_resolution, session_provider=session_model_provider
+        )
 
         resolved_api_key = None
         _rt = None

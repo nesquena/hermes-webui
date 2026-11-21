@@ -428,7 +428,7 @@ def run_turn(monkeypatch, homes):
         monkeypatch.setattr(
             streaming,
             "resolve_model_provider",
-            lambda model_with_provider_context, explicitly_picked=None: (model_with_provider_context, None, None),
+            lambda model_with_provider_context, explicitly_picked=None, session_provider=None: (model_with_provider_context, None, None),
         )
         monkeypatch.setattr(streaming, "_runtime_preferred_base_url", lambda rt, provider, configured_base_url: configured_base_url)
         monkeypatch.setattr(
