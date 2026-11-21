@@ -313,6 +313,16 @@ function extractFunc(src, name){
   throw new Error(name + ' did not close');
 }
 
+function extractOptionalFunc(src, name){
+  return src.indexOf('function ' + name) < 0 ? '' : extractFunc(src, name);
+}
+
+function extractOptionalDeclaration(src, name){
+  const escaped=name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match=src.match(new RegExp('(?:^|\\n)([ \\t]*(?:const|let|var) '+escaped+'\\s*=[^;]*;)'));
+  return match?match[1]:'';
+}
+
 class FakeElement {
   constructor(tag='div'){
     this.tagName=String(tag).toUpperCase();
@@ -462,6 +472,7 @@ global.window={
 };
 global.document={
   baseURI:'http://test.local/',
+  documentElement:{lang:''},
   hidden:false,
   createElement:tag=>new FakeElement(tag),
   createTextNode:text=>{const node=new FakeElement('#text');node.textContent=text;return node;},
@@ -473,21 +484,44 @@ global.CSS={escape:value=>String(value)};
 const deferredFrames=process.env.ISSUE5720_REASONING_BURST==='1';
 const frames=new Map();
 const timers=new Map();
-let nextFrame=1, clock=1000;
+let nextFrame=1, clock=1000, callbackOrder=0;
+function queueCallback(queue,id,fn,due){
+  fn.issue5720Due=due;
+  fn.issue5720Order=++callbackOrder;
+  queue.set(id,fn);
+}
 global.performance={now:()=>deferredFrames?clock:(clock+=100)};
 global.requestAnimationFrame=fn=>{
   const id=nextFrame++;
-  if(deferredFrames) frames.set(id,fn); else fn();
+  if(deferredFrames) queueCallback(frames,id,fn,clock); else fn();
   return id;
 };
 global.cancelAnimationFrame=id=>frames.delete(id);
 global.setTimeout=(fn,ms)=>{
   const id=nextFrame++;
-  if(deferredFrames&&ms<=100) frames.set(id,fn);
-  else if(ms<600000) timers.set(id,fn);
+  const due=clock+Math.max(0,Number(ms)||0);
+  if(deferredFrames&&ms<=100) queueCallback(frames,id,fn,due);
+  else if(ms<600000) queueCallback(timers,id,fn,due);
   return id;
 };
 global.clearTimeout=id=>{frames.delete(id);timers.delete(id);};
+function drainFrames(){
+  let drained=0;
+  while(drained++<10000){
+    const candidates=[];
+    for(const [id,fn] of frames) candidates.push({queue:frames,id,fn});
+    for(const [id,fn] of timers){
+      if(fn.issue5720Due-clock<=1000) candidates.push({queue:timers,id,fn});
+    }
+    candidates.sort((a,b)=>a.fn.issue5720Due-b.fn.issue5720Due||a.fn.issue5720Order-b.fn.issue5720Order);
+    const next=candidates[0];
+    if(!next) return;
+    next.queue.delete(next.id);
+    clock=Math.max(clock,next.fn.issue5720Due);
+    next.fn();
+  }
+  throw new Error('deferred callback drain exceeded its bound');
+}
 
 const emptyState=new FakeElement('div');
 const msgInner=new FakeElement('div');
@@ -565,6 +599,14 @@ global._sanitizeThinkingDisplayText=value=>String(value||'').trim();
 global._firstValidTimestampSeconds=()=>null;
 
 eval(anchorsSrc);
+eval([
+  'COMPOSER_TYPING_RENDER_DEFER_MS','COMPOSER_TYPING_RENDER_MAX_DEFER_MS',
+  '_composerTypingUntil','_composerTypingDeferStarted','_composerTypingListenersBound',
+].map(name=>extractOptionalDeclaration(messagesSrc,name)).join('\n')+'\n'+
+  extractOptionalFunc(messagesSrc,'_deferLiveRenderForTyping'));
+for(const name of ['_anchorSceneToolRowLogicalKey','_anchorSceneMergeToolRows']){
+  eval(extractOptionalFunc(uiSrc,name));
+}
 for(const name of [
   'chatActivityMode','isTransparentStream','isFinalAnswerOnlyMode','isCompactWorklogMode','isSimplifiedToolCalling',
   '_anchorSceneIsSettledSuccessfulCompression','_anchorSceneRowsForRendering',
@@ -664,11 +706,6 @@ if(deferredFrames){
   global.api=async path=>path.includes('/stream/status')?{active:true}:null;
   function reasoningEvents(){
     return window._liveAnchorRegistries.get('stream-1').anchor.activity_events.filter(e=>e.source_event_type==='reasoning');
-  }
-  function drainFrames(){
-    while(frames.size){
-      const [id,fn]=frames.entries().next().value;frames.delete(id);clock+=100;fn();
-    }
   }
   function finalSession(reasoning=''){
     return {session_id:'sid-1',messages:[{role:'user',content:'question'},{role:'assistant',content:'Final answer',reasoning}],active_stream_id:null};
@@ -837,6 +874,9 @@ const firstFallback=fallbackReasoningRows()[0]||null;
 const firstFallbackText=reasoningText(firstFallback);
 const passAfterFirst=transparentRenderPasses;
 source.emit('reasoning',{text:'step'});
+const secondBeforeDrain=anchorReasoningRows()[0]||null;
+const secondTextBeforeDrain=reasoningText(secondBeforeDrain);
+drainFrames();
 const second=anchorReasoningRows()[0]||null;
 const secondText=reasoningText(second);
 const anchorRowsAfterRecovery=anchorReasoningRows();
@@ -884,6 +924,7 @@ process.stdout.write(JSON.stringify({
   first_text:firstText,
   first_fallback_text:firstFallbackText,
   second_text:secondText,
+  second_text_before_drain:secondTextBeforeDrain,
   same_node:first===second,
   live_reasoning_rows:anchorRowsAfterRecovery.length,
   fallback_rows_after_recovery:fallbackRowsAfterRecovery.length,
