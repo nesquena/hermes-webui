@@ -21,6 +21,7 @@ on:
       - 'tests/browser_live_scene_energy.py'
       - 'tests/browser_progress_animation.py'
       - 'tests/browser_running_ring_inset.py'
+      - 'tests/browser_memory_recall_composer_layout.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -40,6 +41,7 @@ on:
       - 'tests/browser_live_scene_energy.py'
       - 'tests/browser_progress_animation.py'
       - 'tests/browser_running_ring_inset.py'
+      - 'tests/browser_memory_recall_composer_layout.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -105,6 +107,12 @@ jobs:
             browsers: chromium
           - name: running-ring-inset
             script: tests/browser_running_ring_inset.py
+            browsers: chromium
+          # #8940 C70-UX1: a memory recall notice must leave the populated
+          # composer alone (labels, Saved Prompts, settled height) at desktop
+          # with both panels open and at tablet, active and after it clears.
+          - name: memory-recall-composer-layout
+            script: tests/browser_memory_recall_composer_layout.py
             browsers: chromium
     steps:
       - uses: actions/checkout@v4
