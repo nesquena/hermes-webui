@@ -400,6 +400,137 @@ def test_cancel_restart_recovers_exact_journal_before_successor():
     ]
 
 
+def test_cancel_restart_exact_owner_not_vetoed_by_recovered_successor():
+    """The 2026-10-15 re-gate repro: an unrelated tokenless recovered
+    successor must not veto the already-proven owner's answer rehome.
+
+    The cancellation marker carries the exact owner token
+    (``_journal_retry_owner_token``), and the cancelled user A is
+    materialized BEFORE the marker — ``_cancel_journal_retry_owner_index``
+    proves that ownership. A LATER user row that is itself recovered
+    (``_recovered`` set, no token) belongs to a DIFFERENT turn; vetoing the
+    rehome on its presence leaves A's recovered answer stranded below the
+    successor (display: A user → marker → B user → B answer → A answer)
+    even though the hook is already retired.
+    """
+    sid = "cancel-restart-recovered-successor"
+    stream_id = "stream-cancel-restart-recovered-successor"
+    early = "Journal-only prefix before Stop."
+    late = " Late suffix before process loss."
+
+    _start_cancelled_turn(sid, stream_id)
+    writer = RunJournalWriter(sid, stream_id)
+    writer.append_sse_event("token", {"text": early})
+
+    assert cancel_stream(stream_id) is True
+    cancelled = Session.load(sid)
+    assert cancelled is not None
+    marker_index, marker = _cancel_marker(cancelled)
+    assert marker.get("_pending_journal_recovery") is True
+    assert marker.get("_journal_retry_kind") == "cancelled"
+    assert marker.get("_journal_retry_stream_id") == stream_id
+    # The exact cancelled user is already materialized and proven by the
+    # marker's owner token — this is NOT the missing-user shape.
+    assert marker.get("_journal_retry_owner_token")
+
+    # A same-session successor that was ITSELF recovered by an earlier
+    # repair pass: tokenless ``_recovered`` — but it is an unrelated later
+    # turn, not this cancelled turn's missing prompt.
+    successor_user = {
+        "role": "user",
+        "content": "Successor B prompt.",
+        "timestamp": 20,
+        "_recovered": True,
+    }
+    successor_assistant = {
+        "role": "assistant",
+        "content": "Successor B answer.",
+        "timestamp": 21,
+    }
+    cancelled.messages.extend([copy.deepcopy(successor_user), copy.deepcopy(successor_assistant)])
+    cancelled.context_messages.extend([copy.deepcopy(successor_user), copy.deepcopy(successor_assistant)])
+    cancelled.save()
+
+    # The old stream publishes one last durable token, then the process dies.
+    writer.append_sse_event("token", {"text": late})
+    _simulate_restart()
+
+    recovered = models.get_session(sid)
+    exact_rows = [
+        row
+        for row in recovered.messages
+        if isinstance(row, dict) and row.get("_recovered_stream_id") == stream_id
+    ]
+    assert [row.get("content") for row in exact_rows] == [early + late]
+
+    marker_index, marker = _cancel_marker(recovered)
+    recovered_index = recovered.messages.index(exact_rows[0])
+    successor_user_index = next(
+        index
+        for index, row in enumerate(recovered.messages)
+        if isinstance(row, dict) and row.get("content") == successor_user["content"]
+    )
+    successor_assistant_row = next(
+        row
+        for row in recovered.messages
+        if isinstance(row, dict) and row.get("content") == successor_assistant["content"]
+    )
+    # Saved display: A user → A answer → marker → B user → B answer. The
+    # proven owner's answer rises with its user; the unrelated recovered
+    # successor stays below the marker.
+    assert recovered_index < marker_index < successor_user_index, (
+        "an unrelated tokenless recovered successor must not veto the "
+        f"proven owner's rehome, got {[str(m.get('content'))[:24] for m in recovered.messages]!r}"
+    )
+    assert successor_assistant_row == successor_assistant
+    assert marker.get("_pending_journal_recovery") is None
+    assert marker.get("_journal_retry_stream_id") is None
+
+    context_contents = [
+        row.get("content")
+        for row in recovered.context_messages
+        if isinstance(row, dict)
+    ]
+    assert context_contents == [
+        "Do the cancellable task.",
+        early + late,
+        successor_user["content"],
+        successor_assistant["content"],
+    ]
+
+    # The repaired order and context projection survive a fresh file load.
+    recovered.save()
+    loaded = Session.load(sid)
+    assert loaded is not None, f"session {sid} must reload after recovery"
+    loaded_exact = next(
+        row
+        for row in loaded.messages
+        if isinstance(row, dict) and row.get("_recovered_stream_id") == stream_id
+    )
+    loaded_index = loaded.messages.index(loaded_exact)
+    loaded_marker_index, _ = _cancel_marker(loaded)
+    loaded_successor_index = next(
+        index
+        for index, row in enumerate(loaded.messages)
+        if isinstance(row, dict) and row.get("content") == successor_user["content"]
+    )
+    assert loaded_index < loaded_marker_index < loaded_successor_index, (
+        "the rehomed display order must survive save + fresh load, got "
+        f"{[str(m.get('content'))[:24] for m in loaded.messages]!r}"
+    )
+    loaded_context = [
+        row.get("content")
+        for row in loaded.context_messages
+        if isinstance(row, dict)
+    ]
+    assert loaded_context == [
+        "Do the cancellable task.",
+        early + late,
+        successor_user["content"],
+        successor_assistant["content"],
+    ]
+
+
 def test_cancel_lazy_recovery_waits_for_old_worker_to_retire():
     sid = "cancel-restart-active-owner"
     stream_id = "stream-cancel-restart-active-owner"

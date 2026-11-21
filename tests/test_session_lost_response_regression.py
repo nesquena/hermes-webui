@@ -646,7 +646,7 @@ def test_still_arriving_journal_does_not_consume_retry_budget(hermes_home, monke
     s = _make_pending_retry_session(sid, stream_id=stream_id)
     models.SESSIONS[sid] = s
 
-    monkeypatch.setattr(models, "_append_journaled_partial_output", lambda *a, **kw: False)
+    monkeypatch.setattr(models, "_append_journaled_partial_output", lambda *a, **kw: (False, False))
     monkeypatch.setattr(models, "_journal_is_still_arriving", lambda *a, **kw: True)
 
     for _ in range(20):
@@ -706,7 +706,7 @@ def test_marker_demotes_after_giveup_seconds(hermes_home, monkeypatch):
     def append_should_not_run(*args, **kwargs):
         nonlocal append_calls
         append_calls += 1
-        return False
+        return (False, False)
 
     monkeypatch.setattr(models, "_append_journaled_partial_output", append_should_not_run)
 
