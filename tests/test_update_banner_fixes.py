@@ -367,6 +367,43 @@ class TestUpdateChecker:
 class TestConflictError:
     """#813 — conflict error must include flag + recovery command."""
 
+    @pytest.fixture(autouse=True)
+    def _no_active_runs(self):
+        """Start each test with no registered chat runs, and put them back after.
+
+        These tests cover apply_update's merge-conflict branch, which runs after
+        the #7293 run fence. Tests elsewhere in the same process can leave chat
+        streams registered (a chat start whose worker thread is faked never
+        unregisters its stream). The fence then refuses with "Cannot update ...
+        while N WebUI agent runs are active" before any git step, and both tests
+        fail whenever such a test ran earlier in the process. The registries are
+        emptied in place, so every module holding a reference sees the same
+        state, and restored afterwards so other tests see what they left.
+        """
+        from api import config as _config
+
+        gateway_chat = sys.modules.get("api.gateway_chat")
+        lifecycle = getattr(gateway_chat, "_STREAM_RUN_LIFECYCLE", None)
+        registries = [
+            (_config.STREAMS, _config.STREAMS_LOCK),
+            (_config.PRE_ADMISSION_CLAIMS, _config.STREAMS_LOCK),
+            (_config.ACTIVE_RUNS, _config.ACTIVE_RUNS_LOCK),
+        ]
+        if isinstance(lifecycle, dict):
+            registries.append((lifecycle, threading.RLock()))
+        saved = []
+        for registry, lock in registries:
+            with lock:
+                saved.append(dict(registry))
+                registry.clear()
+        try:
+            yield
+        finally:
+            for (registry, lock), contents in zip(registries, saved, strict=True):
+                with lock:
+                    registry.clear()
+                    registry.update(contents)
+
     def test_conflict_returns_conflict_flag(self, tmp_path, monkeypatch):
         import api.updates as upd
 
@@ -555,7 +592,9 @@ class TestApplyUpdateRestartSafety:
         assert result.get('active_runs') == 1
         assert result.get('restart_blocked') is True
         assert result.get('force_available') is True
-        assert '1 WebUI agent run is active' in result['message']
+        # #8667/#8746: for a single WebUI run with zero Gateway runs, the refusal does not name Gateway.
+        assert '1 agent run is active' in result['message']
+        assert '(WebUI and Gateway)' not in result['message']
 
     def test_apply_update_refuses_when_active_run_without_stream(self, tmp_path, monkeypatch):
         import api.updates as upd
@@ -625,7 +664,9 @@ class TestApplyUpdateRestartSafety:
         assert result.get('active_runs') == 1
         assert result.get('restart_blocked') is True
         assert result.get('force_available') is True  # #7293
-        assert '1 WebUI agent run is active' in result['message']
+        # #8667/#8746: for a single WebUI run with zero Gateway runs, the refusal does not name Gateway.
+        assert '1 agent run is active' in result['message']
+        assert '(WebUI and Gateway)' not in result['message']
 
     def test_wait_until_restart_safe_waits_for_active_run_to_clear(self, monkeypatch):
         import api.updates as upd

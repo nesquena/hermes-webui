@@ -2524,6 +2524,10 @@ async function newSession(flash, options={}){
     // restore and the busy-flag cleanup can no longer mutate the new pane.
     _loadingSessionId = null;
     _loadSessionGeneration++;
+    // #9101: New Chat installs a session without loadSession(); key the YOLO
+    // view to it so the previous session's pill does not stay on screen. A
+    // brand-new session has no server-side YOLO flag.
+    if(typeof _applyYoloState==='function') _applyYoloState(S.session.session_id,false,{reset:true});
     // #7855: a brand-new session starts with no restored-continuation draft.
     if(typeof _clearRestoredGoalContinuationDraft==='function') _clearRestoredGoalContinuationDraft();
     S._pendingSessionToolsets=null;
@@ -2647,6 +2651,17 @@ async function newSession(flash, options={}){
   })();
   try{
     return await _newSessionInFlight;
+  }catch(e){
+    // A failed create used to look like a dead button: api() only toasts
+    // timeouts, so a 400 from /api/session/new (an untrusted workspace is the
+    // common one — "Path is outside the user home directory, not in the saved
+    // workspace list, and not under the default workspace") rejected with no
+    // message anywhere on screen. Surface the server's own explanation and
+    // keep propagating, so callers that abort their flow on failure still do.
+    if(typeof showToast==='function'){
+      showToast(t('failed_colon')+((e&&e.message)?e.message:String(e)),5000,'error');
+    }
+    throw e;
   }finally{
     _newSessionInFlight=null;
     _setNewSessionPending(false);
@@ -2707,6 +2722,24 @@ async function _switchProfileForSessionLoad(profile){
     S.activeProfileIsDefault=!!data.is_default;
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
+    }
+    // #9069: the server now serves the new profile, so drop the previous
+    // profile's Tasks detail/edit/duplicate state through the SAME synchronous
+    // reset the canonical switch runs (_profileSwitchPanelLoad). Without it,
+    // Duplicate + Save on the still-shown cron job created the previous
+    // profile's job in this one. Runs at accept, so a later list-render
+    // failure cannot skip it. Only a visible Tasks panel is reloaded here:
+    // loadCrons is latest-wins (#6767), and it is not awaited, so the session
+    // being loaded never waits on, or fails because of, it. Memory/Skills are
+    // not reloaded on this path (their loaders have no owner-profile/
+    // latest-response check yet). The Skills cache is dropped like
+    // switchToProfile does, so a later Skills open refetches, except while
+    // Skills is visible: its search/toggle re-render from that cache.
+    const skillsVisible=typeof _currentPanel!=='undefined'&&_currentPanel==='skills';
+    if(typeof _skillsData!=='undefined'&&!skillsVisible) _skillsData=null;
+    if(typeof _resetProfileScopedPanelState==='function') _resetProfileScopedPanelState();
+    if(typeof _currentPanel!=='undefined'&&_currentPanel==='tasks'&&typeof loadCrons==='function'){
+      Promise.resolve(loadCrons()).catch(()=>{});
     }
     // #7509: mirror the canonical switch in panels.js — the slash-skill caches still
     // hold the previous profile's /api/skills payload, so drop them (and any reply
@@ -2829,7 +2862,10 @@ async function loadSession(sid){
   }
   stopApprovalPolling();hideApprovalCard(forceReload);
   if(typeof stopSessionStream==='function') stopSessionStream();
-  _yoloEnabled=false;_updateYoloPill();
+  // #9101: the YOLO view is keyed by session. A switch drops the previous
+  // session's view (pill hidden until this load's own read answers); a
+  // same-session refresh keeps it and re-reads after install.
+  if(typeof _applyYoloState==='function') _applyYoloState(sid,false,{reset:true});
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
   // #6572: clear stale compression state when switching sessions.
@@ -3105,6 +3141,12 @@ async function loadSession(sid){
         && typeof startSessionStream === 'function') {
       startSessionStream(currentSid);
     }
+    // #9101: the load reset the YOLO view to the target; the previous session
+    // stays open, so read its flag back (guarded like every other read).
+    if (_loadingSessionId === null && S.session && S.session.session_id === currentSid
+        && typeof _fetchYoloState === 'function') {
+      _fetchYoloState(currentSid);
+    }
     return;
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
@@ -3147,6 +3189,9 @@ async function loadSession(sid){
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
   S._pendingSessionToolsets=null;
+  // #9101: key the YOLO view to the installed session, dropping any pill an
+  // explicit write for the departing session restored while this load ran.
+  if(typeof _applyYoloState==='function') _applyYoloState(sid,false,{reset:true});
   // #7855: a session switch is a hard context boundary — drop any restored
   // goal-continuation draft left over from the previous session (restored but
   // never sent, or abandoned mid-settle) so it cannot attach to the next send.
@@ -3417,7 +3462,7 @@ async function loadSession(sid){
     setBusy(true);setComposerStatus('');
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
-    if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
+    if(typeof _fetchYoloState==='function') _fetchYoloState(sid,{gen:_loadGeneration});
   }else{
     // Phase 2b: Idle session — load full messages lazily for rendering.
     // _ensureMessagesLoaded is idempotent; it skips if S.messages already populated.
@@ -3441,7 +3486,11 @@ async function loadSession(sid){
         _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
-      if (_isCurrentLoad()) _loadingSessionId = null;
+      if (_isCurrentLoad()) {
+        // #9101: this exit skips the idle read below; read the flag here.
+        if (typeof _fetchYoloState === 'function') _fetchYoloState(sid, {gen: _loadGeneration});
+        _loadingSessionId = null;
+      }
       return;
     }
     // Stale? A newer loadSession() call has already started (#1060).
@@ -3527,7 +3576,7 @@ async function loadSession(sid){
       updateQueueBadge(sid);
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
-      if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
+      if(typeof _fetchYoloState==='function') _fetchYoloState(sid,{gen:_loadGeneration});
     }else{
       S.busy=false;
       S.activeStreamId=null;
@@ -3537,6 +3586,9 @@ async function loadSession(sid){
       updateQueueBadge(sid);
       syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
       startApprovalPolling(sid);
+      // #9101: idle installs (switch, boot restore, reload, same-session
+      // refresh) read the YOLO flag too, not only streaming ones. Not awaited.
+      if(_isCurrentLoad()&&typeof _fetchYoloState==='function') _fetchYoloState(sid,{gen:_loadGeneration});
       if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
       // Workspace refresh is guarded by session id inside loadDir(); keep it
       // after the transcript's first paint so chat switching is not competing
@@ -8121,6 +8173,19 @@ let _deferredActiveSessionExternalRefreshReason = '';
 let _pendingSessionUpdatedCounts = null;
 let _sessionEventsSSE = null;
 let _sessionEventsRefreshTimer = 0;
+// Coalescing for SSE-driven sidebar refreshes. Every `sessions_changed` publish
+// clears the server's session-list cache, so an event-driven refresh always
+// rebuilds: this client-side cap is its only rate limit. It used to be a 300 ms
+// trailing debounce, so a streaming session's burst of events re-fetched
+// `/api/sessions` several times a second. Measured 2026-10-30: 65 `/api/sessions`
+// per minute from one client, gaps of 0-2 s, sidebar p99 1.8 s. The cap holds a
+// continuously-streaming session to 12 event-driven refreshes/min instead of 200;
+// an isolated event still paints after the 300 ms burst window (see
+// `_scheduleSessionEventsRefresh`). (#8694)
+const _SESSION_EVENTS_REFRESH_COALESCE_MS = 5000;
+const _SESSION_EVENTS_REFRESH_BURST_MS = 300;
+let _sessionEventsLastRefreshAt = 0;
+let _sessionEventsRefreshDueAt = 0;
 let _sessionEventsRefreshPendingRequest = null;
 let _sessionEventsReconnectTimer = 0;
 let _sessionEventsNeedsRefreshOnOpen = false;
@@ -8432,22 +8497,52 @@ async function refreshSessionList(reason='manual', opts={}){
     _sessionListRefreshInFlight = false;
     const pendingRequest = _sessionListRefreshPendingRequest;
     _sessionListRefreshPendingRequest = null;
-    if(pendingRequest) _scheduleSessionEventsRefresh(pendingRequest.reason, pendingRequest.opts);
+    if(pendingRequest) _scheduleSessionEventsRefresh(pendingRequest.reason, pendingRequest.opts, {prompt:true});
   }
 }
 
-function _scheduleSessionEventsRefresh(reason, opts={}){
+function _scheduleSessionEventsRefresh(reason, opts={}, schedule={}){
   _sessionEventsRefreshPendingRequest = {
     reason: reason || (_sessionEventsRefreshPendingRequest && _sessionEventsRefreshPendingRequest.reason) || 'event',
     opts:_mergeSessionListRefreshOptions(_sessionEventsRefreshPendingRequest && _sessionEventsRefreshPendingRequest.opts, opts),
   };
-  if(_sessionEventsRefreshTimer) return;
+  // Throttle, not a trailing-only debounce (#8694 senior review): an isolated
+  // event — a rename or delete from another tab, a cron finishing — paints after
+  // the short burst window, and only events arriving within
+  // `_SESSION_EVENTS_REFRESH_COALESCE_MS` of the last refresh this timer fired
+  // (an event-driven one or a parked re-send) wait for that cap. A PARKED request (`schedule.prompt`) arrived
+  // while another refresh was in flight: usually a new chat, a pull or a resume
+  // the user or the UI asked for, but this timer's own event refresh is parked
+  // the same way when it fires mid-flight. It re-sends after the burst window and
+  // is never held behind the cap (at most one extra refresh per in-flight one);
+  // it also pulls an already-pending capped timer forward.
+  // The cap is clamped to its own length: `Date.now()` follows the wall clock,
+  // and after a backward clock step `_sessionEventsLastRefreshAt` lies in the
+  // future, which would otherwise freeze every event refresh for the size of the
+  // step (#8694 senior review r2).
+  const now = Date.now();
+  const delay = (schedule && schedule.prompt)
+    ? _SESSION_EVENTS_REFRESH_BURST_MS
+    : Math.min(
+        _SESSION_EVENTS_REFRESH_COALESCE_MS,
+        Math.max(
+          _SESSION_EVENTS_REFRESH_BURST_MS,
+          _sessionEventsLastRefreshAt + _SESSION_EVENTS_REFRESH_COALESCE_MS - now,
+        ),
+      );
+  if(_sessionEventsRefreshTimer){
+    if(now + delay >= _sessionEventsRefreshDueAt) return;
+    clearTimeout(_sessionEventsRefreshTimer);
+  }
+  _sessionEventsRefreshDueAt = now + delay;
   _sessionEventsRefreshTimer = setTimeout(() => {
     _sessionEventsRefreshTimer = 0;
+    _sessionEventsRefreshDueAt = 0;
+    _sessionEventsLastRefreshAt = Date.now();
     const request = _sessionEventsRefreshPendingRequest || {reason:'event', opts:{}};
     _sessionEventsRefreshPendingRequest = null;
     void refreshSessionList(request.reason||'event', request.opts);
-  }, 300);
+  }, delay);
 }
 
 function _sessionEventTargetsActiveSession(payload){
@@ -9270,6 +9365,14 @@ function _isChildSession(s){
   return !!(s&&s.parent_session_id&&s.relationship_type==='child_session');
 }
 
+function _isResetSuccessor(s){
+  return !!(s&&s.relationship_type==='reset_successor');
+}
+
+function _showsForkOrBranchIndicator(s){
+  return !!(s&&s.parent_session_id&&!_isResetSuccessor(s));
+}
+
 function _isForkWithResolvableParent(s, sessionIdsInList){
   return !!(s&&s.session_source==='fork'&&s.parent_session_id&&sessionIdsInList&&sessionIdsInList.has(s.parent_session_id));
 }
@@ -9334,7 +9437,7 @@ function _resolveSessionIdFromSidebarLineage(sid){
     );
     if(!lineageLike) continue;
     const key=_sidebarLineageKeyForRow(row);
-    if(key===sid||row.parent_session_id===sid||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid)){
+    if(key===sid||(!_isResetSuccessor(row)&&row.parent_session_id===sid)||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid)){
       candidates.push(row);
     }
   }
@@ -11323,8 +11426,11 @@ function renderSessionListFromCache(){
       wtInd.title=`${wtLabel}: ${s.worktree_branch||s.worktree_path}`;
       titleRow.appendChild(wtInd);
     }
-    // Parent session indicator for forked/branched sessions (#465)
-    if(s.parent_session_id){
+    // Reset successors retain parent_session_id as durable lineage but are
+    // independent top-level conversations. Suppress the historical parent-linked
+    // branch indicator only for a positively classified reset successor so legacy
+    // /branch rows without modern fork metadata keep their provenance (#7178).
+    if(_showsForkOrBranchIndicator(s)){
       const branchInd=document.createElement('span');
       branchInd.className='session-branch-indicator';
       branchInd.innerHTML=li('git-branch',12);
