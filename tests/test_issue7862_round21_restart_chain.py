@@ -28,6 +28,9 @@ import pytest
 # compensation). The maintainer asked to KEEP that harness design.
 from tests.test_issue7862_round17_findings import _Worker as _Round17Worker  # noqa: E402
 
+# The reclaim window the round-16/17 schedules shift the worker clock past.
+from api.goal_continuation_store import _ROLLBACK_RECEIPT_TTL_SECONDS as _TTL  # noqa: E402
+
 PROMPT = "keep refining the release checklist"
 
 
@@ -91,12 +94,19 @@ def test_a_pending_continuation_survives_a_restart_and_is_consumed_once(workers)
     )
 
     # ── the browser's token is accepted after the restart ─────────────────
+    # The token is the one process A saved -- the SAME string the browser
+    # still holds. ``arm_consume`` would have armed a NEW record with a
+    # new token, so it would prove nothing about the saved one.
     consumed = worker_b.call(
-        "arm_consume", sid=sid, prompt=PROMPT, attempt="att-B"
+        "consume_restored",
+        sid=sid,
+        prompt=PROMPT,
+        continuation_id=cont_id,
+        attempt="att-B",
     )
     assert consumed["outcome"] == "committed", (
-        "the browser's token was refused after the restart: the queued turn "
-        f"cannot run ({consumed})"
+        "the browser's saved token was refused after the restart: the queued "
+        f"turn cannot run ({consumed})"
     )
 
     # ── the durable registry no longer holds it ───────────────────────────
@@ -125,24 +135,68 @@ def test_a_late_rollback_does_not_resurrect_completed_work(workers):
     back an intent another process already consumed -- the round-19
     "completed work returns after recovery" invariant, checked here on the
     same chain.
+
+    The schedule matters: process A has to CONSUME first (as its own
+    attempt ``att-A``), so it holds a receipt and a handoff to roll back.
+    Process B then recovers that continuation and consumes it as its own
+    attempt, and discharges its handoff. Only THEN does A's late rollback
+    arrive -- with nothing of its own left to restore, and a continuation
+    that has already run.
     """
     sid = "sess-r21-e2e-rollback"
     cont_id = "f" * 32
 
-    worker_a = workers("A")
-    worker_b = workers("B")
+    # The reclaim window: past it, an unreclaimed handoff reads as ABANDONED,
+    # which is what lets a cold process adopt the interrupted attempt's
+    # continuation. This is the same schedule the round-16 takeover tests
+    # use (a shifted worker clock, not a sleep).
+    late = _TTL + 120
 
+    worker_a = workers("A")
+    # Process B reads the clock PAST the reclaim window, so A's handoff --
+    # stamped with A's clock when it was written -- reads as abandoned and
+    # B may adopt it. This is the same schedule the round-16 takeover
+    # tests use (a shifted worker clock, not a sleep).
+    worker_b = workers("B", clock_offset=late)
+
+    # Process A consumes it as ITS OWN attempt: A now holds the receipt and
+    # the handoff a rejected start would roll back. It has to ARM first --
+    # ``consume_restored`` only spends an existing record.
     assert worker_a.call(
         "arm", sid=sid, prompt=PROMPT, continuation_id=cont_id
     )["ok"]
-
-    # Process B spends it (the successful turn).
-    spent = worker_b.call("arm_consume", sid=sid, prompt=PROMPT, attempt="att-B")
-    assert spent["outcome"] == "committed", (
-        f"process B could not spend the continuation: {spent}"
+    spent_a = worker_a.call(
+        "consume_restored",
+        sid=sid,
+        prompt=PROMPT,
+        continuation_id=cont_id,
+        attempt="att-A",
+    )
+    assert spent_a["outcome"] == "committed", (
+        f"process A could not consume the continuation: {spent_a}"
     )
 
-    # Process A's late rejected start rolls ITS attempt back.
+    # Process B recovers that continuation (the crash-recovery path) and
+    # consumes it as its OWN attempt.
+    assert worker_b.call("restore")["restored"] == 1, (
+        "process B did not recover the interrupted attempt's continuation"
+    )
+    spent_b = worker_b.call(
+        "consume_restored",
+        sid=sid,
+        prompt=PROMPT,
+        continuation_id=cont_id,
+        attempt="att-B",
+    )
+    assert spent_b["outcome"] == "committed", (
+        f"process B could not consume the recovered continuation: {spent_b}"
+    )
+    # B's admission launched, so its handoff is discharged.
+    assert worker_b.call("discharge", sid=sid, attempt="att-B")["ok"], (
+        "process B could not discharge its handoff"
+    )
+
+    # NOW process A's rejected start rolls back.
     rollback = worker_a.call("rollback", sid=sid, attempt="att-A")
     assert rollback.get("accepted") is False, (
         "a late rollback re-armed an intent another process already consumed"

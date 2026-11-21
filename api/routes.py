@@ -4149,6 +4149,10 @@ from api.config import (
     get_webui_session_save_mode,
     get_config_snapshot,
     STREAM_GOAL_RELATED,
+    # #7862 round 21: the marker set stays part of this module's surface --
+    # it is the fast path for "this session has a pending intent", and the
+    # rollback tests drive it through ``routes.PENDING_GOAL_CONTINUATION``.
+    PENDING_GOAL_CONTINUATION,
     _get_config_path,
     _load_yaml_config_file,
     _load_yaml_config_file_raw,
@@ -31107,17 +31111,24 @@ def _start_chat_stream_for_session(
         # ``goal_related=False`` worker, so REFUSE instead.
         if not goal_related and goal_continuation_id:
             # #7862 round 21 (P1, "valid continuations get rejected"): the
-            # refusal used to come from THIS process's in-memory marker set,
-            # which is not authoritative. With two WebUI processes sharing
-            # the state directory, process A can persist a new continuation
-            # while process B has not observed it yet -- B then refused a
-            # perfectly valid token and the browser's queued turn could not
-            # run. The store's locked read decides: it reloads the durable
-            # state under the cross-process lock first, so a peer's
-            # persisted record counts. An already-consumed intent still has
-            # no record and is still refused (single execution right).
-            if not pending_goal_continuation_matches(
-                s.session_id, goal_continuation_id
+            # refusal used to come from THIS process's in-memory marker set
+            # alone, which is not authoritative. With two WebUI processes
+            # sharing the state directory, process A can persist a new
+            # continuation while process B has not observed it yet -- B then
+            # refused a perfectly valid token and the browser's queued turn
+            # could not run.
+            #
+            # So the LOCAL marker is now only the fast path: when this
+            # process holds the marker, the token is admitted as before (no
+            # cross-process lock needed). When it does NOT, the store's
+            # locked read decides -- it reloads the durable state under the
+            # cross-process lock, so a peer's persisted record counts. An
+            # already-consumed intent has no record and is still refused
+            # (single execution right).
+            if s.session_id not in PENDING_GOAL_CONTINUATION and not (
+                pending_goal_continuation_matches(
+                    s.session_id, goal_continuation_id
+                )
             ):
                 logger.warning(
                     "Refusing chat start for session %s: the request carried "

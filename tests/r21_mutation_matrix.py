@@ -33,7 +33,7 @@ MUTATIONS = [
         STORE,
         [
             (
-                "        # 2. A pending record whose session was explicitly retired is dead",
+                "        # 2. A pending record whose intent was EXPLICITLY retired is dead",
                 "        _MUT_now = time.time()\n"
                 "        for _mut_sid in list(PENDING_GOAL_CONTINUATION_RECORDS.keys()):\n"
                 "            _mut_rec = PENDING_GOAL_CONTINUATION_RECORDS[_mut_sid]\n"
@@ -41,7 +41,7 @@ MUTATIONS = [
                 "                24 * 60 * 60\n"
                 "            ):\n"
                 "                retire_pending_goal_continuation(_mut_sid, reason=\"expired\")\n"
-                "        # 2. A pending record whose session was explicitly retired is dead",
+                "        # 2. A pending record whose intent was EXPLICITLY retired is dead",
             ),
         ],
         GOAL_TESTS,
@@ -135,8 +135,10 @@ MUTATIONS = [
         ROUTES,
         [
             (
-                "            if not pending_goal_continuation_matches(\n"
-                "                s.session_id, goal_continuation_id\n"
+                "            if s.session_id not in PENDING_GOAL_CONTINUATION and not (\n"
+                "                pending_goal_continuation_matches(\n"
+                "                    s.session_id, goal_continuation_id\n"
+                "                )\n"
                 "            ):",
                 "            if s.session_id not in PENDING_GOAL_CONTINUATION:",
             ),
@@ -161,6 +163,47 @@ MUTATIONS = [
         ],
         PEER_TESTS,
         ["test_a_peer_persisted_continuation_is_admitted_by_the_real_route"],
+    ),
+    (
+        "R1b: let the sweep retire an intent without comparing generations",
+        STORE,
+        [
+            (
+                "        for sid in list(PENDING_GOAL_CONTINUATION_RECORDS.keys()):\n"
+                "            record = PENDING_GOAL_CONTINUATION_RECORDS.get(sid)\n"
+                "            if not isinstance(record, dict):\n"
+                "                continue\n"
+                "            if not _record_is_retired(sid, record):\n"
+                "                continue",
+                "        for sid in list(PENDING_GOAL_CONTINUATION_RECORDS.keys()):\n"
+                "            record = PENDING_GOAL_CONTINUATION_RECORDS.get(sid)\n"
+                "            if not isinstance(record, dict):\n"
+                "                continue\n"
+                "            if int(_TOMBSTONES.get(sid) or 0) <= 0:\n"
+                "                continue",
+            ),
+        ],
+        GOAL_TESTS,
+        ["test_the_sweep_does_not_retire_a_continuation_newer_than_the_stamp"],
+    ),
+    (
+        "R1c: let the sweep ignore the live handoff (string key never matches)",
+        STORE,
+        [
+            (
+                "            if any(key[0] == sid for key in _CONTINUATION_HANDOFF_TOKENS):\n"
+                "                # An admission is still in flight for this session: its\n"
+                "                # handoff is the evidence, so the intent is not dead work.\n"
+                "                continue",
+                "            if sid not in _CONTINUATION_HANDOFF_TOKENS:\n"
+                "                # MUTATION: the string key never matches the tuple keys.\n"
+                "                pass\n"
+                "            else:\n"
+                "                continue",
+            ),
+        ],
+        GOAL_TESTS,
+        ["test_the_sweep_keeps_an_intent_with_a_live_handoff"],
     ),
     (
         "T1: let the abandoned-receipt cleanup drop nothing",

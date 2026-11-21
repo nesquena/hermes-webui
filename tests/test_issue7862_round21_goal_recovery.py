@@ -224,6 +224,114 @@ def test_the_expired_sweep_still_cleans_up_dead_records(clean_registry):
     )
 
 
+def test_the_sweep_does_not_retire_a_continuation_newer_than_the_stamp(
+    clean_registry,
+):
+    """R1 (P1, "cleanup deletes newer continuations"): compare generations.
+
+    Greptile, on this round's own head: "With two WebUI processes sharing
+    state, process A can keep an old retirement stamp after process B arms
+    a new continuation. ``_merge_disk_state_unlocked()`` preserves that
+    stamp but correctly accepts the newer record. A's next write saves
+    both. After a restart, recovery restores the valid record, then this
+    sweep deletes it because it checks only whether a stamp exists -- not
+    whether it covers the record's generation."
+
+    The reproduction is the state that merge leaves BEHIND in process A:
+    A still holds the OLD retirement stamp, while the record it adopted
+    from process B carries a NEWER generation. (A fresh ``arm`` clears
+    the stamp in the arming process, so the stamp has to be put back the
+    way the merge leaves it -- which is exactly what makes this the
+    cross-process shape.)
+
+    The stamp only says "the intent as of generation N was cancelled". A
+    record newer than that is a different, still-valid intent.
+    """
+    store = _store()
+    from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
+    sid = "sess-r21-newer-than-stamp"
+
+    # The session was retired at generation N.
+    store.arm_pending_goal_continuation(sid, PROMPT, continuation_id="tok-old")
+    assert store.retire_pending_goal_continuation(sid, reason="clear"), (
+        "the setup could not retire the session"
+    )
+    old_stamp = int(store._TOMBSTONES.get(sid) or 0)
+    assert old_stamp > 0, "the setup left no retirement stamp"
+
+    # A NEW continuation for the same session, at a newer generation.
+    store.arm_pending_goal_continuation(sid, PROMPT, continuation_id="tok-new")
+    with store._LOCK:
+        record = dict(PENDING_GOAL_CONTINUATION_RECORDS[sid])
+        assert int(record.get("generation") or 0) > old_stamp, (
+            "the setup failed: the new record is not newer than the stamp"
+        )
+        # Process A still holds the OLD stamp: that is the state the merge
+        # leaves behind when it adopts a peer's newer record.
+        store._TOMBSTONES[sid] = old_stamp
+        PENDING_GOAL_CONTINUATION_RECORDS[sid] = record
+
+    swept = store.sweep_expired_goal_continuations()
+
+    assert sid in PENDING_GOAL_CONTINUATION_RECORDS, (
+        "the sweep retired a continuation that is NEWER than the retirement "
+        "stamp: with two processes, an old stamp in one of them would "
+        "delete the other's live continuation, and after the next restart "
+        "the browser's saved token could no longer resume the goal"
+    )
+    assert swept == 0, (
+        "the sweep reported retiring an intent whose generation is newer "
+        "than the retirement stamp"
+    )
+
+
+def test_the_sweep_keeps_an_intent_with_a_live_handoff(clean_registry):
+    """R1 (P1, second half): the handoff check has to actually match.
+
+    The handoff keys are ``(sid, attempt)`` tuples, so a string ``sid``
+    is never found in them -- the condition was always true and the
+    handoff was never consulted. A session with an admission still in
+    flight must not be swept.
+    """
+    store = _store()
+    from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
+    sid = "sess-r21-live-handoff"
+
+    store.arm_pending_goal_continuation(sid, PROMPT, continuation_id="tok-live")
+    assert (
+        store.consume_pending_goal_continuation(sid, PROMPT, "tok-live", "att-live")
+        == store.CONSUME_COMMITTED
+    )
+    # The consume left a HANDOFF for the in-flight attempt. Re-plant the
+    # record so the sweep has something to look at.
+    with store._LOCK:
+        PENDING_GOAL_CONTINUATION_RECORDS[sid] = {
+            "prompt": PROMPT,
+            "generation": 1,
+            "created_at": time.time(),
+            "reason": "goal_continue",
+            "continuation_id": "tok-live",
+        }
+        assert any(key[0] == sid for key in store._CONTINUATION_HANDOFF_TOKENS), (
+            "the setup left no handoff for the session"
+        )
+        # A retirement stamp that covers the record.
+        store._TOMBSTONES[sid] = 99
+
+    swept = store.sweep_expired_goal_continuations()
+
+    assert sid in PENDING_GOAL_CONTINUATION_RECORDS, (
+        "the sweep retired an intent whose admission is still in flight: the "
+        "handoff keys are (sid, attempt) tuples, so a string sid never "
+        "matched them and the handoff was never consulted"
+    )
+    assert swept == 0, (
+        "the sweep reported retiring an intent with a live handoff"
+    )
+
+
 # ── R2: an unreadable registry is not an empty registry ────────────────────
 
 

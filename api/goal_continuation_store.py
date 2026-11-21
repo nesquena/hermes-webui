@@ -3436,12 +3436,35 @@ def sweep_expired_goal_continuations(
             else min(float(max_age_seconds), _ROLLBACK_RECEIPT_TTL_SECONDS)
         )
         swept += _sweep_expired_receipts_unlocked(ttl_seconds=receipt_ttl)
-        # 2. A pending record whose session was explicitly retired is dead
+        # 2. A pending record whose intent was EXPLICITLY retired is dead
         #    work: the retirement tombstone is the authority, never a clock.
+        #
+        #    #7862 round 21 (P1, "cleanup deletes newer continuations"): the
+        #    generation has to be COMPARED. A stamp only says "this session
+        #    was retired at generation N"; a record armed AFTER that carries
+        #    a NEWER generation and is still valid. With two processes
+        #    sharing the state directory, process A can keep an old stamp
+        #    while process B arms a new continuation -- and a sweep that
+        #    only asked "is there a stamp?" retired B's live record, so
+        #    after the next restart the browser's saved token could no
+        #    longer resume the goal.
+        #
+        #    The handoff check has to match the SESSION component of the
+        #    key: the keys are ``(sid, attempt)`` tuples, so a string ``sid``
+        #    is never found in them and the condition was always true --
+        #    the handoff was never actually consulted.
         for sid in list(PENDING_GOAL_CONTINUATION_RECORDS.keys()):
-            if int(_TOMBSTONES.get(sid) or 0) > 0 and sid not in _CONTINUATION_HANDOFF_TOKENS:
-                if retire_pending_goal_continuation(sid, reason="retired"):
-                    swept += 1
+            record = PENDING_GOAL_CONTINUATION_RECORDS.get(sid)
+            if not isinstance(record, dict):
+                continue
+            if not _record_is_retired(sid, record):
+                continue
+            if any(key[0] == sid for key in _CONTINUATION_HANDOFF_TOKENS):
+                # An admission is still in flight for this session: its
+                # handoff is the evidence, so the intent is not dead work.
+                continue
+            if retire_pending_goal_continuation(sid, reason="retired"):
+                swept += 1
     return swept
 
 
