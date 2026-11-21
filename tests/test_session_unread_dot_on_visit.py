@@ -29,10 +29,16 @@ Two invariants flagged in review are protected here and MUST NOT regress:
 """
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+
+# Sibling harness scaffolding lives beside this file and is not on sys.path by
+# default; import it the same way the other node-harness tests do.
+sys.path.insert(0, str(ROOT / "tests"))
+import _unread_store_helpers as unread_store_helpers  # noqa: E402
 
 
 def _load_session_block() -> str:
@@ -50,7 +56,7 @@ def _function_block(name: str, next_marker: str) -> str:
 # ── Structural anchors ──────────────────────────────────────────────────────
 
 def test_visit_ack_helpers_exist():
-    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0)" in SESSIONS_JS
+    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, backgroundRepaint = false)" in SESSIONS_JS
     assert "function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt)" in SESSIONS_JS
     assert "function _sessionVisitHasUnreadState(sid)" in SESSIONS_JS
 
@@ -77,6 +83,31 @@ def test_load_session_acknowledges_visit_before_and_after_message_load():
         "loadSession must re-acknowledge after the async message-load gap so a "
         "deferred sidebar poll cannot leave a sticky unread dot"
     )
+
+
+def test_external_refresh_acknowledgements_preserve_picker_as_background_churn():
+    block = _load_session_block()
+    assert block.count("Boolean(opts.externalRefreshReason)") >= 2, (
+        "both metadata-arrival and post-message-load acknowledgements must carry "
+        "the external-refresh intent into the sidebar repaint"
+    )
+
+
+def test_acknowledge_visit_uses_background_repaint_when_requested():
+    ack = _extract("_acknowledgeSessionVisit")
+    script = f"""
+let direct = 0;
+let background = 0;
+function _setSessionViewedCount() {{}}
+function _syncSessionListSnapshotOnVisit() {{}}
+function renderSessionListFromCache() {{ direct += 1; }}
+function _repaintSidebarForBackgroundChurn() {{ background += 1; }}
+{ack}
+_acknowledgeSessionVisit('external', 1, 2, true);
+_acknowledgeSessionVisit('explicit', 1, 2, false);
+console.log(JSON.stringify({{direct, background}}));
+"""
+    assert _run_node(script) == {"direct": 1, "background": 1}
 
 
 def test_post_load_reack_is_guarded_by_active_view():
@@ -176,6 +207,9 @@ const _store = {{}};
 const localStorage = {{
   getItem: (k) => (k in _store ? _store[k] : null),
   setItem: (k, v) => {{ _store[k] = String(v); }},
+  removeItem: (k) => {{ delete _store[k]; }},
+  key: (i) => Object.keys(_store)[i] ?? null,
+  get length() {{ return Object.keys(_store).length; }},
 }};
 const SESSION_VIEWED_COUNTS_KEY = 'v';
 const SESSION_COMPLETION_UNREAD_KEY = 'u';
@@ -195,6 +229,7 @@ function _forgetObservedStreamingSession() {{}}
 {set_viewed}
 {sync}
 {ack}
+{unread_store_helpers.BLOCK}
 // Seed a stale completion-unread marker for the open session.
 _getSessionCompletionUnread()['open'] = {{message_count: 5, completed_at: 1}};
 _saveSessionCompletionUnread();
@@ -202,7 +237,7 @@ const before = Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(
 _acknowledgeSessionVisit('open', 5, 10);
 const after = Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(), 'open');
 const snap = _sessionListSnapshotById.get('open');
-console.log(JSON.stringify({{before, after, repaints, viewed: _getSessionViewedCounts()['open'], snap}}));
+console.log(JSON.stringify({{before, after, repaints, viewed: _sessionViewedCountValue(_getSessionViewedCounts()['open']), snap}}));
 """
     out = _run_node(script)
     assert out["before"] is True, "precondition: marker seeded"
@@ -238,6 +273,9 @@ const _store = {{}};
 const localStorage = {{
   getItem: (k) => (k in _store ? _store[k] : null),
   setItem: (k, v) => {{ _store[k] = String(v); }},
+  removeItem: (k) => {{ delete _store[k]; }},
+  key: (i) => Object.keys(_store)[i] ?? null,
+  get length() {{ return Object.keys(_store).length; }},
 }};
 const SESSION_VIEWED_COUNTS_KEY = 'v';
 const SESSION_COMPLETION_UNREAD_KEY = 'u';
@@ -272,6 +310,7 @@ const _sessionListSourceById = new Map();
 {effective}
 {sync}
 {ack}
+{unread_store_helpers.BLOCK}
 function _isSessionActivelyViewedForList(sid) {{
   if (!sid || !S.session || S.session.session_id !== sid) return false;
   if (_loadingSessionId && _loadingSessionId !== sid) return false;
@@ -335,6 +374,9 @@ const _store = {{}};
 const localStorage = {{
   getItem: (k) => (k in _store ? _store[k] : null),
   setItem: (k, v) => {{ _store[k] = String(v); }},
+  removeItem: (k) => {{ delete _store[k]; }},
+  key: (i) => Object.keys(_store)[i] ?? null,
+  get length() {{ return Object.keys(_store).length; }},
 }};
 const SESSION_VIEWED_COUNTS_KEY = 'v';
 const SESSION_COMPLETION_UNREAD_KEY = 'u';
@@ -380,6 +422,7 @@ async function api(url) {{ _apiCalled = true; return _apiResult; }}
 {set_viewed}
 {actively_viewed}
 {ensure}
+{unread_store_helpers.BLOCK}
 
 function _hasMarker() {{
   return Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(), 'open');
@@ -401,12 +444,13 @@ function _hasMarker() {{
   _releaseApi({{ session: {{ session_id: 'open', message_count: 6, messages: [{{ role: 'assistant', content: 'x' }}] }} }});
   await p;
   const markerAfter = _hasMarker();
-  const viewed = _getSessionViewedCounts()['open'];
+  const viewedRecord = _getSessionViewedCounts()['open'];
+  const viewed = viewedRecord === undefined ? null : _sessionViewedCountValue(viewedRecord);
   console.log(JSON.stringify({{
     apiIssued,
     markerBefore,
     markerAfter,
-    viewed: viewed === undefined ? null : viewed,
+    viewed,
   }}));
 }})();
 """

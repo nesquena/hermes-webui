@@ -216,10 +216,18 @@ class TestSidebarCollapseBootJS:
         depth = 0
         end = BOOT_JS.index("});", idx)
         block = BOOT_JS[idx:end + 3]
-        assert "hermes-webui-sidebar-collapsed" in block, \
-            "pageshow handler must re-sync sidebar state from localStorage"
-        assert "_syncSidebarAria" in block, \
-            "pageshow handler must call _syncSidebarAria after re-sync"
+        # The bfcache path must reconcile via the shared non-persisting apply
+        # helper (_applySidebarState) — NOT call toggleSidebar — so a derived
+        # compact-band default is never persisted as an explicit '1' (which
+        # would leak into widths above 900px).
+        assert "_applySidebarState()" in block, \
+            "pageshow handler must reconcile via the _applySidebarState helper"
+        assert "hermes-webui-sidebar-collapsed" in BOOT_JS, \
+            "the sidebar-collapsed key must still be referenced (via the helper)"
+        assert "toggleSidebar(" not in block, \
+            "pageshow handler must not call toggleSidebar (would persist derived default)"
+        assert "_syncSidebarAria" in BOOT_JS or "_applySidebarState" in block, \
+            "pageshow handler must sync ARIA (directly or via the apply helper)"
 
 
 # ── panels.js contract ─────────────────────────────────────────────────────
