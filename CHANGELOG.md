@@ -296,6 +296,8 @@
 
 ### Changed
 
+- **German reads as one consistent translation (#8787, @goetterbote2342).** The German interface now uses informal "du" throughout, uses the same word for the same thing everywhere (for example "Anbieter" for providers), and restores several messages whose meaning had drifted from the English. The quota-chip settings that were still in English are translated too.
+
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Internal
