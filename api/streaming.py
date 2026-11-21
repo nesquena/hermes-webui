@@ -12823,7 +12823,6 @@ def _nearest_assistant_msg_idx(messages, msg_idx: int) -> int:
 
 def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
     """Build persisted tool-call summaries from final messages plus live progress fallback."""
-    tool_calls = []
     pending_names = {}
     pending_args = {}
     pending_asst_idx = {}
@@ -12860,17 +12859,17 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
         elif role == 'tool':
             tid = m.get('tool_call_id') or m.get('tool_use_id', '')
             raw = m.get('content', '')
-            seq = {'msg_idx': msg_idx, 'raw': raw, 'tid': tid, 'resolved': False}
+            seq = {'msg_idx': msg_idx, 'raw': raw, 'tid': tid, 'resolved': False, 'summary': None}
             if tid:
                 name = pending_names.get(tid, '')
                 if name and name != 'tool':
-                    tool_calls.append({
+                    seq['summary'] = {
                         'name': name,
                         'snippet': _tool_result_snippet(raw),
                         'tid': tid,
                         'assistant_msg_idx': pending_asst_idx.get(tid, -1),
                         'args': _truncate_tool_args(pending_args.get(tid, {})),
-                    })
+                    }
                     seq['resolved'] = True
             tool_msg_sequence.append(seq)
 
@@ -12898,13 +12897,13 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
         unresolved = [seq for seq in tool_msg_sequence if not seq.get('resolved')]
 
         def _append_live_summary(seq, ltc, tid):
-            tool_calls.append({
+            seq['summary'] = {
                 'name': ltc.get('name', 'tool'),
                 'snippet': _tool_result_snippet(seq.get('raw', '')),
                 'tid': tid,
                 'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
                 'args': _truncate_tool_args(ltc.get('args', {}), limit=4),
-            })
+            }
 
         remaining = [(l_idx, ltc) for l_idx, ltc in enumerate(live) if l_idx not in claimed]
 
@@ -12929,6 +12928,7 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
         for seq, (_l_idx, ltc) in zip(still_unresolved, remaining, strict=False):
             _append_live_summary(seq, ltc, seq.get('tid') or ltc.get('tid') or '')
 
+    tool_calls = [seq['summary'] for seq in tool_msg_sequence if seq.get('summary') is not None]
     return tool_calls
 
 
