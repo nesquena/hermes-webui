@@ -55,6 +55,31 @@ def test_valid_workspace_image_is_embedded(sandbox):
     assert shares._PLACEHOLDER not in out
 
 
+def test_spaced_workspace_image_is_embedded(sandbox):
+    # The agent-facing convention emits ``MEDIA: <path>`` with one space; the
+    # share embed scan must accept the same form the chat renderer embeds
+    # (#8800), or a spaced workspace image is left as a path and redacted.
+    out = _embed("MEDIA: ok.png", [sandbox["ws"]])
+    assert "base64," in out
+    assert "data:image/png" in out
+    assert shares._PLACEHOLDER not in out
+
+
+def test_two_space_form_stays_prose_in_share(sandbox):
+    # One optional literal space, matching the token grammar — two spaces are
+    # prose and must not embed (nor match a bogus ``ok.png``-style ref).
+    out = _embed("Supported tokens: MEDIA:  and file:// links", [sandbox["ws"]])
+    assert "base64," not in out
+
+
+def test_spaced_remote_url_is_not_embedded(sandbox):
+    # The negative lookahead still passes external image URLs through even
+    # when they carry the optional space.
+    out = _embed("MEDIA: https://example.com/a.png", [sandbox["ws"]])
+    assert "base64," not in out
+    assert "https://example.com/a.png" in out
+
+
 @pytest.mark.parametrize(
     "text, suffix",
     [
