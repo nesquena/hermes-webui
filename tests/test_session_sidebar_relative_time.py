@@ -29,6 +29,7 @@ def _run_session_time_case(script_body: str) -> dict:
     functions = "\n\n".join(
         _extract_function(SESSIONS_JS, name)
         for name in (
+            "_serverNowMs",
             "_sessionTimestampMs",
             "_localDayOrdinal",
             "_sessionCalendarBoundaries",
@@ -40,6 +41,7 @@ def _run_session_time_case(script_body: str) -> dict:
     script = textwrap.dedent(
         f"""
         process.env.TZ = 'UTC';
+        let _serverTimeDelta = 0;
         const translations = {{
           session_time_unknown: 'Unknown',
           session_time_minutes_ago: (n) => `${{n}}m`,
