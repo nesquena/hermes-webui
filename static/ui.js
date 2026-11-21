@@ -11219,7 +11219,13 @@ function renderMd(raw){
     t=t.split(/([\r\n\u2028\u2029])/).map(line=>{const at=line.lastIndexOf('>')+1;return line.slice(0,at)+line.slice(at).replace(/<(?=[a-zA-Z])/g,()=>{_tag_stash.push('&lt;');return `\x00T${_tag_stash.length-1}\x00`;});}).join('');
     t=_autolinkBareText(t);
     t=t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='T'?_tag_stash[+i]:m);
-    t=t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='L'?_link_stash[+i]:k==='G'?_img_stash[+i]:m);
+    // Restore L and G in one left-to-right pass so a match can never start
+    // inside a neighbouring token (the #9134 item-5 misread). The image pass
+    // runs before the link pass, so a stored link may contain a stashed image
+    // token (e.g. `[![alt](i.png)](u)` → L token body is `\x00G0\x00`); expand
+    // G tokens INSIDE the stashed link body only, never rescanning the text,
+    // so the linked image survives without re-opening the boundary bug.
+    t=t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='L'?_link_stash[+i].replace(/\x00G(\d+)\x00/g,(_,gi)=>_img_stash[+gi]):k==='G'?_img_stash[+i]:m);
     // Escape any plain text that isn't already wrapped in a tag we produced
     // by escaping bare < > that are not part of our own tags
     const SAFE_INLINE=/^<\/?(strong|em|del|code|a|img|br)([\s>]|$)/i;
