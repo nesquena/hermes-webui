@@ -811,14 +811,21 @@ def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkey
     # Stable per-message ids (#context-message-stable-id) are now stamped on
     # context rows; compare on the semantic fields so the dedup invariant is
     # still what is under test. Build ``expected`` from fresh literals: the id
-    # stamping mutates the shared result dicts in place, and this test reuses the
-    # same objects for its result and its previous_context.
+    # stamping mutates the shared result dicts in place, and this test reuses
+    # the same objects for its result and its previous_context.
     def _no_id(rows):
         return [{k: v for k, v in m.items() if k != "id"} for m in rows]
 
+    # #6310 parity (nesquena-hermes 2026-10-27 residual): the synchronous
+    # route now applies the shared identity dedup as its FINAL persistence
+    # step, exactly like the streaming settle. That dedup canonicalises a
+    # context-compression marker to its assistant role (a mis-role user marker
+    # must not become the next active user instruction) — the same contract
+    # the streaming path has always applied, so the marker row's role here is
+    # the shared behaviour, not a sync-specific regression.
     expected = [
         {"role": "assistant", "content": "cron banner"},
-        {"role": "user", "content": "[Session Arc Summary (d1, node 39)]\n" + "old context\n" * 400},
+        {"role": "assistant", "content": "[Session Arc Summary (d1, node 39)]\n" + "old context\n" * 400},
         {"role": "assistant", "content": "previous answer"},
         {"role": "user", "content": "simple follow-up"},
         {"role": "assistant", "content": "", "tool_calls": [{"id": "vision-1"}]},

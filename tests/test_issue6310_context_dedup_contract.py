@@ -13,6 +13,15 @@ Prescription this module pins (nesquena-hermes):
   settlement and synchronous chat. Required regressions: replay-cleaned
   context and display agree; stale-user repair keeps the same integer ID
   through a subsequent settlement; sync chat dedups before minting.
+* 2026-11-02 (#8574 review): a token-bearing collision resolves against every
+  retained same-key durable owner before appending; a replaced slot's exact-key
+  entries are invalidated before a new invalid/idless owner is rejected; the
+  synchronous settle persists the identity-deduped context.
+* 2026-11-03 (#8574 review P2-3): the distinct-occurrence count spans the whole
+  historical ownership group, rows that already own a valid id included; a
+  distinct unowned occurrence receives collision-free ownership, while an
+  unowned replay of an established exact-key occurrence reconciles onto that
+  owner's id instead of being over-split.
 
 Every test drives the REAL components (``_deduplicate_context_messages``,
 ``_dedupe_replayed_context_messages``, ``_sanitize_messages_for_agent``,
@@ -561,3 +570,134 @@ def test_stale_user_repair_keeps_same_id_through_settlement(tmp_path, monkeypatc
             f"the repaired row must keep id 21 on {surface} through the "
             f"settlement and cold reload; got {ids}"
         )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# #8574 review P2-1 (nesquena-hermes 2026-11-02): a stale exact-key entry
+# must not let a replay overwrite the row that legally took the slot over.
+# ────────────────────────────────────────────────────────────────────────
+#
+# Schedule: ID1/tokA/ts100 -> ID1/tokA/ts250 -> id-less/tokX/ts250 ->
+# ID1/tokA/ts100. The owner-1 row is updated IN PLACE by the
+# timestamp-shifted replay, which leaves its ORIGINAL ts100 entry naming that
+# slot. The id-less token row then legally takes the slot over. The final
+# replay of owner 1 at its ORIGINAL timestamp must NOT overwrite that takeover.
+
+
+def _p2_1_schedule():
+    from api.streaming import _deduplicate_context_messages
+
+    history = [
+        _user("higher", timestamp=100.0, id=1, _active_turn_token="tokA"),
+        _assistant("guess 50", timestamp=101.0, id=2),
+        _user("higher", timestamp=250.0, id=1, _active_turn_token="tokA"),
+        _assistant("guess 75", timestamp=251.0, id=4),
+        _user("higher", timestamp=250.0, _active_turn_token="tokX"),
+        _assistant("guess 100", timestamp=252.0, id=6),
+        _user("higher", timestamp=100.0, id=1, _active_turn_token="tokA"),
+    ]
+    out = _deduplicate_context_messages(copy.deepcopy(history))
+    tokens = [r.get("_active_turn_token") for r in out if r.get("role") == "user"]
+    return out, tokens
+
+
+def test_stale_exact_key_does_not_overwrite_the_takeover():
+    """The id-less replacement must survive its owner's later replay."""
+    out, tokens = _p2_1_schedule()
+    assert "tokX" in tokens, (
+        "the id-less tokX row legally took the slot over, so the final replay "
+        "of owner 1 at its ORIGINAL timestamp must not overwrite it; "
+        f"got user tokens={tokens} contents={_contents(out)}"
+    )
+    assert tokens.count("tokA") == 1, (
+        "owner 1's replay must collapse onto its own slot, not append a copy; "
+        f"got tokens={tokens}"
+    )
+
+
+def test_the_takeover_row_keeps_its_id_less_shape():
+    out, _tokens = _p2_1_schedule()
+    takeover = [
+        r for r in out
+        if r.get("role") == "user" and r.get("_active_turn_token") == "tokX"
+    ]
+    assert len(takeover) == 1, f"tokX must appear exactly once; got {len(takeover)}"
+    assert takeover[0].get("id") is None, (
+        "the takeover is the id-less legacy exact replacement and must keep "
+        f"that shape; got id={takeover[0].get('id')!r}"
+    )
+    assert takeover[0].get("timestamp") == 250.0
+
+
+def test_stale_user_repair_keeps_the_image_parts():
+    """A multimodal current turn keeps its images after the text repair.
+
+    The repair path concatenates stale context with the submitted turn as TEXT;
+    the row's image parts belong to the user's real turn. Replacing the whole
+    content list with the clean text deleted them from the saved model context,
+    and later settlement never restored them (greptile P1, 2026-11-18).
+    """
+    from api.streaming import _strip_stale_user_merge_from_messages
+
+    prior_tail = "please use the larger context model"
+    current_turn = "what is in this picture?"
+    polluted_text = f"{prior_tail}\n\n{current_turn}"
+    image_part = {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,AAAA"},
+    }
+
+    row = _user(polluted_text, id=21, timestamp=2)
+    row["content"] = [{"type": "text", "text": polluted_text}, copy.deepcopy(image_part)]
+    row["api_content"] = [
+        {"type": "text", "text": polluted_text},
+        copy.deepcopy(image_part),
+    ]
+
+    cleaned = _strip_stale_user_merge_from_messages(
+        [copy.deepcopy(row)], current_turn, prior_tail
+    )
+    repaired = cleaned[0]
+
+    for field in ("content", "api_content"):
+        parts = repaired.get(field)
+        assert isinstance(parts, list), (field, repaired)
+        texts = [p for p in parts if p.get("type") == "text"]
+        images = [p for p in parts if p.get("type") == "image_url"]
+        assert texts and texts[0]["text"] == current_turn, (field, parts)
+        assert images == [image_part], (
+            f"the user's image must survive the text repair ({field}): {parts}"
+        )
+
+
+def test_stale_user_repair_flattens_text_only_list_rows():
+    """A list row carrying only text parts is repaired to the plain string.
+
+    Both the display projection and the model-facing ``api_content`` field are
+    compared against the submitted turn as a string. When nothing non-text
+    survives there is nothing to preserve, so the repaired value must be the
+    submitted text itself rather than a one-part list — the list shape broke
+    the existing contamination contract on both surfaces (greptile P1,
+    2026-11-20).
+    """
+    from api.streaming import _strip_stale_user_merge_from_messages
+
+    prior_tail = "please use the larger context model"
+    current_turn = "can you summarize the release blockers?"
+    polluted_text = f"{prior_tail}\n\n{current_turn}"
+
+    row = _user(polluted_text, id=21, timestamp=2)
+    row["content"] = [{"type": "text", "text": polluted_text}]
+    row["api_content"] = [{"type": "text", "text": polluted_text}]
+
+    cleaned = _strip_stale_user_merge_from_messages(
+        [copy.deepcopy(row)], current_turn, prior_tail
+    )
+    repaired = cleaned[0]
+
+    for field in ("content", "api_content"):
+        assert repaired.get(field) == current_turn, (
+            f"text-only {field} must flatten to the submitted string, "
+            f"got {repaired.get(field)!r}"
+        )
+
