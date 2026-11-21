@@ -37,6 +37,7 @@ _SESSIONS_HELPERS = (
     "_sameTranscriptMessage",
     "_currentTailUserMessage",
     "_hasCurrentTailUserDuplicate",
+    "_hasInflightTailUserDuplicate",
     "_messageTimestampValue",
     "_messageTurnOwnership",
     "_isCompactionMarkerRow",
