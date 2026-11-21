@@ -183,14 +183,34 @@ def _read_backend_env_strict(env_path: Path) -> dict[str, str]:
     return values
 
 
+def _expand_backend_config(home: Path, config_data: dict, environ: Mapping[str, str]) -> dict:
+    """Expand ``${VAR}`` references in *config_data* under *environ*.
+
+    The normal profile backend selection reads the profile's config through
+    ``get_config_for_profile_home``, which expands ``${VAR}`` before the
+    resolver sees the value: a reference that points at a Gateway backend means
+    Gateway there. Expanding under the same binding keeps that meaning here, so
+    a Gateway-owned completion is not admitted into local replay.
+
+    The expansion binds *environ* — the same values the resolver reads, with
+    the profile's own ``.env`` winning over the process environment — for this
+    thread only, and never falls back to the process environment. The decision
+    therefore still comes from the single read of ``config.yaml`` (#9050).
+    """
+    from api.profiles import expand_profile_config
+
+    return expand_profile_config(home, config_data, env=dict(environ))
+
+
 def _require_backend_inputs_read(profile: str) -> tuple[dict | None, dict[str, str]]:
     """Read the inputs that resolve *profile*'s chat backend, strictly.
 
     Returns ``(config_data, environ)`` for :func:`webui_chat_backend_mode`: the
-    parsed ``config.yaml`` (``None`` when no config was read) and the environ the
-    profile's own ``.env`` wins in. Deciding the backend from these values —
-    instead of re-reading the files a second time — is what keeps the replay
-    check consistent when a config write lands between two reads (#9050).
+    parsed ``config.yaml`` with its ``${VAR}`` references expanded (``None``
+    when no config was read) and the environ the profile's own ``.env`` wins
+    in. Deciding the backend from these values — instead of re-reading the
+    files a second time — is what keeps the replay check consistent when a
+    config write lands between two reads (#9050).
 
     The shared config and ``.env`` readers map an unreadable or malformed file
     to "no settings", which resolves to the local default. That fallback stays
@@ -226,7 +246,13 @@ def _require_backend_inputs_read(profile: str) -> tuple[dict | None, dict[str, s
     loaded = yaml_compat.safe_load(text)
     if loaded is not None and not isinstance(loaded, dict):
         raise ValueError(f"{path} is not a mapping")
-    return loaded, environ
+    if loaded is None:
+        loaded = {}
+    # Expand ${VAR} under the same environ the resolver reads, so a reference
+    # that points at a Gateway backend keeps its Gateway meaning here too
+    # (the normal profile backend selection expands it the same way).
+    expanded = _expand_backend_config(home, loaded, environ)
+    return expanded if isinstance(expanded, dict) else loaded, environ
 
 
 def _session_runs_in_process(session_id: str) -> bool:

@@ -170,3 +170,92 @@ def test_broken_config_without_env_is_still_undetermined(world):
     config._yaml_file_cache.clear()
     with pytest.raises(yaml.YAMLError):  # fail-closed unchanged: undetermined, retried by the sweep
         owner_mod._session_runs_in_process("s-web")
+
+
+# ── Config ${VAR} references keep the normal profile backend meaning ─────────
+#
+# The normal profile backend selection reads the profile's config through
+# get_config_for_profile_home, which expands ${VAR} under the profile's env
+# binding: a reference that points at a Gateway backend means Gateway there.
+# The single strict read must expand it the same way, or a Gateway-owned
+# completion is admitted into local replay (Greptile P1 on #9238).
+
+
+def test_env_reference_to_gateway_is_not_local_replay(world, monkeypatch):
+    """A ${VAR} reference that resolves to Gateway stays with the Gateway."""
+    named = world["homes"]["named"]
+    world["sessions"]["s-web"] = "named"
+    (named / "config.yaml").write_text("webui_chat_backend: ${CHAT_MODE}\n")
+    monkeypatch.setenv("CHAT_MODE", "gateway")
+    assert owner_mod._session_runs_in_process("s-web") is False
+
+
+def test_env_reference_to_local_is_local_replay(world, monkeypatch):
+    """The positive control: a ${VAR} reference to a local value stays local."""
+    named = world["homes"]["named"]
+    world["sessions"]["s-web"] = "named"
+    (named / "config.yaml").write_text("webui_chat_backend: ${CHAT_MODE}\n")
+    monkeypatch.setenv("CHAT_MODE", "legacy")
+    assert owner_mod._session_runs_in_process("s-web") is True
+
+
+def test_profile_dotenv_overrides_the_process_value_for_a_reference(world, monkeypatch):
+    """A profile .env value wins over the process env for the reference."""
+    named = world["homes"]["named"]
+    world["sessions"]["s-web"] = "named"
+    (named / "config.yaml").write_text("webui_chat_backend: ${CHAT_MODE}\n")
+    (named / ".env").write_text("CHAT_MODE=gateway\n")
+    monkeypatch.setenv("CHAT_MODE", "legacy")  # the process value loses to the profile's .env
+    assert owner_mod._session_runs_in_process("s-web") is False
+
+
+def test_env_reference_reads_each_input_once(world, monkeypatch):
+    """The expansion rides the single read: one .env, one config.yaml."""
+    named = world["homes"]["named"]
+    world["sessions"]["s-web"] = "named"
+    (named / "config.yaml").write_text("webui_chat_backend: ${CHAT_MODE}\n")
+    monkeypatch.setenv("CHAT_MODE", "gateway")
+
+    reads = {"config": 0, "env": 0}
+    real_read_text = Path.read_text
+
+    def counting_read_text(self, *args, **kwargs):
+        if self.name == "config.yaml":
+            reads["config"] += 1
+        elif self.name == ".env":
+            reads["env"] += 1
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+    assert owner_mod._session_runs_in_process("s-web") is False
+    assert reads == {"config": 1, "env": 1}
+
+
+def test_explicit_env_short_circuits_the_config_read(world, monkeypatch):
+    """An explicit backend env value wins over config.yaml without reading it."""
+    named = world["homes"]["named"]
+    world["sessions"]["s-web"] = "named"
+    (named / "config.yaml").write_text("webui_chat_backend: ${CHAT_MODE}\n")
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
+
+    reads = {"config": 0}
+    real_read_text = Path.read_text
+
+    def counting_read_text(self, *args, **kwargs):
+        if self.name == "config.yaml":
+            reads["config"] += 1
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+    assert owner_mod._session_runs_in_process("s-web") is False
+    assert reads["config"] == 0  # the env already decided the backend
+
+
+def test_empty_env_value_is_not_a_blank_override(world, monkeypatch):
+    """An empty env value is not set: the config's reference still decides."""
+    named = world["homes"]["named"]
+    world["sessions"]["s-web"] = "named"
+    (named / "config.yaml").write_text("webui_chat_backend: ${CHAT_MODE}\n")
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "")
+    monkeypatch.setenv("CHAT_MODE", "gateway")
+    assert owner_mod._session_runs_in_process("s-web") is False
