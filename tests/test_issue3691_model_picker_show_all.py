@@ -860,6 +860,7 @@ for (const name of [
   '_sortModelPickerOptions',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
+  '_modelPickerOptionIdentity',
   '_isEquivalentConfiguredModelEntry',
   'renderModelDropdown',
 ]) {
@@ -1087,6 +1088,7 @@ for (const name of [
   '_sortModelPickerOptions',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
+  '_modelPickerOptionIdentity',
   '_isEquivalentConfiguredModelEntry',
   'renderModelDropdown',
 ]) {
@@ -1461,6 +1463,7 @@ for (const name of [
   '_sortModelPickerOptions',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
+  '_modelPickerOptionIdentity',
   '_isEquivalentConfiguredModelEntry',
   'renderModelDropdown',
 ]) {
@@ -3016,6 +3019,7 @@ for (const name of [
   '_sortModelPickerOptions',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
+  '_modelPickerOptionIdentity',
   '_isEquivalentConfiguredModelEntry',
   'renderModelDropdown',
 ]) {

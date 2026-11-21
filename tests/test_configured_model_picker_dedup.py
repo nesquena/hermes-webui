@@ -31,6 +31,7 @@ function extractFunc(name) {
   }
   return ui.slice(start, i);
 }
+eval(extractFunc('_modelPickerOptionIdentity'));
 eval(extractFunc('_normalizeConfiguredModelKey'));
 eval(extractFunc('_configuredModelIdentity'));
 eval(extractFunc('_isEquivalentConfiguredModelEntry'));
@@ -84,6 +85,25 @@ def test_named_custom_provider_routing_id_does_not_duplicate_picker_row(tmp_path
     )
 
     assert results == [True, True]
+
+
+def test_openrouter_typed_path_does_not_hide_native_configured_choice(tmp_path):
+    # The selection path strips @provider:, not a plain provider/ path. A typed
+    # openrouter/vendor/model still sends that extra path segment upstream.
+    badge = {"provider": "openrouter"}
+    results = _equivalent_cases(tmp_path, [
+        {
+            "modelId": "anthropic/claude-sonnet-4.6",
+            "badge": badge,
+            "entries": [{"value": "openrouter/anthropic/claude-sonnet-4.6", "providerId": "openrouter"}],
+        },
+        {
+            "modelId": "anthropic/claude-sonnet-4.6",
+            "badge": badge,
+            "entries": [{"value": "@openrouter:anthropic/claude-sonnet-4.6", "providerId": "openrouter"}],
+        },
+    ])
+    assert results == [False, True]
 
 
 def test_plain_provider_prefix_slash_model_id_does_not_duplicate_picker_row(tmp_path):
@@ -394,6 +414,7 @@ for (const name of [
   '_providerFromModelValue',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
+  '_modelPickerOptionIdentity',
   '_isEquivalentConfiguredModelEntry',
   '_getOptionProviderId',
   '_modelStateForSelect',

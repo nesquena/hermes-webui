@@ -219,6 +219,7 @@ for (const name of [
   '_getOptionProviderId',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
+  '_modelPickerOptionIdentity',
   '_isEquivalentConfiguredModelEntry',
   'renderModelDropdown',
 ]) {

@@ -74,6 +74,12 @@ def test_duplicate_slash_id_primary_badge_sticks_to_matching_provider_only():
             {"provider": "Beta", "provider_id": "custom:beta", "models": [{"id": "@custom:beta:google/gemma-4-27b"}]},
         ],
         "_resolve_provider_alias": lambda provider: provider,
+        # #8732: module-level helpers the builder calls; the fallback
+        # provider stays as written, like the alias stand-in above.
+        "_configured_badge_fallback_provider": lambda entry, _cfg: str(entry.get("provider") or ""),
+        "_configured_badge_option_ids": config._configured_badge_option_ids,
+        "_configured_badge_provider_options": config._configured_badge_provider_options,
+        "_configured_badge_provider_match": config._configured_badge_provider_match,
     }
     exec(
         "def _norm_model_id(model_id):\n"
@@ -180,7 +186,9 @@ def test_ui_renders_model_badges_from_api_payload():
         "A UI deve calcular uma prioridade estável (primary -> fallback 1 -> fallback N) "
         "para renderizar os modelos configurados no topo do dropdown."
     )
-    assert "Object.entries(_badgeMap)" in js and "_normalizeConfiguredModelKey(existing.value)" in js, (
+    # The production catalog/renderer regressions cover missing-fallback
+    # synthesis; do not pin this wiring check to a normalization expression.
+    assert "Object.entries(_badgeMap)" in js, (
         "renderModelDropdown() deve sintetizar entradas para modelos configurados ausentes "
         "do catálogo atual, senão fallbacks locais/Ollama desaparecem da seção Configured."
     )
