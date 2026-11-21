@@ -1021,11 +1021,13 @@ def get_hermes_home_for_profile(name: str) -> Path:
     return _resolve_profile_home_for_name(name)
 
 
-# Mirrors of hermes_constants' older-Agent liveness rule: an Agent core that
-# predates ``named_profile_is_live`` still imports ``hermes_constants`` and still
-# serves ``cron.jobs``, and it decides liveness with exactly these inputs — an
-# existing directory, an identity marker, and no delete tombstone beside the
-# profile dir. Kept here so the fallback below never has to guess.
+# Mirrors of the modern marker/tombstone rule, applied ONLY when no Agent is
+# importable at all (a WebUI-only deployment): there is no installed producer
+# to match, so an identity-marked and non-tombstoned named home is admitted and
+# everything else is denied as the fail-closed proxy. An installed core that
+# merely predates the helpers is NOT governed by this mirror — those cores
+# decide named-profile existence by directory existence, and
+# _named_profile_is_live_without_helper applies that rule instead.
 _PROFILE_IDENTITY_MARKERS = ('config.yaml', '.env', 'SOUL.md', 'profile.yaml', 'auth.json', 'state.db')
 _DELETED_PROFILES_DIRNAME = '.deleted'
 
@@ -1210,16 +1212,28 @@ def _named_profile_home_for_reads(path, owner_profile: str | None = None) -> Pat
 
 
 def _named_profile_is_live_without_helper(home) -> bool:
-    """Apply the older-Agent liveness rule when ``named_profile_is_live`` is absent.
+    """Apply the installed core's own liveness rule when ``named_profile_is_live`` is absent.
 
     Agent cores that predate the helper still import ``hermes_constants`` and
     still serve ``cron.jobs``, so a missing helper must not read as "not live":
     denying there fired the deny branch for every live named profile on every
-    ``/api/crons`` call and blanked Tasks on those deployments. Their own rule
-    decides instead — an existing directory carrying an identity marker and no
-    ``profiles/.deleted/<name>`` tombstone. The installed Agent's identity and
-    tombstone helpers are preferred when it ships them (its marker set stays
-    authoritative); otherwise the mirrored constants above apply the same rule.
+    ``/api/crons`` call and blanked Tasks on those deployments.
+
+    The rule applied is the one the *installed producer itself* uses, decided by
+    the marker helpers it exports:
+
+    * both ``named_profile_has_identity`` and ``named_profile_is_deleted`` —
+      that core's own identity/tombstone rule (its marker set stays
+      authoritative);
+    * only one of them — check the half that core checks, and nothing more;
+    * neither one, but ``hermes_constants`` imports — a pre-marker core
+      (the ``e5b4cf7bea`` shape): its ``profile_exists`` is plain directory
+      existence and it has no tombstone concept, so a live directory must
+      stay readable rather than be judged by a rule that core never applied;
+    * ``hermes_constants`` itself is unimportable (no Agent at all) — mirror
+      the modern rule as a fail-closed proxy: an identity marker must be
+      present and no tombstone may exist, or deny.
+
     A raising check still denies, exactly like the helper path.
     """
     try:
@@ -1227,11 +1241,20 @@ def _named_profile_is_live_without_helper(home) -> bool:
         if not home.is_dir():
             return False
         try:
-            from hermes_constants import named_profile_has_identity, named_profile_is_deleted
+            import hermes_constants as installed
         except Exception:
-            named_profile_has_identity = named_profile_is_deleted = None
-        if named_profile_has_identity is not None and named_profile_is_deleted is not None:
-            return bool(named_profile_has_identity(home)) and not bool(named_profile_is_deleted(home))
+            installed = None
+        if installed is not None:
+            named_profile_has_identity = getattr(installed, 'named_profile_has_identity', None)
+            named_profile_is_deleted = getattr(installed, 'named_profile_is_deleted', None)
+            if named_profile_has_identity is None and named_profile_is_deleted is None:
+                # Pre-marker core: directory existence is its own profile rule.
+                return True
+            if named_profile_has_identity is not None and not bool(named_profile_has_identity(home)):
+                return False
+            if named_profile_is_deleted is not None and bool(named_profile_is_deleted(home)):
+                return False
+            return True
         if not any(
             (home / marker).is_file() or (home / marker).is_symlink()
             for marker in _PROFILE_IDENTITY_MARKERS
@@ -2932,11 +2955,19 @@ def _build_profile_rows_fast() -> list | None:
             _read_config_model,
             _check_gateway_running,
             _PROFILE_ID_RE as _UPSTREAM_PROFILE_ID_RE,
-            named_profile_has_identity,
-            named_profile_is_deleted,
         )
     except Exception:
         return None
+    # Optional exports: cores that predate the marker/tombstone helpers list
+    # named profiles by directory existence and would still build correct rows
+    # here. Their absence must degrade the row FILTER, not disable the whole
+    # fast path (a None return drops the listing to the slow alias-scanning
+    # path on every request). When a helper is absent, skip only the check it
+    # would have performed — matching the producer that is actually installed.
+    try:
+        from hermes_cli.profiles import named_profile_has_identity, named_profile_is_deleted
+    except Exception:
+        named_profile_has_identity = named_profile_is_deleted = None
 
     def _row(home: Path, name: str, is_default: bool) -> dict:
         try:
@@ -2996,9 +3027,12 @@ def _build_profile_rows_fast() -> list | None:
                 # stop at "is a dir + valid id", so a marker-less shell left behind by a
                 # delete (or by a recovery-artifact mkdir) showed up in the dropdown and was
                 # then read by /api/crons. Match upstream here or the two lists disagree.
-                if not named_profile_has_identity(entry):
+                # Each check runs only when the installed core exports it: a pre-marker
+                # core applies neither, and filtering by a rule it does not have would
+                # hide live rows it lists.
+                if named_profile_has_identity is not None and not named_profile_has_identity(entry):
                     continue
-                if named_profile_is_deleted(entry):
+                if named_profile_is_deleted is not None and named_profile_is_deleted(entry):
                     continue
                 rows.append(_row(entry, entry.name, False))
             except OSError:

@@ -500,12 +500,18 @@ def test_custom_default_home_under_profiles_ancestor_is_readable(stub_agent, stu
 
 # ── Per-entry isolation: an unreadable tombstone store ───────────────────────
 
-def _install_hermes_cli_profiles_stub(monkeypatch, *, home: Path, profiles: Path, tombstone_exc=None):
+def _install_hermes_cli_profiles_stub(monkeypatch, *, home: Path, profiles: Path, tombstone_exc=None,
+                                      optional_helpers: bool = True):
     """Install a ``hermes_cli.profiles`` stand-in the fast path imports from.
 
     ``_build_profile_rows_fast`` imports its helpers from ``hermes_cli.profiles``
     at call time, so a stub here exercises the real code path on a machine with
     no Agent on disk — and lets one helper raise on demand.
+
+    ``optional_helpers=False`` reproduces a pre-marker core
+    (NousResearch/hermes-agent@e5b4cf7bea): the required exports every fast-path
+    builder needs are present, but ``named_profile_has_identity`` and
+    ``named_profile_is_deleted`` do not exist yet.
     """
     profiles_mod = types.ModuleType("hermes_cli.profiles")
     profiles_mod._get_default_hermes_home = lambda: home
@@ -513,17 +519,48 @@ def _install_hermes_cli_profiles_stub(monkeypatch, *, home: Path, profiles: Path
     profiles_mod._read_config_model = lambda _home: (None, None)
     profiles_mod._check_gateway_running = lambda _home: False
     profiles_mod._PROFILE_ID_RE = _STUB_PROFILE_ID_RE
-    profiles_mod.named_profile_has_identity = _stub_named_profile_has_identity
-    if tombstone_exc is None:
-        profiles_mod.named_profile_is_deleted = _stub_named_profile_is_deleted
-    else:
-        def _tombstone_raises(_home):
-            raise tombstone_exc
-        profiles_mod.named_profile_is_deleted = _tombstone_raises
+    if optional_helpers:
+        profiles_mod.named_profile_has_identity = _stub_named_profile_has_identity
+        if tombstone_exc is None:
+            profiles_mod.named_profile_is_deleted = _stub_named_profile_is_deleted
+        else:
+            def _tombstone_raises(_home):
+                raise tombstone_exc
+            profiles_mod.named_profile_is_deleted = _tombstone_raises
 
     pkg = types.ModuleType("hermes_cli")
     pkg.__path__ = []  # package marker so `from hermes_cli.profiles import ...` resolves
     pkg.profiles = profiles_mod
+
+    # The historical core always shipped list_profiles(); the builder's
+    # fallback imports it when the fast path is unavailable. Its rule is
+    # directory existence (no marker/tombstone filtering), exactly like
+    # profile_exists() at e5b4cf7bea.
+    class _Info:
+        def __init__(self, name: str, path, is_default: bool):
+            self.name = name
+            self.path = Path(path)
+            self.is_default = is_default
+            self.gateway_running = False
+            self.model = None
+            self.provider = None
+            self.has_env = (Path(path) / ".env").exists()
+
+    def _list_profiles():
+        out = []
+        if home.is_dir():
+            out.append(_Info("default", home, True))
+        if profiles.is_dir():
+            for entry in sorted(profiles.iterdir()):
+                if not entry.is_dir():
+                    continue
+                if not _STUB_PROFILE_ID_RE.match(entry.name):
+                    continue
+                out.append(_Info(entry.name, entry, False))
+        return out
+
+    profiles_mod.list_profiles = _list_profiles
+
     monkeypatch.setitem(sys.modules, "hermes_cli", pkg)
     monkeypatch.setitem(sys.modules, "hermes_cli.profiles", profiles_mod)
     return profiles_mod
@@ -654,3 +691,161 @@ def test_cron_aggregator_healthy_control_keeps_the_default_job(agent_free, stub_
     assert [job["name"] for job in active_jobs] == ["default-job"], active_jobs
     assert active_jobs[0]["owner_profile"] == "default", active_jobs[0]
     assert active_jobs[0]["read_only"] is False, active_jobs[0]
+
+
+# ── Pre-marker core (e5b4cf7bea): directory existence IS the profile rule ────
+#
+# NousResearch/hermes-agent@e5b4cf7bea defines named-profile existence as
+# `get_profile_dir(canon).is_dir()` — no identity-marker rule, no tombstone
+# concept — and its `hermes_constants` exports none of the `named_profile_*`
+# helpers. A core that loads and serves cron jobs must keep its own rule: the
+# modern marker grammar may gate live homes only on cores that actually ship
+# it, or every marker-less live home's saved jobs disappear from Tasks.
+
+def _build_pre_marker_agent_stub() -> types.ModuleType:
+    """The e5b4cf7bea-era ``hermes_constants``: none of the named-profile helpers."""
+    module = types.ModuleType("hermes_constants")
+    module.get_hermes_home = lambda: Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
+    module.get_default_hermes_root = _stub_default_hermes_root
+    return module
+
+
+@pytest.fixture
+def pre_marker_agent(agent_free, monkeypatch):
+    """A pre-marker core: ``hermes_constants`` imports, no ``named_profile_*``."""
+    module = _build_pre_marker_agent_stub()
+    _install_module(monkeypatch, "hermes_constants", module)
+    return module
+
+
+def _install_cron_reader(monkeypatch) -> types.ModuleType:
+    """The cron reader without pulling in the full modern-Agent stub."""
+    module = _build_cron_jobs_stub()
+    _install_module(monkeypatch, "cron.jobs", module)
+    return module
+
+
+def _make_pre_marker_homes(tmp_path: Path, *, marked: bool):
+    """A default home plus a live marker-less (or marked) ``worker`` home."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("model: x\n", encoding="utf-8")
+    profiles = home / "profiles"
+    profiles.mkdir()
+    worker = profiles / "worker"
+    worker.mkdir()
+    if marked:
+        (worker / "config.yaml").write_text("model: w\n", encoding="utf-8")
+    return home, profiles, worker
+
+
+def test_pre_marker_core_keeps_a_markerless_named_home_readable(pre_marker_agent, monkeypatch, tmp_path):
+    """The pre-marker core's own rule is directory existence.
+
+    The modern six-marker rule belongs to cores that ship it; projecting it
+    onto e5b4cf7bea denied live homes that core accepts, which is the
+    gate-certificate finding. A pre-marker core has no tombstone concept
+    either, so `.deleted` is not consulted.
+    """
+    from api import profiles as webui_profiles
+
+    home, profiles, worker = _make_pre_marker_homes(tmp_path, marked=False)
+    _point_aggregator_at_base(monkeypatch, home, profiles)
+
+    assert webui_profiles._named_profile_home_for_reads(worker) == worker
+    assert webui_profiles.is_live_profile_home_for_reads(worker) is True
+    assert webui_profiles.is_live_profile_home_for_reads(worker, owner_profile="worker") is True
+    assert webui_profiles.is_live_profile_home_for_reads(home) is True
+
+
+def test_pre_marker_core_saved_job_survives_in_tasks(pre_marker_agent, monkeypatch, tmp_path):
+    """A saved job in a marker-less live home the historical producer accepts.
+
+    Drives the REAL listing and the REAL aggregator: the pre-marker shape must
+    enumerate `worker` and keep its job as a foreign row (`owner_profile`
+    set, `read_only`).
+    """
+    from api import profiles as webui_profiles
+    from api import routes as webui_routes
+
+    home, profiles, worker = _make_pre_marker_homes(tmp_path, marked=False)
+    _write_saved_job(worker, "worker")
+    _install_hermes_cli_profiles_stub(
+        monkeypatch, home=home, profiles=profiles, optional_helpers=False,
+    )
+    _install_cron_reader(monkeypatch)
+    _point_aggregator_at_base(monkeypatch, home, profiles)
+
+    assert [row["name"] for row in webui_profiles.list_profiles_api()] == ["default", "worker"]
+
+    active_jobs, other_jobs = webui_routes._cron_jobs_cross_profile("default")
+
+    assert active_jobs == [], active_jobs
+    assert [job["name"] for job in other_jobs] == ["worker-job"], other_jobs
+    assert other_jobs[0]["owner_profile"] == "worker", other_jobs[0]
+    assert other_jobs[0]["read_only"] is True, other_jobs[0]
+
+
+def test_pre_marker_core_marked_job_control(pre_marker_agent, monkeypatch, tmp_path):
+    """Control: the same scenario with a config marker passes on both trees."""
+    from api import routes as webui_routes
+
+    home, profiles, worker = _make_pre_marker_homes(tmp_path, marked=True)
+    _write_saved_job(worker, "worker")
+    _install_hermes_cli_profiles_stub(
+        monkeypatch, home=home, profiles=profiles, optional_helpers=False,
+    )
+    _install_cron_reader(monkeypatch)
+    _point_aggregator_at_base(monkeypatch, home, profiles)
+
+    active_jobs, other_jobs = webui_routes._cron_jobs_cross_profile("default")
+
+    assert active_jobs == [], active_jobs
+    assert [job["name"] for job in other_jobs] == ["worker-job"], other_jobs
+    assert other_jobs[0]["owner_profile"] == "worker", other_jobs[0]
+
+
+def test_modern_core_still_denies_a_markerless_home_with_saved_jobs(
+    stub_agent, stub_cron_reader, monkeypatch, tmp_path,
+):
+    """Modern control: the repair must not widen the modern marker rule.
+
+    With the modern helper exports present, the same marker-less `worker`
+    home stays out of the listing and its job stays out of Tasks.
+    """
+    from api import profiles as webui_profiles
+    from api import routes as webui_routes
+
+    home, profiles, worker = _make_pre_marker_homes(tmp_path, marked=False)
+    _write_saved_job(worker, "worker")
+    _install_hermes_cli_profiles_stub(monkeypatch, home=home, profiles=profiles)
+    _point_aggregator_at_base(monkeypatch, home, profiles)
+
+    assert [row["name"] for row in webui_profiles.list_profiles_api()] == ["default"]
+
+    active_jobs, other_jobs = webui_routes._cron_jobs_cross_profile("default")
+
+    assert active_jobs == [] and other_jobs == []
+
+
+def test_build_profile_rows_fast_tolerates_missing_optional_helpers(pre_marker_agent, monkeypatch, tmp_path):
+    """Optional helper exports must degrade the row filter, not the fast path.
+
+    The fast-path builder's REQUIRED exports all exist on the pre-marker core;
+    only the marker/tombstone helpers do not. Returning None there dropped the
+    listing to the slow alias-scanning path on every request (the certificate's
+    fast-path-loss finding). The rows themselves are built by directory
+    existence, the core's own rule.
+    """
+    from api import profiles as webui_profiles
+
+    home, profiles, worker = _make_pre_marker_homes(tmp_path, marked=False)
+    _install_hermes_cli_profiles_stub(
+        monkeypatch, home=home, profiles=profiles, optional_helpers=False,
+    )
+    _point_aggregator_at_base(monkeypatch, home, profiles)
+
+    rows = webui_profiles._build_profile_rows_fast()
+
+    assert rows is not None, "missing optional helpers must not disable the fast path"
+    assert [row["name"] for row in rows] == ["default", "worker"], rows

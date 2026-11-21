@@ -132,16 +132,15 @@ def test_read_predicate_fails_closed_when_liveness_cannot_be_confirmed(tmp_path,
 
 
 def test_read_predicate_denies_named_homes_when_helpers_are_missing(tmp_path, monkeypatch):
-    """A missing liveness helper no longer denies live named homes.
+    """No Agent importable (the CI shape): the mirrored marker rule is the proxy.
 
-    This is the CI shape: hermes-agent is not installed there, so
-    ``hermes_constants`` is simply absent. Older Agent cores that DO load never
-    shipped ``named_profile_is_live`` either, and they still serve ``cron.jobs``
-    — denying every named home there blanked Tasks on those deployments. The
-    predicate now applies that Agent's own rule (directory + identity marker +
-    no tombstone), so the live home stays readable while tombstoned and
-    marker-less shells are still skipped. The default home never needed the
-    helper: its shape is provable without any upstream import.
+    ``hermes_constants`` is absent outright, so there is no installed producer
+    to match and the fail-closed mirror decides: an identity marker must be
+    present and no tombstone may exist. The live marked home stays readable
+    while tombstoned and marker-less shells are still skipped. An installed
+    core that merely LACKS the helpers is a different shape — it applies its
+    own directory-existence rule (see the pre-marker tests in
+    ``test_profile_liveness_agent_free.py``).
     """
     from api import profiles as webui_profiles
     import sys
@@ -156,13 +155,13 @@ def test_read_predicate_denies_named_homes_when_helpers_are_missing(tmp_path, mo
 
 
 def test_read_predicate_applies_agent_rule_when_liveness_helper_is_missing(tmp_path, monkeypatch):
-    """The real older-Agent shape: ``hermes_constants`` loads, the helper does not.
+    """Helper capability is honored step by step: marker helpers present decide.
 
-    Agent cores that predate ``named_profile_is_live`` still import the module
-    and still serve ``cron.jobs`` (verified against e5b4cf7bea2), so the missing
-    helper must not read as "not live". With only that one name removed, the
-    installed Agent's own identity/tombstone helpers decide — the marker set
-    stays authoritative instead of being mirrored.
+    With only ``named_profile_is_live`` removed, the installed Agent's own
+    identity/tombstone helpers still exist, so they decide — the marker set
+    stays authoritative instead of being mirrored. (A core that predates those
+    helpers too decides by directory existence instead; that shape is covered
+    by the pre-marker tests in ``test_profile_liveness_agent_free.py``.)
     """
     from api import profiles as webui_profiles
     import hermes_constants
