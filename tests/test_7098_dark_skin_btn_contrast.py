@@ -295,3 +295,213 @@ def test_no_hardcoded_foreground_on_solid_accent_background():
         f"{len(offenders)} rule(s) paint a solid accent background with a literal "
         f"colour instead of var(--btn-primary-text):\n  " + "\n  ".join(offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# hover state (re-gate 2026-10-01T18:38:05Z, item 1)
+# ---------------------------------------------------------------------------
+#
+# Every solid-accent primary surface switches its fill to ``--accent-hover`` on
+# hover while the text keeps ``--btn-primary-text``.  Covering only ``--accent``
+# left three skins below AA (ares 3.68, sisyphus 4.46, slate 3.97).  The token
+# and the hover fill therefore have to be verified *together*, per skin.
+
+
+def _label(skin: str | None) -> str:
+    return f"data-skin={skin}" if skin else "base :root.dark (no skin)"
+
+
+@pytest.mark.parametrize("skin", DARK_SKINS + [None])
+def test_dark_hover_fill_resolves_aa_with_primary_text(skin: str | None):
+    """The primary foreground must pass AA on the hover fill too."""
+    token = _effective(skin, "--btn-primary-text")
+    accent = _effective(skin, "--accent")
+    hover = _effective(skin, "--accent-hover")
+    assert token and _is_hex(token), f"{_label(skin)}: --btn-primary-text unresolved ({token!r})"
+    assert accent and _is_hex(accent), f"{_label(skin)}: --accent unresolved ({accent!r})"
+    assert hover and _is_hex(hover), f"{_label(skin)}: --accent-hover unresolved ({hover!r})"
+    ratio = contrast_ratio(token, hover)
+    assert ratio >= AA_RATIO, (
+        f"{_label(skin)}: primary text {token} on hover fill {hover} -> contrast "
+        f"{ratio:.2f} (need >= {AA_RATIO}); the normal fill {accent} is "
+        f"{contrast_ratio(token, accent):.2f}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# surface inventory (re-gate 2026-10-01T18:38:05Z, items 2 and 3)
+# ---------------------------------------------------------------------------
+#
+# Item 2: ``static/panels.js`` painted its "Save options" primary button with a
+# literal ``#1a1a1a``, which is invisible to a stylesheet-only scan.  Item 3:
+# the inventory has to assert that each solid-accent textual surface *resolves*
+# through the primary token instead of only rejecting co-located literals.
+
+#: Names that mark a selector as a textual primary control.
+_PRIMARY_CONTROL_RE = re.compile(
+    r"(?:btn|button|send|submit|save|primary|new-chat|apply)", re.IGNORECASE
+)
+#: A fill that is the bare accent value (a solid primary fill), not a wash.
+_SOLID_FILL_RE = re.compile(r"^var\(\s*(--accent(?:-hover)?)\s*\)$")
+#: ``var(--token)`` / ``var(--token, fallback)`` -> token name.
+_VAR_REF_RE = re.compile(r"var\(\s*(--[A-Za-z0-9_-]+)")
+_PSEUDO_RE = re.compile(
+    r"::?(?:not|is|where|has)\([^()]*\)|::?[a-z-]+(?:\([^()]*\))?", re.IGNORECASE
+)
+_INLINE_STYLE_LITERAL_RE = re.compile(
+    r"color\s*:\s*(#[0-9a-fA-F]{3,8}|white|black)\b"
+)
+_INLINE_SOLID_FILL_RE = re.compile(r"background(?:-color)?\s*:\s*var\(\s*--accent(?:-hover)?\s*\)")
+_INLINE_STYLE_FILES = tuple(sorted((REPO / "static").glob("*.js"))) + tuple(
+    sorted((REPO / "static").glob("*.html"))
+)
+
+
+def _normalise_selector(selector: str) -> str:
+    """Strip pseudo-classes/``:not()`` so ``x:hover`` and ``x`` compare equal."""
+    return " ".join(_PSEUDO_RE.sub("", selector).split())
+
+
+def _selector_scope(selector: str):
+    """``(skin_or_None)`` when the selector applies in dark mode, else ``None``.
+
+    A light-only selector (``:not(.dark)``) is skipped: its tokens come from the
+    light block and are covered by the normal-state tests.
+    """
+    if ":not(.dark)" in selector:
+        return None
+    match = re.search(r'\[data-skin="([^"]+)"\]', selector)
+    return match.group(1) if match else ""
+
+
+def _declared_token(value: str | None) -> str | None:
+    """The token a colour declaration resolves through, or ``None``."""
+    if not value:
+        return None
+    match = _VAR_REF_RE.search(value)
+    return match.group(1) if match else None
+
+
+def _base_token_for(selectors: list, rule) -> str | None:
+    """The colour token an inheriting surface gets from its base rule."""
+    targets = {_normalise_selector(sel) for sel in selectors}
+    for other in RULES:
+        if other is rule:
+            continue
+        token = _declared_token(other.decls.get("color"))
+        if not token:
+            continue
+        for candidate in other.selectors:
+            base = _normalise_selector(candidate)
+            for target in targets:
+                if target == base or (
+                    target.startswith(base) and target[len(base):][:1] in ".[:#"
+                ):
+                    return token
+    return None
+
+
+#: The token this contract is about; other tokens are separate design decisions
+#: (an inverted button painting ``var(--bg)``, for instance) and are only
+#: required to resolve *some* token, not this one.
+_PRIMARY_TEXT_TOKEN = "--btn-primary-text"
+
+
+def _solid_primary_surfaces() -> list:
+    """Every (selector, skin_scope, fill_token, colour_token) primary surface."""
+    surfaces = []
+    for rule in RULES:
+        fill = _SOLID_FILL_RE.match(
+            (rule.decls.get("background") or rule.decls.get("background-color") or "")
+            .replace("!important", "")
+            .strip()
+        )
+        if not fill:
+            continue
+        colour_token = _declared_token(rule.decls.get("color"))
+        for selector in rule.selectors:
+            if not _PRIMARY_CONTROL_RE.search(selector):
+                continue
+            if "::before" in selector or "::after" in selector:
+                # Decorative bar/dot painted in the accent: not a text surface.
+                continue
+            scope = _selector_scope(selector)
+            if scope is None:
+                continue
+            token = colour_token or _base_token_for([selector], rule)
+            surfaces.append((selector.strip(), scope, fill.group(1), token))
+    return surfaces
+
+
+def test_surface_inventory_finds_the_shared_primary_controls():
+    """Guard: an empty/one-sided inventory would make the next test vacuous."""
+    surfaces = _solid_primary_surfaces()
+    fills = {item[2] for item in surfaces}
+    assert {"--accent", "--accent-hover"} <= fills, f"fills discovered: {sorted(fills)}"
+    selector_text = " | ".join(item[0] for item in surfaces)
+    for expected in (".send-btn", ".send-btn:hover", ".settings-btn:hover",
+                     ".provider-card-btn-primary:hover"):
+        assert expected in selector_text, f"{expected} missing from the surface inventory"
+    primary = [item for item in surfaces if item[3] == _PRIMARY_TEXT_TOKEN]
+    assert len(primary) >= 20, (
+        f"only {len(primary)} surface(s) resolve {_PRIMARY_TEXT_TOKEN}; the inventory "
+        f"is not seeing the shared primary controls"
+    )
+
+
+def test_primary_text_surfaces_resolve_through_the_token():
+    """Each solid-accent textual surface must resolve a token that passes AA.
+
+    Resolution is per skin: a skin-scoped selector is measured only against its
+    own skin, so a hover rule that keeps the normal-state token is caught by the
+    numbers rather than by a style convention.
+    """
+    missing, offenders = [], []
+    for selector, scope, fill_token, colour_token in _solid_primary_surfaces():
+        if not colour_token:
+            missing.append(f"{selector} (fill {fill_token}): no colour token resolved")
+            continue
+        if colour_token != _PRIMARY_TEXT_TOKEN:
+            # Inverted surfaces own a different token and a different contract.
+            continue
+        skins = [scope] if scope else DARK_SKINS + [None]
+        for skin in skins:
+            foreground = _effective(skin, colour_token)
+            background = _effective(skin, fill_token)
+            if not (foreground and _is_hex(foreground)):
+                missing.append(f"{selector}: {colour_token} unresolved for {_label(skin)}")
+                continue
+            if not (background and _is_hex(background)):
+                missing.append(f"{selector}: {fill_token} unresolved for {_label(skin)}")
+                continue
+            ratio = contrast_ratio(foreground, background)
+            if ratio < AA_RATIO:
+                offenders.append(
+                    f"{selector} [{_label(skin)}]: {colour_token}={foreground} on "
+                    f"{fill_token}={background} -> {ratio:.2f}"
+                )
+    assert not missing, "primary surfaces with no resolvable token:\n  " + "\n  ".join(missing)
+    assert not offenders, (
+        f"{len(offenders)} primary surface(s) below AA:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_inline_primary_surfaces_use_the_token():
+    """Inline styles in ``static/*.js``/``*.html`` cannot hide a literal either.
+
+    The stylesheet-only scan stayed green while ``static/panels.js`` painted a
+    solid accent button with ``color:#1a1a1a``.
+    """
+    offenders = []
+    for path in _INLINE_STYLE_FILES:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for number, line in enumerate(text.splitlines(), 1):
+            if not _INLINE_SOLID_FILL_RE.search(line):
+                continue
+            for literal in _INLINE_STYLE_LITERAL_RE.findall(line):
+                if literal.lower() in {"white", "black"} or not literal.startswith("var("):
+                    offenders.append(f"{path.name}:{number} -> color:{literal}")
+    assert not offenders, (
+        f"{len(offenders)} inline solid-accent surface(s) with a literal foreground:\n  "
+        + "\n  ".join(sorted(offenders))
+    )
