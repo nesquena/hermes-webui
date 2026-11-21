@@ -11165,7 +11165,7 @@ function renderMd(raw){
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
-    t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
+    t=t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='C'?_code_stash[+i]:m);
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
@@ -11219,8 +11219,7 @@ function renderMd(raw){
     t=t.split(/([\r\n\u2028\u2029])/).map(line=>{const at=line.lastIndexOf('>')+1;return line.slice(0,at)+line.slice(at).replace(/<(?=[a-zA-Z])/g,()=>{_tag_stash.push('&lt;');return `\x00T${_tag_stash.length-1}\x00`;});}).join('');
     t=_autolinkBareText(t);
     t=t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='T'?_tag_stash[+i]:m);
-    t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
-    t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
+    t=t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='L'?_link_stash[+i]:k==='G'?_img_stash[+i]:m);
     // Escape any plain text that isn't already wrapped in a tag we produced
     // by escaping bare < > that are not part of our own tags
     const SAFE_INLINE=/^<\/?(strong|em|del|code|a|img|br)([\s>]|$)/i;
@@ -11235,7 +11234,7 @@ function renderMd(raw){
   s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
   s=s.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
   s=s.replace(/~~(.+?)~~/g,(_,t)=>`<del>${esc(t)}</del>`);
-  s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
+  s=s.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='O'?_ob_stash[+i]:m);
   s=s.replace(/^###### (.+)$/gm,(_,t)=>`<h6>${inlineMd(t)}</h6>`).replace(/^##### (.+)$/gm,(_,t)=>`<h5>${inlineMd(t)}</h5>`).replace(/^#### (.+)$/gm,(_,t)=>`<h4>${inlineMd(t)}</h4>`).replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
   s=s.replace(/^---+$/gm,'<hr>');
   // (Blockquotes are handled by the pre-pass at the top of renderMd, before
