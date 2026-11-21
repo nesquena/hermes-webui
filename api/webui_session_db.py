@@ -68,6 +68,8 @@ _METADATA_FIELDS = frozenset(
         "worktree_branch",
         "worktree_repo_root",
         "worktree_created_at",
+        "worktree_placement",
+        "worktree_placement_reason",
         "is_cli_session",
         "source_tag",
         "raw_source",

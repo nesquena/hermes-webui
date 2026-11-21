@@ -17,6 +17,7 @@ EXPECTED_GIT_RUNS = Counter(
         "api/workspace.py": 1,
         "api/workspace_git.py": 2,
         "api/worktrees.py": 2,
+        "api/worktree_placement.py": 1,
     }
 )
 
