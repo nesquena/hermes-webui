@@ -267,7 +267,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 
 ### Profiles
 - Profile chip in the **composer footer** -- dropdown showing all profiles with gateway status and model info
-- Only live named profile homes appear in the dropdown and in Tasks: a home under `profiles/` is listed when the installed Agent considers it live (an identity marker such as `config.yaml`, and no `profiles/.deleted/<name>` tombstone). Marker-less shell homes and tombstoned profiles stay hidden, and reading their saved jobs never creates `cron/` directories inside them. The default home and custom `HERMES_HOME` / `HERMES_BASE_HOME` roots remain readable regardless.
+- The profile dropdown and Tasks follow the installed Agent's profile liveness rules. With marker-aware cores, a named home under `profiles/` needs an identity marker such as `config.yaml` and must not be tombstoned in `profiles/.deleted/<name>`. Older cores without marker support still recognize directory-only named homes and can read their saved jobs. Guarded reads do not create `cron/` directories in rejected homes. The default home and custom `HERMES_HOME` / `HERMES_BASE_HOME` roots remain readable.
 - Gateway status dots (green = running), model info, skill count per profile
 - Profiles management panel -- create, switch, and delete profiles from the sidebar
 - Clone config from active profile on create
