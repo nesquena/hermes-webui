@@ -1214,8 +1214,15 @@ def git_stash_and_checkout(
 
 def _diff_stats(diff_text: str) -> tuple[int, int]:
     additions = deletions = 0
+    in_hunk = False
     for line in diff_text.splitlines():
-        if line.startswith("+++") or line.startswith("---"):
+        if line.startswith("diff --git "):
+            in_hunk = False
+            continue
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if not in_hunk and (line.startswith("+++ ") or line.startswith("--- ")):
             continue
         if line.startswith("+"):
             additions += 1
