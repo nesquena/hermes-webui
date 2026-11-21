@@ -4038,13 +4038,23 @@ def _resolve_custom_record_key(
     raw_api_key: object,
     raw_key_env: object,
     provider_hint: object = None,
+    raw_api_key_env: object = None,
 ) -> str | None:
     """Static credential declared by ONE custom record.
 
-    Accepts a literal key, a ``${ENV_VAR}`` reference or a ``key_env`` env-var
-    hint, then falls back to the ``CUSTOM_<SLUG>_API_KEY`` convention. Reading
-    every form from the SAME record is what keeps an endpoint and a credential
-    from being resolved out of two different authorities.
+    Accepts a literal key, a ``${ENV_VAR}`` reference, a ``key_env`` env-var
+    hint or the ``api_key_env`` spelling of the same hint, then falls back to
+    the ``CUSTOM_<SLUG>_API_KEY`` convention. Reading every form from the SAME
+    record is what keeps an endpoint and a credential from being resolved out
+    of two different authorities.
+
+    ``key_env`` outranks ``api_key_env`` when one record declares both: that is
+    the Agent's own order (``runtime_provider_custom._key_env_secret`` reads
+    ``key_env`` first) and the order ``_normalized_raw_provider_record``
+    applies to ``providers.<id>`` records, so both spellings resolve to the
+    same key in WebUI and in the Agent (#8959). Legacy ``custom_providers[]``
+    entries reach this ladder directly, without that normalisation, so the
+    ``api_key_env`` spelling has to be read here too.
     """
     api_key = None
     if raw_api_key is not None:
@@ -4057,6 +4067,10 @@ def _resolve_custom_record_key(
         key_env = str(raw_key_env or "").strip()
         if key_env:
             api_key = _thread_local_env_value(key_env).strip() or None
+    if not api_key:
+        api_key_env = str(raw_api_key_env or "").strip()
+        if api_key_env:
+            api_key = _thread_local_env_value(api_key_env).strip() or None
     if not api_key and provider_hint:
         api_key = _lookup_custom_api_key_env(provider_hint)
     return api_key
@@ -4260,7 +4274,9 @@ def _custom_record_owns_connection(record: dict, pid: str) -> bool:
     # authority instead of surfacing the misconfiguration.
     if _custom_record_declares_credential(record, base_url, None):
         return True
-    if _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid):
+    if _resolve_custom_record_key(
+        record.get("api_key"), record.get("key_env"), pid, record.get("api_key_env")
+    ):
         return True
     if _custom_record_api_mode(record):
         return True
@@ -4969,7 +4985,9 @@ def resolve_custom_provider_connection(
         return None, None
 
     base_url = _custom_record_base_url(record)
-    api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
+    api_key = _resolve_custom_record_key(
+        record.get("api_key"), record.get("key_env"), pid, record.get("api_key_env")
+    )
     if return_provenance:
         return api_key, base_url, is_exact
     return api_key, base_url
@@ -5144,11 +5162,12 @@ def _custom_record_declares_credential(
     endpoint and hides the real cause.
 
     So the question asked here is declaration, not resolution: the RAW
-    ``api_key`` (literal or ``${ENV}``), ``key_env``, ``key_cmd``, a configured
-    ``credential_pool``, a pool that actually resolved for this endpoint, and a
-    host-gated env credential the runtime would accept for it.
+    ``api_key`` (literal or ``${ENV}``), ``key_env``, ``api_key_env``,
+    ``key_cmd``, a configured ``credential_pool``, a pool that actually
+    resolved for this endpoint, and a host-gated env credential the runtime
+    would accept for it.
     """
-    for field in ("api_key", "key_env", "key_cmd"):
+    for field in ("api_key", "key_env", "api_key_env", "key_cmd"):
         if str(record.get(field) or "").strip():
             return True
     # A configured pool is a declaration even when empty or exhausted: the user
@@ -5321,7 +5340,9 @@ def resolve_custom_provider_bundle(
             owned["credential_pool"] = pool_runtime.get("credential_pool")
 
     if not api_key:
-        api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
+        api_key = _resolve_custom_record_key(
+            record.get("api_key"), record.get("key_env"), pid, record.get("api_key_env")
+        )
     if not api_key and not lookup_only:
         api_key = _host_gated_env_key(base_url)
 
@@ -11773,7 +11794,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
                 _cp_base_url = str(_cp.get("base_url") or "").strip()
                 _cp_api_key = _resolve_custom_record_key(
-                    _cp.get("api_key"), _cp.get("key_env"), _slug,
+                    _cp.get("api_key"), _cp.get("key_env"), _slug, _cp.get("api_key_env"),
                 ) or ""
                 # Fallback: check credential pool for both api_key and base_url
                 if (not _cp_api_key or not _cp_base_url) and _slug:

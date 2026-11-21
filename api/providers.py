@@ -1444,7 +1444,9 @@ def _provider_has_key(provider_id: str) -> bool:
         for cp in custom_providers:
             if isinstance(cp, dict):
                 if _custom_provider_name_matches(provider_id, cp.get("name")):
-                    key = _resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), provider_id)
+                    key = _resolve_custom_record_key(
+                        cp.get("api_key"), cp.get("key_env"), provider_id, cp.get("api_key_env")
+                    )
                     if _provider_value_counts_as_api_key(provider_id, key):
                         return True
     return False
@@ -1470,7 +1472,9 @@ def _get_provider_api_key(provider_id: str) -> str | None:
                 _custom_provider_entries(cfg), _custom_provider_slug_key(provider_id),
             )
         if entry is not None:
-            key = _resolve_custom_record_key(entry.get("api_key"), entry.get("key_env"), provider_id)
+            key = _resolve_custom_record_key(
+                entry.get("api_key"), entry.get("key_env"), provider_id, entry.get("api_key_env")
+            )
             if key:
                 return key
         # No presentation row does not rule out an explicitly owned pool key.
@@ -1520,7 +1524,9 @@ def _get_provider_api_key(provider_id: str) -> str | None:
             if not isinstance(cp, dict):
                 continue
             if _custom_provider_name_matches(provider_id, cp.get("name")):
-                cp_key = _resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), provider_id)
+                cp_key = _resolve_custom_record_key(
+                    cp.get("api_key"), cp.get("key_env"), provider_id, cp.get("api_key_env")
+                )
                 if _provider_value_counts_as_api_key(provider_id, cp_key):
                     return cp_key
     # Fallback: try credential pool (e.g. bothub key stored via auth.json)
@@ -3285,7 +3291,11 @@ def get_providers() -> dict[str, Any]:
                 if _mid not in cp_model_ids:
                     cp_model_ids.append(_mid)
             cp_models = [{"id": mid, "label": mid} for mid in cp_model_ids]
-            cp_has_key = bool(_resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), cp_id))
+            cp_has_key = bool(
+                _resolve_custom_record_key(
+                    cp.get("api_key"), cp.get("key_env"), cp_id, cp.get("api_key_env")
+                )
+            )
             # Fallback: check credential pool (key added via hermes auth add)
             if not cp_has_key:
                 try:

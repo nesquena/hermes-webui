@@ -9697,8 +9697,10 @@ def _context_lookup_record_key(record: dict) -> str:
     from the chat's own runtime chain, as GET does since #8951, is #8963.
 
     On a legacy ``custom_providers`` entry and on the model block the lookup reads ``key_env``
-    alone (:func:`_context_lookup_resolve_key`), which is what WebUI's merge reads there for a
-    named ``custom:<name>`` route (#8959).
+    alone (:func:`_context_lookup_resolve_key`); WebUI's merge reads ``key_env`` then
+    ``api_key_env`` there for a named ``custom:<name>`` route (#8959), so the lookup still
+    sends less than the chat on those routes (a context window from the default), never more;
+    closing that gap is #8963.
     """
     return _context_lookup_resolve_key(record.get("api_key"), record.get("key_env"))
 
