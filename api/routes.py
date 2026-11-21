@@ -8509,7 +8509,8 @@ def _login_client_ip(handler) -> str:
     X-Forwarded-For through and the client could pick its bucket. Every field
     of both headers is checked, as the resolver reads them all: fall back to the
     raw peer when they differ, a field is empty, X-Real-IP is repeated with
-    different values, or a value is not an IP address.
+    different values, a value is not an IP address, or the forwarded client
+    carries an IPv6 zone ID ("fe80::1%eth0").
 
     A request with no X-Forwarded-For keys on the raw peer even when X-Real-IP
     is a valid address: X-Real-IP alone may be the client's own value relayed
@@ -8543,7 +8544,11 @@ def _login_client_ip(handler) -> str:
                     _forwarded_client_ip_from_trusted_proxy(handler, consult_real_ip=False)
                 )
                 real_ips = {ipaddress.ip_address(v.strip()) for v in _fields("X-Real-IP")}
-                if real_ips <= {client}:
+                # An IPv6 zone ID ("fe80::1%eth0") is free-form header text
+                # that ipaddress keeps verbatim (control characters included)
+                # and that means nothing off-host. Treat a scoped forwarded
+                # client as unusable, as the request log does. IPv4 has none.
+                if getattr(client, "scope_id", None) is None and real_ips <= {client}:
                     return str(client)
         except ValueError:
             pass

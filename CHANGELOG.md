@@ -43,6 +43,8 @@
 
 ### Fixed
 
+- **Login and read-aloud rate limits ignore a forwarded client address that carries an IPv6 zone (#9211).** Behind a trusted proxy, a forwarded IPv6 client address with a scope ID now falls back to the connecting peer, as other unusable forwarded values already did. Unscoped addresses and deployments without a trusted proxy are unchanged.
+
 - **Deleting a Gateway-backed session works again on Hermes Agent v0.23.3 and later (#9218, closes #9213).** Since the Agent moved its session-retirement step in v0.23.3, deleting a session that had Gateway runs failed with "runtime ledger unavailable". WebUI now finds the step in its new place and passes the profile's attachment folder it needs. Sessions with work still running are still refused, and older Agents behave as before.
 
 - **A forced Agent update now says that it stops Gateway runs too, and only restarts the Gateway you confirmed (#8746, closes #8667).** Thanks @webtecnica. Since #8662 an Agent update counts active Gateway runs, so "Update anyway" also ends them when the Gateway restarts, but the refusal text, the confirmation dialog, the server log and `docs/supervisor.md` still described only WebUI runs. The wording now depends on the update target and on whether this profile's Gateway can be restarted, so it names the runs that will be interrupted and the Gateway runs that keep running. A WebUI update is unchanged.
