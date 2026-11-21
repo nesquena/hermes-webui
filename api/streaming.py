@@ -14371,6 +14371,106 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
             rt['is_anthropic_oauth'] = getattr(agent, '_is_anthropic_oauth')
 
 
+def _start_turn_start_watchdog(*, stream_id, session_id, channel, journal_writer=None):
+    """Surface a worker that never reaches the running phase.
+
+    A worker can block on a process-wide lock (model-catalog rebuild, another
+    turn's session lock) long before it publishes its first SSE frame. Without
+    this, the browser keeps showing its processing placeholder forever and
+    nothing records why: the turn journal only ever holds ``worker_started``.
+
+    The watchdog logs once and pushes a ``warning`` frame so the tab can say
+    what happened. When a ``journal_writer`` is supplied the frame is appended
+    to the run journal first and its event id rides along on the queued frame,
+    so a browser that reconnects after the alert replays the warning from the
+    journal instead of losing it with the in-memory queue. It deliberately
+    does NOT kill the worker (Python cannot interrupt a thread parked on a
+    lock) and does NOT release locks it does not own — releasing another
+    thread's lock would corrupt the very invariant the lock protects. Recovery
+    still requires a process restart; this only makes the stall visible and
+    attributable.
+
+    ``HERMES_WEBUI_TURN_START_TIMEOUT`` overrides the 120s default; ``0`` or a
+    negative value disables the watchdog.
+    """
+    try:
+        timeout = float(os.getenv("HERMES_WEBUI_TURN_START_TIMEOUT", "120"))
+    except (TypeError, ValueError):
+        timeout = 120.0
+    if timeout <= 0:
+        return None
+    done = threading.Event()
+
+    def _watch():
+        if done.wait(timeout):
+            return
+        logger.warning(
+            "turn start watchdog: stream=%s session=%s has not reached the "
+            "running phase after %.0fs — the worker is blocked before its "
+            "first agent call (most likely a process-wide lock)",
+            stream_id,
+            session_id,
+            timeout,
+        )
+        if channel is None:
+            return
+        payload = {
+            'type': 'turn_start_timeout',
+            'message': (
+                'This turn has not started after %.0f seconds: the worker is '
+                'blocked on a server-side lock. Restart the WebUI process to '
+                'recover.' % timeout
+            ),
+            'stream_id': stream_id,
+            'session_id': session_id,
+            'timeout_seconds': timeout,
+        }
+        # Journal the warning BEFORE queueing it. A put_nowait-only frame dies
+        # with the in-memory queue, so a browser that reconnects after the
+        # alert (refresh, dropped SSE) replays a journal that never held the
+        # warning while the worker is still blocked. The journal row's event id
+        # rides along on the queued frame and the stream's last-event cursor so
+        # replay recovers this warning exactly like any other SSE frame.
+        event_id = None
+        if journal_writer is not None:
+            try:
+                journaled = journal_writer.append_sse_event('warning', payload)
+                event_id = (
+                    journaled.get('event_id')
+                    if isinstance(journaled, dict) else None
+                )
+                if event_id:
+                    STREAM_LAST_EVENT_ID[stream_id] = event_id
+            except Exception:
+                logger.debug(
+                    "turn start watchdog could not journal its warning for %s",
+                    stream_id,
+                    exc_info=True,
+                )
+        try:
+            if event_id and hasattr(channel, "note_last_event_id"):
+                channel.note_last_event_id(event_id)
+            item = (
+                ('warning', payload, event_id)
+                if hasattr(channel, "subscribe_with_snapshot")
+                else ('warning', payload)
+            )
+            channel.put_nowait(item)
+        except Exception:
+            logger.debug(
+                "turn start watchdog could not queue its warning for %s",
+                stream_id,
+                exc_info=True,
+            )
+
+    threading.Thread(
+        target=_watch,
+        daemon=True,
+        name=f"turn-start-watchdog-{str(stream_id)[:8]}",
+    ).start()
+    return done
+
+
 def _run_agent_streaming(
     session_id,
     msg_text,
@@ -14834,6 +14934,13 @@ def _run_agent_streaming(
         except Exception:
             logger.debug("Failed to put event to queue")
 
+    _turn_start_watchdog_done = _start_turn_start_watchdog(
+        stream_id=stream_id,
+        session_id=session_id,
+        channel=q,
+        journal_writer=run_journal,
+    )
+
     _last_runtime_model_identity = None
     _runtime_model_session_id = session_id
 
@@ -15077,6 +15184,14 @@ def _run_agent_streaming(
                 _turn_owns_persisted_model = True
                 _turn_route_model = model
                 _turn_route_provider = provider_context
+
+        # #9221 round 2: disarm the turn-start watchdog only now. phase="running"
+        # above proves update_active_run() ran, not that the turn is underway:
+        # a worker parked on another turn's session agent lock has reached
+        # nothing yet, and that wait is exactly the stall the watchdog must
+        # surface. The outer finally covers every other exit.
+        if _turn_start_watchdog_done is not None:
+            _turn_start_watchdog_done.set()
 
         # TD1: set thread-local env context so concurrent sessions don't clobber globals
         # Check for pre-flight cancel (user cancelled before agent even started)
@@ -19367,6 +19482,14 @@ def _run_agent_streaming(
         except Exception:
             logger.debug("Failed to end metering session for stream %s", stream_id, exc_info=True)
         _metering_stop.set()
+        # #9221 round 2: disarm the turn-start watchdog on EVERY exit. Only the
+        # success path used to, so a worker that exited before reaching running
+        # (get_session raised, pre-flight cancel, early return) left the
+        # watchdog armed and its deadline fired a false "worker is blocked"
+        # warning. Event.set() is idempotent, so this also covers the path that
+        # already disarmed after the session agent lock was acquired.
+        if _turn_start_watchdog_done is not None:
+            _turn_start_watchdog_done.set()
         # Stop the periodic checkpoint thread before the final recovery path.
         # The checkpoint thread also uses the per-session lock; joining it first
         # avoids contending with checkpoint writes during stale-pending repair.
