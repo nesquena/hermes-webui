@@ -20235,7 +20235,29 @@ function _renderLiveRunStatusContent(el,startedAt){
   const elapsed=startedAt?Math.max(0,now-startedAt):0;
   const timeStr=_formatRunElapsed(elapsed);
   const tokens=_liveRunStatusTokens;
-  el.innerHTML=`<span class="live-run-status-dot tool-card-running-dot"></span><span class="live-run-status-text lf-time">${timeStr}</span>${tokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}<span class="lf-sep">·</span><span class="lf-status">Running</span>`;
+  const conn=_liveRunConnectionLabel();
+  const connHtml=conn?`<span class="lf-sep">·</span><span class="lf-status ${conn.cls}">${conn.text}</span>`:'';
+  el.innerHTML=`<span class="live-run-status-dot tool-card-running-dot"></span><span class="live-run-status-text lf-time">${timeStr}</span>${tokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}<span class="lf-sep">·</span><span class="lf-status">Running</span>${connHtml}`;
+}
+// Connection state of the turn stream, shown beside "Running". Without it a chat that never
+// started a run and a chat whose stream dropped look identical: elapsed time ticking, no text,
+// and a Stop button that does nothing. '' = not yet known, which renders exactly as before.
+let _liveRunConnection='';
+function setLiveRunConnection(state){
+  const next=state==='live'||state==='reconnecting'||state==='no-run'?state:'';
+  if(_liveRunConnection===next) return;
+  _liveRunConnection=next;
+  const el=$('liveRunStatus');
+  if(el&&!el.hidden){
+    const timer=_liveRunStatusTimers[_liveRunStatusSessionId];
+    _renderLiveRunStatusContent(el,(timer&&timer.startedAt)||null);
+  }
+}
+function _liveRunConnectionLabel(){
+  if(_liveRunConnection==='live') return {text:'Live',cls:'lf-conn-live'};
+  if(_liveRunConnection==='reconnecting') return {text:'Reconnecting…',cls:'lf-conn-reconnecting'};
+  if(_liveRunConnection==='no-run') return {text:'No run',cls:'lf-conn-down'};
+  return null;
 }
 function updateLiveRunStatus(opts){
   if(opts&&opts.sessionId&&_liveRunStatusSessionId&&opts.sessionId!==_liveRunStatusSessionId) return;
@@ -20273,6 +20295,8 @@ function hideLiveRunStatus(sid){
   _clearLiveRunStatusTimer(sid||_liveRunStatusSessionId);
   _liveRunStatusTokens=null;
   _liveRunStatusSessionId=null;
+  // A finished banner carries no transport verdict into the next run.
+  _liveRunConnection='';
 }
 function _startLiveRunStatusTimer(sid,startedAt){
   if(!sid)return;

@@ -6496,6 +6496,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }};
     _bindSidebarIdleRecovery(LIVE_STREAMS[activeSid]);
 
+    // Surface transport health next to "Running". EventSource fires `open` on every successful
+    // (re)connect and `error` when the connection drops — that is the only signal that separates
+    // "the model is thinking" from "nothing is connected at all".
+    source.addEventListener('open',()=>{
+      if(typeof setLiveRunConnection==='function') setLiveRunConnection('live');
+    });
+    source.addEventListener('error',()=>{
+      if(_terminalStateReached||_streamFinalized) return;
+      if(typeof setLiveRunConnection==='function') setLiveRunConnection('reconnecting');
+    });
+
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
     // the accumulators here so the re-sent tokens wouldn't double the prefix.
@@ -8208,6 +8219,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _cancelThrottledSnapshotTimer();
     _clearAnchorProseIncrementalNode();
+    // The stream is gone and no run is behind it — say so instead of leaving a silent banner.
+    if(typeof setLiveRunConnection==='function') setLiveRunConnection('no-run');
     _streamFinalized=true;
     _cancelAnimationFramePendingStreamRender();
     _streamFadeCleanupReduceMotionListener();
