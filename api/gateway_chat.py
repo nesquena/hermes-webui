@@ -39,7 +39,7 @@ from api.config import (
     unregister_stream_owner,
     update_active_run,
 )
-from api.helpers import _redact_text, redact_session_data
+from api.helpers import _redact_text, redact_session_data, StreamDeltaRedactor
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
 from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
 from api.turn_journal import append_turn_journal_event_for_stream
@@ -1044,7 +1044,7 @@ def _open_gateway_run_events(base_url, headers, run_id, last_seq: int = -1, read
 
 def _relay_gateway_run_events(
     resp, session_id, stream_id, run_id, base_url, api_key,
-    *, put_gateway_event, cancel_event, on_seq=None, final_text="", stop_on_truncated=False,
+    *, put_gateway_event, cancel_event, delta_redactor, on_seq=None, final_text="", stop_on_truncated=False,
     surfaced_approval_ids=None, output_is_authoritative=False, approval_is_current=None,
     watchdog_secs=None,
 ):
@@ -1199,7 +1199,11 @@ def _relay_gateway_run_events(
             delta = str(payload.get("delta") or "")
             if delta:
                 final_text = _append_gateway_stream_text(stream_id, final_text, delta)
-                emit("token", {"text": delta})
+                # #8901: redact before SSE/journal; a split secret is held
+                # back until later deltas or the flush prove it safe.
+                _safe_delta = delta_redactor.feed(delta)
+                if _safe_delta:
+                    emit("token", {"text": _safe_delta})
             commit()
             sse_event = "message"
             continue
@@ -1256,7 +1260,11 @@ def _relay_gateway_run_events(
         delta = _gateway_sse_delta(payload)
         if delta:
             final_text = _append_gateway_stream_text(stream_id, final_text, delta)
-            emit("token", {"text": delta})
+            # #8901: redact before SSE/journal; a split secret is held back
+            # until later deltas or the flush prove it safe.
+            _safe_delta = delta_redactor.feed(delta)
+            if _safe_delta:
+                emit("token", {"text": _safe_delta})
         usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
         commit()
     commit()
@@ -1295,7 +1303,7 @@ def _gateway_run_headers(session_id, api_key) -> dict:
 def _run_gateway_runs_api_streaming(
     session_id, msg_text, model, workspace, stream_id,
     base_url, api_key, prefill_messages, body_extras,
-    *, put_gateway_event, cancel_event,
+    *, put_gateway_event, cancel_event, delta_redactor,
     attachments=None, cfg=None, session=None,
     active_provider: str = "",
     on_run_id=None,
@@ -1620,6 +1628,7 @@ def _run_gateway_runs_api_streaming(
                     stream_text, stream_usage, outcome, accepted_frame = _relay_gateway_run_events(
                         resp, session_id, stream_id, run_id, base_url, api_key,
                         put_gateway_event=put_gateway_event, cancel_event=cancel_event,
+                        delta_redactor=delta_redactor,
                         # Cursor commit: the internal reconnect cursor ALWAYS
                         # advances (the next /events reopen must send
                         # Last-Event-ID or delivered tokens replay into the
@@ -2019,7 +2028,7 @@ def _restore_relayed_gateway_state(session_id: str, stream_id: str) -> int | Non
 
 def _await_gateway_run_result(
     session_id, stream_id, run_id, base_url, api_key,
-    *, put_gateway_event, cancel_event, resume_seq=None,
+    *, put_gateway_event, cancel_event, delta_redactor, resume_seq=None,
 ):
     """Resume a run started by a previous WebUI process; same return contract as _run_gateway_runs_api_streaming.
 
@@ -2070,6 +2079,7 @@ def _await_gateway_run_result(
                     text, usage, outcome, _accepted = _relay_gateway_run_events(
                         resp, session_id, stream_id, run_id, base_url, api_key,
                         put_gateway_event=put_gateway_event, cancel_event=cancel_event,
+                        delta_redactor=delta_redactor,
                         on_seq=lambda seq: last_seq.__setitem__(0, seq), final_text=STREAM_PARTIAL_TEXT.get(stream_id, ""),
                         stop_on_truncated=True, surfaced_approval_ids=surfaced_approval_ids,
                         output_is_authoritative=True, approval_is_current=approval_is_current,
@@ -3252,9 +3262,19 @@ def _run_gateway_chat_streaming(
     preserve_gateway_pending = False
     canonical_snapshot = None
 
+    # #8901: per-stream redactor for live and replayed gateway token deltas.
+    _delta_redactor = StreamDeltaRedactor()
+
     def put_gateway_event(event, data):
         if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
             return
+        # #8901: release any held-back delta tail before the stream settles,
+        # so a secret-shaped prefix is never swallowed at end of turn. The
+        # released text is redacted and journaled like any other delta.
+        if event in ("done", "stream_end", "apperror"):
+            _held_delta = _delta_redactor.flush()
+            if _held_delta:
+                put_gateway_event("token", {"text": _held_delta})
         if event == "apperror" and isinstance(data, dict):
             data = data.copy()
             data.setdefault("session_id", session_id)
@@ -3382,8 +3402,19 @@ def _run_gateway_chat_streaming(
                     _settle_delegation_reservation(session_id, stream_id, accepted=True)
             try:
                 if _use_session_rpc:
+                    # #8901: redact token deltas before SSE/journal; a split
+                    # secret is held back until later deltas or the flush in
+                    # put_gateway_event prove it safe. Other events pass through.
+                    def emit_redacted_token(event_name, data):
+                        if event_name == "token" and isinstance(data, dict) and isinstance(data.get("text"), str):
+                            _safe_delta = _delta_redactor.feed(data["text"])
+                            if not _safe_delta:
+                                return
+                            data = {**data, "text": _safe_delta}
+                        put_gateway_event(event_name, data)
+
                     final_text, usage, canonical_snapshot = run_session(
-                        s, stream_id, msg_text, emit=put_gateway_event, cancel=cancel_event,
+                        s, stream_id, msg_text, emit=emit_redacted_token, cancel=cancel_event,
                         record=record_run, saved=reattach_run,
                     )
                 elif reattach_run:
@@ -3400,6 +3431,7 @@ def _run_gateway_chat_streaming(
                         session_id, stream_id, run_id, base_url, api_key,
                         put_gateway_event=put_gateway_event,
                         cancel_event=cancel_event,
+                        delta_redactor=_delta_redactor,
                         resume_seq=_restore_relayed_gateway_state(session_id, stream_id),
                     )
                 else:
@@ -3408,6 +3440,7 @@ def _run_gateway_chat_streaming(
                         base_url, api_key, prefill_messages, body_extras,
                         put_gateway_event=put_gateway_event,
                         cancel_event=cancel_event,
+                        delta_redactor=_delta_redactor,
                         attachments=attachments,
                         cfg=cfg,
                         session=s,
@@ -3606,7 +3639,11 @@ def _run_gateway_chat_streaming(
                         final_text += delta
                         if stream_id in STREAM_PARTIAL_TEXT:
                             STREAM_PARTIAL_TEXT[stream_id] += delta
-                        put_gateway_event("token", {"text": delta})
+                        # #8901: redact before SSE/journal; a split secret is
+                        # held back until later deltas or the flush prove it safe.
+                        _safe_delta = _delta_redactor.feed(delta)
+                        if _safe_delta:
+                            put_gateway_event("token", {"text": _safe_delta})
                     usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
             usage.update({k: v for k, v in _gateway_stream_usage(last_payload).items() if v})
         assistant_text = final_text.strip()

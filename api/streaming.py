@@ -74,6 +74,7 @@ from api.helpers import (
     redact_session_data,
     scrub_internal_replay_fields,
     _redact_text,
+    StreamDeltaRedactor,
     _is_client_disconnect_error,
     _as_client_disconnect,
 )
@@ -14800,8 +14801,19 @@ def _run_agent_streaming(
                 'session_id': session_id, 'text': '\n'.join(leftovers),
             })
 
+    # #8901: per-stream redactor for live and replayed token deltas. Created
+    # before put() so even an early terminal event can flush it.
+    _delta_redactor = StreamDeltaRedactor()
+
     def put(event, data):
         nonlocal _stream_end_published
+        # #8901: release any held-back delta tail before the stream settles,
+        # so a secret-shaped prefix is never swallowed at end of turn. The
+        # released text is redacted and journaled like any other delta.
+        if event in ('done', 'stream_end', 'apperror'):
+            _held_delta = _delta_redactor.flush()
+            if _held_delta:
+                put('token', {'text': _held_delta})
         if event in ('done', 'apperror', 'stream_end'):
             _settle_pending_steer()
         # If cancelled, drop all further events except the cancel event itself
@@ -15561,7 +15573,14 @@ def _run_agent_streaming(
                 # worth it for a recoverable staleness window.
                 if stream_id in STREAM_PARTIAL_TEXT:
                     STREAM_PARTIAL_TEXT[stream_id] += str(text)
-                put('token', {'text': text})
+                # #8901: redact the delta before it reaches SSE or the run
+                # journal (a replay after reconnect re-sends the journaled
+                # event). Text that could still grow into a secret with the
+                # next delta is held back and released by a later delta or
+                # by the flush in put().
+                _safe_delta = _delta_redactor.feed(str(text))
+                if _safe_delta:
+                    put('token', {'text': _safe_delta})
                 # Update live throughput from stream delta callbacks, not from
                 # byte/character length. If a backend cannot provide live deltas,
                 # the frontend hides TPS rather than showing an estimate.
