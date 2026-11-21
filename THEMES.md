@@ -61,7 +61,9 @@ absent for light. System mode tracks the OS preference at runtime.
 | **Zeus** | OLED-near-black dark surfaces that keep the default gold accent. Dark-focused; falls back to the default light palette in light mode. |
 
 Each skin defines paired light + dark variants so it reads cleanly on either
-theme. The skin is applied as `data-skin="<name>"` on `<html>` (the default
+theme. One stylesheet per skin lives in `static/skins/<name>.css`, loaded from
+`static/index.html` after `static/style.css`; every selector in it is scoped to
+`[data-skin="<name>"]`, so skins cannot affect each other. The skin is applied as `data-skin="<name>"` on `<html>` (the default
 skin clears the attribute).
 
 ---
@@ -198,10 +200,15 @@ expresses the intent.
 Skins are the easiest extension point — pure CSS, no Python, no JS logic. To
 contribute one upstream:
 
-1. Add your `:root[data-skin="name"]` and `:root.dark[data-skin="name"]`
-   blocks to `static/style.css`.
-2. Register it in the Settings skin picker in `static/index.html` and in the
-   skin list used by `cmdTheme()` in `static/commands.js`.
+1. Add `static/skins/<name>.css` with your `:root[data-skin="name"]` and
+   `:root.dark[data-skin="name"]` blocks. Skin CSS lives in its own file, never
+   in `static/style.css` — see `static/skins/README.md` for the load-order
+   contract and the full checklist.
+2. Link it from `static/index.html` (after the `style.css` link), add the
+   `<name>` key to the pre-paint `skins={…}` allowlist in the same file, add the
+   `_SKINS` entry in `static/boot.js`, and add `"<name>"` to
+   `_SETTINGS_SKIN_VALUES` in `api/config.py` so the choice persists.
+   `static/commands.js` needs no change — `cmdTheme()` reads `_SKINS`.
 3. Test on desktop and mobile across both Light and Dark themes.
 4. Open a PR — skins are pure CSS additions with no backend changes needed.
 

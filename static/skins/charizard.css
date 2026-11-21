@@ -1,0 +1,7 @@
+/* Skin: charizard
+   Extracted verbatim from style.css (see static/skins/README.md).
+   Loaded from index.html after style.css; every selector is scoped to
+   [data-skin="charizard"] so this file can never affect another skin. */
+/* ── Skin: Charizard (orange) ── */
+  :root[data-skin="charizard"]{--accent:#EA580C;--accent-hover:#C2410C;--accent-bg:rgba(234,88,12,0.08);--accent-bg-strong:rgba(234,88,12,0.15);--accent-text:#C2410C;}
+:root.dark[data-skin="charizard"]{--accent:#FB923C;--accent-hover:#F97316;--accent-bg:rgba(251,146,60,0.08);--accent-bg-strong:rgba(251,146,60,0.15);--accent-text:#FB923C;}

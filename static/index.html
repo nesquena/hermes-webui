@@ -72,6 +72,33 @@
   }
 })()</script>
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
+  <!-- One stylesheet per skin, loaded after style.css so skins can override base
+       rules without !important. Each file is scoped to [data-skin="<key>"], so the
+       order among them is irrelevant; see static/skins/README.md. -->
+  <link rel="stylesheet" href="static/skins/ares.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/mono.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/graphite.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/codex.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/terracotta.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/github.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/slate.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/poseidon.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/sisyphus.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/charizard.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/sienna.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/catppuccin.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/hepburn.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/nous.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/geist-contrast.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/zeus.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/neon.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/neon-soft.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/neon-paint.css?v=__WEBUI_VERSION__">
+  <link rel="stylesheet" href="static/skins/verdigris.css?v=__WEBUI_VERSION__">
+  <!-- Shared skin scaffold: :root[data-skin] (no key) matches every skin, so these
+       resets must load AFTER the skin files to keep their original cascade position
+       (they used to sit after the skin block inside style.css). -->
+  <link rel="stylesheet" href="static/scaffold.css?v=__WEBUI_VERSION__">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly from vendored assets to prevent font CSP noise) -->
   <link rel="stylesheet" href="static/vendor/katex/0.16.22/katex.min.css">

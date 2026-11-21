@@ -1,0 +1,59 @@
+/* Shared skin scaffold — must load AFTER every skin file.
+ *
+ * `:root[data-skin]` (no key) matches every skin, so these rules raise
+ * specificity above the base component rules. They originally sat after the
+ * skin block inside style.css; once the skins moved to static/skins/*.css they
+ * would have loaded BEFORE the skins and lost the cascade to equal-specificity
+ * dark-skin rules (dark Neon worklog rows went from transparent to
+ * rgba(179,71,255,.1)). Keeping them in a file linked last preserves the
+ * original source order.
+ *
+ * Do not add skin-specific rules here: this file must stay key-agnostic.
+ */
+
+.tool-worklog-list .tool-card,
+:root[data-skin] .tool-worklog-list .tool-card,
+:root[data-skin] .tool-worklog-list .tool-card:hover,
+:root[data-skin] .tool-worklog-list .tool-card-running{
+  margin:0;
+  border:0;
+  border-left:0;
+  border-radius:0;
+  background:transparent;
+}
+
+.tool-worklog-list > .agent-activity-thinking .thinking-card,
+:root[data-skin] .tool-worklog-list > .agent-activity-thinking .thinking-card,
+:root[data-skin] .tool-worklog-list > .agent-activity-thinking .thinking-card:hover{
+  margin:0;
+  max-width:none;
+  border:0;
+  border-radius:0;
+  background:transparent;
+}
+
+/* Transparent Stream: both tool AND thinking inner cards must reset to a flat,
+   transparent row. The thinking-card previously kept its base accent-bg/border/
+   radius/msg-rail chrome (it was the heaviest object in the stream — Frank's
+   complaint, trifecta V1). The scoped !important also beats the per-skin
+   `:root[data-skin] .tool-card{...!important}` rules (graphite/sienna/catppuccin/
+   hepburn/neon/verdigris) that otherwise re-card every row (trifecta V3). */
+.transparent-event-row .tool-card,
+.transparent-event-row .tool-card:hover,
+.transparent-event-row .tool-card-running,
+.transparent-event-row .thinking-card,
+.transparent-event-row .thinking-card:hover,
+:root[data-skin] .transparent-event-row .tool-card,
+:root[data-skin] .transparent-event-row .tool-card:hover,
+:root[data-skin] .transparent-event-row .tool-card-running,
+:root[data-skin] .transparent-event-row .thinking-card,
+:root[data-skin] .transparent-event-row .thinking-card:hover{
+  border:0!important;
+  border-left:0!important;
+  border-radius:0!important;
+  background:transparent!important;
+  box-shadow:none!important;
+  margin:0!important;
+  max-width:none!important;
+  overflow:visible;
+}

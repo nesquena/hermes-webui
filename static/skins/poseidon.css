@@ -1,0 +1,7 @@
+/* Skin: poseidon
+   Extracted verbatim from style.css (see static/skins/README.md).
+   Loaded from index.html after style.css; every selector is scoped to
+   [data-skin="poseidon"] so this file can never affect another skin. */
+/* ── Skin: Poseidon (ocean blue) ── */
+  :root[data-skin="poseidon"]{--accent:#0369A1;--accent-hover:#025080;--accent-bg:rgba(3,105,161,0.08);--accent-bg-strong:rgba(3,105,161,0.15);--accent-text:#025080;}
+:root.dark[data-skin="poseidon"]{--accent:#0EA5E9;--accent-hover:#0284C7;--accent-bg:rgba(14,165,233,0.08);--accent-bg-strong:rgba(14,165,233,0.15);--accent-text:#0EA5E9;}
