@@ -8535,6 +8535,17 @@ function _applyYoloState(sid, enabled, meta) {
   // per-session revision and the server run they were computed under.
   const aRun = typeof m.epoch === 'string' ? m.epoch : null;
   const aReq = typeof m.reqGen === 'number' ? m.reqGen : null;
+  // A rejected WRITE still has to confirm the server's state: the write
+  // settled, so the flag may have moved on since the answer was computed
+  // (another client, a later change). Dropping the answer must not skip the
+  // confirmation read — otherwise the view stays on the revision it had
+  // before the write while the server is further ahead (#9101 review
+  // round 10). A rejected READ needs no confirmation: it asked for the
+  // state and the answer is simply stale.
+  const rejectAnswer = () => {
+    if (!isRead && typeof _fetchYoloState === 'function') _fetchYoloState(sid, {gen});
+    return false;
+  };
   if (aRun && _yoloView.epoch !== aRun) {
     // The answer is from another run than the view holds. Which run is
     // CURRENT is decided by the order of the REQUESTS, not by the order of
@@ -8546,11 +8557,11 @@ function _applyYoloState(sid, enabled, meta) {
       // The answer belongs to a request sent BEFORE the one the view holds:
       // it is a leftover of the previous run.
       _yoloKnownRuns.add(aRun);
-      return false;
+      return rejectAnswer();
     }
     // A run this tab already confirmed and moved past is an older one: its
     // late answer must not override what the current run answered.
-    if (_yoloKnownRuns.has(aRun)) return false;
+    if (_yoloKnownRuns.has(aRun)) return rejectAnswer();
   }
   const aRev = typeof m.rev === 'number' ? m.rev : null;
   // Same run: an answer computed at an older revision than the view holds is
@@ -8558,7 +8569,7 @@ function _applyYoloState(sid, enabled, meta) {
   // for writes AND for the 409 payload that carries the current state: the
   // confirmation read that follows a write repairs a stale view only when it
   // succeeds, so it cannot be the only guard against a rollback.
-  if (aRun && _yoloView.epoch === aRun && aRev !== null && aRev < _yoloView.rev) return false;
+  if (aRun && _yoloView.epoch === aRun && aRev !== null && aRev < _yoloView.rev) return rejectAnswer();
   _yoloView = {sid, enabled, gen, seq: _yoloView.seq + (isRead ? 0 : 1),
                rev: aRev !== null ? aRev : _yoloView.rev, epoch: aRun || _yoloView.epoch,
                reqGen: aReq !== null ? aReq : _yoloView.reqGen};

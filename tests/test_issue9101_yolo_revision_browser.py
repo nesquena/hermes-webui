@@ -65,14 +65,27 @@ def test_yolo_view_tracks_the_server_revision_and_run():
     # Same run: an older revision never rolls the view back — for a read AND
     # for a write (a write answer is not covered by the read sequence rule).
     assert (
-        "if (aRun && _yoloView.epoch === aRun && aRev !== null && aRev < _yoloView.rev) return false;"
+        "if (aRun && _yoloView.epoch === aRun && aRev !== null && aRev < _yoloView.rev) return rejectAnswer();"
         in body
     )
     # Another run: only one this tab has NOT confirmed is the current state.
-    assert "if (_yoloKnownRuns.has(aRun)) return false;" in body
+    assert "if (_yoloKnownRuns.has(aRun)) return rejectAnswer();" in body
     # A session install keeps the confirmed run and restarts the revision.
     assert "rev: 0, epoch: _yoloView.epoch, reqGen: _yoloView.reqGen};" in body
     assert "if (aRun) _yoloKnownRuns.add(aRun);" in body
+
+
+def test_a_rejected_write_answer_still_confirms_the_server_state():
+    """Dropping a stale WRITE answer must not skip the confirmation read that
+    follows the write: the write settled, so the flag may have moved on since
+    the answer was computed. A rejected READ needs no confirmation."""
+    body = _function_body(_read("messages.js"), "_applyYoloState")
+    assert "const rejectAnswer = () => {" in body
+    assert (
+        "if (!isRead && typeof _fetchYoloState === 'function') _fetchYoloState(sid, {gen});"
+        in body
+    )
+    assert "return false;" in body
 
 
 def test_yolo_answers_are_ordered_by_the_request_that_produced_them():
@@ -179,6 +192,8 @@ def test_conflict_payload_refreshes_the_view_instead_of_failing_blind():
         "r22_late_old_process_answer_never_blocks_the_current_process",
         # (e) an older write answer must not roll back the confirmed revision.
         "r23_older_write_answer_never_rolls_back_a_confirmed_revision",
+        # (f) a rejected older write answer must still confirm the server.
+        "r24_rejected_older_write_answer_still_confirms_the_server_state",
     ],
 )
 def test_revision_browser_scenarios_hold(name):

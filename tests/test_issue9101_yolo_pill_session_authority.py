@@ -120,6 +120,10 @@ REVISION_SCENARIOS = [
     # one run, an OLDER write answer must not roll back the revision a read
     # already confirmed — not even when the confirmation read fails.
     "r23_older_write_answer_never_rolls_back_a_confirmed_revision",
+    # Review round 10 (Greptile P1 "Dropped writes skip refresh"): rejecting
+    # an older WRITE answer must still confirm the server's state — the write
+    # settled, so the flag may have moved on since the answer was computed.
+    "r24_rejected_older_write_answer_still_confirms_the_server_state",
 ]
 
 # Orderings that need more than the client can see. The revision-ordering

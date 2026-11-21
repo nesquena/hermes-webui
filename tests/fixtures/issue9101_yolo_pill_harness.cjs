@@ -1323,6 +1323,64 @@ const scenarios = {
     return out;
   },
 
+  // (r24) review round 10 (Greptile P1 "Dropped writes skip refresh"):
+  // rejecting an older WRITE answer must not skip the confirmation read that
+  // follows the write. Scenario: this tab's /yolo enable is answered ON at
+  // revision 1 but lands late. Another tab disables YOLO (revision 2), this
+  // tab reads OFF at revision 2, and the other tab enables it again
+  // (revision 3). When the revision-1 answer arrives it is rejected — the
+  // confirmed revision must not roll back — but the write settled, so the
+  // server's state must still be confirmed. Without that read the pill stays
+  // on the stale revision 2 while the server is at revision 3.
+  //
+  // Expected: the old answer is dropped AND the server's current state is
+  // read afterwards, so the view ends on the server's revision.
+  async r24_rejected_older_write_answer_still_confirms_the_server_state() {
+    const server = createServer({ B: {} });
+    const tab1 = createTab(server, 'tab1');
+    const tab2 = createTab(server, 'tab2');
+    const fetchB1 = () => vm.runInContext('_fetchYoloState("B")', tab1.ctx);
+    await tab1.loadSession('B'); await tab2.loadSession('B'); await tick();
+    // tab1's /yolo enable is answered ON at revision 1 and held: it lands
+    // late, after the other tab moved the flag twice.
+    server.shouldHold = (name, method, p) => name === 'tab1' && method === 'POST' && p === '/api/session/yolo';
+    const cmd = tab1.cmdYolo(); await tick();
+    const lateEnable = tab1.held.shift();
+    check(!!lateEnable && lateEnable.answer.yolo_enabled === true, 'precondition: tab1 enable (ON) held', tab1.calls);
+    server.shouldHold = null;
+    // The other tab disables (revision 2).
+    await tab2.cmdYolo(); await tick();
+    check(server.yolo.B === false && server.state('B').yolo_revision === 2, 'precondition: the other tab disabled (revision 2)', server.state('B'));
+    // This tab's read is sent NOW (the server is at revision 2) and held.
+    server.shouldHold = (name, method, p) => name === 'tab1' && method === 'GET' && p === '/api/session/yolo?session_id=B';
+    const pendingRead = fetchB1(); await tick();
+    const staleRead = tab1.held.shift();
+    check(!!staleRead && staleRead.answer.yolo_revision === 2, 'precondition: tab1 read (revision 2) held', tab1.calls);
+    // The other tab enables again (revision 3) while tab1's answers are held.
+    server.shouldHold = null;
+    await tab2.cmdYolo(); await tick();
+    check(server.yolo.B === true && server.state('B').yolo_revision === 3, 'precondition: the other tab enabled again (revision 3)', server.state('B'));
+    // The revision-2 answer lands: the view confirms OFF at revision 2.
+    staleRead.release(); await pendingRead; await tick(20);
+    const afterRead = tab1.state();
+    check(afterRead.rev === 2 && afterRead.pillVisible === false, 'precondition: revision 2 (OFF) confirmed', afterRead);
+    // Now the late revision-1 enable answer lands. It must be rejected...
+    const readsBefore = yoloReads(tab1, 'B');
+    lateEnable.release(); await cmd; await tick(40);
+    const afterLate = tab1.state();
+    const extraReads = yoloReads(tab1, 'B') - readsBefore;
+    const out = { afterRead, afterLate, extraReads, server: server.state('B') };
+    // ...the confirmed revision must not roll back to 1...
+    check(afterLate.rev >= 2, 'the late revision-1 write answer rolled the confirmed revision back', out);
+    // ...and the write must still have confirmed the server's current state,
+    // so the view ends on the server's revision 3 (ON).
+    check(extraReads >= 1, 'the rejected write answer skipped its confirmation read', out);
+    check(afterLate.rev === server.state('B').yolo_revision && afterLate.pillVisible === true,
+      'the view did not reach the server\'s current revision after the rejected write answer', out);
+    check(synced(tab1, server, 'B'), 'the pill does not match the server', out);
+    return out;
+  },
+
   // Control: a streaming load's read shows the session's own state (proves
   // the harness drives the real read path end to end).
   async control_streaming_load_shows_own_state() {
