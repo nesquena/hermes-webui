@@ -408,6 +408,35 @@ def handle_upload(handler):
         return j(handler, {'error': 'Upload failed'}, status=500)
 
 
+# Longest single file or folder name most filesystems accept (NAME_MAX).
+_MAX_MEMBER_NAME_BYTES = 255
+
+
+def _create_member_fd(workspace: Path, dest_root: Path, member_path: Path, name: str) -> int:
+    """Create one archive member's file, or raise a ValueError that says why not (#8826).
+
+    Duplicate, empty and over-long member names used to surface as raw
+    FileExistsError / OSError, so both upload routes answered with a generic
+    "Archive extraction failed". A ValueError reaches the user as a clear 400.
+    """
+    import errno
+
+    shown = name if len(name) <= 80 else name[:80] + '...'
+    if member_path == dest_root:
+        raise ValueError('Archive member has an empty name')
+    if any(len(os.fsencode(part)) > _MAX_MEMBER_NAME_BYTES
+           for part in member_path.relative_to(dest_root).parts):
+        raise ValueError(f'Archive member name too long: {shown}')
+    try:
+        return open_anchored_create_fd(workspace, member_path)
+    except FileExistsError:
+        raise ValueError(f'Archive contains a duplicate file name: {shown}') from None
+    except OSError as exc:
+        if exc.errno == errno.ENAMETOOLONG:
+            raise ValueError(f'Archive member name too long: {shown}') from None
+        raise
+
+
 def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
     """Extract a zip or tar archive into the workspace.
 
@@ -445,6 +474,7 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
 
     extracted_files = []
     total_extracted = 0
+    dest_root = dest_dir.resolve()
 
     try:
         if _mode == 'zip':
@@ -484,7 +514,7 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
                     # race-safely under the true workspace root (anchored mkdirat),
                     # so no pathname member_path.parent.mkdir() before it (which
                     # could be redirected outside by a raced symlink component).
-                    _mfd = open_anchored_create_fd(workspace, member_path)
+                    _mfd = _create_member_fd(workspace, dest_root, member_path, member.filename)
                     with zf.open(member) as src, os.fdopen(_mfd, 'wb', closefd=True) as dst:
                         _chunk_size = 65536
                         while True:
@@ -535,7 +565,7 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
                     src_obj = tf.extractfile(member)
                     if src_obj:
                         # #3398: fd-anchored member create under the TRUE workspace root.
-                        _mfd = open_anchored_create_fd(workspace, member_path)
+                        _mfd = _create_member_fd(workspace, dest_root, member_path, member.name)
                         with src_obj as src, os.fdopen(_mfd, 'wb', closefd=True) as dst:
                             _chunk_size = 65536
                             while True:
