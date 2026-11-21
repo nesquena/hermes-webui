@@ -92,3 +92,35 @@ def test_quota_chip_localized_in_all_locales():
     js = I18N.read_text(encoding="utf-8")
     assert js.count("settings_label_quota_chip:") == 15, "12 locales expected"
     assert js.count("settings_desc_quota_chip:") == 15, "12 locales expected"
+
+
+def test_quota_chip_window_description_names_the_real_surfaces_and_the_fallback():
+    """The description points to the hover and Settings → Providers (there is no
+    separate quota panel) and says what happens when lengths aren't reported."""
+    expected = (
+        "For providers with several limits (e.g. 5-hour, weekly), which one the chip shows. "
+        "Hover the chip or open Settings → Providers to see all of them. "
+        "If a provider doesn't report limit lengths, the chip shows the lowest remaining."
+    )
+    js = I18N.read_text(encoding="utf-8")
+    entry = "settings_desc_quota_chip_window: '" + expected.replace("'", "\\'") + "',"
+    assert js.count("settings_desc_quota_chip_window:") == 15
+    assert js.count(entry) == 15
+    html = INDEX.read_text(encoding="utf-8")
+    assert 'data-i18n="settings_desc_quota_chip_window">' + expected + "</div>" in html
+    assert "quota panel" not in js and "quota panel" not in html
+
+
+def test_quota_chip_window_label_reads_quota_chip_shows():
+    """#8548: the select's label says what it picks ("Quota chip shows"), not the
+    ambiguous "Quota chip window". Copy only: the i18n key and select id stay."""
+    js = I18N.read_text(encoding="utf-8")
+    assert js.count("settings_label_quota_chip_window:") == 15
+    assert js.count("settings_label_quota_chip_window: 'Quota chip shows',") == 15
+    assert "Quota chip window" not in js
+    html = INDEX.read_text(encoding="utf-8")
+    assert (
+        '<label for="settingsQuotaChipWindow" data-i18n="settings_label_quota_chip_window">'
+        "Quota chip shows</label>"
+    ) in html
+    assert "Quota chip window" not in html

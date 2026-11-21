@@ -4,15 +4,23 @@ import json
 import logging
 import os
 import shlex
+import signal
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer, SimpleHTTPRequestHandler
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import api.updates as updates
+
+# Git children here must never read the host's system/global git config: on a
+# Mac that runs osxkeychain against the test servers (#8931). See
+# tests/_git_host_config_isolation.py.
+pytestmark = pytest.mark.usefixtures("isolated_host_git_config")
 
 
 def _git(repo, *args):
@@ -20,6 +28,116 @@ def _git(repo, *args):
         ['git', *args], cwd=str(repo), check=True,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+
+
+@pytest.mark.parametrize('operation', ['fetch', 'pull'])
+def test_update_network_command_skips_automatic_maintenance(tmp_path, monkeypatch, operation):
+    """Use Git's trace as the oracle, with maintenance explicitly enabled locally."""
+    origin = tmp_path / 'origin.git'
+    _git(tmp_path, 'init', '--bare', '-q', str(origin))
+    repo = tmp_path / 'repo'
+    _git(tmp_path, 'clone', '-q', str(origin), str(repo))
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    _git(repo, 'commit', '-q', '--allow-empty', '-m', 'seed')
+    _git(repo, 'push', '-qu', 'origin', 'HEAD')
+    _git(repo, 'config', 'maintenance.auto', 'true')
+    _git(repo, 'config', 'gc.auto', '1')
+    trace = tmp_path / 'trace.jsonl'
+    monkeypatch.setenv('GIT_TRACE2_EVENT', str(trace))
+    config_before = (repo / '.git' / 'config').read_bytes()
+
+    output, ok = updates._run_git([operation, 'origin'], repo)
+
+    assert ok, output
+    events = [json.loads(line) for line in trace.read_text().splitlines()]
+    children = [event['argv'] for event in events if event['event'] == 'child_start']
+    assert children, 'Git trace did not record any child process'
+    assert not any('maintenance' in cmd or 'gc' in cmd for cmd in children), children
+    assert (repo / '.git' / 'config').read_bytes() == config_before
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX process-group integration')
+@pytest.mark.parametrize('parent_exits', [False, True])
+def test_update_timeout_stops_descendants(tmp_path, monkeypatch, parent_exits):
+    """A child holding the pipes must stop even if its parent already exited."""
+    wrapper = tmp_path / 'git-wrapper'
+    marker = tmp_path / 'child-survived'
+    pidfile = tmp_path / 'child.pid'
+    child = (
+        'import pathlib,time; time.sleep(1); '
+        f'pathlib.Path({str(marker)!r}).touch(); time.sleep(20)'
+    )
+    wrapper.write_text(
+        f'#!{sys.executable}\n'
+        'import pathlib,subprocess,sys,time\n'
+        'if "config" in sys.argv or "ls-remote" in sys.argv: sys.exit(1)\n'
+        f'p = subprocess.Popen([sys.executable, "-c", {child!r}])\n'
+        f'pathlib.Path({str(pidfile)!r}).write_text(str(p.pid))\n'
+        'print("remote: partial output", flush=True)\n'
+        + ('sys.exit(0)\n' if parent_exits else 'time.sleep(20)\n'),
+        encoding='utf-8',
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setattr(updates, '_resolve_git_executable', lambda: str(wrapper))
+    started = time.monotonic()
+    try:
+        output, ok = updates._run_git(['fetch', 'origin'], tmp_path, timeout=0.5)
+        assert not ok
+        assert time.monotonic() - started < 10
+        assert 'partial output' in output
+        time.sleep(1.5)
+        assert not marker.exists(), 'a descendant kept running after cancellation'
+        assert 'timed out after 0.5s' in output
+    finally:
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_update_windows_network_git_delegates_to_job_runner(tmp_path, monkeypatch):
+    """On Windows, tree ownership moves to the shared Job runner; POSIX keeps killpg."""
+    routed = {}
+
+    def fake_windows_runner(argv, *, cwd, env, timeout):
+        routed.update(argv=list(argv), cwd=cwd, env=env, timeout=timeout)
+        return 'sentinel-completed'
+
+    # Replace updates' module-level `os` reference instead of patching the
+    # shared os module: pathlib and pytest internals read os.name live.
+    monkeypatch.setattr(updates, 'os', SimpleNamespace(name='nt'))
+    # updates.py binds the runner by name at import time; patch that binding.
+    monkeypatch.setattr(updates, 'run_network_command_windows', fake_windows_runner)
+    result = updates._run_network_git(['git', 'fetch'], cwd=tmp_path, env={'K': 'V'}, timeout=7)
+    assert result == 'sentinel-completed'
+    assert routed == {'argv': ['git', 'fetch'], 'cwd': tmp_path, 'env': {'K': 'V'}, 'timeout': 7}
+
+
+@pytest.mark.parametrize('operation', ['check', 'branch', 'apply', 'force'])
+def test_update_entry_points_allow_slow_fetch(tmp_path, monkeypatch, operation):
+    """Check/apply/force must all use the same network budget before mutating."""
+    (tmp_path / '.git').mkdir()
+    monkeypatch.setattr(updates, 'REPO_ROOT', tmp_path)
+    seen = []
+
+    def failed_fetch(args, cwd, timeout=10):
+        if args[0] == 'fetch':
+            seen.append(timeout)
+            return f"git {' '.join(args)} timed out after {timeout}s", False
+        return '', False
+
+    monkeypatch.setattr(updates, '_run_git', failed_fetch)
+    if operation == 'check':
+        updates._check_repo(tmp_path, 'webui')
+    elif operation == 'branch':
+        updates._check_repo_branch(tmp_path, 'webui')
+    elif operation == 'apply':
+        updates.apply_update('webui')
+    else:
+        updates.apply_force_update('webui')
+    assert seen == [60]
 
 
 def _dirty_stable_repo(tmp_path):
@@ -62,9 +180,9 @@ def _fake_git_for_release_fetch_failure(args, cwd, timeout=10):
         return '', True  # clean tree
     if args == ['fetch', 'origin', '--tags', '--force']:
         return 'would clobber existing tag v0.50.294', False
-    if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+    if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
         return 'v0.51.106\nv0.51.103', True
-    if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+    if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
         return 'v0.51.103', True
     if args == ['merge-base', '--is-ancestor', 'v0.51.106', 'HEAD']:
         return '', False
@@ -145,7 +263,7 @@ def test_check_repo_redacts_credentialed_fetch_failure(tmp_path):
             return '', True
         if args == ['fetch', 'origin', '--tags', '--force']:
             return raw_error, False
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return '', True
         raise AssertionError(f'unexpected git args: {args!r}')
 
@@ -278,7 +396,7 @@ def test_check_repo_fetch_failure_without_tags_is_not_up_to_date(tmp_path):
             return '', True
         if args == ['fetch', 'origin', '--tags', '--force']:
             return 'network unavailable', False
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return '', True
         raise AssertionError(f'unexpected git args: {args!r}')
 
@@ -664,7 +782,7 @@ def test_force_update_dirty_probe_timeout_keeps_stable_no_ref_as_an_exact_noop(
         'channel': 'stable',
     }
     assert calls == [
-        (['fetch', 'origin', '--quiet', '--tags', '--force'], 15),
+        (['fetch', 'origin', '--quiet', '--tags', '--force'], updates._GIT_NETWORK_TIMEOUT),
         (['diff-index', '--quiet', 'HEAD', '--'], updates._FORCE_DIRTY_PROBE_TIMEOUT),
     ]
     assert 'working-tree state as unknown' in caplog.text
@@ -709,7 +827,7 @@ def test_force_update_dirty_probe_non_dirty_status_keeps_stable_no_ref_as_an_exa
         'channel': 'stable',
     }
     assert calls == [
-        (['fetch', 'origin', '--quiet', '--tags', '--force'], 15),
+        (['fetch', 'origin', '--quiet', '--tags', '--force'], updates._GIT_NETWORK_TIMEOUT),
         (['diff-index', '--quiet', 'HEAD', '--'], updates._FORCE_DIRTY_PROBE_TIMEOUT),
     ]
     assert 'working-tree state as unknown' in caplog.text
@@ -971,6 +1089,7 @@ def test_run_git_ref_recovery_is_bounded_and_preserves_errors(
         return real_run(cmd, **kwargs)
 
     monkeypatch.setattr(subprocess, 'run', failed_network_command)
+    monkeypatch.setattr(updates, '_run_network_git', failed_network_command)
     assert updates._run_git(args, tmp_path) == (diagnostic, False)
     assert len(attempts) == expected_attempts
 
@@ -1010,7 +1129,8 @@ def test_run_git_ref_recovery_preserves_custom_refspec_destinations(tmp_path, ex
 def test_run_git_returns_stderr_on_failure(tmp_path):
     """When a git command fails, _run_git should return stderr (not empty string)."""
     with patch.object(updates.shutil, 'which', return_value='C:/Tools/git.exe'), \
-         patch('subprocess.run') as mock_run:
+         patch('subprocess.run') as mock_run, \
+         patch.object(updates, '_run_network_git', mock_run):
         mock_run.return_value = MagicMock(
             returncode=1,
             stdout='',
@@ -1025,7 +1145,8 @@ def test_run_git_returns_stderr_on_failure(tmp_path):
 def test_run_git_returns_stdout_when_no_stderr(tmp_path):
     """If stderr is empty on failure, fall back to stdout."""
     with patch.object(updates.shutil, 'which', return_value='C:/Tools/git.exe'), \
-         patch('subprocess.run') as mock_run:
+         patch('subprocess.run') as mock_run, \
+         patch.object(updates, '_run_network_git', mock_run):
         mock_run.return_value = MagicMock(
             returncode=128,
             stdout='Already up to date.',
@@ -1232,7 +1353,7 @@ def test_check_repo_fetches_tags_with_force(tmp_path):
             # Force a fetch failure path so we don't have to mock the rest of
             # the release/branch logic; the assertion is about the args shape.
             return '', False
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return '', True
         raise AssertionError(f'unexpected git args: {args!r}')
 
@@ -1319,11 +1440,11 @@ def test_check_repo_recovers_from_remote_retag(tmp_path):
             ), False
         if args == ['fetch', 'origin', '--tags', '--force']:
             return '', True
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v0.51.110\nv0.51.109', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v0.51.110', True
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v0.51.110', True
         if args == ['remote', 'get-url', 'origin']:
             return 'https://github.com/nesquena/hermes-webui.git', True
@@ -1364,12 +1485,12 @@ def test_check_repo_release_falls_through_when_head_is_past_tag(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16', True
         # HEAD is 608 commits past the tag — describe includes a suffix.
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16-608-g1d22b9c2d', True
         raise AssertionError(f'unexpected git args: {args!r}')
 
@@ -1387,12 +1508,12 @@ def test_check_repo_release_not_affected_when_head_exactly_on_tag(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.16\nv2026.5.10', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16', True
         # No -N-gSHA suffix: HEAD is exactly on the tag.
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16', True
         if args == ['remote', 'get-url', 'origin']:
             return 'https://github.com/nesquena/hermes-agent.git', True
@@ -1418,9 +1539,9 @@ def test_check_repo_stable_up_to_date_payload_carries_real_latest_tag(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v0.52.1\nv0.52.0', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v0.52.0', True
         # HEAD contains the latest tag → suppress_stable_fallthrough wins.
         if args == ['merge-base', '--is-ancestor', 'v0.52.1', 'HEAD']:
@@ -1452,12 +1573,12 @@ def test_check_repo_branch_check_runs_for_post_tag_commits(tmp_path):
     def fake_git(args, cwd, timeout=10):
         if args == ['fetch', 'origin', '--tags', '--force']:
             return '', True
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16', True
         # HEAD is 608 commits past the tag.
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16-608-g1d22b9c2d', True
         # Branch-check path follows: rev-parse upstream, default branch, rev-list.
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
@@ -1503,11 +1624,11 @@ def test_check_repo_branch_path_without_tags_omits_tag_fields(tmp_path):
     def fake_git(args, cwd, timeout=10):
         if args == ['fetch', 'origin', '--tags', '--force']:
             return '', True
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return '', True  # no release tags at all
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return '', False
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return '1d22b9c2d', True
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
             return '', False
@@ -1547,11 +1668,11 @@ def test_select_apply_compare_ref_uses_tag_when_head_is_on_tag(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.16\nv2026.5.10', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16', True
         raise AssertionError(f'unexpected git args: {args!r}')
 
@@ -1572,12 +1693,12 @@ def test_select_apply_compare_ref_falls_through_when_head_is_past_tag(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             # HEAD's nearest tag is v2026.5.16; HEAD is 608 commits past it.
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16-608-g1d22b9c2d', True
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
             return 'origin/main', True
@@ -1597,7 +1718,7 @@ def test_select_apply_compare_ref_no_tags_uses_upstream(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return '', True
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
             return 'origin/feat/foo', True
@@ -1614,7 +1735,7 @@ def test_select_apply_compare_ref_no_tags_no_upstream_uses_default_branch(tmp_pa
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return '', True
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
             return '', False
@@ -1638,11 +1759,11 @@ def test_check_and_apply_paths_agree_when_head_is_past_tag(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16-608-g1d22b9c2d', True
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
             return 'origin/main', True
@@ -1675,9 +1796,9 @@ def test_check_repo_release_falls_through_when_head_contains_newer_tag(tmp_path)
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.29.2\nv2026.5.29', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.29', True
         if args == ['merge-base', '--is-ancestor', 'v2026.5.29.2', 'HEAD']:
             return '', True
@@ -1697,9 +1818,9 @@ def test_select_apply_compare_ref_falls_through_when_head_contains_newer_tag(tmp
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.29.2\nv2026.5.29', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.29', True
         if args == ['merge-base', '--is-ancestor', 'v2026.5.29.2', 'HEAD']:
             return '', True
@@ -1733,12 +1854,12 @@ def test_select_apply_compare_ref_case_d_older_tag_with_commits_and_newer_tag_ex
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.16\nv2026.5.10', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             # HEAD's nearest reachable tag (older one)
             return 'v2026.5.10', True
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             # HEAD has 3 commits past v2026.5.10, but it does not contain
             # the newer v2026.5.16 release tag.
             return 'v2026.5.10-3-gabcdef12', True
@@ -1771,11 +1892,11 @@ def test_check_repo_release_falls_through_when_latest_tag_is_not_ff_reachable(tm
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.29.2\nv2026.5.29', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.29', True
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.29-265-g5921d6678', True
         if args == ['merge-base', '--is-ancestor', 'v2026.5.29.2', 'HEAD']:
             return '', False
@@ -1794,11 +1915,11 @@ def test_select_apply_compare_ref_falls_through_when_latest_tag_is_not_ff_reacha
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.29.2\nv2026.5.29', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.29', True
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.29-265-g5921d6678', True
         if args == ['merge-base', '--is-ancestor', 'v2026.5.29.2', 'HEAD']:
             return '', False
@@ -1844,7 +1965,6 @@ def test_is_git_lock_error_returns_false_for_non_lock(output):
 # ── _apply_update_inner lock detection tests ────────────────────────────────
 
 
-_MODULE = 'api.updates'
 
 
 def _assert_lock_conflict_result(result):
@@ -1856,71 +1976,66 @@ def _assert_lock_conflict_result(result):
 def test_apply_update_fetch_lock_error_returns_lock_conflict(tmp_path):
     """Fetch failure caused by .git/index.lock returns lock_conflict: True."""
     (tmp_path / '.git').mkdir()
-    from api import updates as mod
-    with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
-         patch(f'{_MODULE}._run_git') as mock_run_git:
+    with patch.object(updates, 'REPO_ROOT', tmp_path), \
+         patch.object(updates, '_run_git') as mock_run_git:
         mock_run_git.side_effect = [
             ("fatal: Unable to create '/app/.git/index.lock': File exists.", False),
         ]
-        result = mod._apply_update_inner('webui')
+        result = updates._apply_update_inner('webui')
     _assert_lock_conflict_result(result)
 
 
 def test_apply_update_fetch_lock_error_does_not_attempt_pull(tmp_path):
     """If fetch fails with a lock error, no further git calls are made."""
     (tmp_path / '.git').mkdir()
-    from api import updates as mod
-    with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
-         patch(f'{_MODULE}._run_git') as mock_run_git:
+    with patch.object(updates, 'REPO_ROOT', tmp_path), \
+         patch.object(updates, '_run_git') as mock_run_git:
         mock_run_git.side_effect = [
             ("fatal: Unable to create '.git/index.lock': File exists.", False),
         ]
-        mod._apply_update_inner('webui')
+        updates._apply_update_inner('webui')
     assert mock_run_git.call_count == 1
 
 
 def test_apply_update_status_lock_error_returns_lock_conflict(tmp_path):
     """Status failure caused by .git/index.lock returns lock_conflict: True."""
     (tmp_path / '.git').mkdir()
-    from api import updates as mod
-    with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
-         patch(f'{_MODULE}._select_apply_compare_ref', return_value='origin/main'), \
-         patch(f'{_MODULE}._run_git') as mock_run_git:
+    with patch.object(updates, 'REPO_ROOT', tmp_path), \
+         patch.object(updates, '_select_apply_compare_ref', return_value='origin/main'), \
+         patch.object(updates, '_run_git') as mock_run_git:
         mock_run_git.side_effect = [
             ('', True),   # fetch succeeds
             ("fatal: Unable to create '.git/index.lock': File exists.", False),  # status fails
         ]
-        result = mod._apply_update_inner('webui')
+        result = updates._apply_update_inner('webui')
     _assert_lock_conflict_result(result)
 
 
 def test_apply_update_pull_lock_error_returns_lock_conflict(tmp_path):
     """Pull failure caused by .git/index.lock returns lock_conflict: True."""
     (tmp_path / '.git').mkdir()
-    from api import updates as mod
-    with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
-         patch(f'{_MODULE}._select_apply_compare_ref', return_value='origin/main'), \
-         patch(f'{_MODULE}.STREAMS', {}), \
-         patch(f'{_MODULE}._run_git') as mock_run_git:
+    with patch.object(updates, 'REPO_ROOT', tmp_path), \
+         patch.object(updates, '_select_apply_compare_ref', return_value='origin/main'), \
+         patch.object(updates, 'STREAMS', {}), \
+         patch.object(updates, '_run_git') as mock_run_git:
         mock_run_git.side_effect = [
             ('', True),    # fetch succeeds
             ('', True),    # status --porcelain (clean)
             ("fatal: Unable to create '.git/index.lock': File exists.", False),  # pull fails
         ]
-        result = mod._apply_update_inner('webui')
+        result = updates._apply_update_inner('webui')
     _assert_lock_conflict_result(result)
 
 
 def test_apply_update_non_lock_fetch_failure_does_not_include_lock_conflict(tmp_path):
     """A non-lock fetch failure does NOT return lock_conflict."""
     (tmp_path / '.git').mkdir()
-    from api import updates as mod
-    with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
-         patch(f'{_MODULE}._run_git') as mock_run_git:
+    with patch.object(updates, 'REPO_ROOT', tmp_path), \
+         patch.object(updates, '_run_git') as mock_run_git:
         mock_run_git.side_effect = [
             ("fatal: unable to access 'https://github.com/repo.git/': Could not resolve host", False),
         ]
-        result = mod._apply_update_inner('webui')
+        result = updates._apply_update_inner('webui')
     assert result['ok'] is False
     assert result.get('lock_conflict') is None
 
@@ -2704,7 +2819,8 @@ def test_run_git_decodes_timeout_output_bytes(tmp_path):
     back as bytes. Returning them unchanged crashed every str-based caller
     (e.g. the pull-failure diagnosis in apply_update) with TypeError.
     """
-    with patch('subprocess.run') as mock_run:
+    with patch('subprocess.run') as mock_run, \
+         patch.object(updates, '_run_network_git', mock_run):
         mock_run.side_effect = subprocess.TimeoutExpired(
             cmd=['git', 'pull', '--ff-only'], timeout=30,
             output=b'remote: Counting objects:  50% (1/2)\r',
@@ -2718,7 +2834,8 @@ def test_run_git_decodes_timeout_output_bytes(tmp_path):
 
 def test_run_git_timeout_without_output_reports_duration(tmp_path):
     """Timeout with empty output still yields a readable str message."""
-    with patch('subprocess.run') as mock_run:
+    with patch('subprocess.run') as mock_run, \
+         patch.object(updates, '_run_network_git', mock_run):
         mock_run.side_effect = subprocess.TimeoutExpired(
             cmd=['git', 'pull'], timeout=7,
         )
@@ -2767,6 +2884,7 @@ def test_apply_update_pull_timeout_returns_error_not_typeerror(tmp_path):
         raise AssertionError(f'unexpected git cmd: {cmd!r}')
 
     with patch('subprocess.run', side_effect=fake_run), \
+         patch.object(updates, '_run_network_git', side_effect=fake_run), \
          patch.object(updates, 'REPO_ROOT', repo), \
          patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'):
         result = updates.apply_update('webui')
@@ -2813,6 +2931,7 @@ def test_apply_update_pull_timeout_does_not_leak_remote_token(tmp_path):
         raise AssertionError(f'unexpected git cmd: {cmd!r}')
 
     with patch('subprocess.run', side_effect=fake_run), \
+         patch.object(updates, '_run_network_git', side_effect=fake_run), \
          patch.object(updates, 'REPO_ROOT', repo), \
          patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'):
         result = updates.apply_update('webui')

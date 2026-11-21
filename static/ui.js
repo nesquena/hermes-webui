@@ -2247,17 +2247,51 @@ function _questionJumpButtonHtml(questionRawIdx, assistantRawIdx){
   return `<button class="msg-question-jump-btn session-jump-btn session-jump-btn--inline" type="button" title="${esc(title)}" aria-label="${esc(title)}" onclick="jumpToTurnQuestion(${questionRawIdx},${aIdx})"><span aria-hidden="true">↑</span><span>${esc(label)}</span></button>`;
 }
 
+// Pick the scroll behavior for a jump to `el` inside `container`. A smooth scroll across a long transcript runs
+// for seconds (86k px took ~1.5 s for a search hit at message 0 of 240) and the highlight, which starts with the
+// scroll, has faded before the row arrives. Far targets (more than two screens away) and reduced-motion users jump
+// instantly so the highlight plays where the user can see it; near targets keep the smooth scroll.
+function _messageJumpScrollBehavior(container, el){
+  try{
+    if(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches) return 'auto';
+    if(!container||!el) return 'smooth';
+    const distance=Math.abs(el.getBoundingClientRect().top-container.getBoundingClientRect().top);
+    return distance>Math.max(1,container.clientHeight)*2?'auto':'smooth';
+  }catch(_){ return 'smooth'; }
+}
+// Start the pulse on the next frame. A far jump renders and lays out the whole transcript in the same task as the
+// scroll, and an animation started inside that task takes its clock from the frame that began before it: on a
+// 240-message session the first painted frame was already 0.4-0.6 s into the 1.6 s pulse, so the ring appeared at
+// full strength and faded early. One frame later the pulse starts from zero where the user can see it.
 function _highlightQuestionRow(row){
-  if(!row) return;
+  // Cosmetic: never let the landing cue throw inside a jump that owns the scroll.
+  if(!row||!row.classList) return;
   row.classList.remove('msg-question-highlight');
-  void row.offsetWidth;
-  row.classList.add('msg-question-highlight');
-  window.setTimeout(()=>row.classList.remove('msg-question-highlight'),1800);
+  if(row._questionHighlightTimer) window.clearTimeout(row._questionHighlightTimer);
+  const start=()=>{
+    void row.offsetWidth;
+    row.classList.add('msg-question-highlight');
+    row._questionHighlightTimer=window.setTimeout(()=>{
+      row._questionHighlightTimer=0;
+      row.classList.remove('msg-question-highlight');
+    },1800);
+  };
+  if(typeof requestAnimationFrame==='function') requestAnimationFrame(start);
+  else start();
 }
 
-async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
+async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx, opts){
   const container=$('messages');
   if(!container||typeof questionRawIdx!=='number'||questionRawIdx<0) return;
+  // The frames scheduled below run after this call returns. A session switch in between, or a caller that
+  // cancelled the jump (opts.isValid, e.g. a superseded search hit), must not scroll, re-render or flash the
+  // transcript that is on screen by then (#5106).
+  const currentJumpSid=()=>(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)||null;
+  const jumpSid=currentJumpSid();
+  const stillValid=()=>{
+    if(currentJumpSid()!==jumpSid) return false;
+    return !(opts&&typeof opts.isValid==='function')||!!opts.isValid();
+  };
   const clampTargetScrollTop=(scrollTop)=>{
     const maxTop=Math.max(0,container.scrollHeight-container.clientHeight);
     const n=Number(scrollTop);
@@ -2274,14 +2308,17 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
       const segs=container.querySelectorAll('[data-msg-idx="'+assistantRawIdx+'"]');
       for(const seg of segs){
         if(seg.getClientRects().length>0){
-          seg.scrollIntoView({block:'start',behavior:'smooth'});
+          seg.scrollIntoView({block:'start',behavior:_messageJumpScrollBehavior(container,seg)});
+          // Assistant targets (search hits in a reply, jump to the start of a response) get the same landing
+          // cue as question rows; without it half of all content hits landed silently (#5106 Fable r3).
+          _highlightQuestionRow(seg);
           return true;
         }
       }
     }
     const row=document.getElementById(_userMessageDomId(questionRawIdx));
     if(!row) return false;
-    row.scrollIntoView({block:'center',behavior:'smooth'});
+    row.scrollIntoView({block:'center',behavior:_messageJumpScrollBehavior(container,row)});
     _highlightQuestionRow(row);
     return true;
   };
@@ -2300,11 +2337,11 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
     _messageVirtualWindowKey='';
     renderMessages({ preserveScroll:true });
     requestAnimationFrame(()=>{
-      if(!scrollToTarget()&&_messageHiddenBeforeCount()>0){
+      if(stillValid()&&!scrollToTarget()&&_messageHiddenBeforeCount()>0){
         _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
         _messageVirtualWindowKey='';
         renderMessages({ preserveScroll:true });
-        requestAnimationFrame(scrollToTarget);
+        requestAnimationFrame(()=>{ if(stillValid()) scrollToTarget(); });
       }
       _deferClearProgrammaticScroll();
     });
@@ -2314,7 +2351,7 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
     _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
     _messageVirtualWindowKey='';
     renderMessages({ preserveScroll:true });
-    requestAnimationFrame(scrollToTarget);
+    requestAnimationFrame(()=>{ if(stillValid()) scrollToTarget(); });
   }
 }
 
@@ -4352,6 +4389,7 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
       catch(__){ref=ref.replace(/^file:\/\//i,'');}
     }
   }
+  if(/\x00/.test(String(ref))) return '';
   if(/^https?:\/\//i.test(ref)){
     let src=ref;
     if(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(src)){
@@ -4474,6 +4512,7 @@ else _initMediaPlaybackObserver();
 setTimeout(_initMediaPlaybackObserver,0);
 
 // ── Ambient provider quota indicator (#1766) ────────────────────────────────
+let _providerQuotaLastStatus=null;
 // A provider switch can complete before an older account-quota request returns.
 // Only the newest request may update the composer; otherwise an old Codex result
 // can reappear while the active conversation uses another provider.
@@ -4486,26 +4525,105 @@ function _providerQuotaProfileKey(){
   return (typeof S!=='undefined'&&S&&S.activeProfile)?String(S.activeProfile):'';
 }
 
+// Number(null), Number('') and Number(false) are 0: a missing or rejected
+// measurement must hide, not render as $0.00 / 0%.
+function _isQuotaMeasurement(value){
+  return (typeof value==='number'||(typeof value==='string'&&value.trim()!==''))&&Number.isFinite(Number(value));
+}
 function _formatQuotaMoneyShort(value){
+  if(!_isQuotaMeasurement(value)) return '';
   const n=Number(value);
-  if(!Number.isFinite(n)) return '';
   if(Math.abs(n)>=100) return '$'+n.toFixed(0);
   if(Math.abs(n)>=10) return '$'+n.toFixed(1);
   return '$'+n.toFixed(2);
 }
 function _formatQuotaPercentShort(value){
+  if(!_isQuotaMeasurement(value)) return '';
   const n=Number(value);
-  if(!Number.isFinite(n)) return '';
   return Math.max(0,Math.min(100,n)).toFixed(0)+'%';
+}
+// Which account window the chip shows (Settings: quota_chip_window). The fixed modes pick by
+// the window's limit_window_seconds, never by list position: providers do not order windows.
+function _normalizeQuotaChipWindow(value){
+  return value==='shortest'||value==='longest'?value:'most_constrained';
+}
+function _quotaWindowSeconds(x){
+  return x&&_isQuotaMeasurement(x.limit_window_seconds)&&Number(x.limit_window_seconds)>0?Number(x.limit_window_seconds):null;
+}
+function _isAccountQuotaWindow(x){
+  const scope=typeof x.scope==='string'?x.scope.trim().toLowerCase():'';
+  return !scope||scope==='account';
+}
+function _selectQuotaChipWindow(windows){
+  const measured=windows.filter(x=>x&&_isQuotaMeasurement(x.remaining_percent));
+  if(!measured.length) return null;
+  // A model-only window (e.g. one model family's weekly cap) doesn't limit the
+  // account, so choose among account windows whenever there is one. The hover
+  // text still lists every window.
+  const account=measured.filter(_isAccountQuotaWindow);
+  const valid=account.length?account:measured;
+  const mode=_normalizeQuotaChipWindow(typeof window!=='undefined'?window._quotaChipWindow:undefined);
+  // Pick by duration only when every candidate window reports one. An untimed
+  // window can't be ordered, and skipping it could hide the depleted limit, so
+  // any gap falls back to the most constrained window.
+  if((mode==='shortest'||mode==='longest')&&valid.every(x=>_quotaWindowSeconds(x)!==null)){
+    return valid.reduce((best,x)=>{
+      const a=_quotaWindowSeconds(x),b=_quotaWindowSeconds(best);
+      return (mode==='shortest'?a<b:a>b)?x:best;
+    });
+  }
+  return valid.reduce((min,x)=>Number(x.remaining_percent)<Number(min.remaining_percent)?x:min);
+}
+// Time left until a window resets, e.g. "2h 14m" / "3d 5h"; '' when unknown or past.
+function _formatQuotaResetIn(value,now){
+  if(!value) return '';
+  const ms=new Date(value).getTime();
+  if(!Number.isFinite(ms)) return '';
+  const s=Math.round((ms-(typeof now==='number'?now:Date.now()))/1000);
+  if(s<=0) return '';
+  const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  if(d>0) return d+'d'+(h?' '+h+'h':'');
+  if(h>0) return h+'h'+(m?' '+m+'m':'');
+  return Math.max(1,m)+'m';
+}
+// Hover text: one line per account window (all periods), each with its remaining
+// share and time to reset when the provider reports one, then any detail lines.
+// With several windows, "▸ " marks the one the chip shows (`chosen`) and the other
+// window lines are indented to match.
+function _providerQuotaWindowLines(accountLimits,now,chosen){
+  const windows=accountLimits&&Array.isArray(accountLimits.windows)?accountLimits.windows:[];
+  const shown=windows.filter(w=>w&&_isQuotaMeasurement(w.remaining_percent));
+  const mark=chosen&&shown.length>1&&shown.includes(chosen);
+  const lines=[];
+  for(const w of shown){
+    const name=typeof w.label==='string'&&w.label.trim()?w.label.trim()+': ':'';
+    const reset=_formatQuotaResetIn(w.reset_at,now);
+    const prefix=mark?(w===chosen?'\u25B8 ':'\u2002 '):'';
+    lines.push(prefix+name+_formatQuotaPercentShort(w.remaining_percent)+' remaining'+(reset?' · resets in '+reset:''));
+  }
+  const details=accountLimits&&Array.isArray(accountLimits.details)?accountLimits.details:[];
+  for(const detail of details){
+    if(typeof detail==='string'&&detail.trim()) lines.push(detail.trim());
+  }
+  return lines;
 }
 function _providerQuotaIndicatorText(status){
   if(!status||status.status!=='available') return null;
   const provider=status.display_name||status.provider||'Provider';
   const accountLimits=status.account_limits||null;
   if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
-    const w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
-    const remaining=_formatQuotaPercentShort(w&&w.remaining_percent);
-    if(remaining) return {label:remaining, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+    // Multi-window providers (rolling/5-hour, weekly, monthly): by default the most
+    // constrained window, since the lowest remaining share is the limit hit first.
+    const w=_selectQuotaChipWindow(accountLimits.windows);
+    const remaining=w?_formatQuotaPercentShort(w.remaining_percent):'';
+    const windowLabel=w&&typeof w.label==='string'&&w.label.trim()?w.label.trim()+': ':'';
+    if(remaining){
+      const lines=_providerQuotaWindowLines(accountLimits,undefined,w);
+      const head=provider+' — '+(status.message||'Provider usage loaded');
+      // One window keeps the single-line form; several list every period on its own line.
+      if(lines.length<=1) return {label:remaining, title:head+' — '+(lines[0]||windowLabel+remaining+' remaining')};
+      return {label:remaining, title:head+'\n'+lines.join('\n')};
+    }
   }
   const quota=status.quota||null;
   if(quota){
@@ -4552,6 +4670,8 @@ function renderProviderQuotaIndicator(status){
     clearProviderQuotaIndicator();
     return;
   }
+  _providerQuotaLastStatus=status;
+  _initProviderQuotaTitleRefresh();
   label.textContent=text.label;
   chip.title=text.title;
   if(mobileLabel) mobileLabel.textContent=text.label;
@@ -4621,6 +4741,40 @@ window.addEventListener('visibilitychange',()=>{
     void refreshProviderQuotaIndicator(_currentQuotaProvider());
   }
 });
+// Reset countdowns are computed when the title is built; rebuild it on hover/focus
+// so "resets in" is current without waiting for the next quota fetch.
+function _refreshProviderQuotaTitle(){
+  const chip=$('providerQuotaChip');
+  if(!chip||chip.hidden||!_providerQuotaLastStatus) return;
+  const text=_providerQuotaIndicatorText(_providerQuotaLastStatus);
+  if(!text) return;
+  chip.title=text.title;
+  const mobileAction=$('composerMobileQuotaAction');
+  if(mobileAction) mobileAction.title=text.title;
+}
+// Bound lazily from renderProviderQuotaIndicator (hover only matters once the chip has drawn),
+// so this block runs no top-level DOM code. Both the desktop chip and the compact composer's
+// quota button refresh on hover / focus (CSS hides the chip in the compact layout).
+let _providerQuotaTitleRefreshBound=false;
+let _providerQuotaMobileTitleRefreshBound=false;
+function _initProviderQuotaTitleRefresh(){
+  if(!_providerQuotaTitleRefreshBound){
+    const chip=$('providerQuotaChip');
+    if(chip&&typeof chip.addEventListener==='function'){
+      chip.addEventListener('mouseenter',_refreshProviderQuotaTitle);
+      chip.addEventListener('focus',_refreshProviderQuotaTitle);
+      _providerQuotaTitleRefreshBound=true;
+    }
+  }
+  if(!_providerQuotaMobileTitleRefreshBound){
+    const mobileAction=$('composerMobileQuotaAction');
+    if(mobileAction&&typeof mobileAction.addEventListener==='function'){
+      mobileAction.addEventListener('mouseenter',_refreshProviderQuotaTitle);
+      mobileAction.addEventListener('focus',_refreshProviderQuotaTitle);
+      _providerQuotaMobileTitleRefreshBound=true;
+    }
+  }
+}
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
@@ -6018,6 +6172,25 @@ function _normalizeConfiguredModelKey(modelId){
   return s.replace(/-/g,'.');
 }
 
+// The one identity the configured badge lookup, the configured-row dedup and
+// the Configured section key share, so they cannot disagree (#8756).
+function _configuredModelIdentity(modelId,providerId){
+  const provider=String(providerId||'').trim().toLowerCase();
+  // Callers pass the provider owning the row or badge. With none, nothing
+  // marks a leading segment as routing syntax: keep the legacy key.
+  if(!provider) return _normalizeConfiguredModelKey(modelId);
+  let s=String(modelId||'').trim().toLowerCase();
+  // Strip only this provider's routing wrappers. Live enrichment composes
+  // them (`@openai:` + `openai/gpt-x`), so peel `@provider:` and then
+  // `provider/`. Any other leading segment is a vendor namespace and stays
+  // part of the identity (#8725).
+  const atPrefix=`@${provider}:`;
+  const slashPrefix=`${provider}/`;
+  if(s.startsWith(atPrefix)) s=s.slice(atPrefix.length)||s;
+  if(s.startsWith(slashPrefix)) s=s.slice(slashPrefix.length)||s;
+  return s.replace(/-/g,'.');
+}
+
 function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   const normalized=_normalizeConfiguredModelKey(modelId);
   const provider=String(badge&&badge.provider||'').toLowerCase();
@@ -6079,10 +6252,15 @@ function _getConfiguredModelBadge(modelId,badgeMap,providerId){
   const provider=String(providerId||'').toLowerCase();
   const exact=map[modelId];
   if(exact && (!provider || !exact.provider || String(exact.provider).toLowerCase()===provider)) return exact;
-  const targetNorm=_normalizeConfiguredModelKey(modelId);
   const matches=[];
   for(const [candidate,badge] of Object.entries(map)){
-    if(_normalizeConfiguredModelKey(candidate)===targetNorm) matches.push(badge);
+    const badgeProvider=String(badge&&badge.provider||'').toLowerCase();
+    if(provider&&badgeProvider&&badgeProvider!==provider) continue;
+    // Strip the same provider wrapper from both sides. A typed custom id such
+    // as 'openai/gpt-4o' reaches here with no row provider, so the badge's
+    // provider decides which wrapper is routing syntax.
+    const identityProvider=provider||badgeProvider;
+    if(_configuredModelIdentity(candidate,identityProvider)===_configuredModelIdentity(modelId,identityProvider)) matches.push(badge);
   }
   if(!matches.length) return null;
   if(provider){
@@ -6769,6 +6947,24 @@ function renderModelDropdown(){
   const _selectedModelBadge=(m)=>_isSelectedModelRow(m)
     ?`<span class="model-opt-badge model-opt-badge--selected">${esc(t('model_badge_selected')||'Selected')}</span>`
     :'';
+  // #9074: the backend's badge label is English ("Primary", "Fallback 2"), so
+  // every renderer translates the role here. t() returns the key itself when
+  // no locale has it, which falls back to the English text.
+  const _badgeText=(key,english,...args)=>{
+    const value=t(key,...args);
+    return value&&value!==key?String(value):english;
+  };
+  const _modelBadgeLabel=(badge)=>{
+    if(!badge) return '';
+    const role=String(badge.role||'');
+    const label=String(badge.label||'');
+    if(role==='primary') return _badgeText('model_badge_primary','Primary');
+    if(role==='fallback'){
+      const index=(label.match(/(\d+)\s*$/)||[])[1]||'';
+      return _badgeText('model_badge_fallback',`Fallback ${index}`.trim(),index).trim();
+    }
+    return label&&!label.includes('@')?label:_badgeText('model_group_configured','Configured');
+  };
   const _renderProviderEndpointHint=(entry,parent)=>{
     if(!entry||!entry.label||!entry.modelsEndpointError) return;
     const hint=document.createElement('div');
@@ -6781,7 +6977,7 @@ function renderModelDropdown(){
   const _buildModelRow=(m,withProviderChip)=>{
     const row=document.createElement('div');
     row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
-    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(_modelBadgeLabel(m.badge))}</span>`:'';
     const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
     const providerChip=(_plainGroup&&withProviderChip)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
     row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${_selectedModelBadge(m)}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
@@ -6955,7 +7151,7 @@ function renderModelDropdown(){
   const _makeModelRow=(m,shouldRenderHeading)=>{
     const row=document.createElement('div');
     row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
-    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(_modelBadgeLabel(m.badge))}</span>`:'';
     const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
     const _underOwnHeading=shouldRenderHeading&&!!(m.groupKey&&_groupWrappers[m.groupKey]);
     const providerChip=(_plainGroup&&!_underOwnHeading)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
@@ -6997,8 +7193,17 @@ function renderModelDropdown(){
     const configuredCandidates=_modelData
       .filter(m=>m.badge&&matches(m));
     const configuredBySemanticKey=new Map();
+    const semanticKeyByEntry=new Map();
     const _configuredProviderKey=(m)=>String((m&&m.badge&&m.badge.provider)||_providerFromModelValue(m&&m.value)||'').toLowerCase();
-    const _configuredModelKey=(m)=>_normalizeConfiguredModelKey(m&&m.value||'');
+    const _configuredModelKey=(m)=>_configuredModelIdentity(m&&m.value||'',_configuredProviderKey(m));
+    const _sendsProviderAlias=(m)=>{
+      const p=_configuredProviderKey(m);
+      if(!p) return false;
+      const s=String(m&&m.value||'').trim().toLowerCase();
+      const at=`@${p}:`;
+      const w=(s.startsWith(at)?s.slice(at.length):s).replace(/-/g,'.');
+      return w.startsWith(`${p.replace(/-/g,'.')}/`);
+    };
     const _configuredDisplayPriority=(m)=>{
       // Prefer plain IDs over provider-qualified aliases for readability.
       const v=String((m&&m.value)||'');
@@ -7007,15 +7212,36 @@ function renderModelDropdown(){
       return 2;
     };
     for(const candidate of configuredCandidates){
-      const semanticKey=`${_configuredProviderKey(candidate)}::${_configuredModelKey(candidate)}`;
+      // One configured entry (Primary, Fallback N) is one Configured row. The
+      // backend also badges spellings it linked across a vendor namespace
+      // (`qwen3` and `Qwen/qwen3`, via _norm_model_id), which the identity
+      // keeps apart, so a later row showing an entry already placed joins
+      // that row's key (#8756). The badge names the entry, so its own provider
+      // (none for a providerless badge) keys it, not the row's routing prefix.
+      const entryKey=candidate.badge.label?`${String(candidate.badge.provider||'').toLowerCase()}::${candidate.badge.role||''}::${candidate.badge.label}`:'';
+      const semanticKey=(entryKey&&semanticKeyByEntry.get(entryKey))||`${_configuredProviderKey(candidate)}::${_configuredModelKey(candidate)}`;
+      if(entryKey&&!semanticKeyByEntry.has(entryKey)) semanticKeyByEntry.set(entryKey,semanticKey);
       const existing=configuredBySemanticKey.get(semanticKey);
       if(!existing){
         configuredBySemanticKey.set(semanticKey,candidate);
         continue;
       }
+      // A row that sends `<provider>/<model>` is an alias of the configured id;
+      // a row that sends the configured id itself always wins the Configured slot.
+      const candidateAlias=_sendsProviderAlias(candidate);
+      const existingAlias=_sendsProviderAlias(existing);
+      if(candidateAlias!==existingAlias){
+        if(!candidateAlias) configuredBySemanticKey.set(semanticKey,candidate);
+        continue;
+      }
       const candidatePriority=_configuredDisplayPriority(candidate);
       const existingPriority=_configuredDisplayPriority(existing);
-      if(candidatePriority>existingPriority){
+      // Same model, same priority: the shorter spelling carries fewer routing
+      // wrappers, so it is the native configured id rather than a typed alias.
+      const sameIdentityShorter=candidatePriority===existingPriority
+        &&_configuredModelKey(candidate)===_configuredModelKey(existing)
+        &&String(candidate.value||'').length<String(existing.value||'').length;
+      if(candidatePriority>existingPriority||sameIdentityShorter){
         configuredBySemanticKey.set(semanticKey,candidate);
       }
     }
@@ -7027,11 +7253,21 @@ function renderModelDropdown(){
         return a.name.localeCompare(b.name);
       });
     const configuredIds=new Set(configuredModels.map(m=>m.value));
-    const configuredSemanticKeys=new Set(configuredModels.map(m=>`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`));
+    // A hidden row stays out of the Show-more count only when a Configured row
+    // already sends its wire id (provider plus value less `@provider:`,
+    // dash-folded); a row that sends `<provider>/<model>`, or the same bare id
+    // to another provider, is a different route and stays reachable.
+    const _configuredWireKey=(m)=>{
+      const p=_configuredProviderKey(m);
+      const s=String(m&&m.value||'').trim().toLowerCase();
+      const at=`@${p}:`;
+      return `${p}::${(p&&s.startsWith(at)?s.slice(at.length):s).replace(/-/g,'.')}`;
+    };
+    const configuredWireKeys=new Set(configuredModels.map(_configuredWireKey));
     const _effectiveHiddenCount=(groupKey)=>_modelData.filter(m=>
       m.groupKey===groupKey
       && m.hiddenByDefault
-      && !configuredSemanticKeys.has(`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`)
+      && !configuredWireKeys.has(_configuredWireKey(m))
     ).length;
     dd.innerHTML='';
     dd.appendChild(_scopeNote);
@@ -7052,17 +7288,44 @@ function renderModelDropdown(){
         const row=document.createElement('div');
         row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
         let badgeLabel = '';
+        let badgeTitle = '';
         if (m.badge) {
-          // 直接用badge的原始key（即config.yaml里的ID）
+          // #8733: the chip shows the readable role the group rows already use
+          // ("Primary", "Fallback 2") instead of the matched config key. That key
+          // can be an '@provider:model' routing spelling, which wraps the chip onto
+          // its own line on desktop and breaks mid-string on ~320px phones. The key
+          // stays reachable on the row subtitle, and the chip's title keeps master's
+          // full "key (provider)" text, so the provider the chip used to name isn't lost.
           const rawId = badgeKeyMap.get(m.badge) || m.value || m.badge.label || 'Configured';
-          badgeLabel = rawId;
+          badgeLabel = _modelBadgeLabel(m.badge);
+          badgeTitle = rawId;
           if(m.badge.provider){
-            const providerName=m.badge.provider.replace(/^custom:/,'').split('/')[0];
-            badgeLabel += ` (${providerName})`;
+            const providerName=String(m.badge.provider).replace(/^custom:/,'').split('/')[0];
+            badgeTitle += ` (${providerName})`;
           }
         }
-        const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
-        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+        const badgeAttrs = badgeTitle ? ` title="${esc(badgeTitle)}"` : '';
+        const badgeHtml=m.badge?`<span${badgeAttrs} class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
+        // #9074: a title is out of reach on touch and keyboard, so the provider
+        // the chip used to name gets the muted pill the group rows use. It sits
+        // beside the chip rather than inside it, and ellipsizes on narrow phones.
+        // It names the provider the click selects, from that provider's own group:
+        // m.group can be the backend's injected "Default" group, or empty.
+        const providerId=String((m.badge&&m.badge.provider)||m.providerId||'');
+        const providerMeta=_groupMeta.get(providerId);
+        const providerLabel=providerMeta?String(providerMeta.label||'').replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
+        const providerName=(providerLabel&&providerLabel!=='Default')?providerLabel
+          :providerId.replace(/^custom:/,'').split('/')[0];
+        // A short name keeps its full width and wraps whole: an ellipsis on it
+        // leaves a stub ("Ope…") that can't tell OpenAI from OpenRouter.
+        const providerFit=providerName.length<=14?' model-opt-provider--fit':'';
+        const providerChip=providerName
+          ?`<span class="model-opt-provider model-opt-provider--configured${providerFit}" title="${esc(providerName)}">${esc(providerName)}</span>`
+          :'';
+        // #8733: the chip no longer carries the routing key, so the matched key
+        // rides on the chip's title. The subtitle stays the option id, which the
+        // Configured section has always shown.
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>selectFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }
@@ -7640,6 +7903,11 @@ function _fitComposerFooter(){
     footer.style.visibility='hidden';
   }
   let next='';
+  // Buttons carry `transition:all`; measured mid-transition they still report
+  // their icon-stage width, so a footer that collapsed to icons could never
+  // re-expand once its labels fit again (#8253 Fable r1). Freeze transitions
+  // for the synchronous strip-and-measure.
+  footer.classList.add('cf-measuring');
   try{
     footer.classList.remove('cf-icons','cf-burger');
     if(overflows()){
@@ -7659,6 +7927,12 @@ function _fitComposerFooter(){
       footer.style.height=prevHeight;
       footer.style.visibility=prevVisibility;
     }
+    // Commit the restored, visible style while transitions are still frozen,
+    // then unfreeze: otherwise every `transition:all` descendant animates its
+    // inherited visibility from the hidden measuring state and blinks out for a
+    // frame on each fit pass (#8253 Fable r2).
+    void footer.offsetWidth;
+    footer.classList.remove('cf-measuring');
   }
   // Post-restore transition check: fire the same composer menu cleanup used
   // by the 640px MediaQueryList boundary listener (see _onPhoneBoundaryChange
@@ -7768,6 +8042,10 @@ function _reasoningEffortContext(){
   const ctx={};
   if(model) ctx.model=model;
   if(provider) ctx.provider=provider;
+  // Reasoning effort is session-owned just like the model selection. Including
+  // the session identity also makes the request-cache key change when two
+  // sessions happen to use the same model/provider pair.
+  if(session&&session.session_id) ctx.session_id=session.session_id;
   return ctx;
 }
 
@@ -7775,6 +8053,103 @@ function _reasoningEffortQuery(){
   const params=new URLSearchParams(_reasoningEffortContext());
   const qs=params.toString();
   return qs?('?'+qs):'';
+}
+
+// Monotonic save counter plus the newest save per profile/session: only the
+// newest save for a chat may update that chat's chip, so an older save resolving
+// late cannot undo a newer pick, and another chat's pick cannot hide this one's.
+let _reasoningSaveSeq=0;
+const _reasoningLatestSaveByOwner=new Map();
+// Effort saves are sent one at a time in pick order, so the threaded server
+// stores the latest pick rather than whichever request it handled last.
+let _reasoningSaveChain=Promise.resolve();
+// Every request carries the profile cookie at send time. A profile switch
+// freezes new picks and drains queued saves before it changes the cookie, so a
+// save queued behind a slow one still lands in the profile it was picked in.
+let _reasoningSavesFrozen=0;
+
+function _reasoningSaveOwner(profile, context){
+  return profile+'\n'+((context&&context.session_id)||'');
+}
+
+// While frozen the effort controls are disabled, so a pick is never accepted
+// by the UI and then dropped; /reasoning still reports the refusal in a toast.
+function _setReasoningControlsFrozen(frozen){
+  ['composerReasoningChip','composerMobileReasoningAction'].forEach(function(id){
+    const btn=$(id);
+    if(btn) btn.disabled=frozen;
+  });
+  if(frozen) closeReasoningDropdown();
+}
+
+async function _beginReasoningProfileSwitch(){
+  ++_reasoningSavesFrozen;
+  _setReasoningControlsFrozen(true);
+  await _reasoningSaveChain;
+}
+
+function _endReasoningProfileSwitch(){
+  if(_reasoningSavesFrozen>0) --_reasoningSavesFrozen;
+  if(!_reasoningSavesFrozen) _setReasoningControlsFrozen(false);
+}
+
+function _saveReasoningEffort(effort){
+  if(_reasoningSavesFrozen){
+    const frozen=new Error('profile switch in progress');
+    frozen.code='profile_switch_in_progress';
+    return Promise.reject(frozen);
+  }
+  const context=_reasoningEffortContext();
+  const profile=(S&&S.activeProfile)||'default';
+  const owner=_reasoningSaveOwner(profile, context);
+  const saveSeq=++_reasoningSaveSeq;
+  _reasoningLatestSaveByOwner.set(owner, saveSeq);
+  const payload=Object.assign({effort:effort},context);
+  const post=function(){
+    return api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)});
+  };
+  const request=_reasoningSaveChain.then(post,post);
+  _reasoningSaveChain=request.catch(function(){});
+  return request.then(function(st){
+    _applyReasoningSaveResult(saveSeq, owner, context, profile, (st&&st.reasoning_effort)||effort, st||{});
+    return st;
+  },function(e){
+    _failReasoningSave(saveSeq, owner);
+    throw e;
+  });
+}
+
+function _isLatestReasoningSave(saveSeq, owner){
+  return _reasoningLatestSaveByOwner.get(owner)===saveSeq;
+}
+
+function _failReasoningSave(saveSeq, owner){
+  // This chat's newest save failed, so an older save (whose result was
+  // suppressed) may be what the server stored. Re-read it now if it is visible.
+  if(!_isLatestReasoningSave(saveSeq, owner)) return;
+  _reasoningLatestSaveByOwner.delete(owner);
+  if(owner===_reasoningSaveOwner((S&&S.activeProfile)||'default', _reasoningEffortContext())) fetchReasoningChip();
+}
+
+function _applyReasoningSaveResult(saveSeq, owner, context, profile, effort, status){
+  // The server saved the originating session. This single-entry UI cache
+  // belongs only to the visible context; revisiting another session refetches.
+  if(!_isLatestReasoningSave(saveSeq, owner)) return;
+  _reasoningLatestSaveByOwner.delete(owner);
+  if(profile!==((S&&S.activeProfile)||'default')) return;
+  const params=new URLSearchParams(context).toString();
+  const key=params?('?'+params):'';
+  if(key!==_reasoningEffortQuery()){
+    // Same chat, different model/provider: a GET for the new key may have
+    // read the pre-save value, so re-read it rather than keep a stale cache.
+    const current=_reasoningEffortContext();
+    if(context.session_id&&current.session_id===context.session_id) fetchReasoningChip();
+    return;
+  }
+  // A GET dispatched before this save must not restore the old effort later.
+  ++_reasoningFetchSeq;
+  _lastReasoningFetchKey=key;
+  _applyReasoningChip(effort, status);
 }
 
 function _applyReasoningOptions(supportedEfforts){
@@ -7850,7 +8225,7 @@ function _applyReasoningChip(eff){
   if(chip){
     const inactive=!effort||effort==='none';
     chip.classList.toggle('inactive',inactive);
-    const labelText='Reasoning effort: '+text;
+    const labelText='Reasoning effort for this chat: '+text;
     chip.title=labelText;
     chip.setAttribute('aria-label',labelText);
   }
@@ -7858,9 +8233,9 @@ function _applyReasoningChip(eff){
   _highlightReasoningOption(effort);
 }
 
-// Tracks the model/provider identity of the last reasoning fetch so routine
-// topbar syncs can serve the cached chip state instead of re-hitting the
-// network. null = never fetched.
+// Tracks the session/model/provider identity of the last reasoning fetch so
+// routine topbar syncs can serve the cached chip state instead of re-hitting
+// the network. null = never fetched.
 let _lastReasoningFetchKey=null;
 // Monotonic dispatch counter. Each fetchReasoningChip() increments it and the
 // async handlers capture their own value; a response (success OR failure) only
@@ -7917,12 +8292,12 @@ function syncReasoningChip(){
   // refetch unconditionally to refresh supported-efforts after a model switch,
   // which turned ordinary syncs into a GET /api/reasoning storm (one per token).
   // Restore the cache short-circuit but keep a9ce2889's intent: only hit the
-  // network when nothing is cached yet OR the model/provider identity changed
-  // since the last fetch (the only inputs that change /api/reasoning's answer).
+  // network when nothing is cached yet OR the session/model/provider identity
+  // changed since the last fetch (the inputs that change /api/reasoning's answer).
   // The user-pick and model-switch paths still update the cache directly.
   const key=_reasoningEffortQuery();
-  // Short-circuit on the KEY alone: if a fetch for this exact model/provider has
-  // already been dispatched (in-flight) or completed, do not dispatch another —
+  // Short-circuit on the KEY alone: if a fetch for this exact session/model/provider
+  // has already been dispatched (in-flight) or completed, do not dispatch another —
   // this is what stops the #4650 storm, including the COLD-cache window where
   // _currentReasoningEffort is still null between the first dispatch and its
   // response (10 syncs before the first GET resolves must produce ONE request,
@@ -7948,6 +8323,7 @@ function toggleReasoningDropdown(){
   if(!dd||!chip) return;
   const open=dd.classList.contains('open');
   if(open){closeReasoningDropdown();return;}
+  if(_reasoningSavesFrozen) return;
   if(typeof closeProfileDropdown==='function') closeProfileDropdown();
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   closeModelDropdown();
@@ -7999,14 +8375,12 @@ document.addEventListener('click',function(e){
     // silently ignore the Default click and leave the toggle one-way off-only.
     // (#6219 round-3)
     if(opt){
-      const payload=Object.assign({effort:effort},_reasoningEffortContext());
-      api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
+      _saveReasoningEffort(effort)
         .then(function(st){
           // For Default (effort=''), the returned reasoning_effort is '' (clear)
           // — display 'Default' rather than an empty toast.
-          const display=(st&&st.reasoning_effort)||effort||'Default';
-          _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
-          showToast('🧠 Reasoning effort set to '+display);
+          const display=_formatReasoningEffortLabel((st&&st.reasoning_effort)||effort||'');
+          showToast('🧠 Reasoning effort set to '+display+' for this chat and new chats (applies to next turn)');
         })
         .catch(function(){showToast('🧠 Failed to set effort');});
       closeReasoningDropdown();
@@ -10411,7 +10785,9 @@ function _stripVisibleAssistantEchoFromThinking(thinkingText, ...visibleTexts){
 }
 
 function renderMd(raw){
-  let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  // Raw NULs become U+FFFD (what a browser shows for a NUL in text) before any
+  // stash token is generated, so input text can never spell a token.
+  let s=(raw||'').replace(/\x00/g,'\uFFFD').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
   // pre-pass below. LLMs sometimes emit HTML-entity-encoded output; without this
   // a blockquote sent as "&gt; text" would never be recognised as a blockquote.
@@ -10544,9 +10920,15 @@ function renderMd(raw){
       // For JSON/YAML blocks, add tree-view placeholder with raw data
       } else if(lang==='json'||lang==='yaml'){
         const rawCode=esc(code.replace(/\n$/,''));
+        // data-raw holds the fence's source text. MEDIA references were stashed
+        // before this pass, so put their source text back here (the stash is
+        // restored after this attribute is built) and drop any other stash token.
+        const rawSrc=code.replace(/\n$/,'')
+          .replace(/\x00D(\d+)\x00/g,(_,i)=>decode('MEDIA:'+media_stash[+i]))
+          .replace(/\x00[^\x00]*\x00/g,'').replace(/\x00/g,'');
         // Encode newlines as &#10; to prevent HTML attribute normalization
         // (browsers collapse \n to spaces inside attribute values).
-        const rawAttr=rawCode.replace(/"/g,'&quot;').replace(/\n/g,'&#10;');
+        const rawAttr=esc(rawSrc).replace(/"/g,'&quot;').replace(/\n/g,'&#10;');
         const blockId='tree-'+Math.random().toString(36).slice(2,10);
         _preBlock_stash.push(`<div class="code-tree-wrap" data-raw="${rawAttr}" data-lang="${lang}" id="${blockId}">${h}<pre class="tree-raw-view"><code${langAttr}>${rawCode}</code></pre></div>`);
       // CSV blocks → render as styled table
@@ -10787,7 +11169,56 @@ function renderMd(raw){
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
+    // Autolink only the text between tags, as the block pass below does: set
+    // aside complete links, images and pre blocks and every other tag, then
+    // turn a raw tag left without its closing ">" on its line into text by
+    // escaping its "<" (the block pass escapes those too), so a URL in an
+    // attribute value stays as written.
+    // - A bracketed address such as <https://example.com> or <mailto:a@b.c>
+    //   (any scheme, any case) is not a tag: it stays in place, so the URL in
+    //   it is linked as before. A name holding ":" is never an allowed tag.
+    // - Only the "<" of an unclosed tag is escaped; the rest stays plain text,
+    //   so a URL after it is linked with its "&" and quotes left as written.
+    //   The escaped "<" is set aside too, so it still ends a URL before it.
+    //   Each line is scanned once: a "<" before a letter is escaped when no
+    //   ">" follows it on its line.
+    // - Restoring scans every stash token in one left-to-right pass, so a run
+    //   of text between two tokens is never read as a token.
+    // - Setting tags aside is one forward scan that remembers where the next
+    //   ">", "</a>" and "</pre>" are (or that there is none), so a long line
+    //   of "<" without a close is read once, not once per "<".
+    const _tag_stash=[];
+    t=(()=>{
+      const out=[];
+      const head=/<(?![a-zA-Z][a-zA-Z0-9+.-]*:)\/?[a-zA-Z]/y;
+      let at=0,emitted=0,gt=-1,aClose=-2,preClose=-2;
+      while((at=t.indexOf('<',at))!==-1){
+        if(gt<at) gt=t.indexOf('>',at+1);
+        if(gt<0) break;
+        let end=-1;
+        if(t.startsWith('<a',at)&&!/\w/.test(t[at+2]||'')){
+          if(aClose===-2||(aClose>=0&&aClose<=gt)) aClose=t.indexOf('</a>',gt+1);
+          if(aClose>=0) end=aClose+4;
+        }
+        if(end<0&&t.startsWith('<img',at)&&!/\w/.test(t[at+4]||'')) end=gt+1;
+        if(end<0&&t.startsWith('<pre',at)&&!/\w/.test(t[at+4]||'')){
+          if(preClose===-2||(preClose>=0&&preClose<=gt)) preClose=t.indexOf('</pre>',gt+1);
+          if(preClose>=0) end=preClose+6;
+        }
+        if(end<0){head.lastIndex=at;if(head.test(t)) end=gt+1;}
+        if(end<0){at++;continue;}
+        out.push(t.slice(emitted,at));
+        _tag_stash.push(t.slice(at,end));
+        out.push(`\x00T${_tag_stash.length-1}\x00`);
+        emitted=end;
+        at=end;
+      }
+      out.push(t.slice(emitted));
+      return out.join('');
+    })();
+    t=t.split(/([\r\n\u2028\u2029])/).map(line=>{const at=line.lastIndexOf('>')+1;return line.slice(0,at)+line.slice(at).replace(/<(?=[a-zA-Z])/g,()=>{_tag_stash.push('&lt;');return `\x00T${_tag_stash.length-1}\x00`;});}).join('');
     t=_autolinkBareText(t);
+    t=t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='T'?_tag_stash[+i]:m);
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
@@ -10988,7 +11419,11 @@ function renderMd(raw){
   // Tests verify this list is complete; _tag() enforces it.
   const SAFE_TAGS=/^<\/?(?:strong|em|del|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|div|span|img)([\s>]|$)/i;
   function _safeAttrValue(v){
-    return String(v||'').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').trim();
+    // Stash tokens (\x00Q0\x00, math, code ...) are restored after this sanitizer runs,
+    // so a token left inside an attribute value would be replaced by rendered HTML
+    // there. No attribute legitimately carries one: drop them, and any stray \x00.
+    return String(v||'').replace(/\x00[^\x00]*\x00/g,'').replace(/\x00/g,'')
+      .replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').trim();
   }
   function _markdownHref(raw){
     const href=String(raw||'').replace(/"/g,'%22');
@@ -11113,7 +11548,10 @@ function renderMd(raw){
     }
     if(name==='div'){
       const cls=_cls(a.class,['pre-header','mermaid-block','katex-block']);
-      const mermaid=a['data-mermaid-id']?` data-mermaid-id="${esc(a['data-mermaid-id'])}"`:'';
+      // Generated ids are word characters; anything else (a URL the autolink pass
+      // would rewrite, a stash token) must not reach this free-text attribute.
+      const mermaidId=_safeAttrValue(a['data-mermaid-id']);
+      const mermaid=/^[\w-]{1,64}$/.test(mermaidId)?` data-mermaid-id="${esc(mermaidId)}"`:'';
       const katex=a['data-katex']==='display'?' data-katex="display"':'';
       return `<div${cls}${mermaid}${katex}>`;
     }
@@ -11122,7 +11560,7 @@ function renderMd(raw){
       const target=a.target==='_blank'?' target="_blank"':'';
       const rel=a.rel==='noopener'?' rel="noopener"':'';
       const cls=_cls(a.class,['msg-media-link','skill-linked-file','skill-file-back','session-link']);
-      const download=a.download?` download="${esc(a.download)}"`:'';
+      const download=a.download?` download="${esc(_safeAttrValue(a.download))}"`:'';
       // #7941: keep the blocked-remote-image tooltip only on a media chip whose
       // href really is a non-allowlisted remote image AND whose title begins with
       // the reason computed from that same href, so model-authored anchors cannot
@@ -11152,7 +11590,18 @@ function renderMd(raw){
     }
     return '';
   }
-  s=s.replace(/<\/?[a-z][^>]*>/gi,tag=>_tag(tag));
+  // One pass over every "<": a tag goes through _tag(), and any other "<"
+  // becomes "&lt;". _tag() returns "" for a tag it removes, and a replace never
+  // scans its own output again, so a "<" left as is just before a removed tag
+  // would join the text after it into a new tag that was never checked.
+  // Consuming every "<" here means each "<" left in the result came from
+  // _tag() or starts an HTML comment written as "<!--" in the message (kept
+  // as before; a removal cannot form one, as its "<" would be escaped), so a
+  // removal can never join the text around it into a tag.
+  // That "&lt;" is held in the autolink stash below until autolinking is done,
+  // so it still ends a URL written just before it, as the raw "<" did.
+  const _al_stash=[];
+  s=s.replace(/<\/?[a-z][^>]*>|<(?!!--)/gi,m=>m==='<'?(_al_stash.push('&lt;'),`\x00B${_al_stash.length-1}\x00`):_tag(m));
   // Incomplete raw tags must not survive until paragraph wrapping, where the
   // renderer's generated </p> could provide a closing ">" and turn them into
   // executable HTML in innerHTML (for example: <img src=x onerror=...//).
@@ -11163,18 +11612,28 @@ function renderMd(raw){
     return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>`;
   }
   function _autolinkBareText(text){
+    // A stash token ends the URL: its content is restored after this pass and
+    // belongs after the link, not inside the rebuilt href.
     return String(text||'').replace(
-      /(https?:\/\/[^\s<>"')\]\uFF09]+)/g,
+      /(https?:\/\/[^\s<>"')\]\uFF09\x00]+)/g,
       run=>_autolinkBareRun(run),
     );
   }
-  // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
-  const _al_stash=[];
-  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
+  // Stash <a>, <img> and <pre> blocks so autolink never runs inside them, and
+  // every other tag (an opening <a> without its </a>, for one) so autolink
+  // never rewrites text inside a tag. The sanitizer pass above set aside every
+  // "<" it did not hand to _tag() as "&lt;", so every tag here was written
+  // by _tag(), with escaped, double-quoted attribute values, and ends at its
+  // first ">".
+  // Restoring scans every stash token (\x00, capital letters, digits, \x00) in
+  // one left-to-right pass and puts back only these entries, so a run of text
+  // between two tokens (math, code block, media) is never read as a token.
+  const _alRestore=t=>t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='B'?_al_stash[+i]:m);
+  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>|<\/?[a-zA-Z][^>]*>)/g,m=>{_al_stash.push(_alRestore(m));return `\x00B${_al_stash.length-1}\x00`;});
   // Split high-confidence sentence boundaries while preserving valid CJK IRI
   // content, then rescan each plain-text trail so adjacent URLs all link.
   s=_autolinkBareText(s);
-  s=s.replace(/\x00B(\d+)\x00/g,(_,i)=>_al_stash[+i]);
+  s=_alRestore(s);
   // Restore math stash → katex placeholder spans/divs
   // These will be rendered by renderKatexBlocks() after DOM insertion
   s=s.replace(/\x00M(\d+)\x00/g,(_,i)=>{
@@ -11347,6 +11806,9 @@ function _getExplicitBusyCommandAction(text){
 }
 
 function getComposerPrimaryAction(){
+  if(S.session&&S.session.chat_read_only_reason){
+    return S.busy&&S.activeStreamId?'stop':'disabled';
+  }
   const msg=$('msg');
   const hasContent=_composerHasContent();
   const locked=!!(msg&&msg.disabled);
@@ -11376,6 +11838,15 @@ function getComposerPrimaryAction(){
 function _applyBusyComposerPlaceholder(){
   const input=$('msg');
   if(!input) return;
+  if(S.session&&S.session.chat_read_only_reason){
+    input.placeholder=typeof t==='function' ? t('composer_placeholder_read_only') : 'Read-only in WebUI';
+    input.dataset.readOnlyPlaceholder='true';
+    return;
+  }
+  if(input.dataset.readOnlyPlaceholder){
+    input.placeholder='Message '+assistantDisplayName()+'\u2026';
+    delete input.dataset.readOnlyPlaceholder;
+  }
   if(_compressionPlaceholderSaved!==null) return;
   if(input.disabled) return;
   if(_composerHasContent()) return;
@@ -11416,6 +11887,28 @@ function _setComposerPrimaryButtonIcon(btn,action){
 }
 
 function updateSendBtn(){
+  const chatReadOnlyReason=(S.session&&S.session.chat_read_only_reason)||'';
+  const chatReadOnlyNoticeText=chatReadOnlyReason.replace(/^Read-only in WebUI\.\s*/, '');
+  const showChatReadOnlyHelp=!!(chatReadOnlyReason&&S.session.chat_read_only_can_connect);
+  const chatReadOnlyNotice=$('composerChatReadOnlyNotice');
+  const chatReadOnlyText=$('composerChatReadOnlyReason');
+  const chatReadOnlyHelp=$('composerChatReadOnlyHelp');
+  if(chatReadOnlyText&&chatReadOnlyText.textContent!==chatReadOnlyNoticeText){
+    chatReadOnlyText.textContent=chatReadOnlyNoticeText;
+  }
+  if(chatReadOnlyHelp) chatReadOnlyHelp.hidden=!showChatReadOnlyHelp;
+  if(chatReadOnlyNotice){
+    chatReadOnlyNotice.hidden=!(chatReadOnlyNoticeText||showChatReadOnlyHelp);
+  }
+  const chatInput=$('msg');
+  if(chatInput){
+    chatInput.readOnly=!!chatReadOnlyReason;
+    const descriptionIds=new Set((chatInput.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean));
+    if(chatReadOnlyNoticeText) descriptionIds.add('composerChatReadOnlyReason');
+    else descriptionIds.delete('composerChatReadOnlyReason');
+    if(descriptionIds.size) chatInput.setAttribute('aria-describedby',[...descriptionIds].join(' '));
+    else chatInput.removeAttribute('aria-describedby');
+  }
   const btn=$('btnSend');
   if(!btn){
     if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
@@ -11431,7 +11924,8 @@ function updateSendBtn(){
   let _btnTitle;
   if(action==='disabled'){
     const _dmsg=$('msg');
-    if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
+    if(chatReadOnlyReason) _btnTitle=chatReadOnlyReason;
+    else if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
   }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
     _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');
@@ -12145,8 +12639,42 @@ let _ttsGeneration=0;
 // replacement — and stopTTS() — invalidates all prior tokens, and every
 // asynchronous callback must verify ownership before mutating shared state.
 // `_ttsSpeaking` alone cannot distinguish playback A from playback B.
-function _beginTtsPlayback(){ _ttsSpeaking=true; return ++_ttsGeneration; }
+// A generation bump also aborts the requests the dead generation still has in
+// flight: the token only keeps stale responses out of the AudioContext, while
+// the AbortController below stops the browser downloading and decoding the
+// abandoned response. The server still finishes that provider call.
+function _beginTtsPlayback(){
+  _ttsSpeaking=true;
+  // Bump BEFORE aborting: the abort handlers are microtasks, but the token must
+  // already be dead when they run so none of them can claim the new playback.
+  const gen=++_ttsGeneration;
+  _abortPendingTtsRequests();
+  return gen;
+}
 function _ownsTtsPlayback(gen){ return gen===_ttsGeneration; }
+// In-flight /api/tts requests, one AbortController per request. Cancelling on
+// stop/replacement matters even though every callback is generation-guarded:
+// the server keeps synthesizing, the response is downloaded and thrown away,
+// and the request still occupies the per-client TTS rate window that the next
+// playback has to wait out.
+let _ttsPendingAborts=null;
+function _newTtsAbortController(){
+  if(typeof AbortController!=='function') return null;
+  try{ return new AbortController(); }catch(_){ return null; }
+}
+function _trackTtsAbort(ctl){
+  if(!ctl) return null;
+  if(!_ttsPendingAborts) _ttsPendingAborts=new Set();
+  _ttsPendingAborts.add(ctl);
+  return ctl;
+}
+function _releaseTtsAbort(ctl){ if(ctl&&_ttsPendingAborts) _ttsPendingAborts.delete(ctl); }
+function _abortPendingTtsRequests(){
+  if(!_ttsPendingAborts||!_ttsPendingAborts.size) return;
+  const pending=Array.from(_ttsPendingAborts);
+  _ttsPendingAborts.clear();
+  pending.forEach(function(ctl){ try{ ctl.abort(); }catch(_){} });
+}
 // Minimum gap between consecutive /api/tts synthesis requests, matching the
 // server-side per-client window in api/routes.py (_TtsRateLimiter, 2 s).
 // Shared by every engine and generation — the server limiter is per-client
@@ -12191,11 +12719,18 @@ function _sendTtsRequest(init, owner){
   let attempt=0;
   function _dispatch(){
     return _acquireTtsRequestSlot(owner).then(function(reserved){
-      if(!reserved) return {ok:false, err:new Error('aborted')};
-      return fetch(new URL('api/tts', document.baseURI || location.href).href, init)
+      if(!reserved) return {ok:false, err:new Error('aborted'), aborted:true};
+      // One AbortController per request: stopTTS()/a replacement aborts it, so
+      // the browser drops an abandoned response at once instead of downloading
+      // it into a generation-guarded no-op. The server-side synthesis and the
+      // request-rate window are not refunded.
+      const ctl=_trackTtsAbort(_newTtsAbortController());
+      const opts=ctl?Object.assign({}, init, {signal:ctl.signal}):init;
+      return fetch(new URL('api/tts', document.baseURI || location.href).href, opts)
       .then(function(r){
         if(r.status===429&&attempt<3){
           attempt++;
+          _releaseTtsAbort(ctl);
           return _dispatch();
         }
         if(!r.ok){
@@ -12220,8 +12755,15 @@ function _sendTtsRequest(init, owner){
           if(res&&typeof res==='object'&&('ok' in res)) return res;
           return {ok:true, buf:res};
         },
-        function(err){ return {ok:false, err:err}; }
-      );
+        function(err){
+          // A cancellation is not a failure: report it as such so no caller
+          // turns the user's own stop into an error toast.
+          return {ok:false, err:err, aborted:!!(ctl&&ctl.signal.aborted)};
+        }
+      )
+      // The request is settled (or abandoned): drop the controller so a later
+      // stop cannot abort a request that already delivered its audio.
+      .then(function(res){ _releaseTtsAbort(ctl); return res; });
     });
   }
   return _dispatch();
@@ -12334,7 +12876,7 @@ function _playEdgeTtsChunked(text, btn){
     }, _owns)
     .then(function(res){
       if(!_owns()) return;
-      if(!res.ok){ _fail((res.err&&res.err.message)||'Edge TTS failed'); return; }
+      if(!res.ok){ if(res.aborted) return; _fail((res.err&&res.err.message)||'Edge TTS failed'); return; }
       const url=URL.createObjectURL(new Blob([res.buf],{type:res.type}));
       const audio=new Audio(url);
       _playingEdgeAudio=audio;
@@ -12457,7 +12999,7 @@ function _playElevenLabsTts(text, btn){
   }, _owns)
   .then(function(res){
     if(!_owns()) return;
-    if(!res.ok){ _fail((res.err&&res.err.message)||'ElevenLabs TTS failed'); return; }
+    if(!res.ok){ if(res.aborted) return; _fail((res.err&&res.err.message)||'ElevenLabs TTS failed'); return; }
     return _playAudioBuf(res.buf, btn, 'ElevenLabs TTS', gen);
   })
   .catch(function(e){ _fail((e&&e.message)||'ElevenLabs TTS failed'); });
@@ -12482,9 +13024,11 @@ function _playOpenaiTts(text, btn){
   const _fail=function(msg){
     // Terminal failure: invalidate every scheduled/pending callback of this
     // playback (paced prefetch timers, in-flight fetch then-chains) so no
-    // follow-on request can fire after a terminal error, and stop/disconnect
-    // any partially constructed source before dropping the handle.
+    // follow-on request can fire after a terminal error, stop/disconnect
+    // any partially constructed source before dropping the handle, and cancel
+    // whatever this playback still has in flight.
     _ttsGeneration++;
+    _abortPendingTtsRequests();
     _ttsSpeaking=false;
     _stopActivePlaybackAudio();
     if(btn)btn.dataset.speaking='0';
@@ -12533,7 +13077,7 @@ function _playOpenaiTts(text, btn){
     bufPromise
     .then(function(res){
       if(!_ttsSpeaking||!_ownsTtsPlayback(gen)) return;
-      if(!res.ok){ _fail((res.err&&res.err.message)||'OpenAI TTS failed'); return; }
+      if(!res.ok){ if(res.aborted) return; _fail((res.err&&res.err.message)||'OpenAI TTS failed'); return; }
       var ctx=_getTtsAudioCtx();
       if(!ctx){ _fail('Web Audio API not available'); return; }
       var buf;
@@ -12710,8 +13254,11 @@ function _playAudioBuf(arrayBuffer, btn, label, gen){
 function stopTTS(){
   // Invalidate every in-flight generation (all engines, all chains) before
   // clearing state, so a late fetch/onended/decode callback can neither
-  // resume a stopped chain nor clobber a later playback.
+  // resume a stopped chain nor clobber a later playback. Then cancel the
+  // requests those generations still have on the wire, so stopping releases
+  // the browser's side of each request instead of only ignoring its response.
   _ttsGeneration++;
+  _abortPendingTtsRequests();
   if('speechSynthesis' in window){
     speechSynthesis.cancel();
   }
@@ -13819,6 +14366,132 @@ function dismissReconnect() {
   clearInflight();
 }
 
+// ── #8517 memory-off notice ──
+// The server reports the memory status of the agent actually serving a session as
+// `memory_status` ({state:'ok'} or {state:'off',reason,scope}; codes only) in every
+// session payload it knows it for (GET /api/session, the `session` of stream `done`
+// and `apperror`, a compression continuation's own payload), and per turn as a stream
+// event for that session. The notice renders ONLY from the session on screen
+// (S.session.memory_status): there is no per-session client state and nothing to hand
+// over between sessions, so session switch, reload, continuation, redirect and
+// clearing the selected session all follow from the assignment of S.session below.
+// A dismissal is remembered per profile and reason (it applies to every conversation
+// of that profile); an explicit `ok` for the profile forgets its dismissals, so a
+// later recurrence is shown and announced again. No status (healthy sessions, older
+// servers): the element stays `hidden`, so normal sessions never see a layout change.
+const MEMORY_OFF_NOTICE_KEYS={
+  agent_outdated:'memory_off_agent_outdated',
+  agent_no_instance_claim:'memory_off_agent_no_instance_claim',
+  provider_shared_instance:'memory_off_provider_shared_instance',
+};
+const MEMORY_OFF_DISMISS_PREFIX='hermes-webui-memory-off-dismissed:';
+const _memoryOffAnnounced=new Set(); // `${profile}:${reason}` announced on this page
+function _memoryNoticeProfile(session){return String((session&&session.profile)||'default');}
+function _memoryOffDismissKey(profile,reason){return MEMORY_OFF_DISMISS_PREFIX+profile+':'+reason;}
+function _memoryOffDismissed(profile,reason){
+  try{return localStorage.getItem(_memoryOffDismissKey(profile,reason))==='1';}catch(_){return false;}
+}
+function _memoryOffReason(session){
+  const status=session&&session.memory_status;
+  if(!status||typeof status!=='object'||status.state!=='off') return '';
+  const reason=String(status.reason||'');
+  return Object.prototype.hasOwnProperty.call(MEMORY_OFF_NOTICE_KEYS,reason)?reason:'';
+}
+// The server says memory is on for this profile's agent: what was dismissed for the
+// profile is news again when it recurs.
+function _forgetMemoryOffDismissals(profile){
+  for(const reason of Object.keys(MEMORY_OFF_NOTICE_KEYS)){
+    try{localStorage.removeItem(_memoryOffDismissKey(profile,reason));}catch(_){}
+    _memoryOffAnnounced.delete(profile+':'+reason);
+  }
+}
+function syncMemoryOffNotice(){
+  const notice=$('memoryOffNotice');
+  const text=$('memoryOffNoticeText');
+  if(!notice||!text) return;
+  const session=(typeof S!=='undefined'&&S)?S.session:null;
+  const profile=_memoryNoticeProfile(session);
+  if(session&&session.memory_status&&session.memory_status.state==='ok') _forgetMemoryOffDismissals(profile);
+  const reason=_memoryOffReason(session);
+  if(!reason||_memoryOffDismissed(profile,reason)){
+    notice.hidden=true;
+    notice.dataset.reason='';
+    return;
+  }
+  const copy=t(MEMORY_OFF_NOTICE_KEYS[reason]);
+  if(text.textContent!==copy) text.textContent=copy;
+  notice.dataset.reason=reason;
+  const wasHidden=notice.hidden;
+  notice.hidden=false;
+  // Appearing (often mid-turn) shrinks the transcript viewport by the notice's height; keep a
+  // reader pinned to the tail pinned, gated like the chat-todos tray (the helper itself no-ops
+  // for a reader who scrolled away).
+  if(wasHidden&&!(typeof window!=='undefined'&&window._autoScrollFollow===false)&&typeof _repinMessagesAfterComposerResize==='function') _repinMessagesAfterComposerResize();
+  // A live region that was `hidden` is not reliably announced when it appears, so
+  // say it once per profile and reason through the shared polite announcer as well.
+  const announceKey=profile+':'+reason;
+  if(!_memoryOffAnnounced.has(announceKey)){
+    _memoryOffAnnounced.add(announceKey);
+    const announcer=$('a11yAnnouncer');
+    if(announcer) announcer.textContent=copy;
+  }
+}
+// A stream event about session `sid` (warning memory_off / memory_status ok). Only the
+// session on screen is updated; any other session gets its status from its own
+// payload when it is opened. Returns true when the session on screen was updated.
+function noteSessionMemoryStatus(sid,status){
+  if(typeof S==='undefined'||!S||!S.session||!sid||String(S.session.session_id||'')!==String(sid)) return false;
+  if(!status||typeof status!=='object') return false;
+  S.session.memory_status=status;
+  syncMemoryOffNotice();
+  return true;
+}
+function dismissMemoryOffNotice(){
+  const notice=$('memoryOffNotice');
+  const session=(typeof S!=='undefined'&&S)?S.session:null;
+  const reason=_memoryOffReason(session);
+  if(reason){try{localStorage.setItem(_memoryOffDismissKey(_memoryNoticeProfile(session),reason),'1');}catch(_){}}
+  if(notice){notice.hidden=true;notice.dataset.reason='';}
+  // The dismiss button disappears with the notice; keep focus somewhere useful.
+  const composer=$('msg');
+  if(composer&&typeof composer.focus==='function') composer.focus();
+}
+// Render from the session on screen: every assignment of S.session (load, switch,
+// reload, continuation, redirect, new chat, delete -> null) repaints the notice once,
+// after the assigning code has finished. A payload for the SAME session from an
+// endpoint that does not report memory (rename, toolsets, ...) keeps what the server
+// last said about that session; another session never inherits it.
+(function _renderMemoryOffNoticeFromSessionOnScreen(){
+  if(typeof S==='undefined'||!S) return;
+  const desc=Object.getOwnPropertyDescriptor(S,'session');
+  if(!desc||!desc.configurable||!('value' in desc)) return;
+  let current=desc.value;
+  let queued=false;
+  const later=typeof queueMicrotask==='function'?queueMicrotask:(fn=>Promise.resolve().then(fn));
+  Object.defineProperty(S,'session',{
+    configurable:true,
+    enumerable:true,
+    get(){return current;},
+    set(next){
+      if(next&&current&&next!==current&&typeof next==='object'&&!('memory_status' in next)
+        &&current.memory_status&&String(next.session_id||'')===String(current.session_id||'')){
+        next.memory_status=current.memory_status;
+      }
+      current=next;
+      if(queued) return;
+      queued=true;
+      later(()=>{queued=false;syncMemoryOffNotice();});
+    },
+  });
+})();
+if(typeof window!=='undefined'&&typeof window.addEventListener==='function'){
+  // Another tab dismissed (or an ok forgot) a notice: repaint now, not at the next sync.
+  window.addEventListener('storage',e=>{
+    if(e&&typeof e.key==='string'&&e.key.startsWith(MEMORY_OFF_DISMISS_PREFIX)) syncMemoryOffNotice();
+  });
+}
+// ── end #8517 memory-off notice ──
+
 // ── Live host resource health panel (#693) ──
 const SYSTEM_HEALTH_INTERVAL_MS=5000;
 let _systemHealthTimer=null;
@@ -14051,6 +14724,9 @@ async function refreshSession() {
     _mergePendingSessionMessage(data.session, S.messages);
     S.activeStreamId = data.session.active_stream_id || null;
 
+    // #8523: the refreshed session can have turned read-only (or writable); redraw the composer's lock, notice
+    // and placeholder from it before the same-frame scroll-snapshot render (#3479).
+    if(typeof updateSendBtn==='function') updateSendBtn();
     syncTopbar(); _renderMessagesWithScrollSnapshot();
     showToast('Conversation refreshed');
   } catch(e) { setStatus('Refresh failed: ' + e.message); }
@@ -14452,6 +15128,7 @@ async function applyUpdates(opts){
   // #7293: true only on the re-send after the user explicitly confirmed
   // interrupting the WebUI agent runs that made the server refuse the update.
   const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);
+  const confirmedGateway=forceActiveRuns&&opts.confirmedGateway?opts.confirmedGateway:null;  // #8746
   const updateText=(key,fallback)=>(typeof _i18nUpdateText==='function'?_i18nUpdateText(key,fallback):fallback);
   const btn=$('btnApplyUpdate');
   const resetApplyButton=(delayMs)=>{
@@ -14492,11 +15169,12 @@ async function applyUpdates(opts){
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
       if(forceActiveRuns) _applyBody.force_active_runs=true;
-      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000});
+      if(confirmedGateway&&target==='agent') Object.assign(_applyBody,confirmedGateway);
+      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:300000});
       if(!res.ok){
         _showUpdateError(target,res);
         if(res.restart_blocked&&res.force_available){
-          _renderActiveRunsForceOffer(target,res,()=>applyUpdates({forceActiveRuns:true}));
+          _renderActiveRunsForceOffer(target,res,(gw)=>applyUpdates({forceActiveRuns:true,confirmedGateway:gw}));
         }
         resetApplyButton(0);
         return;
@@ -14551,9 +15229,9 @@ function _showUpdateError(target,res){
     clearLockBtn.style.display='inline-block';
   }
 }
-function _activeRunsUpdateText(key,count,fallback){
+function _activeRunsUpdateText(key,count,fallback,extra){
   if(typeof t==='function'){
-    const val=t(key,count);
+    const val=extra!==undefined?t(key,count,extra):(count!==undefined?t(key,count):t(key));
     if(val&&val!==key) return val;
   }
   return fallback;
@@ -14562,8 +15240,9 @@ function _activeRunsUpdateText(key,count,fallback){
 // runs are active (restart_blocked + force_available). Offer one explicit,
 // confirmed override that re-sends the same request with
 // force_active_runs:true; the server then saves those runs as interrupted
-// before it restarts. Gateway runs that a restart can reattach are not counted
-// and keep running in the Gateway.
+// before it restarts. For a WebUI update, Gateway runs that a restart can
+// reattach are not counted and keep running in the Gateway. An Agent update
+// cycles the Gateway, so it counts them too (#8660).
 function _renderActiveRunsForceOffer(target,res,resend){
   const errEl=$('updateError');
   if(!errEl||typeof resend!=='function') return;
@@ -14573,39 +15252,98 @@ function _renderActiveRunsForceOffer(target,res,resend){
   // way forward (on the conflict path its re-send also carries the hard reset).
   const legacyForceBtn=$('btnForceUpdate');
   if(legacyForceBtn) legacyForceBtn.style.display='none';
-  const rawCount=Number(res&&res.active_runs)||Number(res&&res.active_streams)||1;
-  const count=Math.max(1,Math.floor(rawCount));
-  const plural=count===1?'':'s';
-  const label=_activeRunsUpdateText('update_force_active_runs',count,'Update anyway (interrupts '+count+' run'+plural+')');
+  const agentTarget=target==='agent';
+  const total=Number(res&&res.active_runs)||Number(res&&res.active_streams)||1;
+  const w=(res&&res.webui_owned_runs!==undefined)?Number(res.webui_owned_runs):total;
+  const g=Number(res&&res.gateway_runs)||0;
+  const agentExternal=agentTarget&&Boolean(res)&&res.gateway_restart_managed===false;
+  const interruptedCount=agentExternal?w:total;
+  // #8746: the forced request carries the Gateway restart impact and the
+  // interrupted-run count this offer shows, so the server refuses again if the
+  // impact changed or more runs would be interrupted.
+  const confirmedGateway=(agentTarget&&res&&typeof res.gateway_restart_managed==='boolean')
+    ?{gateway_restart_managed:res.gateway_restart_managed,gateway_profile:res.gateway_profile,gateway_endpoint:res.gateway_endpoint,interrupted_runs:interruptedCount}
+    :null;
+  let label;
+  if(interruptedCount===0){
+    label=_activeRunsUpdateText('update_force_active_runs_no_runs',undefined,'Update anyway (interrupts nothing)');
+  }else{
+    const plural=interruptedCount===1?'':'s';
+    label=_activeRunsUpdateText('update_force_active_runs',interruptedCount,'Update anyway (interrupts '+interruptedCount+' run'+plural+')');
+  }
   const actions=document.createElement('div');
   actions.style.marginTop='6px';
   const btn=document.createElement('button');
   btn.type='button';
   btn.id='btnForceUpdateActiveRuns';
-  btn.className='update-btn';
-  btn.style.background='var(--error,#e05)';
-  btn.style.color='#fff';
-  btn.style.borderColor='var(--error,#e05)';
+  if(interruptedCount===0){
+    // #8746: a force that interrupts nothing is not a destructive action; the
+    // server refuses it again if the Gateway impact changes before the confirm.
+    btn.className='update-btn update-primary';
+  }else{
+    btn.className='update-btn';
+    btn.style.background='var(--error,#e05)';
+    btn.style.color='#fff';
+    btn.style.borderColor='var(--error,#e05)';
+  }
   btn.dataset.target=target;
   btn.textContent=label;
   btn.onclick=async()=>{
     if(btn.disabled) return;
+    // #8667: an Agent update also cycles the Gateway that executes the
+    // resumable runs, so its confirmation names both kinds of run. A WebUI
+    // update keeps the WebUI-only copy (#7293).
+    // #8746: qualify the Agent confirmation by Gateway lifecycle ownership.
+    // #8746: an external-Gateway-only refusal interrupts nothing, so its
+    // confirmation names the Gateway runs that keep running, not an interruption.
+    const nothingInterrupted=interruptedCount===0;
+    let confirmMessage;
+    if(nothingInterrupted){
+      const confirmMessageFallback=g+' Gateway run'+(g===1?' keeps':'s keep')+' running because the WebUI cannot restart this profile\'s Gateway. Forcing the update will not stop '+(g===1?'it':'them')+'.';
+      confirmMessage=_activeRunsUpdateText('update_force_active_runs_no_runs_message',g,confirmMessageFallback);
+    }else if(agentTarget){
+      if(g>0){
+        if(agentExternal){
+          const confirmMessageKey='update_force_active_runs_message_agent_external';
+          const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working, and '+g+' Gateway run'+(g===1?' keeps':'s keep')+' running because the WebUI cannot restart this profile\'s Gateway. Only the WebUI runs are saved as interrupted.';
+          confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback,g);
+        }else if(w===0){
+          // #8746: only Gateway runs are interrupted; do not name 0 WebUI runs.
+          const confirmMessageKey='update_force_active_runs_message_agent_gateway_only';
+          const confirmMessageFallback=g+' Gateway run'+(g===1?' is':'s are')+' still working. Updating the Agent also restarts the Gateway this profile uses and stops every run that Gateway is executing, including runs started from other profiles that use the same Gateway endpoint. Wait for '+(g===1?'it':'them')+' to finish if you can.';
+          confirmMessage=_activeRunsUpdateText(confirmMessageKey,g,confirmMessageFallback);
+        }else{
+          const confirmMessageKey='update_force_active_runs_message_agent';
+          const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working and '+g+' Gateway run'+(g===1?' is':'s are')+' running. Updating the Agent also restarts the Gateway this profile uses and stops every run that Gateway is executing, including runs started from other profiles that use the same Gateway endpoint. The WebUI runs are saved as interrupted. Wait for them to finish if you can.';
+          confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback,g);
+        }
+      }else{
+        const confirmMessageKey='update_force_active_runs_message_agent_webui_only';
+        const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working. The WebUI runs are saved as interrupted if you force the update.';
+        confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback);
+      }
+    }else{
+      const count=Math.max(1,Math.floor(total));
+      const confirmMessageKey='update_force_active_runs_message';
+      const confirmMessageFallback=count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.';
+      confirmMessage=_activeRunsUpdateText(confirmMessageKey,count,confirmMessageFallback);
+    }
     const confirmed=await showConfirmDialog({
-      title:_activeRunsUpdateText('update_force_active_runs_title',count,'Interrupt active runs?'),
-      message:_activeRunsUpdateText(
-        'update_force_active_runs_message',
-        count,
-        count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.'
-      ),
-      confirmLabel:_activeRunsUpdateText('update_force_active_runs_confirm',count,'Interrupt and update'),
-      danger:true,
+      title:nothingInterrupted
+        ?_activeRunsUpdateText('update_force_active_runs_no_runs_title',undefined,'Update the Agent now?')
+        :_activeRunsUpdateText('update_force_active_runs_title',interruptedCount,'Interrupt active runs?'),
+      message:confirmMessage,
+      confirmLabel:nothingInterrupted
+        ?_activeRunsUpdateText('update_force_active_runs_no_runs_confirm',undefined,'Update anyway')
+        :_activeRunsUpdateText('update_force_active_runs_confirm',interruptedCount,'Interrupt and update'),
+      danger:!nothingInterrupted,
       focusCancel:true,
     });
     if(!confirmed) return;
     btn.disabled=true;
     btn.textContent=_i18nUpdateText('update_updating','Updating\u2026');
     try{
-      await resend();
+      await resend(confirmedGateway);
     }finally{
       if(btn.isConnected){btn.disabled=false;btn.textContent=label;}
     }
@@ -14626,7 +15364,8 @@ async function applyClearUpdateLock(btn,opts){
   try{
     const _clearBody={target};
     if(forceActiveRuns) _clearBody.force_active_runs=true;
-    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify(_clearBody),timeoutMs:60000});
+    if(forceActiveRuns&&opts.confirmedGateway) Object.assign(_clearBody,opts.confirmedGateway);  // #8746
+    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify(_clearBody),timeoutMs:300000});
     if(res.ok){
       sessionStorage.removeItem('hermes-update-checked');
       sessionStorage.removeItem('hermes-update-dismissed');
@@ -14645,7 +15384,7 @@ async function applyClearUpdateLock(btn,opts){
       if(errEl){errEl.textContent=msg;errEl.style.display='block';}
       else showToast(msg);
       if(res.restart_blocked&&res.force_available){
-        _renderActiveRunsForceOffer(target,res,()=>applyClearUpdateLock(btn,{forceActiveRuns:true}));
+        _renderActiveRunsForceOffer(target,res,(gw)=>applyClearUpdateLock(btn,{forceActiveRuns:true,confirmedGateway:gw}));
       }
     }
   }catch(e){
@@ -14780,12 +15519,13 @@ async function forceUpdate(btn,opts){
     const _ch=window._updateData?.[target]?.channel;
     if(_ch==='stable'||_ch==='experimental') _forceBody.channel=_ch;
     if(forceActiveRuns) _forceBody.force_active_runs=true;
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:120000});
+    if(forceActiveRuns&&opts.confirmedGateway) Object.assign(_forceBody,opts.confirmedGateway);  // #8746
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:300000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';btn.style.display='inline-block';
       if(res.restart_blocked&&res.force_available){
-        _renderActiveRunsForceOffer(target,res,()=>forceUpdate(btn,{forceActiveRuns:true}));
+        _renderActiveRunsForceOffer(target,res,(gw)=>forceUpdate(btn,{forceActiveRuns:true,confirmedGateway:gw}));
       }
       return;
     }
@@ -15188,7 +15928,7 @@ function syncTopbar(){
     if(sourceLabel){
       const badge=document.createElement('span');
       badge.className='topbar-source-badge';
-      badge.textContent=sourceLabel+(S.session.read_only?' · read-only':'');
+      badge.textContent=sourceLabel+((S.session.read_only||S.session.chat_read_only_reason)?' · read-only':'');
       _topbarMeta.appendChild(document.createTextNode(' '));
       _topbarMeta.appendChild(badge);
     }
@@ -15352,8 +16092,9 @@ function _fmtDateSep(d){
   const todayStart=new Date();todayStart.setHours(0,0,0,0);
   const dStart=new Date(d);dStart.setHours(0,0,0,0);
   const diffDays=Math.round((todayStart-dStart)/86400000);
-  if(diffDays===0) return 'Today';
-  if(diffDays===1) return 'Yesterday';
+  // hwc: same strings as the sidebar day buckets, already in every locale.
+  if(diffDays===0) return t('session_time_bucket_today');
+  if(diffDays===1) return t('session_time_bucket_yesterday');
   if(diffDays>0 && diffDays<7) return dStart.toLocaleDateString([], {weekday:'long'});
   const opts={month:'short', day:'numeric'};
   if(todayStart.getFullYear()!==dStart.getFullYear()) opts.year='numeric';
@@ -15599,6 +16340,27 @@ function _worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, visi
   const thinkingText=_assistantReasoningPayloadText(m);
   const visibleTexts=Array.isArray(turnVisibleContents)?turnVisibleContents:[];
   return _stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts);
+}
+// A delegated subagent's whole task is one turn; split its worklog at each interim text.
+function _isDelegatedSubagentTranscript(){
+  return !S.busy&&!!S.session&&_isDelegatedSubagentRow(S.session);
+}
+function _worklogGroupKey(anchorRow, anchorTurn, placedAfterAnchor){
+  if(!_isDelegatedSubagentTranscript()) return anchorTurn;
+  if(placedAfterAnchor) return anchorRow;
+  for(let el=anchorRow.previousElementSibling;el;el=el.previousElementSibling){
+    if(el.classList&&el.classList.contains('assistant-segment')&&!el.classList.contains('assistant-segment-worklog-source')) return el;
+  }
+  return anchorTurn;
+}
+// Only the subagent's last turn opens: while it runs, or after it ended with no answer.
+function _subagentOpenWorklogTurn(inner){
+  if(!_isDelegatedSubagentTranscript()) return null;
+  const turns=inner.querySelectorAll('.assistant-turn'), lastTurn=turns[turns.length-1]||null;
+  if(!lastTurn||S.session.active===true) return lastTurn;
+  const last=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role!=='tool').pop();
+  const answered=!!last&&last.role==='assistant'&&!(Array.isArray(last.tool_calls)&&last.tool_calls.length)&&!!String(msgContent(last)||'').trim();
+  return answered?null:lastTurn;
 }
 function _worklogDetailsExpandedDefault(){
   return window._worklogDetailsExpandedByDefault===true;
@@ -17040,6 +17802,8 @@ function _toggleActivityGroup(summary){
   // #5839: materialize deferred settled rows on first expand (lazy render).
   if(!collapsed) _materializeDeferredWorklogRows(group);
   _writeActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'), !collapsed);
+  // The cached transcript HTML predates this click; drop it so a switch-back rebuilds.
+  if(typeof S!=='undefined'&&S.session&&S.session.session_id&&typeof _sessionHtmlCache!=='undefined') _sessionHtmlCache.delete(S.session.session_id);
   if(typeof _onLiveActivityToggle==='function') _onLiveActivityToggle(group);
 }
 function _toggleToolWorklogGroup(summary){
@@ -19297,6 +20061,7 @@ function ensureActivityGroup(inner, opts){
     else if(live && _liveActivityUserExpanded === false) collapsed=true;
     if(live && savedState==='open') collapsed=false;
     else if(live && savedState==='closed') collapsed=true;
+    else if(opts.honourSavedDisclosure===true && savedState) collapsed=savedState==='closed';
     group.className='agent-activity-group tool-worklog-group activity'+(collapsed?' tool-call-group-collapsed':'');
     group.setAttribute('data-tool-call-group','1');
     group.setAttribute('data-agent-activity-group','1');
@@ -20469,7 +21234,7 @@ function _messageRenderCacheSignature(){
     _addBoundedHash(add, tc.args||{});
   });
   if(S.session){
-    add(S.session.message_count);add(S.session.updated_at);add(S.session.compression_anchor_visible_idx);
+    add(S.session.message_count);add(S.session.updated_at);add(S.session.active);add(S.session.compression_anchor_visible_idx);
     _addBoundedHash(add, S.session.compression_anchor_message_key||null);
     add(S.session.compression_anchor_summary||'');
   }
@@ -21731,6 +22496,15 @@ function _insertSegmentBlock(seg, html){
   }
   seg.insertAdjacentHTML('beforeend', html);
 }
+function _assistantSegmentIsTurnFinal(row, mi){
+  // True for the row's last assistant segment — the turn's final answer, the one
+  // that owns turn-level footer labels (switch/failover warnings). A turn
+  // without discoverable segments counts as final so its labels still render.
+  if(!row) return true;
+  const segs=row.querySelectorAll('.assistant-segment[data-msg-idx]');
+  const last=segs.length?segs[segs.length-1]:null;
+  return !last||String(last.dataset.msgIdx)===String(mi);
+}
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
   // typeof guard: node harnesses extract renderMessages() without its helpers (#6717).
@@ -22971,6 +23745,7 @@ function renderMessages(options){
     };
     const durationAssignedTurns = new Set();
     const activityByTurn = new Map();
+    let subagentOpenTurn;
     const activityOrder = [];
     const ensureActivityBucket=(key,aIdx,segmentSeq,burstId)=>{
       if(!byActivity.has(key)){
@@ -23052,13 +23827,16 @@ function renderMessages(options){
         // value) so the append path can use the ownership fact the group
         // construction already uses.
         const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
-        let state=activityByTurn.get(anchorTurn);
+        const groupKey=_worklogGroupKey(anchorRow,anchorTurn,!anchorIsWorklogSource&&!thinkingText);
+        let state=activityByTurn.get(groupKey);
+        if(subagentOpenTurn===undefined) subagentOpenTurn=_subagentOpenWorklogTurn(inner);
         if(!state){
           const includeTurnDuration=!durationAssignedTurns.has(anchorTurn);
           if(includeTurnDuration) durationAssignedTurns.add(anchorTurn);
           const activityKey=`assistant:${aIdx}`;
           const group=ensureActivityGroup(anchorParent,{
-            collapsed:true,
+            collapsed:!subagentOpenTurn||anchorTurn!==subagentOpenTurn,
+            honourSavedDisclosure:_isDelegatedSubagentTranscript(),
             anchor:anchorRow,
             beforeAnchor:!!thinkingText&&!anchorIsWorklogSource,
             syncAnchorReason:anchorIsWorklogSource,
@@ -23071,7 +23849,7 @@ function renderMessages(options){
           if(!list) continue;
           list.innerHTML='';
           state={group,cards:[],seenReasons:new Set(),seenTools:new Set()};
-          activityByTurn.set(anchorTurn,state);
+          activityByTurn.set(groupKey,state);
         }
         state.cards.push(...cards);
         _appendWorklogStep(state.group, anchorRow, cards, thinkingText, {
@@ -23090,7 +23868,13 @@ function renderMessages(options){
           seenTools:state.seenTools,
         });
       }
+      // The running subagent's newest worklog is live work: label it Running, not Processed.
+      let runningGroup=null;
+      if(subagentOpenTurn&&S.session.active===true)
+        activityByTurn.forEach(s=>{ if(s.group.closest('.assistant-turn')===subagentOpenTurn) runningGroup=s.group; });
       activityByTurn.forEach(state=>{
+        if(state.group===runningGroup) state.group.setAttribute('data-subagent-running','1');
+        else state.group.removeAttribute('data-subagent-running');
         _syncToolCallGroupSummary(state.group);
       });
     }else{
@@ -23195,8 +23979,17 @@ function renderMessages(options){
       if(msg.role!=='assistant') continue;
       const routing=msg._gatewayRouting||null;
       const gatewayText=_formatGatewayModelLabel(String(msg._usedModel||'').trim()||(S.session&&S.session.model)||'', '', routing);
-      const failoverText=_gatewayRoutingFailoverText(routing);
-      const modelWarningText=_gatewayModelWarningText(routing);
+      const seg=assistantSegments.get(mi);
+      const row=seg?seg.closest('.assistant-turn'):null;
+      // Switch/failover warnings describe the whole turn, not one segment; the
+      // model label below is per-segment. Render the warnings on the turn's
+      // final assistant segment only, so a routed turn with interim answers
+      // shows each label once instead of once per segment.
+      // typeof guard: node harnesses extract renderMessages() without its
+      // helpers (#6717); without the helper every segment counts as final.
+      const isTurnFinal=typeof _assistantSegmentIsTurnFinal==='function' ? _assistantSegmentIsTurnFinal(row, mi) : true;
+      const failoverText=isTurnFinal?_gatewayRoutingFailoverText(routing):'';
+      const modelWarningText=isTurnFinal?_gatewayModelWarningText(routing):'';
       const hasTurnUsage=!!msg._turnUsage;
       // The Worklog summary owns the "Done in …" duration whenever this
       // assistant message contributes tool or thinking detail to a folded
@@ -23205,9 +23998,11 @@ function renderMessages(options){
       const durationText=compactWorklogForMessage?'':_formatTurnDuration(msg._turnDuration);
       const usedModelText=_usedModelTurnChipLabel(msg);
       if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!usedModelText) continue;
-      const seg=assistantSegments.get(mi);
-      const row=seg?seg.closest('.assistant-turn'):null;
-      const footerRows=row?row.querySelectorAll('.msg-foot'):[];
+      // Scope the footer lookup to this message's own segments. The turn's
+      // last .msg-foot belongs to the turn's final answer, and the duplicate
+      // guard below would then make the final message skip its own labels
+      // after an interim answer wrote into that foot (issue #8287).
+      const footerRows=row?row.querySelectorAll(`.assistant-segment[data-msg-idx="${mi}"] .msg-foot`):[];
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
       if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-used-model-inline')) continue;
       const fragments=[];
@@ -23505,6 +24300,9 @@ function renderMessages(options){
           _materializeDeferredWorklogRows(group);
         }
         if(!(group.textContent||'').trim()) continue; // empty group can't help
+        // A delegated transcript's collapsed chip stays collapsed (it keeps the turn non-blank).
+        if(typeof _isDelegatedSubagentTranscript==='function'&&_isDelegatedSubagentTranscript()&&
+           typeof _readActivityDisclosureState==='function'&&_readActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'))==='closed'){revealed=true;continue;}
         if(group.classList.contains('tool-call-group-collapsed')){
           group.classList.remove('tool-call-group-collapsed');
           group.classList.add('open');
@@ -23747,8 +24545,20 @@ function _toolTargetLabel(tc){
   else if(kind==='memory') raw=a.target||a.name||a.action||'';
   else if(kind==='read'||kind==='write') raw=a.path||a.file_path||a.file||a.target||a.name||'';
   else if(kind==='search'||kind==='web') raw=a.query||a.pattern||a.url||a.uri||'';
+  else if(kind==='delegate') raw=_toolDelegateTargetLabel(tc,a);
   else raw=a.cmd||a.command||a.path||a.file_path||a.file||a.uri||a.url||a.query||a.pattern||a.dir||a.task||a.name||'';
   return _redactToolTargetLabel(_decodeToolLabelEntities(String(raw).split('\n')[0].trim()));
+}
+// delegate_task names its work in goal or a tasks batch; saved args may be a truncated string, so the result's count wins.
+function _toolDelegateTargetLabel(tc,a){
+  if(a.action&&a.action!=='spawn') return `subagents (${a.action})`;
+  const counted=String(tc&&tc.snippet||'').match(/"count"\s*:\s*(\d+)/);
+  let tasks=a.tasks;
+  const n=counted?+counted[1]:Array.isArray(tasks)?tasks.length:(String(tasks||'').match(/['"]goal['"]\s*:/g)||[]).length;
+  if(n>1) return `${n} subagents`;
+  if(Array.isArray(tasks)) tasks=tasks[0]&&tasks[0].goal;
+  else if(typeof tasks==='string') tasks=(tasks.match(/['"]goal['"]\s*:\s*['"]([^'"]+)/)||[])[1];
+  return tasks||a.goal||a.task||'';
 }
 function _toolReadRangeLabel(tc){
   const name=String(tc&&tc.name||'').toLowerCase().replace(/[^a-z0-9]+/g,'_');
@@ -24280,6 +25090,8 @@ function _syncToolCallGroupSummary(group){
         ? _activityProcessedElapsedLabel(group)
         : _activitySettledProcessedLabel(group);
       label.textContent=processedLabel||t('processed_elapsed','');
+      // A running subagent's open worklog is live work, not processed work.
+      if(group.getAttribute('data-subagent-running')==='1') label.textContent=t('gateway_running_label');
     }else{
       const rows=Array.from(group.querySelectorAll('.tool-card-row'));
       // Prefer the live _tcData classification; fall back to the durable data-*
@@ -24700,7 +25512,7 @@ function editMessage(btn) {
   bar.querySelector('.msg-edit-cancel').onclick = () => cancelEdit(row, originalText, body);
 
   ta.addEventListener('keydown', e => {
-    if(e.key==='Enter' && !e.shiftKey) { if(window._isImeEnter&&window._isImeEnter(e)) return; e.preventDefault(); bar.querySelector('.msg-edit-send').click(); }
+    if(window._composerShouldSendOnKey?window._composerShouldSendOnKey(e):(e.key==='Enter'&&!e.shiftKey)) { if(window._isImeEnter&&window._isImeEnter(e)) return; e.preventDefault(); bar.querySelector('.msg-edit-send').click(); }
     if(e.key==='Escape') { e.preventDefault(); cancelEdit(row, originalText, body); }
   });
 }
@@ -24742,6 +25554,9 @@ function autoResizeTextarea(ta) {
 let _submitEditInFlight = false;
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy || _submitEditInFlight) return;
+  // #8523: a session another client owns is read-only here. send() refuses it, so stop before the
+  // truncate: the edit must not cut the transcript and then end with no message.
+  if(S.session.chat_read_only_reason){ setStatus(S.session.chat_read_only_reason); return; }
   _submitEditInFlight = true;
   try {
     const initialSid = S.session.session_id;
@@ -24781,6 +25596,8 @@ async function submitEdit(msgIdx, newText) {
 
 async function regenerateResponse(btn) {
   if(!S.session || S.busy) return;
+  // #8523: a read-only session refuses the turn server-side; say why before touching the transcript.
+  if(S.session.chat_read_only_reason){ setStatus(S.session.chat_read_only_reason); return; }
   const row=btn&&btn.closest&&btn.closest('[data-msg-idx]');
   if(!row)return;
   const clickedRowIdx=parseInt(row.dataset.msgIdx,10);
@@ -27080,7 +27897,7 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // file from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
   if(!S.session)return;
@@ -27113,7 +27930,7 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // folder from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
   if(!S.session)return;
