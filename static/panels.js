@@ -10949,7 +10949,27 @@ async function loadSettingsPanel(){
     const ttsVoiceSel=$('settingsTtsVoice');
     window._populateTtsVoices=function(){
       if(!ttsVoiceSel) return;
-      const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+      // #9115: the engine selector and the voice catalog must name the SAME
+      // engine. The selector reads the speech setting (the user's explicit
+      // choice when the mirror write was refused), while the catalog used to
+      // read the raw cache entry -- so after a refused engine edit the control
+      // showed one engine and the catalog offered another engine's voices.
+      //
+      // This reads the changed-key half of _speechSetting only: a key the user
+      // changed uses its desired value, everything else uses the effective cache
+      // entry. The persisted half is deliberately not used -- it performs a
+      // mirror write, and a write from here would reconcile the refusal state
+      // of a control the catalog has nothing to do with (#9114). The `typeof`
+      // guards keep this readable when the block is evaluated on its own (the
+      // renderer tests evaluate _populateTtsVoices against a stub).
+      const engine=(
+        typeof _settingsSpeechChangedKeys!=='undefined'
+        && typeof _settingsSpeechDesiredValues!=='undefined'
+        && _settingsSpeechChangedKeys.has('tts_engine')
+        && _settingsSpeechDesiredValues['tts_engine']!==undefined
+        && _settingsSpeechDesiredValues['tts_engine']!==null
+        && String(_settingsSpeechDesiredValues['tts_engine'])!==''
+      )?String(_settingsSpeechDesiredValues['tts_engine']):(localStorage.getItem('hermes-tts-engine')||'browser');
       const current=String(_speechSetting('tts_voice','hermes-tts-voice','')||'');
       _syncSpeechPreferenceCache('tts_voice',current);
       if(engine==='elevenlabs'){
