@@ -460,8 +460,6 @@ def test_a_concurrent_non_transcript_write_does_not_serve_older_messages(
     older messages than the sidecar holds -- and saving that object could
     erase the newer ones.
     """
-    import api.models as models
-
     models = _prepare_session_dir(monkeypatch, tmp_path, "effortrace")
 
     def _msg(role, content, ts, mid):
