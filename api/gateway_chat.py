@@ -1195,6 +1195,21 @@ def _relay_gateway_run_events(
             commit()
             sse_event = "message"
             continue
+        if payload_event == "message.interim":
+            text = payload.get("text")
+            if isinstance(text, str) and text.strip():
+                emit("interim_assistant", {
+                    "text": text.strip(),
+                    "already_streamed": payload.get("already_streamed") is True,
+                })
+                # The journal owns the sealed segment, including its reasoning.
+                # Terminal snapshots must retain only the still-open segment.
+                final_text = _adopt_gateway_stream_text(stream_id, "")
+                if stream_id in STREAM_REASONING_TEXT:
+                    STREAM_REASONING_TEXT[stream_id] = ""
+            commit()
+            sse_event = "message"
+            continue
         if payload_event == "message.delta":
             delta = str(payload.get("delta") or "")
             if delta:
@@ -2002,7 +2017,7 @@ def _restore_relayed_gateway_state(session_id: str, stream_id: str) -> int | Non
     for row in events:
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         seq = payload.get("gateway_seq")
-        if row.get("event") in {"token", "reasoning", "tool", "tool_complete"}:
+        if row.get("event") in {"token", "interim_assistant", "reasoning", "tool", "tool_complete"}:
             if not isinstance(seq, int):
                 return None
             stateful.append((row["event"], payload))
@@ -2010,7 +2025,12 @@ def _restore_relayed_gateway_state(session_id: str, stream_id: str) -> int | Non
         if isinstance(seq, int):
             cursor = max(cursor, seq)
     for name, payload in stateful:
-        if name == "token":
+        if name == "interim_assistant":
+            if isinstance(payload.get("text"), str) and payload["text"].strip():
+                _adopt_gateway_stream_text(stream_id, "")
+                if stream_id in STREAM_REASONING_TEXT:
+                    STREAM_REASONING_TEXT[stream_id] = ""
+        elif name == "token":
             STREAM_PARTIAL_TEXT[stream_id] = STREAM_PARTIAL_TEXT.get(stream_id, "") + str(payload.get("text") or "")
         else:
             _note_live_gateway_event(stream_id, name, payload)
@@ -2548,6 +2568,19 @@ def _settle_gateway_terminal_error(
             )
         turn_duration = _terminal_turn_duration(session)
         _materialize_pending_user_turn_before_error(session)
+        # Recover sealed commentary before the open suffix and error marker,
+        # while the pending turn still owns the journal output.
+        from api.models import _append_journaled_partial_output
+
+        turn_start = next((
+            i + 1 for i in range(len(session.messages) - 1, -1, -1)
+            if session.messages[i].get("role") == "user"
+        ), len(session.messages))
+        _append_journaled_partial_output(
+            session, stream_id, dedupe_existing=True,
+            dedupe_min_index=turn_start, append_context=False,
+            display_only=True, through_last_interim=True,
+        )
         session.active_stream_id = None
         session.gateway_run = None
         session.pending_user_message = None
@@ -2670,6 +2703,19 @@ def _settle_gateway_cancelled_turn(session_id, stream_id) -> None:
             session,
             stream_id,
             partial_ts=partial_msg.get("timestamp") if partial_msg is not None else None,
+        )
+        # Seed/reconcile model context first, then restore display-only sealed
+        # commentary ahead of the open suffix without clearing turn ownership.
+        from api.models import _append_journaled_partial_output
+
+        turn_start = next((
+            i + 1 for i in range(len(session.messages) - 1, -1, -1)
+            if session.messages[i].get("role") == "user"
+        ), len(session.messages))
+        _append_journaled_partial_output(
+            session, stream_id, dedupe_existing=True,
+            dedupe_min_index=turn_start, append_context=False,
+            display_only=True, through_last_interim=True,
         )
         if partial_msg is not None:
             if not isinstance(session.messages, list):
@@ -3739,6 +3785,25 @@ def _run_gateway_chat_streaming(
                         if latest_text == msg_norm:
                             display = display[:-1]
                 s.messages = display + [user_msg, assistant_msg]
+            if _use_runs_api and s.messages and s.messages[-1].get("content") == assistant_text:
+                # The journal is also the browser replay source. Persist its
+                # sealed commentary with the SAME segment/dedup rules, before
+                # the final row, without adding process prose to model history.
+                from api.models import _append_journaled_partial_output
+
+                final_display = s.messages.pop()
+                turn_start = next((
+                    i + 1 for i in range(len(s.messages) - 1, -1, -1)
+                    if s.messages[i].get("role") == "user"
+                ), len(s.messages))
+                try:
+                    _append_journaled_partial_output(
+                        s, stream_id, dedupe_existing=True,
+                        dedupe_min_index=turn_start, append_context=False,
+                        display_only=True, through_last_interim=True,
+                    )
+                finally:
+                    s.messages.append(final_display)
             if active_turn_identity.get("token"):
                 current_display_rows = [
                     message
