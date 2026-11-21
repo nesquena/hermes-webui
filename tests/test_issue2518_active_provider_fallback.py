@@ -44,10 +44,25 @@ def _read(rel_path: str) -> str:
 # ---------------------------------------------------------------------------
 # Client-side: source-shape check that the fallback is wired in newSession().
 # ---------------------------------------------------------------------------
-# NOTE: the slice length below is only a SEARCH BOUND inside newSession()'s
-# body (which is ~16.9k chars); the assertions are unchanged. It was raised
-# from 8000/9000 to 12000 because the profile-boundary guard added to the
-# project-binding merge lengthened the prefix before the fallback chain.
+# NOTE: the slice below is the SEARCH BOUND inside newSession()'s body. It is
+# derived from the function's own end (the next top-level `async function`
+# declaration), not a magic character count: a fixed window silently stops
+# covering the fallback chain whenever the function grows above it, which reads
+# as "the guard disappeared" instead of "the window is too small". The
+# assertions are unchanged.
+
+
+def _new_session_body(src: str) -> str:
+    """The complete body of ``newSession()``, up to the next top-level function.
+
+    Bounding by the function's real end keeps the source-shape assertions
+    anchored on the whole body: a hardcoded character window breaks as a
+    false negative the moment the function grows past it.
+    """
+    idx = src.find("async function newSession(flash, options={}){")
+    assert idx != -1, "newSession() must be defined in static/sessions.js"
+    end = src.find("\nasync function ", idx + 1)
+    return src[idx:] if end == -1 else src[idx:end]
 
 
 class TestClientFallbackSourceShape:
@@ -55,9 +70,7 @@ class TestClientFallbackSourceShape:
 
     def test_active_provider_fallback_present(self):
         src = _read("static/sessions.js")
-        idx = src.find("async function newSession(flash, options={}){")
-        assert idx != -1
-        body = src[idx:idx + 12000]
+        body = _new_session_body(src)
         assert "window._activeProvider" in body, (
             "newSession() must consult window._activeProvider when the dropdown "
             "did not yield a truthy model_provider (cold boot, empty "
@@ -66,8 +79,7 @@ class TestClientFallbackSourceShape:
 
     def test_previous_session_fallback_present(self):
         src = _read("static/sessions.js")
-        idx = src.find("async function newSession(flash, options={}){")
-        body = src[idx:idx + 12000]
+        body = _new_session_body(src)
         assert "S.session&&S.session.model_provider" in body, (
             "newSession() must fall back to the previous session's "
             "model_provider when neither the dropdown nor window._activeProvider "
@@ -77,8 +89,7 @@ class TestClientFallbackSourceShape:
     def test_fallback_chain_order(self):
         """Fallback order: explicit > _activeProvider > prev-session > null."""
         src = _read("static/sessions.js")
-        idx = src.find("async function newSession(flash, options={}){")
-        body = src[idx:idx + 12000]
+        body = _new_session_body(src)
         explicit = body.find("newModelState.model_provider")
         active = body.find("window._activeProvider")
         prev = body.find("S.session&&S.session.model_provider")
@@ -92,11 +103,7 @@ class TestClientFallbackSourceShape:
     def test_issue_referenced_in_source(self):
         """Future readers should be able to trace this back to the issue."""
         src = _read("static/sessions.js")
-        idx = src.find("async function newSession(flash, options={}){")
-        # Window covers the model-fallback region of newSession(); the function
-        # has grown over time (e.g. pre-session toolset staging #4490), so keep
-        # the window comfortably larger than the fallback block it guards.
-        body = src[idx:idx + 7000]
+        body = _new_session_body(src)
         assert "#2518" in body, (
             "newSession()'s fallback comment should reference #2518 so the "
             "follow-up provenance survives future refactors."
@@ -209,16 +216,13 @@ def _provider_assignment_in_new_session() -> str:
             || (_bareModel ? (window._activeProvider || (S.session && S.session.model_provider)) : null)
             || null;
 
-    Both lines live in the same 4000-char slice of newSession()'s
-    function body, so the helper can read them as a single contract
-    unit. Anchors on the ``=`` of the assignment (not a prose mention
+    Both lines live in newSession()'s function body, so the helper can
+    read them as a single contract unit. Anchors on the ``=`` of the assignment (not a prose mention
     in a comment) and on the guard declaration so future comments
     referencing ``reqBody.model_provider`` cannot confuse it.
     """
     src = _read("static/sessions.js")
-    idx = src.find("async function newSession(flash, options={}){")
-    assert idx != -1, "newSession() must be defined in static/sessions.js"
-    body = src[idx : idx + 12000]
+    body = _new_session_body(src)
     guard_start = body.find("const _bareModel")
     assert guard_start != -1, (
         "newSession() must declare a 'const _bareModel' guard for the "
