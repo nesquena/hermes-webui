@@ -85,6 +85,18 @@ def test_saved_titles_are_not_judged_by_fresh_rules():
     assert not _looks_invalid_generated_title("What About Bob Film Review")
 
 
+@pytest.fixture(autouse=True)
+def _clear_title_schema_refusals():
+    # The module-level refusal memory (#9154) is process-lifetime state;
+    # keep these tests independent of order and of each other.
+    from api import streaming as _streaming
+    with _streaming._TITLE_SCHEMA_REFUSALS_LOCK:
+        _streaming._TITLE_SCHEMA_REFUSALS.clear()
+    yield
+    with _streaming._TITLE_SCHEMA_REFUSALS_LOCK:
+        _streaming._TITLE_SCHEMA_REFUSALS.clear()
+
+
 def _response(content):
     return types.SimpleNamespace(choices=[types.SimpleNamespace(
         message=types.SimpleNamespace(content=content), finish_reason="stop",
@@ -177,10 +189,12 @@ def test_agent_route_resends_without_rejected_schema():
     assert generate_title_raw_via_agent(agent, "q", "a") == ("Docker Volume Permissions", "llm")
     assert ["response_format" in c for c in calls] == [True, False]
 
-    # Nothing is cached: the next title tries the schema again.
+    # The refusal is remembered per (provider, model) for the process
+    # lifetime, so the next title skips the schema instead of paying for the
+    # same refusal again (#9154).
     calls.clear()
     assert generate_title_raw_via_agent(agent, "q", "a") == ("Docker Volume Permissions", "llm")
-    assert ["response_format" in c for c in calls] == [True, False]
+    assert ["response_format" in c for c in calls] == [False]
 
 
 def test_agent_route_does_not_resend_on_other_errors():
