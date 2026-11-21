@@ -58,6 +58,9 @@ SEED_FILES = {
     "photo.png": b"\x89PNG\r\n\x1a\n" + b"\x00" * 32,
     "data.csv": b"a,b\n1,2\n",
 }
+# Extra rows so the tree is taller than the panel and genuinely scrolls: the
+# lower-edge clamp probe needs to place a row at a chosen viewport position.
+SEED_FILES.update({f"bulk_{i:02d}.txt": f"bulk {i}\n".encode() for i in range(40)})
 SEED_DIRS = ["subdir"]  # exercises the existing Download Folder item
 
 # Installs call recorders over the sibling-script globals the handlers resolve
@@ -215,6 +218,124 @@ def _probe_width(page, width, height, label, artifact_dir):
           f"icon→row routing, menu Download→file, dir menu keeps Download Folder: OK")
 
 
+# Lower-edge clamp probe (2026-11-20 gate RED): the menu is placed with a
+# pre-append height guess, so a pointer near the bottom of the viewport left
+# the last rows — Delete — below the fold once Download made the menu taller.
+# This probe right-clicks a REAL pointer at a deterministic lower-edge
+# position (the tree is scrolled so the row center sits at vh-90) and then
+# measures the rendered menu: it must fit inside the viewport with Delete
+# hit-testable at its center. Mirrors the gate's matched base/integration
+# comparison without any destructive Delete operation.
+SCROLL_ROW_JS = """
+(args) => {
+  const rows = Array.from(document.querySelectorAll('.file-item'));
+  const row = rows.find(r => (r.textContent||'').includes(args.file));
+  if (!row) return {error: 'row not found'};
+  let el = row.parentElement;
+  while (el && el !== document.body) {
+    const cs = getComputedStyle(el);
+    if (/(auto|scroll)/.test(cs.overflowY) && el.scrollHeight > el.clientHeight) {
+      const r = row.getBoundingClientRect();
+      el.scrollTop += (r.top + r.height / 2) - args.targetY;
+      break;
+    }
+    el = el.parentElement;
+  }
+  const r = row.getBoundingClientRect();
+  return {cx: r.left + r.width / 2, cy: r.top + r.height / 2};
+}
+"""
+
+MENU_CLAMP_JS = """
+() => {
+  const menu = document.querySelector('.file-ctx-menu');
+  if (!menu) return {error: 'menu not found'};
+  const r = menu.getBoundingClientRect();
+  const items = Array.from(menu.querySelectorAll('div'));
+  const del = items.find(el => el.textContent.trim() === 'Delete');
+  let delInfo = null;
+  if (del) {
+    const dr = del.getBoundingClientRect();
+    const cx = dr.left + dr.width / 2, cy = dr.top + dr.height / 2;
+    const inVp = dr.top >= 0 && dr.bottom <= window.innerHeight;
+    let hit = false;
+    if (inVp && cy >= 0 && cy < window.innerHeight) {
+      const hitEl = document.elementFromPoint(cx, cy);
+      hit = hitEl === del || (hitEl && del.contains(hitEl));
+    }
+    delInfo = {top: dr.top, bottom: dr.bottom, inVp, hit};
+  }
+  return {top: r.top, bottom: r.bottom, left: r.left, right: r.right,
+          vh: window.innerHeight, vw: window.innerWidth,
+          maxHeight: menu.style.maxHeight || '', overflowY: menu.style.overflowY || '',
+          del: delInfo, itemCount: items.length};
+}
+"""
+
+
+def _open_menu_at_lower_edge(page, file, vh, label):
+    info = page.evaluate(SCROLL_ROW_JS, {"file": file, "targetY": vh - 90})
+    assert "error" not in info, f"{label}: {info}"
+    page.mouse.click(info["cx"], info["cy"], button="right")
+    page.wait_for_selector(".file-ctx-menu", timeout=5000)
+    return page.evaluate(MENU_CLAMP_JS)
+
+
+def _probe_menu_clamp(page, width, height, label):
+    page.set_viewport_size({"width": width, "height": height})
+    page.evaluate("() => { if (typeof toggleWorkspacePanel === 'function') toggleWorkspacePanel(true); }")
+    page.wait_for_selector(".file-item", timeout=15000)
+    m = _open_menu_at_lower_edge(page, "receipt.pdf", height, label)
+    assert m["bottom"] <= m["vh"] and m["top"] >= 0, (
+        f"{label}: lower-edge menu overflows the viewport — top={m['top']:.1f} "
+        f"bottom={m['bottom']:.1f} vh={m['vh']} (Download made the menu taller than "
+        f"the fixed placement allowance; Delete fell below the fold)")
+    assert m["del"] and m["del"]["inVp"] and m["del"]["hit"], (
+        f"{label}: Delete must be visible and hit-testable at the lower edge; "
+        f"got {m['del']} (menu bottom={m['bottom']:.1f}, vh={m['vh']})")
+    assert m["left"] >= 0 and m["right"] <= m["vw"], (
+        f"{label}: menu must stay inside the viewport horizontally; got "
+        f"left={m['left']:.1f} right={m['right']:.1f} vw={m['vw']}")
+    page.evaluate("() => document.querySelectorAll('.file-ctx-menu').forEach(el => el.remove())")
+    print(f"  [{label}] lower-edge right-click: menu clamped inside viewport, "
+          f"Delete visible and hit-testable (menu bottom {m['bottom']:.1f} / vh {m['vh']}): OK")
+
+
+def _probe_menu_scroll_fallback(page, label):
+    """When the menu is taller than the viewport it must clamp to the edge and
+    scroll, not overflow: maxHeight + overflowY, with Delete reachable."""
+    width, height = 480, 380
+    page.set_viewport_size({"width": width, "height": height})
+    page.evaluate("() => { if (typeof toggleWorkspacePanel === 'function') toggleWorkspacePanel(true); }")
+    page.wait_for_selector(".file-item", timeout=15000)
+    m = _open_menu_at_lower_edge(page, "receipt.pdf", height, label)
+    assert m["bottom"] <= m["vh"] and m["top"] >= 0, (
+        f"{label}: tiny-viewport menu overflows — top={m['top']:.1f} "
+        f"bottom={m['bottom']:.1f} vh={m['vh']}")
+    if m["maxHeight"]:
+        assert m["overflowY"] == "auto", (
+            f"{label}: clamped tall menu must scroll (overflowY=auto); got "
+            f"maxHeight={m['maxHeight']} overflowY={m['overflowY']!r}")
+        page.evaluate("""() => {
+          const items = Array.from(document.querySelectorAll('.file-ctx-menu div'));
+          const del = items.find(el => el.textContent.trim() === 'Delete');
+          if (del) del.scrollIntoView({block: 'nearest'});
+        }""")
+        m2 = page.evaluate(MENU_CLAMP_JS)
+        assert m2["del"] and m2["del"]["hit"], (
+            f"{label}: Delete must be reachable by scrolling the clamped menu; "
+            f"got {m2['del']}")
+        print(f"  [{label}] tiny viewport: menu pinned to edge + scrollable "
+              f"(maxHeight {m['maxHeight']}), Delete reachable after scroll: OK")
+    else:
+        assert m["del"] and m["del"]["inVp"] and m["del"]["hit"], (
+            f"{label}: menu fit without scrolling but Delete is not visible/"
+            f"hit-testable; got {m['del']}")
+        print(f"  [{label}] tiny viewport: menu fully visible without scroll, "
+              f"Delete hit-testable: OK")
+    page.evaluate("() => document.querySelectorAll('.file-ctx-menu').forEach(el => el.remove())")
+
+
 def main():
     try:
         from playwright.sync_api import sync_playwright
@@ -311,6 +432,8 @@ def main():
             print(f"artifacts (screenshots): {artifact_dir}")
             for width, height, label in VIEWPORTS:
                 _probe_width(page, width, height, label, __import__("pathlib").Path(artifact_dir))
+                _probe_menu_clamp(page, width, height, label)
+            _probe_menu_scroll_fallback(page, "tiny")
             browser.close()
         print("PASS: workspace download placement (context menu) + row geometry hold at both widths")
         return 0

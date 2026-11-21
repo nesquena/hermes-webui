@@ -25473,6 +25473,28 @@ function _showFileContextMenu(e, item){
   }
 
   document.body.appendChild(menu);
+  // Clamp to the ACTUAL rendered bounds. The pre-append estimate above cannot
+  // know the real menu size (it varies with the item set: directories add
+  // Download Folder, files add Download, read-only/external-link menus
+  // shrink), so a pointer near the lower edge left the last rows — e.g.
+  // Delete — below the fold. Measure after insertion and correct; when the
+  // menu is taller than the viewport itself, pin it to the edge and let it
+  // scroll rather than overflow.
+  const mrect=menu.getBoundingClientRect();
+  const edge=8;
+  if(mrect.bottom>vh-edge||mrect.top<edge){
+    const maxH=vh-edge*2;
+    if(mrect.height>maxH){
+      menu.style.top=edge+'px';
+      menu.style.maxHeight=maxH+'px';
+      menu.style.overflowY='auto';
+    }else{
+      menu.style.top=Math.max(edge,Math.min(mrect.top,vh-edge-mrect.height))+'px';
+    }
+  }
+  if(mrect.right>vw-edge||mrect.left<edge){
+    menu.style.left=Math.max(edge,Math.min(mrect.left,vw-edge-mrect.width))+'px';
+  }
   const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
   setTimeout(()=>document.addEventListener('click',dismiss),0);
 }

@@ -400,30 +400,43 @@ class TestIconClickBubblesToRow:
 # ── Behavioral tests: execute _showFileContextMenu and click items ────────────
 
 
-def _menu_vm(item: dict, escape_grant: bool = False) -> dict:
+def _menu_vm(item: dict, escape_grant: bool = False, menu_rect: dict | None = None) -> dict:
     """Execute the real _showFileContextMenu() source against a modeled DOM.
 
     The mock captures the menu appended to document.body, and (optionally)
     clicks the file Download item so the action itself runs — the 2026-10-29
     review asked for execution of the new menu action, not source assertions.
+    ``menu_rect`` models the menu's rendered bounds for the post-append
+    viewport clamp (real layout lives in the browser gate).
     """
     payload = {"fnSource": _context_menu_fn(), "item": item, "escapeGrant": escape_grant}
+    if menu_rect is not None:
+        payload["menuRect"] = menu_rect
     js = (
         "const params = " + json.dumps(payload) + ";\n"
         + r"""
 let menus = [];
+let created = 0;
 const downloadCalls = [];
 const document = {
   body: { appendChild(el) { menus.push(el); } },
   querySelectorAll() { return []; },
   createElement(tag) {
-    return {
+    // The menu is the first element _showFileContextMenu creates; its rect is
+    // injectable so tests can model below-viewport geometry. The default
+    // neutral rect keeps the post-append viewport clamp a no-op here (real
+    // layout is covered by the browser gate).
+    const el = {
       tagName: tag.toUpperCase(), className: '', textContent: '',
       style: {}, children: [], removed: false,
+      __rect: (created++ === 0 && params.menuRect) ? params.menuRect
+              : { top: 12, left: 12, right: 13, bottom: 13, width: 1, height: 1 },
+      getBoundingClientRect() { return this.__rect; },
       appendChild(c) { this.children.push(c); },
       remove() { this.removed = true; },
       onclick: null, onmouseenter: null, onmouseleave: null,
     };
+    return el;
   },
   addEventListener() {}, removeEventListener() {},
 };
@@ -457,6 +470,12 @@ console.log(JSON.stringify({
   menuRemoved: menu.removed,
   downloadCalls,
   clickedDownload,
+  style: {
+    top: menu.style.top || '',
+    left: menu.style.left || '',
+    maxHeight: menu.style.maxHeight || '',
+    overflowY: menu.style.overflowY || '',
+  },
 }));
 """
     )
@@ -543,3 +562,41 @@ class TestContextMenuDownloadActionExecuted:
             f"directory rows must not gain the file Download item; got {out['labels']}"
         )
         assert out["downloadCalls"] == [], out
+
+
+class TestMenuClampsToViewport:
+    """2026-11-20 gate RED: placement used a fixed pre-append height guess, so
+    a pointer near the lower edge left the last rows (Delete) below the fold
+    once Download made the menu taller. The rendered menu must be measured
+    after insertion and clamped to the actual viewport, scrolling when it
+    cannot fit. Real-pointer layout evidence lives in the browser gate
+    (tests/browser_workspace_icon_download_geometry.py); here the modeled DOM
+    executes the same production clamp with injected bounds."""
+
+    def test_lower_edge_menu_is_measured_and_clamped(self):
+        # Coherent rendered geometry: top 800 + height 390 → bottom 1190, past
+        # 1072 (1080-8). The pre-append heuristic kept top at clientY=100
+        # (100+100<1080), but the measured menu overflows, so the clamp moves
+        # the top so the bottom lands at vh-8 (1080-8-390=682). Height still
+        # fits the viewport → no scroll machinery.
+        out = _menu_vm(
+            {"name": "f.txt", "path": "f.txt", "type": "file", "is_dir": False},
+            menu_rect={"top": 800, "left": 100, "right": 260, "bottom": 1190, "width": 160, "height": 390},
+        )
+        assert out["style"]["top"] == "682px", (
+            f"menu must clamp its measured bottom inside the viewport "
+            f"(1080-8-390=682); got top={out['style']['top']!r}"
+        )
+        assert out["style"]["maxHeight"] == "" and out["style"]["overflowY"] == "", (
+            f"fitting menu must not gain scroll styling; got {out['style']}"
+        )
+
+    def test_viewport_taller_than_menu_pins_edge_and_scrolls(self):
+        # Height 1200 > maxH 1064 (1080-2*8): pin to the top edge and scroll.
+        out = _menu_vm(
+            {"name": "f.txt", "path": "f.txt", "type": "file", "is_dir": False},
+            menu_rect={"top": 100, "left": 100, "right": 260, "bottom": 1300, "width": 160, "height": 1200},
+        )
+        assert out["style"]["top"] == "8px", out["style"]
+        assert out["style"]["maxHeight"] == "1064px", out["style"]
+        assert out["style"]["overflowY"] == "auto", out["style"]
