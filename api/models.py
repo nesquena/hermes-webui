@@ -7087,6 +7087,41 @@ def _cached_session_lags_disk(cached) -> bool:
     return False
 
 
+def _detach_session_for_intentional_shrink(sid) -> None:
+    """Drop *sid* from the LRU while an intentional shrink is being persisted.
+
+    retry/undo/truncate/clear all shrink the cached Session object's message
+    list in memory before saving it. Between the shrink and the save the
+    cached object holds FEWER messages than its sidecar — exactly the shape
+    ``_cached_session_lags_disk`` reads as a stale cache. A concurrent full
+    read in that window reloads the old sidecar over the shrunk object
+    (#9029): the reply the user just removed comes back in the transcript,
+    and the next save writes it to disk again.
+
+    Detaching the entry first turns the window into a cache miss instead of
+    a stale hit: concurrent readers cold-load the sidecar — still the old,
+    un-shrunk content, which is the correct pre-save semantics — and the
+    caller republishes the shrunk object once it is durable. This changes
+    nothing about ``_cached_session_lags_disk``; a genuinely stale cache
+    (sidecar ahead of cache through another writer) still takes the reload
+    path.
+    """
+    with LOCK:
+        SESSIONS.pop(sid, None)
+
+
+def _republish_session_after_shrink(sid, session) -> None:
+    """Publish a shrunk, already-saved session back into the LRU (#9029).
+
+    Counterpart to ``_detach_session_for_intentional_shrink``: called once
+    the shrunk object is durable so the cache and the sidecar agree again.
+    """
+    with LOCK:
+        SESSIONS[sid] = session
+        SESSIONS.move_to_end(sid)
+        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+
+
 def _persisted_message_count(sid) -> int | None:
     """Return the on-disk message count for *sid* without a full load (#4765).
 
