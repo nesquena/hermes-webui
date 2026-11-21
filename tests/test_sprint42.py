@@ -442,6 +442,10 @@ class TestRuntimeRouteInjection(unittest.TestCase):
             "Do not keep progress only in reasoning, thinking, or tool-result channels",
             captured["agent"].ephemeral_system_prompt,
         )
+        self.assertIn(
+            "Keep the final reply self-contained",
+            captured["agent"].ephemeral_system_prompt,
+        )
         self.assertNotIn(
             "you may provide brief user-visible progress updates",
             captured["agent"].ephemeral_system_prompt,
