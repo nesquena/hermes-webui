@@ -4729,6 +4729,66 @@ def _unique_raw_provider_record(providers_cfg: object, pid: str, slug: str) -> d
     return owning[0][1] if owning else None
 
 
+def _raise_on_native_alias_collision(
+    providers_cfg: object,
+    pid: str,
+    slug: str,
+    selected: dict,
+) -> None:
+    """Raise when a SECOND native record also claims ``pid``'s identity (#8841).
+
+    :func:`_unique_raw_provider_record` already refuses two raw records that
+    both name the identity, but the exact ``providers['custom:<slug>']`` key
+    short-circuits that scan in :func:`_native_custom_provider_record`, so a
+    record claiming the same alias by display name (``myproxy`` named ``x_ai``
+    beside ``custom:x_ai``) was never checked. The Agent keys one credential
+    pool by display name, so both rows share ``pool:custom:<name>`` and a send
+    could pair one record's endpoint with the other record's key. Refuse the
+    turn instead, naming both records.
+
+    What is NOT a second claimant: a record the Agent treats as disabled (its
+    resolver never sees it), a record that names the identity but declares no
+    connection field (not a competing authority, as in
+    :func:`_unique_raw_provider_record`), a record that claims only through its
+    own config key (the exact canonical key outranks such a raw sibling, #8428),
+    and a built-in-spelled key, which
+    :func:`provider_name_ambiguity_verdict` already refuses (#8690) — counting
+    it here would refuse an already-terminal route a second time.
+    """
+    if not isinstance(providers_cfg, dict):
+        return
+    own_key = str(selected.get("provider_key") or "").strip()
+    own_lower = own_key.lower()
+    claimants = [own_key or pid]
+    for key, record in providers_cfg.items():
+        key_text = str(key or "").strip()
+        if not key_text or key_text.lower() in {pid.lower(), "custom", own_lower}:
+            continue
+        if not _is_native_custom_provider_key(key_text):
+            continue  # built-in spelling: #8690's guard owns that collision
+        if not isinstance(record, dict) or not record:
+            continue
+        if not _raw_provider_record_enabled(record):
+            continue
+        # The claimant must NAME the identity itself: only a record whose own
+        # display name claims this alias counts. A record that claims through
+        # its config KEY alone is the #8428 shape (an exact canonical key
+        # outranks such a raw sibling), not this collision.
+        name = record.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if pid not in _custom_provider_alias_set(name, "") and _custom_provider_slug_key(name) != slug:
+            continue
+        if _custom_record_owns_connection(_normalized_raw_provider_record(record, key_text), pid):
+            claimants.append(key_text)
+    if len(claimants) >= 2:
+        raise AmbiguousCustomProviderError(
+            f"Custom provider records {claimants!r} under providers: all name the provider "
+            f"slug {slug!r}; an endpoint and API key could be resolved from different "
+            f"records. Rename one so each custom provider has a unique slug."
+        )
+
+
 def _native_custom_provider_record(providers_cfg: object, pid: str, slug: str) -> tuple[dict | None, bool]:
     """Return the native authority and whether its explicit disable is terminal.
 
@@ -4857,6 +4917,12 @@ def _select_custom_provider_record(
         # The identity's authority said no; generic model/pool fallbacks cannot
         # resurrect it under the name the user explicitly took offline.
         return None, "", False, CUSTOM_SELECTION_MISSING
+    if native_record is not None:
+        # #8841: another record claiming this alias by its own display name
+        # would share the Agent's display-name-keyed credential pool with this
+        # one, so refuse the turn naming both records before either is handed
+        # back.
+        _raise_on_native_alias_collision(providers_cfg, pid, slug, native_record)
 
     model_cfg = cfg_data.get("model", {})
     model_provider = str(model_cfg.get("provider") or "").strip().lower() if isinstance(model_cfg, dict) else ""
