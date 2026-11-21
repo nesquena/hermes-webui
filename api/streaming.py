@@ -16702,6 +16702,16 @@ def _run_agent_streaming(
             ) = _context_and_revision_from_state_snapshot(
                 _external_state_snapshot,
             )
+            # The run's own replacement baseline: the arrays this turn actually
+            # ran against. A competing writer that appends after this freeze is
+            # imported by the early save below; without this declaration the
+            # import advances the "loaded" arrays and the final append-intent
+            # save then reads those rows as a deliberate local removal. Declared
+            # on the object only around the terminal saves (see models.py).
+            _run_replacement_baseline = {
+                'messages': _previous_messages,
+                'context_messages': _previous_context_messages,
+            }
             # Dedup before feeding to agent — merge_session_messages_append_only
             # can produce duplicates when context_messages and state.db share
             # messages with different timestamps.
@@ -16762,7 +16772,7 @@ def _run_agent_streaming(
             # Persist the user message BEFORE streaming starts so it's durable even if
             # the server crashes before the first checkpoint fires (every 15s).
             with _agent_lock:
-                s.save(touch_updated_at=True, skip_index=False)
+                s.save(touch_updated_at=True, skip_index=False, append_intent=True)
 
             _ckpt_thread = threading.Thread(
                 target=_periodic_checkpoint, daemon=True,
@@ -17708,9 +17718,12 @@ def _run_agent_streaming(
                             _error_message['provider_details_label'] = 'Terminal state details'
                         s.messages.append(_error_message)
                         try:
-                            s.save()
+                            s._replacement_baseline = _run_replacement_baseline
+                            s.save(append_intent=True)
                         except Exception:
                             pass
+                        finally:
+                            s._replacement_baseline = None
                         _error_payload['session'] = redact_session_data(
                             _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
                         )
@@ -18218,8 +18231,14 @@ def _run_agent_streaming(
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                     put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
+                # A streaming run declares the history it actually ran against
+                # for its terminal save; without this the intermediate save's
+                # import looks like a deliberate local removal here. Cleared
+                # right after the save so no later writer inherits it.
+                s._replacement_baseline = _run_replacement_baseline
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
-                    s.save()
+                    s.save(append_intent=True)
+                s._replacement_baseline = None
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:

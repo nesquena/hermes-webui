@@ -86,7 +86,7 @@ def test_stream_writeback_diagnostics_cover_final_writeback_stages():
 
     assert (
         'with _stream_writeback_stage(_writeback_timings, "session_save"):\n'
-        '                    s.save()'
+        '                    s.save(append_intent=True)'
     ) in src
     assert src.index('with _stream_writeback_stage(_writeback_timings, "session_save")') < src.index(
         'with _stream_writeback_stage(_writeback_timings, "state_sync")'
