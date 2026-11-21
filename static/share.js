@@ -91,13 +91,24 @@ function _shareSourceWords(source){
   // page shows (a false alarm), never fewer.
   s=s.replace(/<!--[\s\S]*?(?:-->|$)/g,c=>' '+c.replace(/[<>[\]`:]/g,' ')+' ');
   s=s.replace(/MEDIA:|file:\/\//g,' ')
-    .replace(/^(\s*[-*+]\s+)\[[ xX]\](?=\s)/gm,'$1')
+    .replace(/^([ \t]*[-*+][ \t]+)\[[ xX]\](?=[ \t])/gm,'$1')
     // A mermaid diagram has no language header; every other one-word language
     // is shown in the block's header, so it stays a word.
     .replace(/^( {0,3}`{3,})[ \t]*mermaid[ \t]*$/gim,'$1')
-    // A link whose label is its own address shows that address once.
-    .replace(/\[([^[\]\s]+)\]\(\1\)/g,'$1')
-    .replace(/<a\s+href\s*=\s*(["'])([^"'\s<>]+)\1\s*>\2<\/a\s*>/gi,'$2');
+    ;
+  // The source and DOM must use the same normalized equality for label/href.
+  s=s.replace(/\[([^[\]\n]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s)]+)\)/g,(all,label,href)=>
+    _shareSameWords(_shareWordsOf(label),_shareWordsOf(href))?label:all);
+  s=s.replace(/<a\b([^<>]*)>([^<]*)<\/a\s*>/gi,(all,attrs,label)=>{
+    let href,hrefCount=0;
+    attrs.replace(_SHARE_ATTR_RE,(_m,name,dq,sq,bare)=>{
+      if(name.toLowerCase()==='href'){ hrefCount++; href=dq!==undefined?dq:(sq!==undefined?sq:(bare!==undefined?bare:'')); }
+      return '';
+    });
+    if(hrefCount!==1||href===undefined||!_shareSameWords(_shareWordsOf(label),_shareWordsOf(href))) return all;
+    const rest=attrs.replace(_SHARE_ATTR_RE,(part,name)=>name.toLowerCase()==='href'?'':part);
+    return '<a'+rest+'>'+label+'</a>';
+  });
   s=s.replace(_SHARE_TAG_RE,(tag,_close,name,attrs)=>{
     const n=name.toLowerCase();
     if(!_SHARE_TAG_NAMES.has(n)) return tag;
@@ -165,6 +176,9 @@ function _shareVisibleWords(root){
         let value=String(attr.value||'');
         if(name.startsWith('data-')||name==='download'||name==='style') continue;
         if(name==='class') value=value.split(/\s+/).filter(c=>!/^language-/i.test(c)).join(' ');
+        // A list item's number shows only inside a numbered list, and only up to the browser's
+        // limit; anywhere else the value is invisible, so it gives no credit.
+        if(name==='value'&&tag==='li'&&!(String(node.tagName||'').toLowerCase()==='ol'&&/^(?:0|[1-9]\d{0,8})$/.test(value))) continue;
         // A bare link shows its own address: count it once, not twice.
         if(name==='href'&&_shareSameWords(_shareWordsOf(value),_shareWordsOf(ownText))) continue;
         add(_shareWordsOf(value));

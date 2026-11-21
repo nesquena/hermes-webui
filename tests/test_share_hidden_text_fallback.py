@@ -239,6 +239,33 @@ def test_percent_encoded_addresses_match_plain_ones(call):
     assert _missing(call, "[x](https://e.com/a b)", dom) == []
 
 
+def test_a_list_number_counts_only_where_the_browser_shows_it(call):
+    # A numbered list shows its item's number.
+    assert _missing(call, '<ol><li value="3">item</li></ol>', ["ol", {}, ["li", {"value": "3"}, "item"]]) == []
+    # Outside an <ol>, or past the browser's limit, the number is invisible.
+    for number, dom in [
+        ("731337", ["ul", {}, ["li", {"value": "731337"}, "item"]]),
+        ("731338", ["li", {"value": "731338"}, "item"]),
+        ("99999999999", ["ol", {}, ["li", {"value": "99999999999"}, "item"]]),
+    ]:
+        tag = dom[0]
+        src = f'<li value="{number}">item</li>' if tag == "li" else f'<{tag}><li value="{number}">item</li></{tag}>'
+        assert _missing(call, src, dom) == [number]
+
+
+def test_link_labels_match_their_address_the_same_way_on_both_sides(call):
+    # A label that differs from its address only by a trailing slash shows the address once.
+    dom = ["p", {}, ["a", {"href": "https://example.com/"}, "https://example.com"]]
+    assert _missing(call, "[https://example.com](https://example.com/)", dom) == []
+    # So does an address-labelled anchor with extra attributes.
+    src = '<a href="https://e.com/d" target="_blank" rel="noopener">https://e.com/d</a>'
+    dom = ["p", {}, ["a", {"href": "https://e.com/d", "target": "_blank", "rel": "noopener"}, "https://e.com/d"]]
+    assert _missing(call, src, dom) == []
+    # A hidden copy of the address word is still caught.
+    dom = ["p", {}, ["a", {"href": "https://example.com/"}, "https://example.com"], " ", {"comment": " example "}]
+    assert _missing(call, "[https://example.com](https://example.com/) <!-- example -->", dom) == ["example"]
+
+
 @pytest.mark.parametrize(
     "attrs",
     [{"data-mermaid-id": "secretword"}, {"download": "secretword"}, {"style": "secretword"},
@@ -264,9 +291,9 @@ def test_ordinary_message_has_nothing_missing(call):
     "text",
     ["<a " * 100_000, "<" * 400_000, '<a x="' + "b " * 200_000, "<a b=" * 80_000, "&amp;" * 100_000,
      "- [x] \n" * 50_000, "```\n" * 100_000, "&copy;" * 100_000, "&#65;" * 100_000, "<!--" * 100_000,
-     "<!-- <a> -->" * 40_000],
+     "<!-- <a> -->" * 40_000, "a" + "\n" * 200_000 + "b"],
     ids=["unclosed_tags", "lt_run", "open_quote", "open_values", "entities", "task_boxes", "fences",
-         "named_refs", "numeric_refs", "comment_openers", "comments"],
+         "named_refs", "numeric_refs", "comment_openers", "comments", "blank_lines"],
 )
 def test_source_words_stay_linear(call, text):
     out = call.many([{"fn": "_shareSourceWords", "args": [text]}])[0]

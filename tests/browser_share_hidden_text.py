@@ -84,6 +84,11 @@ HIDING = [
     f"Use `&{MARK};` literally; <!-- {MARK} -->",
     f"[docs](https://example.com/%7A{MARK[1:]}) <!-- {MARK} -->",
     f"see https://example.com/{MARK}/%41 <!-- {MARK} -->",
+    # A list item's number shows only inside a numbered list, and only up to the browser's limit.
+    '<ul><li value="731337">item</li></ul>',
+    '<li value="731338">item</li>',
+    '- one\n<li value="731339">two</li>',
+    '<ol><li value="99999999999">item</li></ol>',
 ]
 
 # Realistic content that must keep its formatting.
@@ -121,6 +126,11 @@ ORDINARY = [
     "Write `&copy;` to get the symbol.",
     "Saved to [report.txt](file:///tmp/report.txt) and file:///tmp/notes.txt",
     "```python\nprint('hi')\n```",
+    # A label that differs from its address only by a trailing slash, an address-labelled anchor with
+    # extra attributes, and a numbered list that starts later (its numbers are shown).
+    "[https://example.com](https://example.com/)",
+    '<a href="https://example.com/docs" target="_blank" rel="noopener">https://example.com/docs</a>',
+    "3. third step\n4. fourth step",
 ]
 
 # Random messages: tokens renderMd treats specially, with numbered marker words.
