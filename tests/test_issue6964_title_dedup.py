@@ -9,13 +9,25 @@ These tests prove the collision path now de-duplicates (suffix variant)
 instead of leaving the row untitled, and that unique titles are unchanged.
 """
 
+import sqlite3
+
 import pytest
 
 
 def _make_db(tmp_path):
-    hermes_state = pytest.importorskip("hermes_state")
-    SessionDB = hermes_state.SessionDB
-    return SessionDB(db_path=tmp_path / "state.db")
+    """The production opener: the legacy SessionDB, or the storage interface on newer Agents."""
+    from tests._agent_state_store import open_agent_store
+
+    return open_agent_store(tmp_path / "state.db")
+
+
+def _title(tmp_path, session_id):
+    conn = sqlite3.connect(f"file:{tmp_path / 'state.db'}?mode=ro", uri=True)
+    try:
+        row = conn.execute("SELECT title FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    finally:
+        conn.close()
+    return None if row is None else row[0]
 
 
 @pytest.mark.requires_agent_modules
@@ -37,8 +49,8 @@ def test_sync_session_title_dedups_second_session_on_collision(tmp_path, monkeyp
         state_sync.sync_session_title("sess-1", "Same Title", profile="default")
         state_sync.sync_session_title("sess-2", "Same Title", profile="default")
 
-        t1 = db.get_session_title("sess-1")
-        t2 = db.get_session_title("sess-2")
+        t1 = _title(tmp_path, "sess-1")
+        t2 = _title(tmp_path, "sess-2")
         assert t1 == "Same Title"
         # De-duplicated with a lineage suffix -- never left blank.
         assert t2 == "Same Title #2"
@@ -64,8 +76,8 @@ def test_sync_session_title_dedup_handles_numbered_base(tmp_path, monkeypatch):
         state_sync.sync_session_title("sess-1", "Same Title #2", profile="default")
         state_sync.sync_session_title("sess-2", "Same Title #2", profile="default")
 
-        t1 = db.get_session_title("sess-1")
-        t2 = db.get_session_title("sess-2")
+        t1 = _title(tmp_path, "sess-1")
+        t2 = _title(tmp_path, "sess-2")
         assert t1 == "Same Title #2"
         assert t2 == "Same Title #3"
         assert t1 != t2
@@ -89,8 +101,8 @@ def test_sync_session_title_unique_titles_unchanged(tmp_path, monkeypatch):
         state_sync.sync_session_title("sess-a", "Alpha Title", profile="default")
         state_sync.sync_session_title("sess-b", "Beta Title", profile="default")
 
-        assert db.get_session_title("sess-a") == "Alpha Title"
-        assert db.get_session_title("sess-b") == "Beta Title"
+        assert _title(tmp_path, "sess-a") == "Alpha Title"
+        assert _title(tmp_path, "sess-b") == "Beta Title"
     finally:
         db.close()
 
@@ -127,9 +139,9 @@ def test_sync_session_title_dedup_retry_never_clobbers_manual_rename(tmp_path, m
         # name must survive.
         state_sync.sync_session_title("sess-2", "Same Title", profile="default")
 
-        assert db.get_session_title("sess-1") == "Same Title"
+        assert _title(tmp_path, "sess-1") == "Same Title"
         # The manual (user-source) rename is preserved -- never clobbered by
         # either the initial auto-title or the de-dup retry variant.
-        assert db.get_session_title("sess-2") == "My Own Name"
+        assert _title(tmp_path, "sess-2") == "My Own Name"
     finally:
         db.close()

@@ -191,6 +191,8 @@ def test_docker_init_stages_agent_source_for_writable_install():
     #   uv pip install "$_agent_src[all]" ...
     # The fixed code is:
     #   uv pip install "$_stage_src[all]" ...
+    # Since #8524 the install lives in install_staged_agent(), whose $_isa_src
+    # parameter is bound to "$_stage_src" by its only caller (pinned below).
     install_lines = [
         line for line in src.splitlines()
         if "uv pip install" in line and "[all]" in line
@@ -204,10 +206,13 @@ def test_docker_init_stages_agent_source_for_writable_install():
             "Use the writable $_stage_src path instead. "
             f"Offending line: {line!r}"
         )
-        assert "_stage_src" in line, (
+        assert "_stage_src" in line or '"$_isa_src[all]"' in line, (
             "the `uv pip install ...[all]` line must use the staged writable "
             f"path. Offending line: {line!r}"
         )
+    callers = [line.strip() for line in src.splitlines()
+               if "install_staged_agent " in line and "() {" not in line]
+    assert callers and all(c.startswith('install_staged_agent "$_stage_src"') for c in callers), callers
 
 
 def test_docker_init_excludes_egg_info_during_staging():
@@ -263,6 +268,31 @@ def test_docker_init_excludes_egg_info_during_staging():
     assert ".playwright" in stage_block, (
         "Both rsync (--exclude) and cp-fallback (rm -rf) must handle "
         ".playwright so the build doesn't choke on unreadable browser files."
+    )
+
+
+def test_docker_init_excludes_unreadable_install_lock_during_staging():
+    """An unreadable `tools/.install.lock` in the agent source must not be staged.
+
+    rsync exits 23 when it cannot read a file it was asked to copy, and the
+    staging step runs under `set -e`, so a single mode-000 file shipped by the
+    agent image kills container startup with
+    `Failed to stage hermes-agent source to writable build dir`. This is the
+    same class as `.playwright` above: an unreadable file in the source tree
+    that only the exclusion list keeps out of the copy.
+
+    Found while validating #8113 — the two/three-container smoke jobs could not
+    reach the interpreter fix because staging aborted first.
+    """
+    src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
+
+    stage_idx = src.index("_stage_src=")
+    install_idx = src.index("uv pip install", stage_idx)
+    stage_block = src[stage_idx:install_idx]
+
+    assert "--exclude='.install.lock'" in stage_block, (
+        "rsync staging must --exclude='.install.lock'; the agent source ships it "
+        "unreadable, which makes rsync exit 23 and kills startup."
     )
 
 
