@@ -213,13 +213,24 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+# Local readiness must never route through an inherited HTTP(S) proxy: the
+# benchmark server and the Chrome debug endpoint live on loopback, and an
+# ambient proxy without a parent loopback exemption turns every readiness
+# probe into a remote hop (the 2026-11-20 Gate reproduced a healthy local
+# server reported unready for the whole 30s deadline behind a 502 proxy).
+# Build a deliberate proxy-free opener rather than asking operators to
+# change their global proxy configuration; the child env keeps its explicit
+# NO_PROXY for the server it launches.
+_PROXY_FREE_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def wait_url(url: str, proc: subprocess.Popen, timeout: float = 30) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(f"process exited {proc.returncode}: {url}")
         try:
-            with urllib.request.urlopen(url, timeout=1) as response:
+            with _PROXY_FREE_OPENER.open(url, timeout=1) as response:
                 if response.status == 200:
                     return
         except OSError:
@@ -259,6 +270,27 @@ def wait_boot(page) -> None:
         page.wait_for_timeout(50)
 
 
+def ensure_loopback_proxy_bypass() -> None:
+    """Exempt loopback from the ambient proxy in THIS process's environment.
+
+    wait_url() probes through a proxy-free opener, but the benchmark talks to
+    more loopback endpoints than urllib: Playwright's ``connect_over_cdp``
+    fetches ``/json/version`` honoring the inherited proxy env, and the
+    Chrome child inherits it too. Behind an inherited HTTP(S) proxy without
+    a loopback exemption the whole benchmark dies one hop away from its own
+    local servers. Add 127.0.0.1/localhost to NO_PROXY/no_proxy for this
+    process (preserving existing entries) — the deliberately scoped
+    loopback bypass; no global or system proxy configuration is touched.
+    """
+    for var in ("NO_PROXY", "no_proxy"):
+        existing = os.environ.get(var, "")
+        entries = [entry.strip() for entry in existing.split(",") if entry.strip()]
+        for host in ("127.0.0.1", "localhost"):
+            if host not in entries:
+                entries.append(host)
+        os.environ[var] = ",".join(entries)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", type=int, default=2)
@@ -284,6 +316,7 @@ def main() -> int:
         from playwright.sync_api import sync_playwright
     except ImportError:
         parser.error("install Playwright in the selected Python environment")
+    ensure_loopback_proxy_bypass()
     results: list[dict] = []
     server: subprocess.Popen | None = None
     chrome: subprocess.Popen | None = None
