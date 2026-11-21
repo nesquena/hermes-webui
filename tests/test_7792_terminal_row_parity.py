@@ -186,3 +186,17 @@ def test_activity_snapshot_body_parses_as_javascript():
         assert r.returncode == 0, f"embedded JS failed to parse: {r.stderr}"
     finally:
         os.unlink(tmp)
+
+
+@pytest.mark.parametrize("field", ["role", "toolCallId", "source", "status", "tool", "detail", "classes"])
+def test_terminal_parity_preserves_canonical_scene_semantics(field):
+    settled = _terminal_row(label=TERMINAL_ERROR_TEXT, clock="9:14 PM")
+    settled.update({
+        "role": "terminal", "toolCallId": "lifecycle-tool-1", "source": "error",
+        "status": "failed", "tool": "read_file", "detail": "provider failed",
+        "classes": "agent-activity-status agent-activity-status-error",
+    })
+    reloaded = dict(settled, clock="9:15 PM")
+    reloaded[field] = "changed-on-reload"
+    with pytest.raises(AssertionError):
+        _assert_terminal_parity([settled], [reloaded])
