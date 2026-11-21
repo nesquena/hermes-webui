@@ -1216,6 +1216,12 @@ def _relay_gateway_run_events(
                 reason="Gateway run completed before approval resolution",
             )
             if payload.get("error"):
+                # #8901: same terminal-with-error path as `run.failed` below —
+                # release the held-back delta tail before unwinding, or the
+                # last streamed text is swallowed by the redactor's window.
+                _held_delta = delta_redactor.flush()
+                if _held_delta:
+                    emit("token", {"text": _held_delta})
                 raise RuntimeError(str(payload["error"]))
             output = str(payload.get("output") or "")
             if output and (output_is_authoritative or not final_text):
@@ -1235,6 +1241,17 @@ def _relay_gateway_run_events(
             break
         if payload_event == "run.failed":
             _relay_gateway_pending_steer(session_id, payload, put_gateway_event)
+            # #8901: a failed run is terminal too, so the held-back delta tail
+            # must be released before the raise below unwinds this loop —
+            # otherwise the last streamed text is swallowed by the redactor's
+            # tail window and the turn ends with a truncated transcript.
+            #
+            # It stays AFTER the steer relay: relaying the unconsumed steer
+            # before the turn is torn down is the existing order, and
+            # test_gateway_steer_forwarding.py pins that first line.
+            _held_delta = delta_redactor.flush()
+            if _held_delta:
+                emit("token", {"text": _held_delta})
             from api.route_approvals import settle_gateway_pending_run
             settle_gateway_pending_run(
                 session_id,

@@ -276,3 +276,109 @@ def test_real_agent_plugin_pattern_split_across_deltas_is_redacted(real_registry
     assert token not in out, "a plugin-shaped secret split across deltas must be masked"
     assert "plugin key: " in out
     assert " done" in out
+
+
+# ── Terminal-error frames must release the held delta tail ────────────────
+#
+# The redactor holds back a tail window so a secret split across deltas can
+# never be emitted in the clear. That window must be released on EVERY
+# terminal path, not just the happy one: a run that ends with `run.failed`
+# (or a `run.completed` that carries an error) unwinds the relay loop with a
+# raise, so a flush that only happens on `done` / `stream_end` / `apperror`
+# silently swallows the last streamed text and the turn ends with a
+# truncated transcript.
+#
+# These cases drive the real `_relay_gateway_run_events` over a fake SSE
+# response, so they exercise the production frame loop rather than a
+# source-text check.
+
+
+class _FakeSseResponse:
+    """Minimal HTTPResponse stand-in: iterating it yields raw SSE lines."""
+
+    def __init__(self, lines):
+        self._lines = [line.encode("utf-8") for line in lines]
+
+    def __iter__(self):
+        return iter(self._lines)
+
+
+def _relay_gateway_frames(frames):
+    """Relay *frames* through the production gateway relay; return emitted tokens."""
+    import json
+    import threading
+
+    from api import gateway_chat
+
+    red = _redactor()
+    emitted = []
+
+    def put_gateway_event(event_name, data):
+        if event_name == "token" and isinstance(data, dict):
+            emitted.append(data.get("text") or "")
+
+    lines = []
+    for frame in frames:
+        lines.append("data: " + json.dumps(frame))
+    lines.append("data: [DONE]")
+
+    resp = _FakeSseResponse(lines)
+    try:
+        gateway_chat._relay_gateway_run_events(
+            resp,
+            "same-session",
+            "stream-1",
+            "run-1",
+            "http://gateway.invalid",
+            "",
+            put_gateway_event=put_gateway_event,
+            cancel_event=threading.Event(),
+            delta_redactor=red,
+        )
+    except RuntimeError:
+        # A terminal error frame unwinds the relay loop with a raise; that is
+        # the production contract. The point under test is what was emitted
+        # BEFORE the unwind.
+        pass
+    return "".join(emitted), red
+
+
+def test_run_failed_releases_the_held_delta_tail():
+    """A run that ends with run.failed must not swallow the last streamed text."""
+    text, red = _relay_gateway_frames([
+        {"event": "message.delta", "delta": "the terminal answer"},
+        {"event": "run.failed", "error": "boom"},
+    ])
+    assert "the terminal answer" in text, (
+        f"the failed run swallowed the streamed text: {text!r}"
+    )
+    assert red._tail == "", "the tail window must be empty after a terminal failure"
+
+
+def test_run_completed_with_error_releases_the_held_delta_tail():
+    """run.completed carrying an error is terminal too, and must flush as well."""
+    text, red = _relay_gateway_frames([
+        {"event": "message.delta", "delta": "partial answer"},
+        {"event": "run.completed", "error": "boom"},
+    ])
+    assert "partial answer" in text, (
+        f"the failed completion swallowed the streamed text: {text!r}"
+    )
+    assert red._tail == "", "the tail window must be empty after a terminal error"
+
+
+def test_failed_run_still_redacts_a_split_secret():
+    """Control: the failure-path flush must not release a secret in the clear.
+
+    This one is a CONTROL, not a discriminating case: it passes both with and
+    without the failure-path flush, because a redactor that never flushes
+    cannot leak. Its job is to pin the invariant that adding the flush does
+    not trade the missing tail for a leaked secret.
+    """
+    secret = _FAKE_SK
+    text, _ = _relay_gateway_frames([
+        {"event": "message.delta", "delta": secret[:12]},
+        {"event": "message.delta", "delta": secret[12:]},
+        {"event": "run.failed", "error": "boom"},
+    ])
+    assert secret not in text, "the failure path must not release a secret in the clear"
