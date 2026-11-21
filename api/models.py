@@ -18185,11 +18185,18 @@ def _merge_session_messages_append_only_impl(
                 state_replay_idx += 1
         if replays_sidecar_prefix:
             _merge_session_display_metadata(replay_target, msg)
-            matched_visible_key = _matching_visible_duplicate(
-                visible_key,
-                sidecar_visible_keys,
-                sidecar_visible_lookup,
-                remaining=sidecar_visible_remaining,
+            # Charge replay capacity for the positional target in the same
+            # decision that suppresses it (#8672 gate finding F1, 2026-11-20).
+            # The positional probe above is deliberately clock-tolerant
+            # (_visible_key_without_occurrence), but _matching_visible_duplicate
+            # is clock-sensitive: with a restamped mirror the clocks differ, the
+            # second search misses, and the saved occurrence keeps its capacity
+            # for a later NULL-clock row to consume.  One saved occurrence then
+            # absorbs two durable rows, violating the at-most-one-replay
+            # invariant this PR establishes.  Consume the positional target's
+            # capacity here so it cannot absorb a second replay.
+            matched_visible_key = _cached_message_key(
+                replay_target, "visible_sidecar"
             )
             if matched_visible_key is not None:
                 skipped_state_visible_counts[matched_visible_key] = (
