@@ -36,12 +36,14 @@ Mechanisms covered (letters follow the issue investigation):
   r8b/r8e/r9/r9c/r11 restart orderings the pre-#9101 rules get right
   r13-r17 late answers from a server run the tab may not have seen (r16/r17:
         a restart it never observed) end as master does, synced
-  KNOWN_GAPS_AS_ON_MASTER: orderings that need YOLO answers ordered by the
-        server revision (cross-tab frames, older-vs-newer answers, restart
-        snapshots), which the client cannot do safely across a restart it
-        has not seen, and r7 (a stale /yolo read undoing a later pill
-        disable), which needs /yolo to send the revision it read; strict
-        xfails with master's end state (follow-up issue)
+  KNOWN_GAPS_AS_ON_MASTER: the remaining orderings need the SERVER to carry
+        YOLO state on the existing session stream — r3/r5/r8 need the
+        reconnect's `initial` snapshot to include the session's YOLO state
+        (revision + epoch) so a tab can notice a restart it never requested
+        anything from, and r1 needs a `yolo-changed` frame per moved revision
+        for cross-tab sync; api/routes.py sends `initial` as {session_id}
+        only and no yolo event exists yet, so the client keeps master's end
+        state; strict xfails (follow-up issue)
 """
 
 import json
@@ -84,14 +86,24 @@ SCENARIOS = [
 ]
 
 REVISION_SCENARIOS = [
+    "r2_older_write_answer_never_overrides_newer_frame",
+    "r2b_newer_read_answer_overrides_older_write_answer",
+    "r2c_older_yolo_answer_never_overrides_newer_frame",
     "r2d_older_frame_never_overrides_newer_read",
+    "r2e_older_approval_answer_never_overrides_newer_read",
+    "r7_stale_yolo_read_cannot_undo_later_pill_disable",
     "r5b_hide_setting_keeps_on_pill_visible",
     "r5c_hide_setting_shrinks_on_pill_to_icon",
     "r8b_post_restart_answer_is_accepted",
+    "r8c_old_epoch_read_after_newer_read_never_hides_on",
+    "r8d_old_epoch_post_answer_never_shows_on_after_restart",
     "r8e_old_epoch_read_from_an_older_load_is_dropped",
     "r9_first_sync_overlap_shows_the_last_answer",
+    "r9b_old_epoch_approval_answer_after_new_epoch_is_dropped",
     "r9c_first_sync_overlap_applies_the_last_off",
     "r11_late_old_epoch_answers_cause_no_reads",
+    "r11c_old_process_answers_keep_their_revision_order",
+    "r12_late_old_on_then_stale_new_off_never_hides_on",
     "r13_late_old_post_then_old_newer_read",
     "r14_old_reads_revision_order_mirror",
     "r15_late_old_writes_after_epoch_change",
@@ -100,28 +112,22 @@ REVISION_SCENARIOS = [
     "r21_older_off_reads_around_yolo_never_hide_its_on",
 ]
 
-# Orderings master (b1935597c040, b8fb4024d3ae) also gets wrong and that only
-# client-side revision ordering fixed. The client cannot order answers across
-# a server restart it has not seen (r16/r17), so it keeps master's rules and
-# master's end state here; a follow-up issue owns them (a server-confirmed
-# epoch first). r7 needs /yolo to send the revision it read (the server's 409
-# is in place); /yolo is master's code, so it keeps master's end state too.
+# Orderings that need more than the client can see. The revision-ordering
+# gaps (r2/r2b/r2c/r2e), the conditional /yolo gap (r7) and the epoch gaps the
+# client can detect from its own answers (r8c/r8d/r9b/r11c/r12) are fixed and
+# live in REVISION_SCENARIOS above. What remains needs the SERVER to carry
+# YOLO state on the existing session stream: r3/r5/r8 need the reconnect's
+# `initial` snapshot to include the session's YOLO state (revision + epoch) so
+# a tab can notice a restart it never requested anything from, and r1 needs a
+# `yolo-changed` frame per moved revision for cross-tab sync. api/routes.py
+# sends `initial` as {session_id} only and no yolo event exists yet, so the
+# client keeps master's rules and master's end state here.
 # Strict: a fix makes these XPASS and fail, so move them up.
 KNOWN_GAPS_AS_ON_MASTER = [
     "r1_cross_tab_yolo_reaches_open_tab_via_session_stream",
-    "r2_older_write_answer_never_overrides_newer_frame",
-    "r2b_newer_read_answer_overrides_older_write_answer",
-    "r2c_older_yolo_answer_never_overrides_newer_frame",
-    "r2e_older_approval_answer_never_overrides_newer_read",
     "r3_restart_snapshot_clears_stale_on_pill",
     "r5_failed_install_read_keeps_on_pill_via_snapshot",
-    "r7_stale_yolo_read_cannot_undo_later_pill_disable",
     "r8_old_epoch_answer_never_overrides_new_epoch",
-    "r8c_old_epoch_read_after_newer_read_never_hides_on",
-    "r8d_old_epoch_post_answer_never_shows_on_after_restart",
-    "r9b_old_epoch_approval_answer_after_new_epoch_is_dropped",
-    "r11c_old_process_answers_keep_their_revision_order",
-    "r12_late_old_on_then_stale_new_off_never_hides_on",
 ]
 
 

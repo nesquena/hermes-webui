@@ -2602,6 +2602,11 @@ async function cmdYolo(){
     // Same boolean rule as the pill's own read: a malformed answer is never
     // inverted into a toggle (it would post enabled:true for {} or null).
     if(!status||typeof status.yolo_enabled!=='boolean')throw new Error('unexpected answer from the server');
+    // The revision this toggle is computed from: the server's answer for the
+    // status read just made (falling back to the view's for a server that
+    // does not send one).
+    const expectedRevision=typeof status.yolo_revision==='number'?status.yolo_revision
+      :(typeof _yoloView.rev==='number'?_yoloView.rev:0);
     const enable=!status.yolo_enabled;
     // A visible approval must belong to this exact session load before any
     // command handler may POST through it. Otherwise fail closed.
@@ -2616,13 +2621,21 @@ async function cmdYolo(){
         return;
       }
     }
+    // Conditional write: the revision this toggle was computed from. When
+    // another client moved the flag first the server answers 409 yolo_changed
+    // with the CURRENT state; the catch below refreshes the view from it
+    // instead of failing blind or toggling again.
     const result=await api('/api/session/yolo',{
       method:'POST',
-      body:JSON.stringify({session_id:sid,enabled:enable}),
+      body:JSON.stringify({session_id:sid,enabled:enable,expected_revision:expectedRevision}),
     });
     if(!viewIsCurrent()||(approvalOwner&&!_approvalResponseOwnerIsCurrent(approvalOwner)))return;
     const settled=(result&&typeof result.yolo_enabled==='boolean')?result.yolo_enabled:enable;
-    _applyYoloState(sid,settled,{gen:generation});
+    _applyYoloState(sid,settled,{
+      gen:generation,
+      rev:result&&typeof result.yolo_revision==='number'?result.yolo_revision:null,
+      epoch:result&&typeof result.yolo_epoch==='string'?result.yolo_epoch:null,
+    });
     showToast(settled?t('yolo_enabled'):t('yolo_disabled'));
   }catch(e){
     if(!viewIsCurrent()||(approvalOwner&&!_approvalResponseOwnerIsCurrent(approvalOwner)))return;
@@ -2631,7 +2644,13 @@ async function cmdYolo(){
       try{errorPayload=JSON.parse(e.body);}catch(_){}
     }
     if(errorPayload&&typeof errorPayload.yolo_enabled==='boolean'){
-      _applyYoloState(sid,errorPayload.yolo_enabled,{gen:generation});
+      // 409 yolo_changed lands here with the server's current state: the view
+      // is refreshed from it, so the pill matches the server again.
+      _applyYoloState(sid,errorPayload.yolo_enabled,{
+        gen:generation,
+        rev:typeof errorPayload.yolo_revision==='number'?errorPayload.yolo_revision:null,
+        epoch:typeof errorPayload.yolo_epoch==='string'?errorPayload.yolo_epoch:null,
+      });
     }
     showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||e.message));
   }finally{
@@ -2651,15 +2670,23 @@ async function disableYoloFromPill(){
   const sid=pill&&pill.getAttribute('data-yolo-session');
   if(!sid){_updateYoloPill();return;}
   const generation=_loadSessionGeneration;
+  // Conditional write: the revision the visible pill was painted from. A 409
+  // yolo_changed means the flag moved since (another tab, a restart): its
+  // payload carries the current state and the view is refreshed from it.
+  const expectedRevision=(_yoloView.sid===sid&&typeof _yoloView.rev==='number')?_yoloView.rev:0;
   try{
     const result=await api('/api/session/yolo',{
       method:'POST',
-      body:JSON.stringify({session_id:sid,enabled:false}),
+      body:JSON.stringify({session_id:sid,enabled:false,expected_revision:expectedRevision}),
     });
     const settled=(result&&typeof result.yolo_enabled==='boolean')?result.yolo_enabled:false;
     // Dropped when the pill's session is no longer the open one: re-render so
     // a pill painted for it disappears.
-    if(!_applyYoloState(sid,settled,{gen:generation}))_updateYoloPill();
+    if(!_applyYoloState(sid,settled,{
+      gen:generation,
+      rev:result&&typeof result.yolo_revision==='number'?result.yolo_revision:null,
+      epoch:result&&typeof result.yolo_epoch==='string'?result.yolo_epoch:null,
+    }))_updateYoloPill();
     showToast(settled?t('yolo_enabled'):t('yolo_disabled'));
   }catch(e){
     let errorPayload=null;
@@ -2667,7 +2694,11 @@ async function disableYoloFromPill(){
       try{errorPayload=JSON.parse(e.body);}catch(_){}
     }
     const applied=!!(errorPayload&&typeof errorPayload.yolo_enabled==='boolean'
-      &&_applyYoloState(sid,errorPayload.yolo_enabled,{gen:generation}));
+      &&_applyYoloState(sid,errorPayload.yolo_enabled,{
+        gen:generation,
+        rev:typeof errorPayload.yolo_revision==='number'?errorPayload.yolo_revision:null,
+        epoch:typeof errorPayload.yolo_epoch==='string'?errorPayload.yolo_epoch:null,
+      }));
     if(!applied)_updateYoloPill();
     showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||(e&&e.message)||''));
   }

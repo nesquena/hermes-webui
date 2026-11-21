@@ -8449,12 +8449,23 @@ function scheduleComposerAutoResize(){
 // keyed by WebUI session_id, in memory only (a server restart clears it).
 // This tab keeps ONE cached answer for it, keyed by the session it belongs to
 // (#9101):
-//   _yoloView = {sid, enabled, gen, seq}
+//   _yoloView = {sid, enabled, gen, seq, rev, epoch}
 //     sid     — the session this answer is about
 //     enabled — the server's answer for that session
 //     gen     — the _loadSessionGeneration it was applied under
 //     seq     — monotonic count of applied explicit writes (/yolo, the pill,
 //               the approval card); a read issued before a write is stale
+//     rev     — the per-session revision the answer was computed under
+//               (every /api/session/yolo answer carries yolo_revision, #9193)
+//     epoch   — the server run (process) that produced the answer
+//               (yolo_epoch); _yoloKnownRuns remembers every run this tab has
+//               confirmed, so a late answer from an older run is recognised
+let _yoloView = {sid: null, enabled: false, gen: 0, seq: 0, rev: 0, epoch: null};
+// Server runs (yolo_epoch values) this tab has confirmed through an applied
+// answer. A restart starts a run no answer has named yet: such an answer is
+// the server's current state and is accepted; an answer naming a run this tab
+// already moved past is a late leftover and is dropped.
+let _yoloKnownRuns = new Set();
 // Every writer goes through _applyYoloState(); the pill renders only when the
 // view is about the open session. Lifecycle:
 //   • Session install (any loadSession branch, boot restore, reload, refresh):
@@ -8464,7 +8475,6 @@ function scheduleComposerAutoResize(){
 //   • Cross-tab: NOT synced. Another tab's change shows here on the next read
 //     (install, send, /goal, /yolo). The pill only ever disables, so a stale
 //     pill cannot turn YOLO on.
-let _yoloView = {sid: null, enabled: false, gen: 0, seq: 0};
 // Compatibility mirror of _yoloView.enabled for the session the view is about
 // (read by the approval toast and by tests). Written only by _applyYoloState.
 let _yoloEnabled = false;
@@ -8475,16 +8485,26 @@ let _yoloEnabled = false;
 //     about `sid` (same-session refresh) is kept until the install re-reads.
 //   gen        — the _loadSessionGeneration the answer was requested under.
 //   readSeq    — set for GET reads: _yoloView.seq when the read was issued.
+//   rev/epoch  — the answer's yolo_revision / yolo_epoch, when the server
+//                sent them (#9193). Ordering rules (same run: an older
+//                revision never overrides a newer one; another run: only a
+//                run this tab has not confirmed is current) are enforced
+//                below; answers without the fields keep master's rules.
 // A non-reset answer is dropped when it is not for the open session, when a
 // newer load started since it was requested (or a load for another session
 // is in flight), or — for reads — when an explicit write was applied after
-// the read was issued. Returns true when the view was updated.
+// the read was issued. An applied explicit write is followed by a
+// fire-and-forget confirmation read: the write's answer was computed when the
+// server handled it, and another client may have moved the flag since, so
+// the view is re-confirmed against the server's current state. Returns true
+// when the view was updated.
 function _applyYoloState(sid, enabled, meta) {
   const m = meta || {};
   if (!sid || typeof enabled !== 'boolean') return false;
   if (m.reset) {
     if (_yoloView.sid !== sid) {
-      _yoloView = {sid, enabled, gen: _loadSessionGeneration, seq: _yoloView.seq};
+      // A new session's flag starts unread; the run this tab confirmed stays.
+      _yoloView = {sid, enabled, gen: _loadSessionGeneration, seq: _yoloView.seq, rev: 0, epoch: _yoloView.epoch};
       _yoloEnabled = enabled;
     }
     _updateYoloPill();
@@ -8498,9 +8518,29 @@ function _applyYoloState(sid, enabled, meta) {
   // an explicit write's answer is not: the open session really changed.
   if (isRead && _loadingSessionId && _loadingSessionId !== sid) return false;
   if (isRead && m.readSeq !== _yoloView.seq) return false;
-  _yoloView = {sid, enabled, gen, seq: _yoloView.seq + (isRead ? 0 : 1)};
+  // #9101 revision/epoch gate (#9193 server side): answers carry the
+  // per-session revision and the server run they were computed under.
+  const aRun = typeof m.epoch === 'string' ? m.epoch : null;
+  if (aRun && _yoloView.epoch !== aRun) {
+    // The answer is from another run than the view holds. A run this tab
+    // already confirmed and moved past is an older one: its late answer must
+    // not override what the current run answered. A run no answer has named
+    // yet is the server's current one (the tab requested across a restart)
+    // and is accepted.
+    if (_yoloKnownRuns.has(aRun)) return false;
+  }
+  const aRev = typeof m.rev === 'number' ? m.rev : null;
+  // Same run: a read answered at an older revision than the view holds is a
+  // late answer and must not roll the flag back.
+  if (isRead && aRun && _yoloView.epoch === aRun && aRev !== null && aRev < _yoloView.rev) return false;
+  _yoloView = {sid, enabled, gen, seq: _yoloView.seq + (isRead ? 0 : 1),
+               rev: aRev !== null ? aRev : _yoloView.rev, epoch: aRun || _yoloView.epoch};
+  if (aRun) _yoloKnownRuns.add(aRun);
   _yoloEnabled = enabled;
   _updateYoloPill();
+  // An explicit write's answer is only as fresh as the moment the server
+  // computed it: confirm the flag against the server's current state.
+  if (!isRead && typeof _fetchYoloState === 'function') _fetchYoloState(sid, {gen});
   return true;
 }
 
@@ -8518,7 +8558,11 @@ async function _fetchYoloState(sid, opts) {
     };
     const data = await api('/api/session/yolo?session_id=' + encodeURIComponent(sid));
     // A malformed answer leaves the view unchanged (as the POST paths do).
-    if (data && typeof data.yolo_enabled === 'boolean') _applyYoloState(sid, data.yolo_enabled, meta);
+    if (data && typeof data.yolo_enabled === 'boolean') {
+      meta.rev = typeof data.yolo_revision === 'number' ? data.yolo_revision : null;
+      meta.epoch = typeof data.yolo_epoch === 'string' ? data.yolo_epoch : null;
+      _applyYoloState(sid, data.yolo_enabled, meta);
+    }
   } catch (_) { /* ignore: fire-and-forget, must never reject */ }
 }
 
@@ -9127,7 +9171,11 @@ async function _handleGatewayUnavailable(owner, errMsg) {
 function _applyApprovalYoloProjection(result, owner) {
   if (!result || typeof result.yolo_enabled !== "boolean") return;
   if (!owner || !owner.sid) return;
-  _applyYoloState(owner.sid, result.yolo_enabled, {gen: owner.generation});
+  _applyYoloState(owner.sid, result.yolo_enabled, {
+    gen: owner.generation,
+    rev: typeof result.yolo_revision === "number" ? result.yolo_revision : null,
+    epoch: typeof result.yolo_epoch === "string" ? result.yolo_epoch : null,
+  });
 }
 
 function toggleApprovalCardCollapsed(forceCollapsed) {
