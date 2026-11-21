@@ -4,6 +4,7 @@ Hermes Web UI -- File upload: multipart parser and upload handler.
 import mimetypes
 import os
 import re as _re
+import stat
 import tempfile
 from pathlib import Path
 
@@ -239,9 +240,26 @@ def _trusted_attachment_root() -> Path | None:
     key = os.getenv('HERMES_WEBUI_ATTACHMENT_DIR', '').strip() or str(STATE_DIR / 'attachments')
     if key not in _TRUSTED_ATTACHMENT_ROOTS:
         try:
-            _TRUSTED_ATTACHMENT_ROOTS[key] = Path(key).expanduser().resolve()
+            resolved = Path(key).expanduser().resolve()
         except (OSError, RuntimeError, ValueError):
             _TRUSTED_ATTACHMENT_ROOTS[key] = None
+        else:
+            # A resolved path is only trusted when it can actually be used as
+            # the inbox. A symlink loop can resolve WITHOUT raising on some
+            # platforms (macOS raises RuntimeError, Linux returns a path),
+            # and the root is then unusable: mkdir() there fails with ELOOP
+            # and the upload would surface as a 500 instead of a refusal.
+            # stat() distinguishes the two cases by errno -- ENOENT means
+            # "not created yet", which is fine (the upload creates it), while
+            # ELOOP (and any other error) means the path can never be a
+            # directory, so the root fails closed on every platform.
+            try:
+                usable = stat.S_ISDIR(os.stat(resolved).st_mode)
+            except FileNotFoundError:
+                usable = True
+            except OSError:
+                usable = False
+            _TRUSTED_ATTACHMENT_ROOTS[key] = resolved if usable else None
     return _TRUSTED_ATTACHMENT_ROOTS[key]
 
 
@@ -262,7 +280,15 @@ def _share_attachment_root() -> Path | None:
 
 def _upload_destination(session_id: str, safe_name: str, dest_dir: Path | None = None) -> Path:
     dest_dir = dest_dir if dest_dir is not None else _session_attachment_dir(session_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        # The trusted root can be unusable at write time even when it resolved
+        # at startup — a symlink loop planted in the inbox raises ELOOP
+        # (errno 40) here, and a path that cannot be created is a refused
+        # upload, not a server fault. ValueError maps to the 400 branch in the
+        # caller; a blanket OSError->500 would report a bad inbox as a crash.
+        raise ValueError(f'Upload destination unavailable: {e.strerror or e}') from e
     dest = (dest_dir / safe_name).resolve()
     if not dest.is_relative_to(dest_dir):
         raise ValueError('Invalid upload destination')
