@@ -25,6 +25,10 @@ PROFILE_CONCEPT_FALLBACK_KEYS = {
     # ``workspace_artifact_source_session`` above).
     "force_no_longer_applicable",
     "update_recovery_pending",
+    # #7679 (greptile P2, 2026-11-18): the Force no-op message is new English
+    # copy too, so it also lives only in the ``en`` locale and rides the same
+    # t() fallback.
+    "update_force_no_op",
 }
 
 

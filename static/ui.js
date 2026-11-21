@@ -15390,12 +15390,19 @@ function _showUpdateBanner(data, epoch, recoveryGenerationAtCheck=null){
   const _recoveryMayRetire=typeof _recoveryObservationMayRetire==='function'
     ? _recoveryObservationMayRetire(data, recoveryGenerationAtCheck)
     : false;
-  const _preservedRecoveryTarget=(typeof _forceUpdateGrant!=='undefined'&&_forceUpdateGrant&&_forceUpdateGrant.target==='agent')
+  // #7679 (greptile P1, 2026-11-18): the preserved recovery is NOT
+  // Agent-only. A WebUI conflict publishes a WebUI grant exactly like an
+  // Agent conflict publishes an Agent one, and an older observation that
+  // snapshotted only the Agent grant cleared the newer WebUI grant on its
+  // way out — so the user's WebUI recovery disappeared. Keep whichever
+  // target's grant is live.
+  const _preservedRecoveryTarget=(typeof _forceUpdateGrant!=='undefined'&&_forceUpdateGrant
+      &&(_forceUpdateGrant.target==='agent'||_forceUpdateGrant.target==='webui'))
     ? _forceUpdateGrant
     : null;
   if(typeof _retireForceUpdate==='function') _retireForceUpdate();
   if(_preservedRecoveryTarget&&!_recoveryMayRetire&&typeof _grantForceUpdate==='function'){
-    _grantForceUpdate('agent', _preservedRecoveryTarget.channel);
+    _grantForceUpdate(_preservedRecoveryTarget.target, _preservedRecoveryTarget.channel);
   }
   const parts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
@@ -15471,6 +15478,9 @@ function _showUpdateBanner(data, epoch, recoveryGenerationAtCheck=null){
       // hide below fires whenever `agentUpdatable` is false — which is exactly
       // the shape of an error-only / no-git-only / disabled payload — and the
       // reviewer's schedule loses a live recovery button on all three.
+      // #7679 (greptile P1, 2026-11-18): the same carve-out applies to a
+      // WebUI recovery — the preserved grant names its own target, so the
+      // preservation follows the grant rather than assuming 'agent'.
       const _preserveAgentRecovery=!!(_preservedRecoveryTarget&&!_recoveryMayRetire&&!_recoveryGone('force'));
       const forceBtn=$('btnForceUpdate');
       if(forceBtn&&!(agentUpdatable&&forceBtn.dataset.target==='agent'&&!_recoveryGone('force'))&&!_preserveAgentRecovery){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
@@ -15505,7 +15515,11 @@ function _showUpdateBanner(data, epoch, recoveryGenerationAtCheck=null){
   // dirty-affordance reset. A payload that is not forceable for a dirty reset
   // must not silently retire an unrelated, still-valid Agent recovery that a
   // newer observation established.
-  const _forceBtnPreservedRecoveryKeep=!!(_preservedRecoveryTarget&&!_recoveryMayRetire&&forceBtn&&forceBtn.dataset.target==='agent'&&forceBtn.style.display==='inline-block'&&!forceBtn.disabled);
+  // #7679 (greptile P1, 2026-11-18): the preserved recovery is not
+  // Agent-only, so this carve-out follows the PRESERVED GRANT's own target
+  // instead of hard-coding 'agent'. A WebUI recovery established by a newer
+  // observation must survive this dirty-affordance reset too.
+  const _forceBtnPreservedRecoveryKeep=!!(_preservedRecoveryTarget&&!_recoveryMayRetire&&forceBtn&&forceBtn.dataset.target===_preservedRecoveryTarget.target&&forceBtn.style.display==='inline-block'&&!forceBtn.disabled);
   if(forceBtn&&!_forceBtnManualAgentKeep&&!_forceBtnPreservedRecoveryKeep){
     if(forceable){
       forceBtn.dataset.target=forceTarget;
@@ -15585,9 +15599,14 @@ function _showUpdateBanner(data, epoch, recoveryGenerationAtCheck=null){
   // visible and carries recovery text instead of the empty-payload path.
   const _forceBtn=$('btnForceUpdate');
   const _lockBtn=$('btnClearUpdateLock');
+  // #7679 (greptile P1, 2026-11-18): the surviving-recovery test is NOT
+  // Agent-only. A WebUI recovery control lives in the same banner, so
+  // hiding it for a WebUI recovery erased the action the user still needed
+  // ("WebUI recovery disappears", 2026-11-18). Either target's surviving
+  // action keeps the banner visible.
   const _recoveryControlSurvives=!!(
-    (_forceBtn&&_forceBtn.dataset.target==='agent'&&_forceBtn.style.display==='inline-block'&&!_forceBtn.disabled)
-    ||(_lockBtn&&_lockBtn.dataset.target==='agent'&&_lockBtn.style.display==='inline-block'&&!_lockBtn.disabled)
+    (_forceBtn&&(_forceBtn.dataset.target==='agent'||_forceBtn.dataset.target==='webui')&&_forceBtn.style.display==='inline-block'&&!_forceBtn.disabled)
+    ||(_lockBtn&&(_lockBtn.dataset.target==='agent'||_lockBtn.dataset.target==='webui')&&_lockBtn.style.display==='inline-block'&&!_lockBtn.disabled)
   );
   if(!parts.length){
     if(_recoveryControlSurvives){
@@ -15655,6 +15674,7 @@ async function applyUpdates(opts){
   // #7293: true only on the re-send after the user explicitly confirmed
   // interrupting the WebUI agent runs that made the server refuse the update.
   const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);
+  const confirmedGateway=forceActiveRuns&&opts.confirmedGateway?opts.confirmedGateway:null;  // #8746
   const updateText=(key,fallback)=>(typeof _i18nUpdateText==='function'?_i18nUpdateText(key,fallback):fallback);
   const btn=$('btnApplyUpdate');
   const resetApplyButton=(delayMs)=>{
@@ -15698,6 +15718,7 @@ async function applyUpdates(opts){
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
       if(forceActiveRuns) _applyBody.force_active_runs=true;
+      if(confirmedGateway&&target==='agent') Object.assign(_applyBody,confirmedGateway);
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:300000});
       if(!res.ok){
         _showUpdateError(target,res);
@@ -15705,7 +15726,10 @@ async function applyUpdates(opts){
           // #7679 finding 1 (re-gate 10-31): this retry re-sends the APPLY,
           // which consumes no Force grant, so there is no grant to bind — the
           // offer's target is the one captured here and the replay carries it.
-          _renderActiveRunsForceOffer(target,res,()=>applyUpdates({forceActiveRuns:true}));
+          // #8746: the replay also carries the Gateway restart impact the
+          // offer's confirmation was qualified with, so the forced request
+          // is re-checked against the same impact.
+          _renderActiveRunsForceOffer(target,res,(gw,bound)=>applyUpdates({forceActiveRuns:true,confirmedGateway:gw}));
         }
         resetApplyButton(0);
         return;
@@ -15775,9 +15799,9 @@ function _showUpdateError(target,res){
     if(typeof _stampControlOwner==='function') _stampControlOwner(clearLockBtn);
   }
 }
-function _activeRunsUpdateText(key,count,fallback){
+function _activeRunsUpdateText(key,count,fallback,extra){
   if(typeof t==='function'){
-    const val=t(key,count);
+    const val=extra!==undefined?t(key,count,extra):(count!==undefined?t(key,count):t(key));
     if(val&&val!==key) return val;
   }
   return fallback;
@@ -15814,32 +15838,95 @@ function _renderActiveRunsForceOffer(target,res,resend,grant){
   // null for the Apply / Clear-lock retries, which consume no Force grant.
   const boundGrant=(grant&&typeof grant==='object')?grant:null;
   const boundTarget=target;
-  const rawCount=Number(res&&res.active_runs)||Number(res&&res.active_streams)||1;
-  const count=Math.max(1,Math.floor(rawCount));
-  const plural=count===1?'':'s';
-  const label=_activeRunsUpdateText('update_force_active_runs',count,'Update anyway (interrupts '+count+' run'+plural+')');
+  // #8746: the offer's copy is qualified by how many runs the forced request
+  // would actually interrupt, and by whether the WebUI owns the Gateway
+  // restart. These are the server's own numbers, so the confirmation the user
+  // reads matches the impact the request carries.
+  const agentTarget=boundTarget==='agent';
+  const total=Number(res&&res.active_runs)||Number(res&&res.active_streams)||1;
+  const w=(res&&res.webui_owned_runs!==undefined)?Number(res.webui_owned_runs):total;
+  const g=Number(res&&res.gateway_runs)||0;
+  const agentExternal=agentTarget&&Boolean(res)&&res.gateway_restart_managed===false;
+  const interruptedCount=agentExternal?w:total;
+  // #8746: the forced request carries the Gateway restart impact and the
+  // interrupted-run count this offer shows, so the server refuses again if the
+  // impact changed or more runs would be interrupted.
+  const confirmedGateway=(agentTarget&&res&&typeof res.gateway_restart_managed==='boolean')
+    ?{gateway_restart_managed:res.gateway_restart_managed,gateway_profile:res.gateway_profile,gateway_endpoint:res.gateway_endpoint,interrupted_runs:interruptedCount}
+    :null;
+  let label;
+  if(interruptedCount===0){
+    label=_activeRunsUpdateText('update_force_active_runs_no_runs',undefined,'Update anyway (interrupts nothing)');
+  }else{
+    const plural=interruptedCount===1?'':'s';
+    label=_activeRunsUpdateText('update_force_active_runs',interruptedCount,'Update anyway (interrupts '+interruptedCount+' run'+plural+')');
+  }
   const actions=document.createElement('div');
   actions.style.marginTop='6px';
   const btn=document.createElement('button');
   btn.type='button';
   btn.id='btnForceUpdateActiveRuns';
-  btn.className='update-btn';
-  btn.style.background='var(--error,#e05)';
-  btn.style.color='#fff';
-  btn.style.borderColor='var(--error,#e05)';
+  if(interruptedCount===0){
+    // #8746: a force that interrupts nothing is not a destructive action; the
+    // server refuses it again if the Gateway impact changes before the confirm.
+    btn.className='update-btn update-primary';
+  }else{
+    btn.className='update-btn';
+    btn.style.background='var(--error,#e05)';
+    btn.style.color='#fff';
+    btn.style.borderColor='var(--error,#e05)';
+  }
   btn.dataset.target=boundTarget;
   btn.textContent=label;
   btn.onclick=async()=>{
     if(btn.disabled) return;
+    // #8667: an Agent update also cycles the Gateway that executes the
+    // resumable runs, so its confirmation names both kinds of run. A WebUI
+    // update keeps the WebUI-only copy (#7293).
+    // #8746: qualify the Agent confirmation by Gateway lifecycle ownership.
+    // #8746: an external-Gateway-only refusal interrupts nothing, so its
+    // confirmation names the Gateway runs that keep running, not an interruption.
+    const nothingInterrupted=interruptedCount===0;
+    let confirmMessage;
+    if(nothingInterrupted){
+      const confirmMessageFallback=g+' Gateway run'+(g===1?' keeps':'s keep')+' running because the WebUI cannot restart this profile\'s Gateway. Forcing the update will not stop '+(g===1?'it':'them')+'.';
+      confirmMessage=_activeRunsUpdateText('update_force_active_runs_no_runs_message',g,confirmMessageFallback);
+    }else if(agentTarget){
+      if(g>0){
+        if(agentExternal){
+          const confirmMessageKey='update_force_active_runs_message_agent_external';
+          const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working, and '+g+' Gateway run'+(g===1?' keeps':'s keep')+' running because the WebUI cannot restart this profile\'s Gateway. Only the WebUI runs are saved as interrupted.';
+          confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback,g);
+        }else if(w===0){
+          // #8746: only Gateway runs are interrupted; do not name 0 WebUI runs.
+          const confirmMessageKey='update_force_active_runs_message_agent_gateway_only';
+          const confirmMessageFallback=g+' Gateway run'+(g===1?' is':'s are')+' still working. Updating the Agent also restarts the Gateway this profile uses and stops every run that Gateway is executing, including runs started from other profiles that use the same Gateway endpoint. Wait for '+(g===1?'it':'them')+' to finish if you can.';
+          confirmMessage=_activeRunsUpdateText(confirmMessageKey,g,confirmMessageFallback);
+        }else{
+          const confirmMessageKey='update_force_active_runs_message_agent';
+          const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working and '+g+' Gateway run'+(g===1?' is':'s are')+' running. Updating the Agent also restarts the Gateway this profile uses and stops every run that Gateway is executing, including runs started from other profiles that use the same Gateway endpoint. The WebUI runs are saved as interrupted. Wait for them to finish if you can.';
+          confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback,g);
+        }
+      }else{
+        const confirmMessageKey='update_force_active_runs_message_agent_webui_only';
+        const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working. The WebUI runs are saved as interrupted if you force the update.';
+        confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback);
+      }
+    }else{
+      const count=Math.max(1,Math.floor(total));
+      const confirmMessageKey='update_force_active_runs_message';
+      const confirmMessageFallback=count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.';
+      confirmMessage=_activeRunsUpdateText(confirmMessageKey,count,confirmMessageFallback);
+    }
     const confirmed=await showConfirmDialog({
-      title:_activeRunsUpdateText('update_force_active_runs_title',count,'Interrupt active runs?'),
-      message:_activeRunsUpdateText(
-        'update_force_active_runs_message',
-        count,
-        count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.'
-      ),
-      confirmLabel:_activeRunsUpdateText('update_force_active_runs_confirm',count,'Interrupt and update'),
-      danger:true,
+      title:nothingInterrupted
+        ?_activeRunsUpdateText('update_force_active_runs_no_runs_title',undefined,'Update the Agent now?')
+        :_activeRunsUpdateText('update_force_active_runs_title',interruptedCount,'Interrupt active runs?'),
+      message:confirmMessage,
+      confirmLabel:nothingInterrupted
+        ?_activeRunsUpdateText('update_force_active_runs_no_runs_confirm',undefined,'Update anyway')
+        :_activeRunsUpdateText('update_force_active_runs_confirm',interruptedCount,'Interrupt and update'),
+      danger:!nothingInterrupted,
       focusCancel:true,
     });
     if(!confirmed) return;
@@ -15866,7 +15953,11 @@ function _renderActiveRunsForceOffer(target,res,resend,grant){
       // The replay carries the ORIGINAL authority with it: the retry must
       // build its request from the bound grant (target + channel), never from
       // whatever the shared button or the live grant say now.
-      await resend({grant:boundGrant,target:boundTarget});
+      // #8746: the FIRST argument is the confirmed Gateway restart impact the
+      // offer's confirmation was qualified with — the server refuses again if
+      // the impact changed in the meantime. The bound grant travels as the
+      // SECOND argument, so neither side's payload shape changes.
+      await resend(confirmedGateway,boundGrant);
     }finally{
       if(btn.isConnected){btn.disabled=false;btn.textContent=label;}
     }
@@ -15887,6 +15978,7 @@ async function applyClearUpdateLock(btn,opts){
   try{
     const _clearBody={target};
     if(forceActiveRuns) _clearBody.force_active_runs=true;
+    if(forceActiveRuns&&opts.confirmedGateway) Object.assign(_clearBody,opts.confirmedGateway);  // #8746
     const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify(_clearBody),timeoutMs:300000});
     if(res.ok){
       sessionStorage.removeItem('hermes-update-checked');
@@ -15909,7 +16001,9 @@ async function applyClearUpdateLock(btn,opts){
         // #7679 finding 1 (re-gate 10-31): the Clear-lock retry consumes no
         // Force grant either (it POSTs /api/updates/clear_lock), so nothing is
         // bound here beyond the target the offer captured.
-        _renderActiveRunsForceOffer(target,res,()=>applyClearUpdateLock(btn,{forceActiveRuns:true}));
+        // #8746: the replay also carries the Gateway restart impact the
+        // offer's confirmation was qualified with.
+        _renderActiveRunsForceOffer(target,res,(gw,bound)=>applyClearUpdateLock(btn,{forceActiveRuns:true,confirmedGateway:gw}));
       }
     }
   }catch(e){
@@ -16119,6 +16213,7 @@ async function forceUpdate(btn,opts){
     // #7293: the active-runs override interrupts the runs the server refused
     // to interrupt on the first attempt.
     if(forceActiveRuns) _forceBody.force_active_runs=true;
+    if(forceActiveRuns&&opts.confirmedGateway) Object.assign(_forceBody,opts.confirmedGateway);  // #8746
     const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:300000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
@@ -16141,7 +16236,14 @@ async function forceUpdate(btn,opts){
           btn.disabled=false;btn.textContent=t('update_force','Force update');
           return;
         }
-        _renderActiveRunsForceOffer(target,res,(bound)=>forceUpdate(btn,{forceActiveRuns:true,grant:bound&&bound.grant?bound.grant:null}),grantSnapshot);
+        // #8746: the replay also carries the Gateway restart impact the offer's
+        // confirmation was qualified with.
+        // The bound grant is the SECOND argument (the first is the confirmed
+        // Gateway impact). It is the grant that armed THIS request, so the
+        // replay reuses it even when the shared button has since been
+        // retargeted; the offer falls back to the snapshot it was created
+        // with when no live bound grant survived the confirmation.
+        _renderActiveRunsForceOffer(target,res,(gw,bound)=>forceUpdate(btn,{forceActiveRuns:true,grant:(bound||grantSnapshot),confirmedGateway:gw}),grantSnapshot);
       }
       return;
     }
@@ -16151,7 +16253,11 @@ async function forceUpdate(btn,opts){
     // restarted, so the user's only destructive recovery path was dead until
     // they reloaded. Handle the no-op as its own outcome.
     if(res.up_to_date){
-      showToast('Already up to date — nothing to reset.','4000');
+      // #7679 (greptile P2, 2026-11-18): the no-op copy is new user-facing
+      // text, so it lives in the ``en`` locale and is read through t() like
+      // every other message — the English literal this branch used to pass
+      // straight to showToast() left every other locale showing English.
+      showToast(t('update_force_no_op','Already up to date — nothing to reset.'),'4000');
       btn.disabled=false;btn.textContent=t('update_force','Force update');
       return;
     }
@@ -16718,8 +16824,9 @@ function _fmtDateSep(d){
   const todayStart=new Date();todayStart.setHours(0,0,0,0);
   const dStart=new Date(d);dStart.setHours(0,0,0,0);
   const diffDays=Math.round((todayStart-dStart)/86400000);
-  if(diffDays===0) return 'Today';
-  if(diffDays===1) return 'Yesterday';
+  // hwc: same strings as the sidebar day buckets, already in every locale.
+  if(diffDays===0) return t('session_time_bucket_today');
+  if(diffDays===1) return t('session_time_bucket_yesterday');
   if(diffDays>0 && diffDays<7) return dStart.toLocaleDateString([], {weekday:'long'});
   const opts={month:'short', day:'numeric'};
   if(todayStart.getFullYear()!==dStart.getFullYear()) opts.year='numeric';
