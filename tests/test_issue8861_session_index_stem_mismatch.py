@@ -29,7 +29,6 @@ Not a data-loss path: the owner's file is never touched (#8859 covers writes).
 
 import json
 from collections import OrderedDict
-from pathlib import Path
 
 import pytest
 
