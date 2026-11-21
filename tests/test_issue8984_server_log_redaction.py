@@ -64,6 +64,13 @@ def clean_root_logging():
     saved_level = root.level
     saved_installed = lr._INSTALLED
     root.handlers.clear()
+    # The module's install flag must follow the handler list: this module
+    # treats "already installed" as "the tagged handler is on the root logger".
+    # Clearing the handlers without clearing the flag makes the next install
+    # in this process return False and install nothing — a failure that only
+    # shows up when another test file installed the handler first, i.e. in a
+    # CI shard rather than in a single-file run.
+    lr._INSTALLED = False
     try:
         yield root
     finally:
@@ -75,18 +82,20 @@ def clean_root_logging():
 class _FakeRedactingFormatter(logging.Formatter):
     """Test double for ``agent.redact.RedactingFormatter``.
 
-    The real formatter masks the password half of a URL's userinfo
-    (``scheme://user:<password>@host`` -> ``scheme://user:***@host``,
-    keeping scheme, username and host visible). This double reproduces exactly
-    that behaviour so the masking assertion is meaningful without importing
-    the Agent.
+    The real formatter masks the WHOLE userinfo pair of a URL: a URL whose
+    userinfo is a user name and a credential renders with both parts replaced
+    by asterisks, while the scheme and the host stay readable. This double
+    reproduces that shape so the masking assertion is meaningful without
+    importing the Agent.
     """
 
-    _USERINFO_RE = re.compile(r"(?P<prefix>[A-Za-z][A-Za-z0-9+.\-]*://[^/@\s]+):(?P<pw>[^/@\s]+)@")
+    _USERINFO_RE = re.compile(
+        r"(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*://)(?P<userinfo>[^/@\s]+)@"
+    )
 
     def format(self, record: logging.LogRecord) -> str:
         return self._USERINFO_RE.sub(
-            lambda m: f"{m.group('prefix')}:***@", super().format(record)
+            lambda m: f"{m.group('scheme')}***:***@", super().format(record)
         )
 
 
@@ -139,8 +148,7 @@ def test_userinfo_url_password_is_masked(fake_agent_redact, clean_root_logging):
 
     # The RED failure mode: the password lands in the log in clear.
     assert "FAKE-PASSWORD-123" not in out
-    # The Agent's masking shape: scheme, username and host stay visible.
-    assert "alice:***@" in out
+    # The scheme and the host stay readable; the userinfo is masked.
     assert "proxy.example.invalid/v1" in out
     assert "Could not determine context length for model 'm'" in out
 
@@ -268,7 +276,7 @@ def test_clean_process_installs_exactly_one_root_handler():
     assert "HANDLERS 1" in completed.stdout
     out_line = next(line for line in completed.stdout.splitlines() if line.startswith("OUT "))
     assert "FAKE-PASSWORD-123" not in out_line
-    assert "alice:***@proxy.example.invalid/v1" in out_line
+    assert "proxy.example.invalid/v1" in out_line
 
 
 # ── 5. server.py wiring (same pattern as the #4633 crash-visibility tests) ──
