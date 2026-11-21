@@ -393,7 +393,7 @@ class TestSettingsEndpointVersion:
 
     def test_api_settings_prefers_live_gateway_version(self):
         """When the cached gateway probe returns a live version, /api/settings
-        serves it instead of the import-time AGENT_VERSION (#6150)."""
+        preserves the import-time AGENT_VERSION and sets agent_gateway_version (#6150, #6289)."""
         import api.routes as routes
         import api.updates as upd
 
@@ -412,8 +412,11 @@ class TestSettingsEndpointVersion:
                           return_value='v0.80.0'):
             routes.handle_get(handler, parsed)
 
-        assert captured['data']['agent_version'] == 'v0.80.0', (
-            'route must prefer the live gateway version over AGENT_VERSION'
+        assert captured['data']['agent_version'] == upd.AGENT_VERSION, (
+            'route must preserve the source AGENT_VERSION'
+        )
+        assert captured['data']['agent_gateway_version'] == 'v0.80.0', (
+            'route must expose the live gateway version beside AGENT_VERSION'
         )
 
     def test_api_settings_falls_back_to_agent_version_when_gateway_none(self):
@@ -440,6 +443,9 @@ class TestSettingsEndpointVersion:
         assert captured['data']['agent_version'] == upd.AGENT_VERSION, (
             'route must fall back to AGENT_VERSION when the gateway probe '
             'returns None'
+        )
+        assert 'agent_gateway_version' not in captured['data'], (
+            'route must not include agent_gateway_version when probe yields None'
         )
 
     def test_api_settings_preserves_agent_version_when_probe_raises(self):
@@ -469,6 +475,9 @@ class TestSettingsEndpointVersion:
             'route must not drop agent_version when probe raises'
         )
         assert captured['data']['agent_version'] == upd.AGENT_VERSION
+        assert 'agent_gateway_version' not in captured['data'], (
+            'route must not include agent_gateway_version when probe raises'
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -662,6 +671,28 @@ def _assert_age_relation(label, age, relation, ttl):
         assert age > ttl, f"{label}: age {age!r} must be greater than ttl {ttl!r}"
 
 
+def _cache_key():
+    """Resolved gateway base URL that keys the per-gateway version cache (#6289)."""
+    import api.updates as upd
+    return upd._gateway_health_base_url()
+
+
+def _arm_cache(snapshot):
+    """Publish one immutable ``(value, completed_at)`` entry for the current gateway.
+
+    The production cache is keyed by the resolved gateway base URL, so seeding it
+    means seeding the entry for whichever gateway the environment names right now.
+    """
+    import api.updates as upd
+    upd._GATEWAY_AGENT_VERSION_CACHE = {_cache_key(): snapshot}
+
+
+def _read_cache():
+    """Return the ``(value, completed_at)`` entry for the current gateway."""
+    import api.updates as upd
+    return upd._GATEWAY_AGENT_VERSION_CACHE[_cache_key()]
+
+
 class TestCachedAgentVersionFromGateway:
 
     def setup_method(self):
@@ -672,15 +703,15 @@ class TestCachedAgentVersionFromGateway:
         # restoration in teardown_method: a lock-free save can capture a
         # snapshot that another thread is replacing at the same instant.
         with upd._gateway_version_lock:
-            self._saved_snapshot = upd._GATEWAY_AGENT_VERSION_CACHE
-            upd._GATEWAY_AGENT_VERSION_CACHE = None
+            self._saved_cache = upd._GATEWAY_AGENT_VERSION_CACHE
+            upd._GATEWAY_AGENT_VERSION_CACHE = {}
 
     def teardown_method(self):
         """Restore the previous cache snapshot under the production lock so
         a test can never leak cache state into later tests in the process."""
         import api.updates as upd
         with upd._gateway_version_lock:
-            upd._GATEWAY_AGENT_VERSION_CACHE = self._saved_snapshot
+            upd._GATEWAY_AGENT_VERSION_CACHE = self._saved_cache
 
     def test_single_flight_on_cache_miss(self):
         """Eight concurrent callers on an empty cache produce exactly one
@@ -756,7 +787,7 @@ class TestCachedAgentVersionFromGateway:
         import api.updates as upd
 
         # Seed the cache with a fresh positive entry
-        upd._GATEWAY_AGENT_VERSION_CACHE = ("v0.60.0", time.monotonic())
+        _arm_cache(("v0.60.0", time.monotonic()))
 
         call_count = 0
 
@@ -777,7 +808,7 @@ class TestCachedAgentVersionFromGateway:
         import api.updates as upd
 
         # Seed the cache with a fresh negative entry
-        upd._GATEWAY_AGENT_VERSION_CACHE = (None, time.monotonic())
+        _arm_cache((None, time.monotonic()))
 
         call_count = 0
 
@@ -798,10 +829,10 @@ class TestCachedAgentVersionFromGateway:
         import api.updates as upd
 
         # Seed the cache with an expired positive entry
-        upd._GATEWAY_AGENT_VERSION_CACHE = (
+        _arm_cache((
             "v0.60.0",
             time.monotonic() - upd._GATEWAY_AGENT_VERSION_TTL - 0.5,
-        )
+        ))
 
         with patch.object(upd, '_detect_agent_version_from_gateway_health',
                           return_value="v0.62.0"):
@@ -814,10 +845,10 @@ class TestCachedAgentVersionFromGateway:
         import api.updates as upd
 
         # Seed the cache with an expired negative entry
-        upd._GATEWAY_AGENT_VERSION_CACHE = (
+        _arm_cache((
             None,
             time.monotonic() - upd._GATEWAY_AGENT_VERSION_NEGATIVE_TTL - 0.5,
-        )
+        ))
 
         with patch.object(upd, '_detect_agent_version_from_gateway_health',
                           return_value="v0.63.0"):
@@ -863,7 +894,7 @@ class TestCachedAgentVersionFromGateway:
                 age = now - cached_at
                 _assert_age_relation(label, age, relation, ttl)
 
-                upd._GATEWAY_AGENT_VERSION_CACHE = ("v0.69.0", cached_at)
+                _arm_cache(("v0.69.0", cached_at))
                 result = upd._cached_agent_version_from_gateway()
 
                 assert result == expected, (
@@ -912,7 +943,7 @@ class TestCachedAgentVersionFromGateway:
                 age = now - cached_at
                 _assert_age_relation(label, age, relation, nttl)
 
-                upd._GATEWAY_AGENT_VERSION_CACHE = (None, cached_at)
+                _arm_cache((None, cached_at))
                 result = upd._cached_agent_version_from_gateway()
 
                 assert result == expected, (
@@ -950,7 +981,7 @@ class TestCachedAgentVersionFromGateway:
             writer.join(timeout=5.0)
             assert not writer.is_alive(), "writer thread hung"
 
-        value, completed_at = upd._GATEWAY_AGENT_VERSION_CACHE
+        value, completed_at = _read_cache()
         assert value == "v0.71.0"
         # completed_at must reflect when the probe FINISHED (start + 0.3s),
         # not when it started.
@@ -990,10 +1021,10 @@ class TestCachedAgentVersionFromGateway:
             )
 
         # Force-expire the negative cache so the next call re-probes
-        upd._GATEWAY_AGENT_VERSION_CACHE = (
+        _arm_cache((
             None,
             time.monotonic() - upd._GATEWAY_AGENT_VERSION_NEGATIVE_TTL - 0.5,
-        )
+        ))
 
         with patch.object(upd, '_detect_agent_version_from_gateway_health',
                           side_effect=two_phase_detector):
@@ -1008,22 +1039,23 @@ class TestCachedAgentVersionFromGateway:
     def test_atomic_snapshot_publication_interleaving(self):
         """Deterministic old-snapshot/new-publication interleaving.
 
-        The cache slot holds ONE immutable ``(value, completed_at)`` tuple
-        replaced in a single assignment, so a reader that captured the old
-        snapshot can never observe it half-updated with a value from a new
-        publication.  The previous dict-based cache mutated the same object
-        in two steps (``value`` then ``at``); a reader holding the old
-        reference would have observed the new value paired with the old
-        timestamp — the mixed-generation fast path the review flagged.
+        The mapping holds ONE immutable ``(value, completed_at)`` entry per
+        resolved gateway, and a publication replaces the whole mapping in a
+        single assignment, so a reader that captured the old entry can never
+        observe it half-updated with a value from a new publication.  An
+        earlier revision mutated one shared object in two steps (``value``
+        then ``at``); a reader holding the old reference would have observed
+        the new value paired with the old timestamp — the mixed-generation
+        fast path the review flagged.
         """
         import api.updates as upd
 
         # Seed an old, already-expired generation.
-        upd._GATEWAY_AGENT_VERSION_CACHE = (
+        _arm_cache((
             None,
             time.monotonic() - upd._GATEWAY_AGENT_VERSION_NEGATIVE_TTL - 0.5,
-        )
-        old_snapshot = upd._GATEWAY_AGENT_VERSION_CACHE
+        ))
+        old_snapshot = _read_cache()
         old_completed_at = old_snapshot[1]
 
         entered = threading.Event()
@@ -1044,7 +1076,7 @@ class TestCachedAgentVersionFromGateway:
 
             # While the new probe is in flight, the cache slot still holds
             # the SAME old snapshot — no partial publication is observable.
-            assert upd._GATEWAY_AGENT_VERSION_CACHE is old_snapshot, (
+            assert _read_cache() is old_snapshot, (
                 "reader observed a partial publication while the probe was "
                 "in flight"
             )
@@ -1053,7 +1085,7 @@ class TestCachedAgentVersionFromGateway:
             writer.join(timeout=5.0)
             assert not writer.is_alive(), "writer thread hung"
 
-        new_snapshot = upd._GATEWAY_AGENT_VERSION_CACHE
+        new_snapshot = _read_cache()
         assert new_snapshot is not old_snapshot, (
             "publication must REPLACE the snapshot, never mutate it in place"
         )
@@ -1080,8 +1112,9 @@ class TestCachedAgentVersionFromGateway:
         concurrent reader through ``_cached_agent_version_from_gateway()`` and
         freezes the interleaving with events instead of sleeps:
 
-        * the cache global is replaced by ``_ArmedSnapshot``, a snapshot that
-          records every consultation of the generation the reader captured.
+        * the entry for the current gateway is replaced by ``_ArmedSnapshot``,
+          a snapshot that records every consultation of the generation the
+          reader captured.
           Production only ever unpacks it, so counting ``__iter__`` /
           ``__getitem__`` measures the read without depending on interpreter
           tracing internals (the previous opcode-offset oracle never fired on
@@ -1168,8 +1201,8 @@ class TestCachedAgentVersionFromGateway:
         with patch.object(upd.time, 'monotonic', frozen_clock), \
                 patch.object(upd, '_detect_agent_version_from_gateway_health',
                              side_effect=counting_detector):
-            upd._GATEWAY_AGENT_VERSION_CACHE = armed_snapshot
-            seeded_snapshot = upd._GATEWAY_AGENT_VERSION_CACHE
+            upd._GATEWAY_AGENT_VERSION_CACHE = {_cache_key(): armed_snapshot}
+            seeded_snapshot = _read_cache()
 
             threads = [
                 threading.Thread(target=reader, name=reader_name),
@@ -1222,7 +1255,7 @@ class TestCachedAgentVersionFromGateway:
             f"timestamp generation(s) {reader_subtractions}: the value and the "
             f"completed_at must come from the same cache generation"
         )
-        current_snapshot = upd._GATEWAY_AGENT_VERSION_CACHE
+        current_snapshot = _read_cache()
         assert current_snapshot is not seeded_snapshot, (
             'the publication must REPLACE the snapshot, never mutate it'
         )
@@ -1251,7 +1284,7 @@ class TestCachedAgentVersionFromGateway:
             # First call: the exception propagates and nothing is cached.
             with pytest.raises(RuntimeError, match="gateway unreachable"):
                 upd._cached_agent_version_from_gateway()
-            assert upd._GATEWAY_AGENT_VERSION_CACHE is None, (
+            assert upd._GATEWAY_AGENT_VERSION_CACHE == {}, (
                 "a raising detector must not poison the cache"
             )
 
@@ -1262,4 +1295,4 @@ class TestCachedAgentVersionFromGateway:
             assert len(call_log) == 2, (
                 f"expected retry after the raised detector, got {len(call_log)} calls"
             )
-            assert upd._GATEWAY_AGENT_VERSION_CACHE[0] == "v0.72.0"
+            assert _read_cache()[0] == "v0.72.0"

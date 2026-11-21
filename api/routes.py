@@ -18827,15 +18827,14 @@ def handle_get(handler, parsed) -> bool:
             )
             settings["webui_version"] = WEBUI_VERSION
             settings["agent_version"] = AGENT_VERSION
-            # Prefer live gateway health detection so Docker gateway
-            # deployments always show the actual running Agent version
-            # even when the import-time AGENT_VERSION is stale (#6150).
-            # Uses a TTL cache so unreachable gateways don't block every
-            # page load (#6289).
+            # Preserve the source revision in agent_version while publishing
+            # any live running Agent version from the gateway beside it (#6150, #6289).
+            # Uses a per-gateway TTL cache so unreachable gateways don't block
+            # page loads (#6289).
             try:
                 live_version = _cached_agent_version_from_gateway()
-                if live_version:
-                    settings["agent_version"] = live_version
+                if isinstance(live_version, str) and live_version.strip():
+                    settings["agent_gateway_version"] = live_version.strip()
             except Exception:
                 pass
         except Exception:
