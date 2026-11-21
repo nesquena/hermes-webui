@@ -7948,6 +7948,7 @@ _available_models_cache_ts: float = 0.0
 _available_models_live_rebuild_ts: float = 0.0
 _available_models_cache_source_fingerprint: dict | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
+_AVAILABLE_MODELS_DIAGNOSTIC_RETRY_SECONDS: float = 30.0  # retry window for a transient probe error (#8158)
 _SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 3600.0
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
@@ -9781,6 +9782,30 @@ def _memoized_models_cache_disk_payload(cache_path: Path):
         return payload
 
 
+def _has_models_endpoint_error(cache: dict | None) -> bool:
+    """Return True if any group in the cached catalog carries a transient endpoint error (#8158)."""
+    if not isinstance(cache, dict):
+        return False
+    groups = cache.get("groups")
+    if not isinstance(groups, list):
+        return False
+    return any(isinstance(g, dict) and bool(g.get("models_endpoint_error")) for g in groups)
+
+
+def _models_diagnostic_retry_due(cache: dict | None, age_seconds: float | None) -> bool:
+    """True when a valid catalog's diagnostic error is old enough to re-probe (#8158).
+
+    This is the ONLY thing the 30-second window decides. Catalog validity keeps
+    its own 24 h ruler: a payload past this window is a catalog that wants a
+    fresh probe, never a catalog that stops being served.
+    """
+    if not _has_models_endpoint_error(cache):
+        return False
+    if age_seconds is None:
+        return False
+    return age_seconds >= _AVAILABLE_MODELS_DIAGNOSTIC_RETRY_SECONDS
+
+
 def _load_models_cache_from_disk() -> dict | None:
     """Load /api/models cache from disk if it exists and has current metadata.
 
@@ -9807,6 +9832,11 @@ def _load_models_cache_from_disk() -> dict | None:
             return None
         if not _is_loadable_disk_cache(cache):
             return None
+        # NOTE (#8158 CR): a catalog that carries a transient probe error is STILL
+        # a loadable catalog — it is the only durable record of the healthy rows
+        # discovered alongside the broken endpoint. Shortening its lifetime here
+        # made an aged diagnostic hide those rows; the retry window is decided by
+        # `_models_diagnostic_retry_due`, never by whether this file may load.
         # Strip the disk-only metadata before returning, so the in-memory
         # cache shape stays exactly what the rest of the code expects. The
         # disk save path does not persist `aliases`, so reconstruct them from
@@ -12639,6 +12669,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     # between. Cold rebuilds still serialize on the lock.
     disk_groups = None
     stale_disk_groups = None
+    # The catalog a reader already has, kept servable while an aged diagnostic is
+    # re-probed (#8158 CR). Same owner, same source fingerprint, same generation
+    # fences as any other answer — it is the last published catalog, not a stale
+    # file smuggled past validation.
+    preserved_groups = None
     disk_epoch = _models_rebuild_seq
     if _available_models_cache is None and not force_refresh:
         disk_groups = _load_models_cache_from_disk()
@@ -12701,6 +12736,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             ):
                 return cached
             if force_refresh and _LIVE_REBUILD_BUDGET_SECONDS > 0 and _cache_build_in_progress:
+                # #8158 CR: the catalog we already served outranks a degraded one.
+                if preserved_groups is not None:
+                    return copy.deepcopy(preserved_groups)
                 if stale_disk_groups is not None:
                     return copy.deepcopy(stale_disk_groups)
                 return copy.deepcopy(_static_models_catalog_without_live_probes())
@@ -12721,8 +12759,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         cached = _get_fresh_memory_models_cache(now)
         if cached is not None:
             if not force_refresh:
-                return cached
-            if (
+                memory_age = now - _available_models_cache_ts
+                if not _models_diagnostic_retry_due(cached, memory_age):
+                    return cached
+                # The diagnostic aged out: still a valid catalog, so keep serving
+                # it while the retry below runs (#8158 CR).
+                preserved_groups = cached
+            elif (
                 force_refresh_started_at is not None
                 and _available_models_live_rebuild_ts >= force_refresh_started_at
             ):
@@ -12754,17 +12797,27 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 ):
                     return cached
             if _cache_build_in_progress and _LIVE_REBUILD_BUDGET_SECONDS > 0:
+                # #8158 CR: the catalog we already served outranks a degraded one.
+                if preserved_groups is not None:
+                    return copy.deepcopy(preserved_groups)
                 if stale_disk_groups is not None:
                     return copy.deepcopy(stale_disk_groups)
                 return copy.deepcopy(_static_models_catalog_without_live_probes())
 
         # Cold path: disk cache hit — use it only from the captured epoch.
         if disk_groups is not None and not force_refresh:
-            _available_models_cache = disk_groups
-            _available_models_cache_ts = now
-            _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-            _sync_models_cache_provenance()
-            return copy.deepcopy(disk_groups)
+            disk_age = _models_cache_file_age_seconds(_get_models_cache_path(), time.time())
+            if _models_diagnostic_retry_due(disk_groups, disk_age):
+                # Aged diagnostic: keep it as a servable answer, but do NOT
+                # republish it (republishing resets the retry clock) — fall
+                # through to the rebuild (#8158 CR).
+                preserved_groups = preserved_groups or copy.deepcopy(disk_groups)
+            else:
+                _available_models_cache = disk_groups
+                _available_models_cache_ts = now
+                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                _sync_models_cache_provenance()
+                return copy.deepcopy(disk_groups)
 
         # ── prefer_cache: NEVER run the live provider rebuild ────────────────
         # Server-initiated wakeup turns (Option Z) reach here with a cold
@@ -12786,6 +12839,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # prematurely release that rebuild's serialization, waking waiters
             # to an empty cache and triggering a second live rebuild. Just
             # serve the network-free minimal catalog and leave the flag alone.
+            # A catalog we already hold beats the minimal one: it is network-free
+            # too, and it is the only place the discovered healthy rows live
+            # (#8158 CR — wakeup turns used to see an empty picker).
+            if preserved_groups is not None:
+                return copy.deepcopy(preserved_groups)
             return copy.deepcopy(_minimal_static_models_catalog())
 
         # Cold path: full rebuild — only one thread reaches here at a time
@@ -13153,6 +13211,43 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         if build_done.is_set() and "error" not in box:
             if "partial" in box:
                 if box["partial"].get("groups"):
+                    if (
+                        preserved_groups is not None
+                        and not _models_rebuild_superseded(rebuild_seq)
+                        and _models_build_identity_current(
+                            rebuild_source_fingerprint, rebuild_profile
+                        )
+                    ):
+                        # Reconcile completed groups from the partial build with
+                        # the healthy catalog already held for the same owner/source (#8478).
+                        partial_catalog = copy.deepcopy(box["partial"])
+                        partial_groups_by_id = {
+                            g.get("provider_id"): g
+                            for g in partial_catalog.get("groups", [])
+                            if g.get("provider_id")
+                        }
+                        reconciled_groups = []
+                        seen_pids = set()
+                        for g in preserved_groups.get("groups", []):
+                            pid = g.get("provider_id")
+                            if not pid:
+                                continue
+                            seen_pids.add(pid)
+                            part_g = partial_groups_by_id.get(pid)
+                            if part_g is not None and (
+                                part_g.get("models")
+                                or part_g.get("models_endpoint_error")
+                            ):
+                                reconciled_groups.append(part_g)
+                            else:
+                                reconciled_groups.append(copy.deepcopy(g))
+                        for g in partial_catalog.get("groups", []):
+                            pid = g.get("provider_id")
+                            if pid and pid not in seen_pids:
+                                seen_pids.add(pid)
+                                reconciled_groups.append(g)
+                        partial_catalog["groups"] = reconciled_groups
+                        return _annotate_fast_tier_model_groups(partial_catalog)
                     return copy.deepcopy(box["partial"])
                 # An all-truncated pass has no picker options. Use the same
                 # stale/static fallback as a still-running first pass below.
@@ -13187,9 +13282,27 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # checks required for authoritative cold-path use. It was read before
         # acquiring _available_models_cache_lock so this over-budget fallback
         # does not extend the lock hold while the worker is ready to publish.
+        if preserved_groups is not None:
+            return copy.deepcopy(preserved_groups)
         if stale_disk_groups is not None:
             return copy.deepcopy(stale_disk_groups)
         return copy.deepcopy(_static_models_catalog_without_live_probes())
+
+
+def _models_payload_built_at(payload: object) -> float | None:
+    """Return the ``_built_at`` (last live rebuild) stamp carried by a parsed cache.
+
+    Returns None for payloads without the stamp (caches written before it
+    existed), non-numeric/future/absurd stamps, and non-dict payloads, so the
+    freshness decision never hard-fails on a malformed cache and falls back to
+    the file mtime instead.
+    """
+    if not isinstance(payload, dict):
+        return None
+    built_at = payload.get("_built_at")
+    if isinstance(built_at, (int, float)) and math.isfinite(built_at) and 0 < built_at <= time.time():
+        return float(built_at)
+    return None
 
 
 def _models_disk_cache_built_at(cache_path: Path) -> float | None:
@@ -13205,12 +13318,7 @@ def _models_disk_cache_built_at(cache_path: Path) -> float | None:
     """
     try:
         payload = _read_models_cache_disk_payload(cache_path)
-        if not isinstance(payload, dict):
-            return None
-        built_at = payload.get("_built_at")
-        if isinstance(built_at, (int, float)) and math.isfinite(built_at) and 0 < built_at <= time.time():
-            return float(built_at)
-        return None
+        return _models_payload_built_at(payload)
     except Exception:
         return None
 
