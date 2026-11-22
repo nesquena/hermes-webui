@@ -1,3 +1,4 @@
+import contextlib
 import queue
 import sqlite3
 from collections import OrderedDict
@@ -6,6 +7,121 @@ from pathlib import Path
 import pytest
 
 pytestmark = pytest.mark.requires_agent_modules
+
+
+@contextlib.contextmanager
+def _isolated_derivations_cache():
+    try:
+        import api.streaming as streaming
+
+        cache = getattr(streaming, "_CONFIG_DERIVATIONS_CACHE", None)
+        lock = getattr(streaming, "_CONFIG_DERIVATIONS_CACHE_LOCK", None)
+    except Exception:
+        cache = None
+        lock = None
+
+    if not isinstance(cache, dict):
+        yield
+        return
+
+    lock_ctx = lock if lock is not None else contextlib.nullcontext()
+    with lock_ctx:
+        snapshot = dict(cache)
+        cache.clear()
+    try:
+        yield
+    finally:
+        with lock_ctx:
+            cache.clear()
+            cache.update(snapshot)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_config_derivations_cache():
+    with _isolated_derivations_cache():
+        yield
+
+
+def _drive_worker_turn(prefill_context, guard_path, monkeypatch, tmp_path):
+    import api.config as config
+    import api.models as models
+    import api.streaming as streaming
+    from api.models import new_session
+
+    guard_file = Path(guard_path)
+    if not guard_file.exists():
+        guard_file.parent.mkdir(parents=True, exist_ok=True)
+        guard_file.write_text("model:\n  default: test-model\n", encoding="utf-8")
+
+    turn_tmp = Path(tmp_path)
+
+    session_dir = turn_tmp / "sessions"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    index_file = session_dir / "_index.json"
+
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", index_file)
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict(), raising=False)
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(config, "SESSION_INDEX_FILE", index_file, raising=False)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: turn_tmp / "state.db", raising=False)
+    monkeypatch.setattr(config, "_get_config_path", lambda: guard_file)
+    config.STREAMS.clear()
+    config.CANCEL_FLAGS.clear()
+
+    captured = {}
+
+    class FakeAgent:
+        def __init__(self, prefill_messages=None, **kwargs):
+            captured["prefill_messages"] = kwargs.get("prefill_messages")
+            if prefill_messages is not None:
+                captured["prefill_messages"] = prefill_messages
+            self.context_compressor = None
+            self.ephemeral_system_prompt = None
+
+        def run_conversation(self, **kwargs):
+            return {
+                "completed": True,
+                "final_response": "ok",
+                "messages": [
+                    {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                    {"role": "assistant", "content": "ok"},
+                ],
+            }
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
+    # The fake Agent ignores session_db; without this the real worker opens hermes_state.SessionDB in the
+    # shared test state dir, and its unique title index breaks later fixtures (see #8277).
+    monkeypatch.setattr(streaming, "_build_session_db_for_stream", lambda _: None)
+    monkeypatch.setattr(streaming, "resolve_model_provider", lambda *args, **kwargs: ("test-model", None, None))
+    monkeypatch.setattr(streaming, "get_config", lambda: {})
+    monkeypatch.setattr(config, "get_config", lambda: {})
+    monkeypatch.setattr(config, "_resolve_cli_toolsets", lambda *args, **kwargs: [])
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: prefill_context)
+
+    s = new_session(workspace=str(turn_tmp))
+    stream_id = "stream-prefill-boundary-normalization"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "new webui turn"
+    s.pending_started_at = 0.0
+    s.save(touch_updated_at=False)
+    models.SESSIONS[s.session_id] = s
+
+    config.STREAMS[stream_id] = queue.Queue()
+    try:
+        streaming._run_agent_streaming(
+            session_id=s.session_id,
+            msg_text="new webui turn",
+            model="test-model",
+            workspace=str(turn_tmp),
+            stream_id=stream_id,
+            attachments=[],
+        )
+    finally:
+        config.STREAMS.pop(stream_id, None)
+
+    return captured.get("prefill_messages") or []
 
 
 def _make_state_db(path: Path, sid: str, rows):
@@ -394,3 +510,54 @@ def test_prefill_boundary_normalization_preserved_on_cache_hit(
     assert len(captured_turns) == 2
     assert captured_turns[0] == [{"role": "assistant", "content": "prefill summary"}]
     assert captured_turns[1] == [{"role": "assistant", "content": "prefill summary"}]
+
+
+def test_prior_no_prefill_worker_turn_caches_an_empty_prefill_context(
+    monkeypatch, tmp_path, tmp_path_factory
+):
+    import api.profiles as profiles
+    import api.streaming as streaming
+
+    guard_path = tmp_path_factory.getbasetemp() / "guard_config.yaml"
+    prefill_ctx = {
+        "status": "missing",
+        "source": "",
+        "label": "",
+        "message_count": 0,
+        "messages": [],
+    }
+    prefill = _drive_worker_turn(
+        prefill_ctx,
+        guard_path,
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+    )
+    assert prefill == []
+    profile_home = profiles.get_hermes_home_for_profile(None)
+    cached = streaming._CONFIG_DERIVATIONS_CACHE[str(profile_home)]["_prefill_context"]
+    assert len(cached.get("messages", [])) == 0
+    assert cached.get("message_count", 0) == 0
+
+
+def test_isolated_prefill_turn_after_that_poison_still_receives_its_prefill(
+    monkeypatch, tmp_path, tmp_path_factory
+):
+    guard_path = tmp_path_factory.getbasetemp() / "guard_config.yaml"
+    prefill_ctx = {
+        "status": "loaded",
+        "source": "test",
+        "label": "test",
+        "message_count": 2,
+        "messages": [
+            {"role": "assistant", "content": "prefill summary"},
+            {"role": "user", "content": "webui session context"},
+        ],
+    }
+    prefill = _drive_worker_turn(
+        prefill_ctx,
+        guard_path,
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+    )
+    assert prefill == [{"role": "assistant", "content": "prefill summary"}]
+
