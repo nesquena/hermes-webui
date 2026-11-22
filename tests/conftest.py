@@ -13,6 +13,7 @@ PATH DISCOVERY:
     3. Common install paths (~/.hermes/hermes-agent)
     4. System python3 as a last resort
 """
+import copy
 import json
 import inspect
 import multiprocessing
@@ -49,7 +50,14 @@ requires_fork = pytest.mark.skipif(
 TESTS_DIR  = pathlib.Path(__file__).parent.resolve()
 REPO_ROOT  = TESTS_DIR.parent.resolve()
 HOME       = pathlib.Path.home()
-HERMES_HOME = pathlib.Path(os.getenv('HERMES_HOME', str(HOME / '.hermes')))
+HERMES_HOME = pathlib.Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser()
+
+# Record the REAL Hermes roots (OS account home, starting HOME, starting HERMES_HOME) now,
+# before anything below repoints the environment. A best-effort guard installed further down
+# refuses and reports test writes into them; the HOME sandbox below is the actual prevention.
+# See tests/_real_hermes_root_guard.py.
+from tests import _real_hermes_root_guard as _hermes_root_guard  # noqa: E402
+_hermes_root_guard.real_roots()
 
 # ── Test server config ────────────────────────────────────────────────────
 # Port and state dir auto-derive from the repo path when no env var is set,
@@ -184,6 +192,44 @@ if _under_prod and not _under_temp:
 
 TEST_WORKSPACE = TEST_STATE_DIR / 'test-workspace'
 
+# ── Sandboxed platform-default home ────────────────────────────────────────
+# The Agent's root resolver (hermes_constants.get_default_hermes_root) treats any HERMES_HOME
+# inside the platform default ``Path.home()/.hermes`` as a profile of that home. Hermes agent
+# sessions export TMPDIR to a scratch dir under ~/.hermes, so a test's "temp" HERMES_HOME
+# resolved the REAL root and hermes_cli.profiles.create_profile wrote a real
+# ~/.hermes/profiles/<name>. Point HOME (and the Agent's HERMES_REAL_HOME) at a per-session
+# directory beside the state dir for the whole session, server children included, so no test
+# HERMES_HOME can resolve the real root wherever its temp dir lives. Windows' native root is
+# %LOCALAPPDATA%\hermes, so LOCALAPPDATA moves into the sandbox too (on every platform, so
+# children see one shape). Agent checkouts under the real homes are linked in so Agent discovery
+# is unchanged; Playwright keeps its browser cache.
+SANDBOX_HOME = TEST_STATE_DIR.with_name(TEST_STATE_DIR.name + '-home')
+_SANDBOX_HOME_CREATED = not SANDBOX_HOME.exists()
+_LOCALAPPDATA = pathlib.Path(os.environ.get('LOCALAPPDATA', '').strip() or HOME / 'AppData' / 'Local')
+(SANDBOX_HOME / '.hermes').mkdir(parents=True, exist_ok=True)
+(SANDBOX_HOME / 'AppData' / 'Local' / 'hermes').mkdir(parents=True, exist_ok=True)
+# Playwright's default browser cache follows HOME (LOCALAPPDATA on Windows), which moves here: link the real caches
+# in, so Playwright's own lookup (PLAYWRIGHT_BROWSERS_PATH, npm config, XDG_CACHE_HOME) is unchanged.
+_PLAYWRIGHT_CACHES = (
+    (HOME / '.cache' / 'ms-playwright', '.cache/ms-playwright'),
+    (HOME / 'Library' / 'Caches' / 'ms-playwright', 'Library/Caches/ms-playwright'),
+    (pathlib.Path(os.environ.get('LOCALAPPDATA') or HOME / 'AppData' / 'Local') / 'ms-playwright',
+     'AppData/Local/ms-playwright'),
+)
+_LINK_FAILED = _hermes_root_guard.link_real_dirs(SANDBOX_HOME, (
+    (HOME / '.hermes/hermes-agent', '.hermes/hermes-agent'), (HOME / 'hermes-agent', 'hermes-agent'),
+    (_LOCALAPPDATA / 'hermes/hermes-agent', 'AppData/Local/hermes/hermes-agent')) + _PLAYWRIGHT_CACHES)
+_PLAYWRIGHT_FALLBACK = (WINDOWS and 'AppData/Local/ms-playwright' in _LINK_FAILED
+                        and _hermes_root_guard.playwright_uses_default_cache(os.environ))
+if _PLAYWRIGHT_FALLBACK:  # no symlink privilege: point Playwright at the original cache directly
+    os.environ['PLAYWRIGHT_BROWSERS_PATH'] = str(_PLAYWRIGHT_CACHES[2][0])
+for _path_var in ('HERMES_WEBUI_AGENT_DIR', 'HERMES_WEBUI_PYTHON'):  # '~' must keep meaning the real home
+    if os.environ.get(_path_var, '').startswith('~'):
+        os.environ[_path_var] = os.path.expanduser(os.environ[_path_var])
+for _home_var in ('HOME', 'HERMES_REAL_HOME') + (('USERPROFILE',) if WINDOWS else ()):
+    os.environ[_home_var] = str(SANDBOX_HOME)
+os.environ['LOCALAPPDATA'] = str(SANDBOX_HOME / 'AppData' / 'Local')
+
 # Publish at module level so api.config, _pytest_port.py, and any test module
 # importing stateful API code during collection see the isolated test paths.
 #
@@ -217,6 +263,37 @@ os.environ['HERMES_CONFIG_PATH'] = str(TEST_STATE_DIR / 'config.yaml')
 # test server env is scrubbed identically in the test_server fixture below.
 for _model_env in ('HERMES_MODEL', 'OPENAI_MODEL', 'LLM_MODEL'):
     os.environ.pop(_model_env, None)
+
+# From here on, a write-mode open/mkdir/rename/remove/rmtree/symlink/sqlite connect from this
+# process that targets a real Hermes root raises, fails the test that did it, and fails the
+# session. Best-effort: see the module docstring for what it does not see.
+_hermes_root_guard.install([REPO_ROOT, TEST_STATE_DIR, SANDBOX_HOME, _tempfile.gettempdir()])
+
+
+@pytest.fixture(autouse=True)
+def _no_real_hermes_root_writes():
+    """Fail the test that wrote (or tried to write) into the real Hermes root."""
+    seen = len(_hermes_root_guard.VIOLATIONS)
+    yield
+    if len(_hermes_root_guard.VIOLATIONS) > seen:
+        pytest.fail("test wrote into the real Hermes root: "
+                    + "; ".join(_hermes_root_guard.VIOLATIONS[seen:]), pytrace=False)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionfinish(session, exitstatus):
+    problems = _hermes_root_guard.finish()
+    if problems:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        message = "REAL HERMES ROOT CHANGED DURING THIS TEST RUN:\n  " + "\n  ".join(problems)
+        reporter = session.config.pluginmanager.get_plugin('terminalreporter')
+        if reporter is not None:
+            reporter.write_sep('!', 'real Hermes root guard', red=True, bold=True)
+            reporter.write_line(message, red=True)
+        else:
+            sys.stderr.write(message + "\n")
+    if _SANDBOX_HOME_CREATED:
+        shutil.rmtree(SANDBOX_HOME, ignore_errors=True)  # links are removed, never followed
 
 
 @pytest.fixture(autouse=True)
@@ -548,6 +625,8 @@ def _discover_python(agent_dir) -> str:
     return shutil.which('python3') or shutil.which('python') or 'python3'
 
 HERMES_AGENT = _discover_agent_dir()
+if HERMES_AGENT:  # before anything imports from it: its imports write bytecode beside the code
+    _hermes_root_guard.register_agent_checkout(HERMES_AGENT)
 VENV_PYTHON  = _discover_python(HERMES_AGENT)
 
 # Work dir: agent dir if found, else repo root
@@ -562,6 +641,16 @@ def _check_agent_modules():
     """Verify hermes-agent Python modules are actually importable."""
     if not HERMES_AGENT:
         return False
+    # Check with the checkout on sys.path, the way the code under test sees it:
+    # api.config appends the discovered Agent dir at import (later in this file),
+    # and the server runs with the checkout as its working directory. Without it,
+    # imports fall back to the venv's editable-install finder, which maps only the
+    # top-level modules that existed at install time, so a module the Agent added
+    # later (hermes_yaml, imported by cron.jobs) failed here and every
+    # requires_agent_modules test skipped. Appended, never prepended, so WebUI's
+    # own modules keep precedence; api.config's append is then a no-op.
+    if str(HERMES_AGENT) not in sys.path:
+        sys.path.append(str(HERMES_AGENT))
     try:
         import importlib
         # These are the modules that cause 500 errors when missing
@@ -585,6 +674,8 @@ requires_agent_modules = pytest.mark.skipif(
 
 def pytest_configure(config):
     _repo_git_guard.pytest_configure(config)  # records --basetemp for the guard (see tests/_real_repo_git_guard.py)
+    if config.getoption('basetemp', default=None):  # pytest's temp tree may sit in a scratch dir under ~/.hermes
+        _hermes_root_guard.allow(pathlib.Path(config.getoption('basetemp')).expanduser())
     config.addinivalue_line("markers", "requires_agent: skip when hermes-agent dir is not found")
     config.addinivalue_line("markers", "requires_agent_modules: skip when hermes-agent Python modules are not importable")
     config.addinivalue_line("markers", "requires_fcntl: skip when fcntl-backed file-descriptor operations are unavailable")
@@ -849,6 +940,50 @@ def allow_real_repo_git(monkeypatch):
     """Opt in to real mutating git against the checkout for one test."""
     monkeypatch.setattr(subprocess, 'Popen', _repo_git_guard.REAL_POPEN)
     yield
+
+
+# ── Host git config isolation for the git-credential tests (#8931) ───────────
+# Opt-in through ``pytestmark = pytest.mark.usefixtures("isolated_host_git_config")``
+# (tests/test_update_git_security.py, tests/test_workspace_git.py). Why and how:
+# tests/_git_host_config_isolation.py.
+from tests import _git_host_config_isolation as _host_git_isolation  # noqa: E402
+
+
+@pytest.fixture
+def host_git(request, monkeypatch, tmp_path_factory):
+    """The git a test's children would run without the isolation shim.
+
+    Parametrize indirectly with ``EMULATED_HOST_WITH_SENTINEL_HELPERS`` to run
+    the test on an emulated developer machine whose system and global git config
+    name a sentinel credential helper.
+    """
+    if os.name == "nt":
+        return None
+    if getattr(request, "param", None) == _host_git_isolation.EMULATED_HOST_WITH_SENTINEL_HELPERS:
+        real = _host_git_isolation.resolve_host_git()
+        if real is None or not _host_git_isolation.git_supports_config_redirects(real.executable):
+            pytest.skip("emulating host git config needs Git 2.32+ (GIT_CONFIG_SYSTEM)")
+        return _host_git_isolation.emulate_host_with_sentinel_helpers(
+            monkeypatch, tmp_path_factory.mktemp("emulated-host"),
+        )
+    return _host_git_isolation.resolve_host_git()
+
+
+@pytest.fixture
+def isolated_host_git_config(host_git, monkeypatch, tmp_path_factory):
+    """Run this test's git children without the host's system/global git config.
+
+    POSIX only: the shim is a shell script, which Windows' CreateProcess would not
+    find as ``git``.
+    """
+    if host_git is None:
+        return None
+    # Real host git, even when host_git is the emulated one: its wrapper execs it.
+    real = _host_git_isolation.resolve_host_git()
+    _host_git_isolation.require_config_redirects((real or host_git).executable)
+    return _host_git_isolation.isolate_git_from_host_config(
+        monkeypatch, tmp_path_factory.mktemp("host-git-isolation"), host_git,
+    )
 
 
 # ── Environment isolation for tests ────────────────────────────────────────
@@ -1370,6 +1505,40 @@ def _invalidate_models_cache_after_test():
         invalidate_models_cache()
     except Exception:
         pass
+
+
+# ── Per-test config disk-load state restore ──────────────────────────────────
+# About a hundred tests point config._get_config_path at a temp file and call
+# get_config(). The path-change branch then reloads _cfg_cache from that file
+# and records it in _cfg_path. monkeypatch puts _get_config_path back, but
+# _cfg_path, _cfg_mtime, _cfg_fingerprint and the cache contents are the
+# reload's, so the NEXT test's get_config() sees another path change and
+# reloads from disk over that test's in-memory cfg override (the path-change
+# branch skips the override guard). test_issue1807_codex_provider_card_live_models
+# -> test_issue2513_custom_provider_remote_models fails that way as a pair
+# (`assert 'custom:alpha-proxy' in {}`) and passes in the full run only because
+# the tests between them happen to reset the state.
+
+def _config_load_state_guard():
+    """Snapshot config's disk-load state; when resumed, put it back."""
+    from api import config
+    with config._cfg_lock:
+        saved = (
+            config._cfg_path,
+            config._cfg_mtime,
+            config._cfg_fingerprint,
+            copy.deepcopy(config._cfg_cache),
+        )
+    yield
+    with config._cfg_lock:
+        config._cfg_path, config._cfg_mtime, config._cfg_fingerprint, cache = saved
+        config._cfg_cache.clear()
+        config._cfg_cache.update(cache)
+
+
+@pytest.fixture(autouse=True)
+def _restore_config_load_state():
+    yield from _config_load_state_guard()
 
 
 # ── Per-test hermes_cli module integrity guard ───────────────────────────────
