@@ -16,7 +16,7 @@ import threading
 
 import pytest
 
-from api import models
+from api import config, models
 from api import streaming
 from tests.test_steer_worker_boundaries import worker_scene as worker_scene
 
@@ -78,6 +78,10 @@ def test_two_hop_compression_keeps_the_recovered_answer(
 ):
     monkeypatch.setenv("HERMES_WEBUI_SILENT_FAILURE_RETRY", retry_enabled)
     scene = worker_scene
+    monkeypatch.setattr(config, "SESSION_WRITEBACK_OWNERS", {})
+    # routes.py claims the writeback for the stream under the chat-start id
+    # before the worker starts; each rotation carries that claim forward.
+    config.register_session_writeback_owner("original", "run")
     _TwoHopHealAgent.instances = []
     _TwoHopHealAgent.constructed_session_ids = []
     _TwoHopHealAgent.calls = 0
@@ -125,3 +129,62 @@ def test_two_hop_compression_keeps_the_recovered_answer(
     )
     done = next(payload for event, payload in emitted if event == "done")
     assert done["session"]["session_id"] == "continuation-two"
+
+    # The turn published its writeback claim on every hop it rotated through:
+    # original -> continuation-one -> continuation-two. Teardown must release
+    # all of them, or the intermediate id keeps a claim on a stream that no
+    # longer exists and the next turn inherits a stale owner (#8011 review,
+    # "ownership-cleanup gap").
+    leftover = {
+        sid: owner for sid, owner in config.SESSION_WRITEBACK_OWNERS.items()
+        if str(owner) == "run"
+    }
+    assert leftover == {}, (
+        "the two-hop turn left writeback claims behind for a torn-down stream: "
+        f"{leftover}"
+    )
+
+
+def test_two_hop_rotation_preserves_a_successors_writeback_claim(
+    worker_scene, monkeypatch,
+):
+    """A successor admitted on an intermediate id keeps its own claim."""
+    monkeypatch.setenv("HERMES_WEBUI_SILENT_FAILURE_RETRY", "0")
+    scene = worker_scene
+    monkeypatch.setattr(config, "SESSION_WRITEBACK_OWNERS", {})
+    config.register_session_writeback_owner("original", "run")
+    _TwoHopHealAgent.instances = []
+    _TwoHopHealAgent.constructed_session_ids = []
+    _TwoHopHealAgent.calls = 0
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: _TwoHopHealAgent)
+    monkeypatch.setattr(
+        streaming, "_attempt_credential_self_heal",
+        lambda *a, **kw: {
+            "api_key": "fresh-key",
+            "provider": "test-provider",
+            "base_url": "https://api.test/v1",
+        },
+    )
+    migrate = streaming._migrate_compression_session_ownership
+
+    def observed_migrate(session, old_sid, new_sid, agent_lock):
+        migrated = migrate(session, old_sid, new_sid, agent_lock)
+        if migrated and str(new_sid) == "continuation-two":
+            # A successor turn is admitted on the intermediate continuation
+            # once the second hop published; the claim now names another
+            # stream, and this turn's teardown must not take it back.
+            config.register_session_writeback_owner("continuation-one", "run-next")
+        return migrated
+
+    monkeypatch.setattr(
+        streaming, "_migrate_compression_session_ownership", observed_migrate,
+    )
+
+    scene.run()
+
+    assert config.session_writeback_owner("continuation-one") == "run-next", (
+        "the teardown released a claim that now belongs to a successor stream"
+    )
+    assert config.session_writeback_owner("original") is None
+    assert config.session_writeback_owner("continuation-two") is None

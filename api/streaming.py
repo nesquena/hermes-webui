@@ -14571,6 +14571,14 @@ def _run_agent_streaming(
     """
     _turn_route_model = model
     _turn_route_provider = model_provider
+    # Every continuation id this turn published a writeback claim under. A
+    # compression rotation carries the claim from the id it left onto the id it
+    # publishes (see _migrate_compression_session_ownership), and a retry can
+    # rotate a second time, so a turn can own more than one entry: the turn's
+    # start id, plus one per hop. The teardown releases the start id and the
+    # turn's final id by name; the intermediate hops are only reachable through
+    # this record (#8011 review, "ownership-cleanup gap").
+    _writeback_continuation_ids: list[str] = []
     cancel_event = threading.Event()
     q = peek_stream(stream_id)
     if q is not None:
@@ -17366,6 +17374,10 @@ def _run_agent_streaming(
                         _resolved_profile_name,
                         _agent_lock,
                     )
+                if _compressed and _compression_continuation_session_id:
+                    _writeback_continuation_ids.append(
+                        str(_compression_continuation_session_id)
+                    )
 
                 # ── Detect silent agent failure (no assistant reply produced) ──
                 # When the agent catches an auth/network error internally it may return
@@ -17968,6 +17980,10 @@ def _run_agent_streaming(
                                     _compression_continuation_session_id = (
                                         _hop_continuation_session_id
                                     )
+                                    if _hop_continuation_session_id:
+                                        _writeback_continuation_ids.append(
+                                            str(_hop_continuation_session_id)
+                                        )
                             if _compression_retry_rotated:
                                 _compressed = True
                             if _heal_ok and _heal_result is not None:
@@ -19936,6 +19952,14 @@ def _run_agent_streaming(
                 _rotated_sid = str(getattr(s, 'session_id', '') or '') if s is not None else ''
                 if _rotated_sid and _rotated_sid != str(session_id):
                     clear_session_writeback_owner_if_owned(_rotated_sid, stream_id)
+                # Multi-hop turns keep a claim on every continuation the
+                # rotation published, including the intermediate id a second
+                # rotation moved off and the retry's final id. Release each —
+                # clear_session_writeback_owner_if_owned leaves a successor's
+                # claim (a different stream) untouched (#8011 review).
+                for _owned_sid in _writeback_continuation_ids:
+                    if _owned_sid and _owned_sid != str(session_id) and _owned_sid != _rotated_sid:
+                        clear_session_writeback_owner_if_owned(_owned_sid, stream_id)
             except Exception:
                 logger.debug(
                     "Failed to clear session writeback owner for stream %s", stream_id,
