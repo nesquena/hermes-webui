@@ -649,3 +649,87 @@ def test_a_conflicting_reload_with_no_resident_serves_the_newer_transcript(
         "a conflicting reload with no resident served the pre-reload object "
         f"instead of re-reading: {contents}"
     )
+
+
+def test_undo_with_a_conflicting_reload_and_eviction_undoes_the_right_turn(
+    monkeypatch, tmp_path
+):
+    """Gate's second schedule: the wrong turn must not be the one undone.
+
+    With a four-message resident and a six-message sidecar, a full read that
+    loses its cache entry to a concurrent write plus eviction used to hand
+    undo the stale four-message object, so undo removed q2/a2 instead of
+    q3/a3 and then saved the shorter transcript over the longer sidecar.
+    """
+    import api.session_ops as session_ops
+
+    models = _prepare_session_dir(monkeypatch, tmp_path, "undonores")
+
+    resident = models.Session(
+        session_id="undonores",
+        messages=[
+            _msg("user", "q1", 1.0, "u1"),
+            _msg("assistant", "a1", 2.0, "a1"),
+            _msg("user", "q2", 3.0, "u2"),
+            _msg("assistant", "a2", 4.0, "a2"),
+        ],
+    )
+    resident.save()
+    models.SESSIONS["undonores"] = resident
+
+    other = models.Session.load("undonores")
+    other.messages = other.messages + [
+        _msg("user", "q3", 5.0, "u3"),
+        _msg("assistant", "a3", 6.0, "a3"),
+    ]
+    other.save()
+
+    evictor = models.Session(
+        session_id="undoevictor", messages=[_msg("user", "e1", 0.5, "e1")]
+    )
+    evictor.save()
+
+    monkeypatch.setattr(models._cfg, "get_sessions_cache_max", lambda: 1)
+
+    real_load = models.Session.load.__func__
+    armed = []
+    fired = []
+
+    def _load(cls, sid):
+        session = real_load(cls, sid)
+        if (
+            sid == "undonores"
+            and armed
+            and not fired
+            and threading.current_thread() is threading.main_thread()
+        ):
+            fired.append(True)
+
+            def _writer_and_eviction():
+                models.set_session_reasoning_effort("undonores", "high")
+                models.get_session("undoevictor")
+
+            thread = threading.Thread(
+                target=_writer_and_eviction, name="undo-no-resident-writer"
+            )
+            thread.start()
+            thread.join(10)
+            assert not thread.is_alive(), "the concurrent writer/eviction never finished"
+            with models.LOCK:
+                assert models.SESSIONS.get("undonores") is None, (
+                    "the eviction did not run, so the no-resident branch was "
+                    "never exercised"
+                )
+        return session
+
+    monkeypatch.setattr(models.Session, "load", classmethod(_load))
+
+    # Everything is seeded; from here on the reader path may be exercised.
+    armed.append(True)
+    session_ops.undo_last("undonores")
+
+    on_disk = models.Session.load("undonores")
+    contents = [m["content"] for m in (on_disk.messages or [])]
+    assert contents == ["q1", "a1", "q2", "a2"], (
+        f"undo removed the wrong turn after a conflicting reload: {contents}"
+    )
