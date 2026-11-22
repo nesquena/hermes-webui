@@ -94,22 +94,30 @@ function _shareSourceWords(source){
   // fence the page shows the text as written, so the marker, task-box, link and
   // anchor rules below must not touch it: a word shown in code would otherwise
   // pay for the same word hidden elsewhere. The tag pass skips it too.
+  // One exception is decided first: the renderer parses MEDIA:<ref> before it sees
+  // code, so which tokens it consumes depends on the text around them as written
+  // (a closing backtick right before MEDIA: counts). Mark those tokens now; outside
+  // code the mark is removed below, inside code it goes back to MEDIA:.
+  let mediaMark='\x00SHARE_MEDIA_';
+  while(s.includes(mediaMark)) mediaMark+='_';
+  mediaMark+='\x00';
+  s=s.replace(/MEDIA:([^\s)\]]+)/g,(token,ref,offset,whole)=>
+    (typeof _mediaTokenParts==='function'&&_mediaTokenParts(whole,offset,ref))?mediaMark+ref:token);
   const literalCode=[];
   let literalPrefix='\x00SHARE_LITERAL_';
   while(s.includes(literalPrefix)) literalPrefix+='_';
   const literalRe=new RegExp(literalPrefix+'(\\d+)\\x00','g');
   const unlit=t=>t.replace(literalRe,(_m,i)=>literalCode[+i]);
   s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)|`([^`\n]+)`/g,part=>{
-    literalCode.push(part);
+    literalCode.push(part.split(mediaMark).join('MEDIA:'));
     return literalPrefix+(literalCode.length-1)+'\x00';
   });
   // Markers are removed only where the renderer consumes them; anywhere else the page shows
   // them as written. MEDIA:<ref> becomes an image or a link when the renderer's own parser
-  // takes the token (MEDIA: with a space or nothing after it stays text). A bare file:// address
-  // at a line start or after a space (outside raw <pre>) and a Markdown link or image to one
-  // become media links without the scheme.
-  s=s.replace(/MEDIA:([^\s)\]]+)/g,(token,ref,offset,whole)=>
-    (typeof _mediaTokenParts==='function'&&_mediaTokenParts(whole,offset,ref))?' '+ref:token);
+  // takes the token (marked above; MEDIA: with a space or nothing after it stays text). A bare
+  // file:// address at a line start or after a space (outside raw <pre>) and a Markdown link or
+  // image to one become media links without the scheme.
+  s=s.split(mediaMark).join(' ');
   const preRanges=[];
   s.replace(/<pre\b[^>]*>[\s\S]*?<\/pre>/gi,(m,offset)=>{ preRanges.push([offset,offset+m.length]); return m; });
   s=s.replace(/(^|\s)file:\/\/(?=[^\s<>"')\]])|(\]\()file:\/\/(?=[^\s)]+\))/g,(m,bare,link,offset)=>

@@ -275,9 +275,13 @@ _MERMAID_TEXT = [["div", {"class": "pre-header"}, "mermaid"],
          "Saved (file:///tmp/r.txt)", [["p", {}, "Saved (file:///tmp/r.txt)"]], "file"),
         ("<pre>see file:///tmp/x.txt</pre>\n<!-- file -->", [["pre", {}, "see file:///tmp/x.txt"], {"comment": " file "}],
          "<pre>see file:///tmp/x.txt</pre>", [["pre", {}, "see file:///tmp/x.txt"]], "file"),
+        # The renderer parses MEDIA: before code, so a closing backtick right before it decides the token:
+        # here the token is left as text, and `MEDIA` shows once.
+        ("`a.`MEDIA:` <!-- media -->", [["p", {}, ["code", {}, "a."], "MEDIA:` ", {"comment": " media "}]],
+         "`a.`MEDIA:`", [["p", {}, ["code", {}, "a."], "MEDIA:`"]], "media"),
     ],
     ids=["mermaid-diagram", "mermaid-text", "mermaid-unclosed", "media-space", "media-bold", "file-bare",
-         "file-in-parens", "file-in-pre"],
+         "file-in-parens", "file-in-pre", "media-after-code"],
 )
 def test_a_marker_the_page_still_shows_cannot_pay_for_a_hidden_copy(call, src, dom, twin_src, twin_dom, hidden):
     # A marker word is removed from the source only where the renderer consumes it. Where the page
@@ -303,6 +307,14 @@ def test_a_marker_the_page_still_shows_cannot_pay_for_a_hidden_copy(call, src, d
 )
 def test_a_marker_the_renderer_consumes_is_not_counted(call, src, dom):
     assert call("_shareMissingWords", src, {"dom": dom}) == []
+
+
+def test_a_media_token_inside_code_keeps_its_word(call):
+    # The renderer turns MEDIA:<ref> into a media chip even inside code. The source side keeps the
+    # code's text as written, so a hidden copy of `media` can't hide behind the chip's class name.
+    dom = [["p", {}, ["code", {}, ["a", {"class": "msg-media-link", "href": "api/media?path=%2Ftmp%2Fa.png"},
+                                   "a.png"]], " ", {"comment": " media "}]]
+    assert "media" in call("_shareMissingWords", "`MEDIA:/tmp/a.png` <!-- media -->", {"dom": dom})
 
 
 @pytest.mark.parametrize(

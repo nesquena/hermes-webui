@@ -117,6 +117,9 @@ HIDING = [
     "See file:// here <!-- file -->",
     "Saved (file:///tmp/r.txt) <!-- file -->",
     "<pre>see file:///tmp/x.txt</pre>\n<!-- file -->",
+    "`a.`MEDIA:` <!-- media -->",
+    # (A remote address: publishing rewrites local MEDIA: paths, so the published text would differ.)
+    "`MEDIA:https://example.com/a.png` <!-- media -->",
 ]
 
 # Realistic content that must keep its formatting.
@@ -181,6 +184,7 @@ ORDINARY = [
     "<pre>see file:///tmp/x.txt</pre>",
     "Here: MEDIA:/tmp/chart.png",
     "Report: [report](file:///tmp/report.txt)",
+    "`a.`MEDIA:`",
 ]
 
 # Random messages: tokens renderMd treats specially, with numbered marker words.
