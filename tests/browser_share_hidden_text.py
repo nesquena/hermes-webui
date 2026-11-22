@@ -107,6 +107,16 @@ HIDING = [
     "````markdown\n```mermaid\ngraph TD\n```\n````\n<!-- mermaid -->",
     f'`<a href="https://example.com/{MARK}">https://example.com/{MARK}</a>` <!-- {MARK} -->',
     f"`[https://example.com/{MARK}](https://example.com/{MARK})` <!-- {MARK} -->",
+    # A marker word the page still shows can't pay for a hidden copy of itself: a mermaid fence's
+    # language, MEDIA: the renderer leaves as text, and file:// outside a bare address or link.
+    "```mermaid\ngraph TD\n  A-->B\n```\n<!-- mermaid -->",
+    "```mermaid\nnot a diagram\n```\n<!-- mermaid -->",
+    "<!-- mermaid -->\n```mermaid\ngraph TD",
+    "MEDIA: hello <!-- media -->",
+    "**MEDIA:** <!-- media -->",
+    "See file:// here <!-- file -->",
+    "Saved (file:///tmp/r.txt) <!-- file -->",
+    "<pre>see file:///tmp/x.txt</pre>\n<!-- file -->",
 ]
 
 # Realistic content that must keep its formatting.
@@ -161,6 +171,16 @@ ORDINARY = [
     "````markdown\n```mermaid\ngraph TD\n```\n````",
     'Write `<a href="https://example.com/docs">https://example.com/docs</a>` for a link.',
     "[`https://example.com/docs`](https://example.com/docs)",
+    # Marker words shown on the page, and markers the renderer turns into media.
+    "```mermaid\nnot a diagram\n```",
+    "```mermaid\ngraph TD",
+    "MEDIA: hello",
+    "**MEDIA:**",
+    "See file:// here",
+    "Saved (file:///tmp/r.txt)",
+    "<pre>see file:///tmp/x.txt</pre>",
+    "Here: MEDIA:/tmp/chart.png",
+    "Report: [report](file:///tmp/report.txt)",
 ]
 
 # Random messages: tokens renderMd treats specially, with numbered marker words.

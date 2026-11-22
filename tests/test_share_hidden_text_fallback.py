@@ -41,6 +41,13 @@ const ctx = {console, window: {location: {pathname: '/'}},
   document: {addEventListener(){}, createElement: el, createTextNode: d => ({nodeType: 3, data: String(d)})},
   _isSafeDataImageUri: v => /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(v)};
 vm.createContext(ctx);
+// The page loads ui.js first: share.js asks the renderer's own MEDIA: token parser
+// (_mediaTokenParts) whether a token is consumed. Load that one function from ui.js.
+const uiPath = require('path').join(require('path').dirname(process.argv[2]), 'ui.js');
+if (fs.existsSync(uiPath)) {
+  const ui = fs.readFileSync(uiPath, 'utf8'), at = ui.indexOf('function _mediaTokenParts(');
+  if (at >= 0) vm.runInContext(ui.slice(at, ui.indexOf('\n}\n', at) + 3), ctx);
+}
 vm.runInContext(src, ctx);
 const dump = n => n.nodeType === 3 ? {text: n.data} :
   {tag: n.tagName.toLowerCase(), cls: n.className, attrs: n.attrs, alt: n.alt, src: n.src, text: n._text,
@@ -120,7 +127,10 @@ def test_source_drops_markup_that_never_shows_as_words(call):
         "- [x] done\n```mermaid\ngraph\n```\n[f](file:///tmp/r.txt)",
     )
     assert "lt" not in got and "amp" not in got and "b" not in got and "br" not in got and "sup" not in got
-    assert "media" not in got and "x" not in got and "mermaid" not in got and "file" not in got
+    assert "media" not in got and "x" not in got and "file" not in got
+    # A mermaid fence's language shows on the page (the diagram block's class, the code header, or
+    # the fence line itself), so it stays a word.
+    assert got["mermaid"] == 1
     assert {"bold", "e", "mc2", "https", "com", "a", "png", "done", "graph", "tmp", "r", "txt"} <= set(got)
 
 
@@ -235,9 +245,78 @@ def test_a_link_made_inside_code_gives_no_extra_credit(call):
     assert _missing(call, "Open `https://example.com/docs`", dom) == []
 
 
-def test_a_mermaid_fence_keeps_no_label_word_closed_or_not(call):
-    assert call("_shareSourceWords", "```mermaid\ngraph TD\n```") == {"graph": 1, "td": 1}
-    assert call("_shareSourceWords", "```mermaid\ngraph TD") == {"graph": 1, "td": 1}
+def test_a_mermaid_fence_label_counts_once_closed_or_not(call):
+    assert call("_shareSourceWords", "```mermaid\ngraph TD\n```") == {"mermaid": 1, "graph": 1, "td": 1}
+    assert call("_shareSourceWords", "```mermaid\ngraph TD") == {"mermaid": 1, "graph": 1, "td": 1}
+
+
+_MERMAID_BLOCK = ["div", {"class": "mermaid-block", "data-mermaid-id": "mermaid-x"}, "graph TD\n  A-->B"]
+_MERMAID_TEXT = [["div", {"class": "pre-header"}, "mermaid"],
+                 ["pre", {}, ["code", {"class": "language-mermaid"}, "not a diagram"]]]
+
+
+@pytest.mark.parametrize(
+    "src,dom,twin_src,twin_dom,hidden",
+    [
+        ("```mermaid\ngraph TD\n  A-->B\n```\n<!-- mermaid -->", [_MERMAID_BLOCK, {"comment": " mermaid "}],
+         "```mermaid\ngraph TD\n  A-->B\n```", [_MERMAID_BLOCK], "mermaid"),
+        ("```mermaid\nnot a diagram\n```\n<!-- mermaid -->", [*_MERMAID_TEXT, {"comment": " mermaid "}],
+         "```mermaid\nnot a diagram\n```", _MERMAID_TEXT, "mermaid"),
+        ("<!-- mermaid -->\n```mermaid\ngraph TD",
+         [["p", {}, {"comment": " mermaid "}, ["br", {}], "```mermaid", ["br", {}], "graph TD"]],
+         "```mermaid\ngraph TD", [["p", {}, "```mermaid", ["br", {}], "graph TD"]], "mermaid"),
+        ("MEDIA: hello <!-- media -->", [["p", {}, "MEDIA: hello ", {"comment": " media "}]],
+         "MEDIA: hello", [["p", {}, "MEDIA: hello"]], "media"),
+        ("**MEDIA:** <!-- media -->", [["p", {}, ["strong", {}, "MEDIA:"], " ", {"comment": " media "}]],
+         "**MEDIA:**", [["p", {}, ["strong", {}, "MEDIA:"]]], "media"),
+        ("See file:// here <!-- file -->", [["p", {}, "See file:// here ", {"comment": " file "}]],
+         "See file:// here", [["p", {}, "See file:// here"]], "file"),
+        ("Saved (file:///tmp/r.txt) <!-- file -->", [["p", {}, "Saved (file:///tmp/r.txt) ", {"comment": " file "}]],
+         "Saved (file:///tmp/r.txt)", [["p", {}, "Saved (file:///tmp/r.txt)"]], "file"),
+        ("<pre>see file:///tmp/x.txt</pre>\n<!-- file -->", [["pre", {}, "see file:///tmp/x.txt"], {"comment": " file "}],
+         "<pre>see file:///tmp/x.txt</pre>", [["pre", {}, "see file:///tmp/x.txt"]], "file"),
+    ],
+    ids=["mermaid-diagram", "mermaid-text", "mermaid-unclosed", "media-space", "media-bold", "file-bare",
+         "file-in-parens", "file-in-pre"],
+)
+def test_a_marker_the_page_still_shows_cannot_pay_for_a_hidden_copy(call, src, dom, twin_src, twin_dom, hidden):
+    # A marker word is removed from the source only where the renderer consumes it. Where the page
+    # still shows it, a hidden copy is caught, and without that copy nothing is missing.
+    assert call("_shareMissingWords", src, {"dom": dom}) == [hidden]
+    assert call("_shareMissingWords", twin_src, {"dom": twin_dom}) == []
+
+
+@pytest.mark.parametrize(
+    "src,dom",
+    [
+        ("Here: MEDIA:/tmp/chart.png",
+         [["p", {}, "Here: ", ["span", {"class": "msg-artifact-image"},
+                               ["img", {"class": "msg-media-img", "src": "api/media?path=%2Ftmp%2Fchart.png",
+                                        "alt": "chart.png"}]]]]),
+        ("Saved to file:///tmp/report.txt",
+         [["p", {}, "Saved to ", ["a", {"class": "msg-media-link", "href": "api/media?path=%2Ftmp%2Freport.txt",
+                                        "download": "report.txt"}, "📎 report.txt"]]]),
+        ("Report: [report](file:///tmp/report.txt)",
+         [["p", {}, "Report: ", ["a", {"href": "api/media?path=%2Ftmp%2Freport.txt&inline=1"}, "report"]]]),
+    ],
+    ids=["media-token", "file-bare", "file-link"],
+)
+def test_a_marker_the_renderer_consumes_is_not_counted(call, src, dom):
+    assert call("_shareMissingWords", src, {"dom": dom}) == []
+
+
+@pytest.mark.parametrize(
+    "dom",
+    [
+        ["pre", {}, ["a", {"href": "https://e.com/zqpre"}, "x"]],
+        ["code", {}, ["span", {}, ["a", {"href": "https://e.com/zqpre"}, "x"]]],
+        ["code", {}, ["img", {"src": "https://e.com/zqpre.png", "alt": "x"}]],
+    ],
+    ids=["link-in-pre", "link-nested-in-code", "image-in-code"],
+)
+def test_an_address_inside_code_gives_no_credit_at_any_depth(call, dom):
+    # Inside <pre> or <code>, at any depth, a link's or image's address adds no words.
+    assert _missing(call, "```\nx\n``` <!-- zqpre -->", dom, {"comment": " zqpre "}) == ["zqpre"]
 
 
 def test_an_anchor_with_two_addresses_is_not_collapsed(call):

@@ -81,8 +81,8 @@ function _shareNormalize(text){
 
 // The words a reader is expected to see for a published message: its text with
 // the markup that never shows as words removed (standard tag and attribute
-// names, the MEDIA: and file:// markers, task-list boxes, and the mermaid
-// fence language). Code spans and fences keep their text as written.
+// names, the MEDIA: and file:// markers the renderer turns into media, and
+// task-list boxes). Code spans and fences keep their text as written.
 function _shareSourceWords(source){
   let s=_shareDecode5(_shareDecode5(String(source==null?'':source).replace(/\r\n?/g,'\n')));
   // Everything inside an HTML comment is hidden text, including tag syntax, code
@@ -99,18 +99,22 @@ function _shareSourceWords(source){
   while(s.includes(literalPrefix)) literalPrefix+='_';
   const literalRe=new RegExp(literalPrefix+'(\\d+)\\x00','g');
   const unlit=t=>t.replace(literalRe,(_m,i)=>literalCode[+i]);
-  s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)|`([^`\n]+)`/g,(part,_lead,ticks,info)=>{
-    // A mermaid diagram has no language header; every other one-word language
-    // is shown in the block's header, so it stays a word.
-    if(ticks&&/^[ \t]*mermaid[ \t]*$/i.test(info)) part=part.replace(/^(\n?[ ]{0,3}`{3,})[ \t]*mermaid[ \t]*/i,'$1');
+  s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)|`([^`\n]+)`/g,part=>{
     literalCode.push(part);
     return literalPrefix+(literalCode.length-1)+'\x00';
   });
-  s=s.replace(/MEDIA:|file:\/\//g,' ')
-    .replace(/^([ \t]*[-*+][ \t]+)\[[ xX]\](?=[ \t])/gm,'$1')
-    // An unclosed mermaid fence isn't lifted above; it has no header either.
-    .replace(/^( {0,3}`{3,})[ \t]*mermaid[ \t]*$/gim,'$1')
-    ;
+  // Markers are removed only where the renderer consumes them; anywhere else the page shows
+  // them as written. MEDIA:<ref> becomes an image or a link when the renderer's own parser
+  // takes the token (MEDIA: with a space or nothing after it stays text). A bare file:// address
+  // at a line start or after a space (outside raw <pre>) and a Markdown link or image to one
+  // become media links without the scheme.
+  s=s.replace(/MEDIA:([^\s)\]]+)/g,(token,ref,offset,whole)=>
+    (typeof _mediaTokenParts==='function'&&_mediaTokenParts(whole,offset,ref))?' '+ref:token);
+  const preRanges=[];
+  s.replace(/<pre\b[^>]*>[\s\S]*?<\/pre>/gi,(m,offset)=>{ preRanges.push([offset,offset+m.length]); return m; });
+  s=s.replace(/(^|\s)file:\/\/(?=[^\s<>"')\]])|(\]\()file:\/\/(?=[^\s)]+\))/g,(m,bare,link,offset)=>
+    preRanges.some(([a,b])=>offset>=a&&offset<b)?m:(bare!==undefined?bare+' ':link));
+  s=s.replace(/^([ \t]*[-*+][ \t]+)\[[ xX]\](?=[ \t])/gm,'$1');
   // The source and DOM must use the same normalized equality for label/href. A
   // label may hold a code span: compare its shown text.
   s=s.replace(/\[([^[\]\n]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s)]+)\)/g,(all,label,href)=>
