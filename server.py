@@ -569,11 +569,7 @@ def main() -> None:
     # instead of a silent death. The paired memory root-cause is #4765.
     install_crash_visibility()
 
-    # Log redaction (issue #8984): install ONE root handler on stderr so Agent
-    # WARNINGs are masked by the Agent's RedactingFormatter instead of falling
-    # through to logging.lastResort in clear text (a provider base_url with
-    # userinfo credentials would otherwise land verbatim in the server log).
-    # Idempotent, and safe when the Agent is not importable (plain formatter).
+    # Log redaction (issue #8984): mask credentials in the server log.
     install_server_log_redaction()
 
     print_startup_config()
@@ -649,13 +645,9 @@ def main() -> None:
             print('[ok] Agent dependencies installed successfully.', flush=True)
 
     # The bootstrap transition above can make the Agent importable AFTER the
-    # redaction handler was installed (issue #8984 round 2): the handler
-    # resolved the Agent's formatter at install time, when the Agent was not
-    # yet importable, and kept the plain fallback for the rest of the
-    # process's life — writing credentials in clear. The handler now resolves
-    # the formatter when a record is formatted, so it picks the Agent's
-    # formatter up on its own; this call just makes the switch happen now
-    # instead of at the next record.
+    # redaction handler was installed (#8984 round 2): the handler resolved the
+    # Agent's formatter at install time and kept the plain fallback for good.
+    # It now resolves it per record; this makes the switch happen now.
     refresh_server_log_redaction()
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
