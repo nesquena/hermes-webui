@@ -354,8 +354,25 @@ def test_respond_transient_error_keeps_card(_endpoint):
     _calls, ctx = _gateway_post(_http_error(503, "storage_unavailable"))
     with ctx:
         out = _respond({"session_id": SID, "clarify_id": cid, "response": "x"})
-    assert out["status"] == 409
+    # Not stale: respondClarify only hides the card on 409, any other error keeps card + draft.
+    assert out["status"] == 503
+    assert out["payload"]["ok"] is False and "stale" not in out["payload"]
+    assert out["payload"]["retryable"] is True
     assert clarify.get_pending(SID)["clarify_id"] == cid
+
+
+def test_respond_gateway_unreachable_is_retryable_not_stale(_endpoint):
+    cid = _surface()
+    _calls, ctx = _gateway_post(urllib.error.URLError("connection refused"))
+    with ctx:
+        out = _respond({"session_id": SID, "clarify_id": cid, "response": "x"})
+    assert out["status"] == 503 and "stale" not in out["payload"]
+    assert clarify.get_pending(SID)["clarify_id"] == cid
+    # The retry reaches the Gateway with the same identity once it is back.
+    calls, ctx = _gateway_post({"run_id": RUN, "status": "resolved", "prompt_id": "clar-a"})
+    with ctx:
+        out = _respond({"session_id": SID, "clarify_id": cid, "response": "x"})
+    assert out["status"] == 200 and calls[0][1]["request_id"] == "clar-a"
 
 
 def test_respond_missing_or_expired_gateway_prompt_never_posts(_endpoint):
@@ -405,3 +422,80 @@ def test_local_clarify_respond_unchanged():
 def test_runner_client_error_carries_code():
     exc = RunnerClientError("x", status=409, code="stale_generation")
     assert exc.code == "stale_generation"
+
+
+# ── WebUI restart / reattach ─────────────────────────────────────────────
+
+
+def _reattach(monkeypatch, statuses, events, seen=None):
+    """Run the post-restart reattach loop against a scripted status sequence."""
+    it = iter(statuses)
+
+    def status(*_a):
+        if seen is not None:
+            seen.append(clarify.gateway_run_prompt_ids(SID, RUN))
+        return next(it)
+
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", status)
+    monkeypatch.setattr(gateway_chat, "update_active_run", lambda *a, **k: None)
+    monkeypatch.setattr(gateway_chat, "GATEWAY_REATTACH_POLL_INTERVAL", 0)
+    monkeypatch.setattr("api.route_approvals.settle_gateway_pending_run", lambda *a, **k: None)
+    try:
+        return gateway_chat._await_gateway_run_result(
+            SID, "stream-reattach", RUN, "http://gw", "k",
+            put_gateway_event=lambda e, d: events.append((e, d)), cancel_event=threading.Event())
+    finally:
+        gateway_chat._STREAM_RUN_IDS.pop("stream-reattach", None)
+        gateway_chat._STREAM_RUN_LIFECYCLE.pop("stream-reattach", None)
+
+
+def _parked(prompt_id="clar-a", generation=3):
+    control = _request(prompt_id, generation)
+    control.pop("event")
+    return control
+
+
+def test_restart_restores_parked_clarify_from_run_status(monkeypatch, _endpoint):
+    """The pre-restart clarify row is behind the cursor and the new queue is empty:
+    reattach rebuilds the card from pending_controls so the answer can be delivered."""
+    assert clarify.get_pending(SID) is None
+    events, seen = [], []
+    running = {"status": "running", "pending_controls": [_parked()]}
+    _reattach(monkeypatch, [running, running, {"status": "completed", "output": "ok"}], events, seen)
+    assert seen[1] == {"clar-a"}
+    cards = [d for e, d in events if e == "clarify"]
+    assert len(cards) == 1  # re-polling the same parked prompt does not duplicate the card
+    assert cards[0]["clarify_id"] == clarify.gateway_run_clarify_id(RUN, "clar-a", 3)
+    assert cards[0]["question"] == "Which one?"
+
+
+def test_restart_restored_clarify_is_answerable(_endpoint):
+    events = []
+    gateway_chat._sync_gateway_run_clarify_from_status(
+        SID, RUN, {"status": "running", "pending_controls": [_parked()]},
+        put_gateway_event=lambda e, d: events.append((e, d)))
+    cid = events[-1][1]["clarify_id"]
+    calls, ctx = _gateway_post({"run_id": RUN, "status": "resolved", "prompt_id": "clar-a"})
+    with ctx:
+        out = _respond({"session_id": SID, "clarify_id": cid, "response": "blue"})
+    assert out["status"] == 200
+    assert calls[0][1] == {"request_id": "clar-a", "execution_generation": 3, "answer": "blue"}
+
+
+def test_restart_does_not_resurrect_settled_clarify(monkeypatch):
+    """clarify.settled writes no journal row; only the status says which prompts live."""
+    events, seen = [], []
+    _relay([_request("clar-old")], [])  # mirrored, then settled while the WebUI was down
+    _reattach(monkeypatch, [
+        {"status": "running", "pending_controls": [_parked("clar-new")]},
+        {"status": "completed", "output": "ok"},
+    ], events, seen)
+    assert seen[1] == {"clar-new"}
+    assert [d["_gateway_prompt_id"] for e, d in events if e == "clarify"] == ["clar-new"]
+
+
+def test_status_without_pending_controls_keeps_clarify_queue():
+    _relay([_request()], [])
+    gateway_chat._sync_gateway_run_clarify_from_status(
+        SID, RUN, {"status": "running"}, put_gateway_event=lambda *a: None)
+    assert clarify.gateway_run_prompt_ids(SID, RUN) == {"clar-a"}

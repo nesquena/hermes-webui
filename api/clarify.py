@@ -298,6 +298,16 @@ def gateway_run_pending(session_key: str, clarify_id: str) -> dict | None:
     return None
 
 
+def gateway_run_prompt_ids(session_key: str, run_id: str) -> set[str]:
+    """Gateway prompt ids of the run's clarify mirrors still queued for this session."""
+    with _lock:
+        return {
+            str(entry.data.get("_gateway_prompt_id") or "")
+            for entry in _gateway_queues.get(session_key) or []
+            if str(entry.data.get("_gateway_run_id") or "") == str(run_id or "")
+        }
+
+
 def settle_gateway_run_pending(session_key: str, run_id: str, prompt_id: str | None = None) -> int:
     """Retire the Gateway run's clarify mirrors (one prompt, or all of the run's).
 

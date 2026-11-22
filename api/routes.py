@@ -35843,12 +35843,18 @@ _GATEWAY_CLARIFY_DEAD_CODES = frozenset({
 })
 
 
+class GatewayClarifyUnavailable(RuntimeError):
+    """The Gateway could not be reached to answer a still-parked clarify prompt."""
+
+
 def _resolve_gateway_run_clarify(sid: str, clarify_id: str, response: str) -> bool | None:
     """Answer a Gateway Runs API clarify card at ``POST /v1/runs/{id}/clarify``.
 
     None when ``clarify_id`` is not a Gateway run prompt (local / native
     session transports keep their own path). A run prompt never falls back to
-    local settlement: the Gateway is the only owner of its waiter.
+    local settlement: the Gateway is the only owner of its waiter. Raises
+    ``GatewayClarifyUnavailable`` when the Gateway failed without proving the
+    prompt dead, so the card stays answerable for a retry.
     """
     from api.clarify import GATEWAY_RUN_CLARIFY_PREFIX, gateway_run_pending, settle_gateway_run_pending
 
@@ -35871,15 +35877,16 @@ def _resolve_gateway_run_clarify(sid: str, clarify_id: str, response: str) -> bo
             run_id, prompt_id, response, execution_generation=generation,
         )
     except RunnerClientError as exc:
+        logger.info("Gateway rejected clarify answer for run %s: %s", run_id, exc.code or exc.status)
         if exc.code in _GATEWAY_CLARIFY_DEAD_CODES:
             # The Gateway proved this prompt can no longer be answered: retire
             # the card so it does not linger, and report the answer as stale.
             settle_gateway_run_pending(sid, run_id, prompt_id)
-        logger.info("Gateway rejected clarify answer for run %s: %s", run_id, exc.code or exc.status)
-        return False
-    except (ValueError, OSError):
+            return False
+        raise GatewayClarifyUnavailable(str(exc)) from exc
+    except (ValueError, OSError) as exc:
         logger.debug("Gateway clarify relay failed for run %s", run_id, exc_info=True)
-        return False
+        raise GatewayClarifyUnavailable(str(exc)) from exc
     status = str((result or {}).get("status") or "") if isinstance(result, dict) else ""
     # Either way the Gateway no longer has this prompt parked.
     settle_gateway_run_pending(sid, run_id, prompt_id)
@@ -35926,11 +35933,20 @@ def _handle_clarify_respond(handler, body):
 
     from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
 
-    if runtime_adapter_enabled():
-        adapter = LegacyJournalRuntimeAdapter(clarify_delegate=_resolve_clarify_legacy)
-        ok = adapter.respond_clarify(sid, clarify_id, response).accepted
-    else:
-        ok = _resolve_clarify_legacy(sid, clarify_id, response)
+    try:
+        if runtime_adapter_enabled():
+            adapter = LegacyJournalRuntimeAdapter(clarify_delegate=_resolve_clarify_legacy)
+            ok = adapter.respond_clarify(sid, clarify_id, response).accepted
+        else:
+            ok = _resolve_clarify_legacy(sid, clarify_id, response)
+    except GatewayClarifyUnavailable:
+        # Not stale: the prompt is still parked, so the browser keeps the card
+        # and the typed answer for a retry (any non-409 error does).
+        return j(handler, {
+            "ok": False,
+            "error": "Gateway is temporarily unavailable; your answer was not delivered. Try again.",
+            "retryable": True,
+        }, status=503)
 
     if not ok:
         # Both the runtime adapter and legacy paths set ok=False for

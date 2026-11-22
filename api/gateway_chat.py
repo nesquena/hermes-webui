@@ -1007,6 +1007,31 @@ def _relay_gateway_run_clarify(session_id, run_id, payload, *, put_gateway_event
     return True
 
 
+def _sync_gateway_run_clarify_from_status(session_id, run_id, status, *, put_gateway_event) -> None:
+    """Mirror exactly the clarify prompts a durable run status still has parked.
+
+    The Gateway's ``pending_controls`` is the only authority for which clarify
+    prompts are live: answers and ``clarify.settled`` write no journal row, so
+    the journal cannot tell a parked prompt from a settled one across a WebUI
+    restart. Surfaces parked prompts the queue lacks and retires mirrors the
+    Gateway no longer lists. A status without ``pending_controls`` proves
+    nothing and changes nothing.
+    """
+    controls = status.get("pending_controls") if isinstance(status, dict) else None
+    if not isinstance(controls, list):
+        return
+    parked = [c for c in controls if isinstance(c, dict) and c.get("kind") == "clarify"]
+    live_ids = {_gateway_prompt_identity(c) for c in parked}
+    from api.clarify import gateway_run_prompt_ids
+
+    queued = gateway_run_prompt_ids(session_id, run_id)
+    for prompt_id in queued - live_ids:
+        _settle_gateway_run_clarify(session_id, run_id, prompt_id)
+    for control in parked:
+        if _gateway_prompt_identity(control) not in queued:
+            _relay_gateway_run_clarify(session_id, run_id, control, put_gateway_event=put_gateway_event)
+
+
 def _settle_gateway_run_clarify(session_id, run_id, prompt_id=None) -> int:
     """Retire a Gateway run's clarify cards (one prompt, or every one on run end)."""
     try:
@@ -2178,6 +2203,9 @@ def _await_gateway_run_result(
             continue
         state = str(status.get("status") or "").strip().lower()
         surface_parked_approval(status)
+        # Clarify prompts relayed before the restart sit behind the replay cursor and the
+        # new process's queue is empty; the status projection is their only live record.
+        _sync_gateway_run_clarify_from_status(session_id, run_id, status, put_gateway_event=put_gateway_event)
         if state in _GATEWAY_RUN_TERMINAL_STATUSES:
             _relay_gateway_pending_steer(session_id, status, put_gateway_event)
             settle_gateway_pending_run(session_id, run_id, reason=f"Gateway run {state} before approval resolution")
