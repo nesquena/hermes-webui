@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 import traceback
+import unicodedata
 import urllib.error
 import urllib.request
 import uuid
@@ -1684,11 +1685,27 @@ def _custom_provider_slug_from_name(name: object) -> str:
         return ""
     if raw.startswith("custom:"):
         return raw
-    # Keep name-derived custom provider slugs out of the @provider:model colon
-    # grammar. Endpoint-derived slugs may still be custom:<host>:<port>, but a
-    # friendly name like "Local (127.0.0.1:15721)" should not preserve ':'.
-    slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
-    slug = re.sub(r"-{2,}", "-", slug)
+    # The identity a saved ``model.provider`` must carry is the one the Agent
+    # mints (``hermes_cli.providers.custom_provider_slug``: lowercase, spaces to
+    # dashes, non-ASCII kept), otherwise the Agent answers "Unknown provider"
+    # and CLI, cron and compression fail on that profile. Folding the name
+    # through an ASCII-only class minted a SECOND identity for a mixed name --
+    # "晨光 Relay" became ``custom:relay`` while the Agent minted
+    # ``custom:晨光-relay`` (#9209) -- so the fold now keeps letters, marks and
+    # numbers in every script.
+    #
+    # What it still removes is what the ``@provider:model`` colon grammar cannot
+    # carry: ':' (a friendly name like "Local (127.0.0.1:15721)" must not inject
+    # a second separator) plus whitespace and control characters, each run
+    # becoming one '-'. Marks are kept attached to their base letter so a
+    # decomposed accent ("e" + U+0301) survives instead of truncating to "e".
+    # ASCII input is byte for byte what master produced: those characters
+    # already fell into these same two classes.
+    slug = "".join(
+        ch if ch in "._-" or unicodedata.category(ch)[0] in "LMN" else "-"
+        for ch in raw
+    )
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
     if not slug:
         return ""
     return "custom:" + slug
