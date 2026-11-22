@@ -5,6 +5,7 @@ import base64 as _base64
 import binascii as _binascii
 import errno
 import functools
+import hashlib as _hashlib
 import json as _json
 import logging
 import os
@@ -988,21 +989,71 @@ def _redaction_policy_namespace_of(lru):
     return ns if isinstance(ns, (dict, MappingProxyType)) else _NO_REDACTION_POLICY
 
 
+_VAULT_FINGERPRINT_SALT = os.urandom(32)
+
+
+def _vault_registry_state():
+    """``(fingerprint, present)`` for the profile-scoped vault value registry.
+
+    ``register_vault_redaction_value()`` (browser-vault fills, MCP transport) pushes
+    the exact secret bytes into a per-profile registry that the redactor consults on
+    every call, and it does so **without rotating** the prefix-pattern globals that
+    ``_current_redaction_policy()`` watches. Two consequences follow, and both are
+    closed here:
+
+    * a masked payload cached before that registration keeps serving the value while
+      every other policy identity in the key stays equal (#8990 review, P1);
+    * marker-free text still short-circuits the prefilter, because the fixed marker
+      table cannot know an arbitrary password, so the value never reached the
+      redactor at all.
+
+    The fingerprint is the owning profile plus a salted digest of the registered
+    values in registry order: it moves when the bucket changes, it never carries the
+    secret bytes, and the per-process salt makes the digest useless as an offline
+    oracle. An unreadable registry reports ``present=True`` (fail closed) with a
+    ``None`` fingerprint, and callers treat ``None`` as "do not cache".
+    """
+    try:
+        from agent import redact as agent_redact
+
+        scope = agent_redact._vault_scope()
+        registry = agent_redact._VAULT_REDACTION_VALUES
+        lock = agent_redact._VAULT_REDACTION_LOCK
+    except Exception:
+        return (None, True)
+    try:
+        with lock:
+            values = tuple((registry.get(scope) or {}))
+    except Exception:
+        return (None, True)
+    digest = _hashlib.sha256(_VAULT_FINGERPRINT_SALT)
+    digest.update(str(scope).encode("utf-8", "surrogatepass"))
+    for value in values:
+        raw = str(value).encode("utf-8", "surrogatepass")
+        digest.update(len(raw).to_bytes(4, "big"))
+        digest.update(raw)
+    return (digest.hexdigest(), bool(values))
+
+
 def _redaction_policy_state_for(lru):
-    """``(lru, policy_ns.get, _PREFIX_RE, _PREFIX_SUBSTRINGS, has_plugin_patterns)`` as seen now.
+    """``(lru, policy_ns.get, _PREFIX_RE, _PREFIX_SUBSTRINGS, has_runtime_authorities,
+    vault_fingerprint)`` as seen now.
 
     The state holds strong references to the fingerprint objects, so their
     identities cannot be recycled while they are compared with ``is``.
 
-    ``has_plugin_patterns`` (#8847) is recomputed only when the fingerprint
-    moves, so it needs no invalidation of its own. It is read AFTER the
-    fingerprint: every registry shape (a list, later a per-source dict) is
-    mutated before ``_rebuild_prefix_matcher()`` rebinds the fingerprint, so a
-    state holding the new fingerprint has seen the new registry. If the
-    registry name is absent but plugins can still register patterns (the
-    Agent renamed its private registry), WebUI can't tell, so it reports True
-    and fails closed. Without either name (an Agent that predates the
-    registry, or no policy namespace) it reports False: today's prefilter.
+    ``has_runtime_authorities`` (#8847, extended by #8990) is True when the prefix
+    machinery has plugin patterns **or** when the profile-scoped vault registry
+    holds registered values: in both cases the fixed marker table cannot recognise
+    the secrets, so marker-free text must still go to the Agent. It is recomputed
+    only when the fingerprint moves, so it needs no invalidation of its own. It is
+    read AFTER the fingerprint: every registry shape (a list, later a per-source
+    dict) is mutated before ``_rebuild_prefix_matcher()`` rebinds the fingerprint, so
+    a state holding the new fingerprint has seen the new registry. If the registry
+    name is absent but plugins can still register patterns (the Agent renamed its
+    private registry), WebUI can't tell, so it reports True and fails closed.
+    Without either name (an Agent that predates the registry, or no policy
+    namespace) it reports False: today's prefilter.
     """
     get = _redaction_policy_namespace_of(lru).get
     prefix_re, prefix_substrings = get("_PREFIX_RE"), get("_PREFIX_SUBSTRINGS")
@@ -1012,7 +1063,15 @@ def _redaction_policy_state_for(lru):
     else:  # the registry can't be read: fail closed if plugins can register
         register = get("register_redaction_patterns", _REDACTION_POLICY_MISSING)
         has_plugin_patterns = register is not _REDACTION_POLICY_MISSING
-    return (lru, get, prefix_re, prefix_substrings, has_plugin_patterns)
+    vault_fingerprint, vault_present = _vault_registry_state()
+    return (
+        lru,
+        get,
+        prefix_re,
+        prefix_substrings,
+        bool(has_plugin_patterns or vault_present),
+        vault_fingerprint,
+    )
 
 
 _redaction_policy_lock = threading.Lock()
@@ -1035,7 +1094,11 @@ def _sync_redaction_policy():
         state = _redaction_policy_state
         current = _redaction_policy_state_for(lru)
         if lru is state[0]:
-            if current[2] is state[2] and current[3] is state[3]:
+            if (
+                current[2] is state[2]
+                and current[3] is state[3]
+                and current[5] == state[5]
+            ):
                 return state  # another thread already synced this policy
             try:
                 maxsize = lru.cache_info().maxsize
@@ -1056,11 +1119,22 @@ def _sync_redaction_policy():
 
 
 def _current_redaction_policy():
-    """The policy state for the memo and Agent policy in force now (#8844)."""
+    """The policy state for the memo and Agent policy in force now (#8844).
+
+    The fingerprint is the rotating prefix memo **plus** the profile-scoped vault
+    registry digest: a vault registration rebinds neither ``_PREFIX_RE`` nor
+    ``_PREFIX_SUBSTRINGS``, so watching only those would leave both the memo and
+    every masked payload cached under the old policy (#8990 review, P1).
+    """
     lru = _redact_fn_lru
     state = _redaction_policy_state
     policy_get = state[1]
-    if lru is state[0] and policy_get("_PREFIX_RE") is state[2] and policy_get("_PREFIX_SUBSTRINGS") is state[3]:
+    if (
+        lru is state[0]
+        and policy_get("_PREFIX_RE") is state[2]
+        and policy_get("_PREFIX_SUBSTRINGS") is state[3]
+        and _vault_registry_state()[0] == state[5]
+    ):
         return state
     return _sync_redaction_policy()
 
@@ -1082,13 +1156,23 @@ def redaction_policy_fingerprint():
     primed before a registration would otherwise keep serving the
     newly-registered secret intact (#8990 review) — the same rule that keeps
     large strings out of the string memo.
+
+    The rotating memo is not the whole policy: the profile-scoped vault registry
+    changes in place, under the same memo, so its identity is the second half of
+    the fingerprint (see :func:`_vault_registry_fingerprint`). Both halves are
+    compared by value, and either being unreadable returns None.
     """
     try:
         state = _current_redaction_policy()
     except Exception:
         return None
     first = state[0] if state else None
-    return first if callable(first) else None
+    if not callable(first):
+        return None
+    vault = state[5] if len(state) > 5 else None
+    if vault is None:
+        return None
+    return (first, vault)
 
 
 _SENSITIVE_CASE_MARKERS = (

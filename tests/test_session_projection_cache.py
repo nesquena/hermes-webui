@@ -428,7 +428,8 @@ def test_redaction_policy_rotation_invalidates_the_projection(env, monkeypatch):
 
     fresh = functools.lru_cache(maxsize=helpers._REDACT_CACHE_MAXSIZE)(_masking_policy)
     monkeypatch.setattr(helpers, "_redact_fn_lru", fresh)
-    assert helpers.redaction_policy_fingerprint() is fresh, (
+    _fingerprint = helpers.redaction_policy_fingerprint()
+    assert _fingerprint is not None and _fingerprint[0] is fresh, (
         "the policy fingerprint must follow the rotated memo"
     )
     assert _POLICY_TOKEN not in helpers._redact_fn_cached(_POLICY_TOKEN), (
@@ -553,3 +554,81 @@ def test_backend_transition_reaches_a_cached_payload(env, monkeypatch):
         "a backend transition must reach the payload even on a cache hit"
     )
     assert env.projection_calls == 1, "the transcript is unchanged: this must be a cache hit"
+
+def test_vault_registry_registration_invalidates_a_primed_payload(env):
+    """A vault-value registration must not be served the pre-registration payload.
+
+    ``register_vault_redaction_value()`` changes the profile-scoped exact-value
+    registry in place and does **not** rotate the prefix-pattern memo that
+    ``_current_redaction_policy()`` watches, so the prefix half of the policy
+    identity stays equal while the mask the redactor produces changes. Priming a
+    GET, registering an inert synthetic value, and asking again is the exact
+    schedule the review replayed: on the unfixed head the second GET is a cache
+    hit and still carries the value.
+    """
+    import api.helpers as helpers
+
+    agent_redact = pytest.importorskip(
+        "agent.redact", reason="the installed Agent owns the vault registry"
+    )
+    if not hasattr(agent_redact, "register_vault_redaction_value"):
+        pytest.skip("installed Agent has no vault-value registry")
+
+    secret = "vault-synthetic-value-9f13c7ab"
+    agent_redact.clear_vault_redaction_values()
+    try:
+        before = helpers.redaction_policy_fingerprint()
+        assert before is not None, "the policy fingerprint must be resolvable here"
+
+        env.save("proj_vault", [f"the value is {secret} and it is inert " + "x" * 17000, "second"])
+        first = env.get("proj_vault")
+        assert env.projection_calls == 1
+        assert secret in " ".join(str(c) for c in _Env.contents(first)), (
+            "the priming payload must carry the value before it is registered, "
+            "or this test proves nothing"
+        )
+
+        agent_redact.register_vault_redaction_value(secret)
+
+        after = helpers.redaction_policy_fingerprint()
+        assert after is not None and after != before, (
+            "the policy fingerprint must move when the vault registry does: the "
+            "registry changes under the same rotating memo, so a prefix-only "
+            "identity keeps serving the pre-registration mask"
+        )
+
+        second = env.get("proj_vault")
+        assert env.projection_calls == 2, (
+            "a vault registration must not be served the pre-registration projection"
+        )
+        assert secret not in " ".join(str(c) for c in _Env.contents(second)), (
+            "the payload still carries a value the registry now masks"
+        )
+    finally:
+        agent_redact.clear_vault_redaction_values()
+
+
+def test_unreadable_vault_registry_disables_the_cache(env, monkeypatch):
+    """When the registry's identity cannot be established, the cache must not run.
+
+    The reviewer's accepted fallback: cover the authority, or bypass the caching
+    when it cannot be covered. A fingerprint of None already means "do not cache",
+    and the two halves are independent — losing only the vault half must be enough.
+    """
+    import api.helpers as helpers
+
+    env.save("proj_unreadable", ["hello", "again"])
+    first = env.get("proj_unreadable")
+    assert env.projection_calls == 1
+    assert _Env.contents(first) == ["hello", "again"]
+
+    monkeypatch.setattr(helpers, "_vault_registry_state", lambda: (None, True))
+    assert helpers.redaction_policy_fingerprint() is None, (
+        "an unreadable vault registry must make the whole policy identity unknown"
+    )
+
+    second = env.get("proj_unreadable")
+    assert env.projection_calls == 2, (
+        "an unknown policy identity must disable reuse rather than risk a stale mask"
+    )
+    assert _Env.contents(second) == ["hello", "again"]

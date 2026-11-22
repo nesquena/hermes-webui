@@ -18144,7 +18144,7 @@ def _handle_session_get(handler, parsed) -> bool:
                     _proj_key is not None
                     and _proj_sidecar_sig_before is not None
                     and _sidecar_stat_signature(_proj_sidecar_path) == _proj_sidecar_sig_before
-                    and redaction_policy_fingerprint() is _proj_redaction_policy
+                    and redaction_policy_fingerprint() == _proj_redaction_policy
                 ):
                     _session_projection_cache_put(_proj_key, redact)
         # Derived from process-level backend/override policy, which no sidecar
