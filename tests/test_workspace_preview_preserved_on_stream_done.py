@@ -67,8 +67,8 @@ def test_turn_mutation_tracking_reloads_open_preview():
     # #5747 re-gate (F3): the refresh loop must still reload the open preview
     # through openFile(), and the gate must coalesce triggers onto that loop.
     loop = _function_block(WORKSPACE_JS, "_runPreviewRefreshLoop")
-    assert "openFile(_previewCurrentPath" in loop.replace(" ", ""), (
-        "Mutated open previews must reload through openFile()"
+    assert "openFile(target,{bustCache:true})" in loop.replace(" ", ""), (
+        "Mutated open previews must reload through openFile() with cache busting"
     )
     gate = _function_block(WORKSPACE_JS, "refreshOpenPreviewIfMutated")
     assert "_runPreviewRefreshLoop" in gate, (

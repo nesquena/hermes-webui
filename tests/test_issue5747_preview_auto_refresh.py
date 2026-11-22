@@ -186,7 +186,7 @@ def test_preview_refresh_still_uses_open_file_with_bust_cache():
     # through openFile() with cache busting, and refreshOpenPreviewIfMutated()
     # must coalesce concurrent triggers onto that single in-flight loop.
     loop = _function_block(WORKSPACE_JS, "_runPreviewRefreshLoop")
-    assert "openFile(_previewCurrentPath,{bustCache:true})" in loop.replace(" ", ""), (
+    assert "openFile(target,{bustCache:true})" in loop.replace(" ", ""), (
         "mutated preview must reload through openFile() with cache busting (#5747)"
     )
     gate = _function_block(WORKSPACE_JS, "refreshOpenPreviewIfMutated")

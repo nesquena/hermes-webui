@@ -641,7 +641,7 @@ function _textWriteOpTargets(text){
     push(m[2]||m[3]||m[4]);
   }
   // 4. python open('<path>', '<mode>') with a write-capable mode (w/a/+).
-  const openRe=/\bopen\s*\(\s*(?:"([^"]+)"|'([^']+)')\s*,\s*(?:"([^"]*)"|'([^']*)')\s*\)/g;
+  const openRe=/\bopen\s*\(\s*(?:"([^"]+)"|'([^']+)')\s*,\s*(?:"([^"]*)"|'([^']*)')(?:\s*,[^)]*)?\s*\)/g;
   while((m=openRe.exec(text))){
     const mode=String(m[3]||m[4]||'').toLowerCase();
     if(/^[rwa]b?\+?$/.test(mode) && (mode[0]==='w'||mode[0]==='a'||mode.includes('+'))) push(m[1]||m[2]);
@@ -745,6 +745,19 @@ let _previewRefreshPromise = null;
 // _previewOpenOwned, and `clearPreview()` retires in-flight opens by bumping
 // `_previewOpenGen`.
 
+function _previewRefreshPublishBlocked(path){
+  // #5747 (review 2026-11-22): one decision for both the drain pass and the
+  // publish path — a refresh-triggered reload may not publish over an editor
+  // that holds unsaved text for the same file. Any other file is unaffected.
+  if(!path||!_previewCurrentPath) return false;
+  if(_previewSavedText===null) return false;   // no baseline → nothing to lose
+  const targetNorm=_normalizeArtifactPath(path,{allowBare:true});
+  const currentNorm=_normalizeArtifactPath(_previewCurrentPath,{allowBare:true});
+  if(!targetNorm||!currentNorm||targetNorm!==currentNorm) return false;
+  return Boolean((typeof _previewHasUnsavedEdits==='function'&&_previewHasUnsavedEdits())
+    ||(typeof _previewDirty!=='undefined'&&!!_previewDirty));
+}
+
 // Drain every pending mutation for the currently open preview, reloading via
 // openFile() once per entry. A mutation recorded while a reload is in flight
 // triggers another pass, so no mutation is dropped; concurrent triggers
@@ -752,15 +765,35 @@ let _previewRefreshPromise = null;
 // reload; N mutations → at most N sequential reloads).
 async function _runPreviewRefreshLoop(){
   while(true){
-    if(!S || !S.session || !_previewCurrentPath) return;
-    const current=_normalizeArtifactPath(_previewCurrentPath, {allowBare:true});
+    if(!S||!S.session||!_previewCurrentPath) return;
+    // Bind the pass to the file it was queued for: the awaited read must not
+    // hand the drain to whatever pane the user opened meanwhile.
+    const target=_previewCurrentPath;
+    const current=_normalizeArtifactPath(target,{allowBare:true});
     if(!current) return;
-    const key=_mutationKey(_currentMutationOwner(),current);
+    const owner=_currentMutationOwner();
+    const key=_mutationKey(owner,current);
     if(!_turnMutatedPreviewPaths.has(key)) return;
+    // Re-checked on every pass, not just at the trigger: an edit that starts
+    // while a read is in flight keeps its mutation pending for a later drain.
+    if(typeof _previewRefreshPublishBlocked==='function'&&_previewRefreshPublishBlocked(target)) return;
     // Consume the entry before reloading so one mutation entry drives at most
     // one reload — even if further triggers race with the reload.
+    const entry=_turnMutatedPreviewPaths.get(key)||{...owner,path:current};
     _turnMutatedPreviewPaths.delete(key);
-    await openFile(_previewCurrentPath, { bustCache: true });
+    let ok=false;
+    try{
+      ok=await openFile(target,{bustCache:true});
+    }catch(_){
+      ok=false;
+    }
+    if(!ok){
+      // A read that failed (or was retired) must not eat the only copy of the
+      // mutation: restore it for a later trigger, never over a newer entry.
+      if(!_turnMutatedPreviewPaths.has(key)) _turnMutatedPreviewPaths.set(key,entry);
+      return;
+    }
+    if(!_previewCurrentPath||_normalizeArtifactPath(_previewCurrentPath,{allowBare:true})!==current) return;
   }
 }
 
@@ -1860,6 +1893,7 @@ async function openFile(path, opts={}){
       // resolves after a newer open, a session switch or a closed panel must not
       // commit or report success (release gate repro: delayed .md + loadDir('.')).
       if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
+      if(bustCache && typeof _previewRefreshPublishBlocked === 'function' && _previewRefreshPublishBlocked(path)) return false;
       _previewRawContent = data.content;
       _previewRawContentPath = path;
       if(!forceRichMarkdown && shouldRenderMarkdownPreviewAsPlainText(data.content)){
@@ -1908,6 +1942,7 @@ async function openFile(path, opts={}){
         downloadFile(path);
         return false;   // downloaded, nothing previewed
       }
+      if(bustCache && typeof _previewRefreshPublishBlocked === 'function' && _previewRefreshPublishBlocked(path)) return false;
       if(renderCsvPreviewContent(path, data.content)) return true;
       renderCodePreviewContent(path, data.content);
     }catch(e){
@@ -1927,6 +1962,7 @@ async function openFile(path, opts={}){
         downloadFile(path);
         return false;   // downloaded, nothing previewed
       }
+      if(bustCache && typeof _previewRefreshPublishBlocked === 'function' && _previewRefreshPublishBlocked(path)) return false;
       if(data.preview_kind==='office'){
         _previewRawContent = data.content || '';
         _previewRawContentPath = path;
