@@ -45,6 +45,32 @@ by identity before URL, and only an identity-absent, unambiguous lookup may infe
 a custom owner from its configured URL/model. Its downstream metadata view is
 restricted to that selected owner.
 
+**Display-name alias collisions are refused at routing time (#8841).** The exact
+canonical key outranks *aliases* in the sense of selection order — but a second
+record that claims the SAME alias by its OWN display name is a different thing
+from a record that claims it only through its config key. The former is refused:
+both records would share the Agent's display-name-keyed credential pool, so a
+send could pair one record's endpoint with the other record's key. The refusal
+names both `providers:` keys and asks for a rename.
+
+Three cases are deliberately NOT collisions:
+
+- a record that claims the alias only through its own config key — the exact
+  canonical key outranks such a raw sibling (#8428);
+- a record the Agent treats as disabled — its resolver never sees it;
+- a record that names the identity but declares no connection field of its own
+  (metadata only). Such a record owns nothing, so it is neither a claimant nor
+  a blocker.
+
+"Declares a connection field of its own" means the record itself spells one
+out: an endpoint, its own `api_key` / `key_env` / `key_cmd` / `credential_pool`
+reference, a wire protocol, or an ACP transport. The ambient
+`CUSTOM_<SLUG>_API_KEY` convention does NOT count: a populated profile
+credential for the requested provider must not turn a metadata-only sibling
+into a competing claimant, because that credential belongs to the provider
+being resolved and is exactly what the sibling must never be able to pair
+with.
+
 Connection/runtime selection still reads the complete original owned record,
 not the presentation view, so transport, credential-pool and other advanced
 fields cannot be lost. Metadata-only rows remain readable without thereby declaring a runtime

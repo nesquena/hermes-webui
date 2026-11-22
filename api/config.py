@@ -4269,6 +4269,46 @@ def _custom_record_owns_connection(record: dict, pid: str) -> bool:
     return False
 
 
+def _custom_record_declares_own_connection(record: dict) -> bool:
+    """True when ``record`` DECLARES a connection field of its own.
+
+    :func:`_custom_record_owns_connection` answers "can this record supply a
+    connection for ``pid``?", and the last step of that answer is the
+    ``CUSTOM_<SLUG>_API_KEY`` convention: when a record declares no credential
+    at all, the ambient variable for the REQUESTED slug still resolves and the
+    record counts as owning the route. That is right when the record IS the
+    requested route's authority — the fallback is how a keyless-by-configuration
+    endpoint still finds its conventional credential.
+
+    It is wrong when the record is being weighed as a COMPETING claimant for
+    somebody else's slug (#8841). There, an ambient key for the requested
+    provider must not manufacture a claimant out of a sibling that declares
+    only a display name and model metadata: the sibling owns nothing, and the
+    requested provider's own credential is exactly what the sibling must never
+    be able to pair with.
+
+    So this predicate counts only what the record itself spells out — its
+    endpoint, its own credential references, its credential pool, the wire
+    protocol and the ACP transport — and never resolves an ambient convention.
+    """
+    base_url = _custom_record_base_url(record)
+    if base_url:
+        return True
+    # The record's OWN credential references. ``api_key`` / ``key_env`` /
+    # ``key_cmd`` / ``credential_pool`` are declarations whether or not they
+    # resolve; a pool that is momentarily empty is still a named source.
+    for field in ("api_key", "key_env", "key_cmd"):
+        if str(record.get(field) or "").strip():
+            return True
+    if record.get("credential_pool") is not None:
+        return True
+    if _custom_record_api_mode(record):
+        return True
+    if _custom_record_acp_transport(record):
+        return True
+    return False
+
+
 # ── raw ``providers:<key>`` records (the standard Hermes v12 config shape) ────
 #
 # The installed Agent's authoritative matcher for a named custom route is
@@ -4758,12 +4798,20 @@ def _raise_on_native_alias_collision(
 
     What is NOT a second claimant: a record the Agent treats as disabled (its
     resolver never sees it), a record that names the identity but declares no
-    connection field (not a competing authority, as in
+    connection field of its OWN (not a competing authority, as in
     :func:`_unique_raw_provider_record`), a record that claims only through its
     own config key (the exact canonical key outranks such a raw sibling, #8428),
     and a built-in-spelled key, which
     :func:`provider_name_ambiguity_verdict` already refuses (#8690) — counting
     it here would refuse an already-terminal route a second time.
+
+    The claimant test is :func:`_custom_record_declares_own_connection`, NOT
+    :func:`_custom_record_owns_connection`. The latter resolves the
+    ``CUSTOM_<SLUG>_API_KEY`` convention for the REQUESTED slug, so a sibling
+    that declares only a display name and model metadata would become a
+    claimant the moment that ambient variable was populated — refusing a valid
+    exact-key provider for owning a credential that belongs to the provider
+    being resolved. A claimant must own something the record itself declares.
     """
     if not isinstance(providers_cfg, dict):
         return
@@ -4795,7 +4843,7 @@ def _raise_on_native_alias_collision(
             continue
         if pid not in _custom_provider_alias_set(name, "") and _custom_provider_slug_key(name) != slug:
             continue
-        if _custom_record_owns_connection(normalized, pid):
+        if _custom_record_declares_own_connection(normalized):
             claimants.append(key_text)
     if len(claimants) >= 2:
         raise AmbiguousCustomProviderError(
