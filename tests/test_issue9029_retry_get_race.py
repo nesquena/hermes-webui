@@ -89,8 +89,12 @@ def _seed_and_cache(session_dir, sid: str) -> Session:
     return cached
 
 
+def _raw_disk(session_dir, sid: str) -> dict:
+    return json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+
+
 def _load_disk(session_dir, sid: str) -> list[dict]:
-    return json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))["messages"]
+    return _raw_disk(session_dir, sid)["messages"]
 
 
 def _install_get_between_truncation_and_save(monkeypatch, sid: str, seen: list):
@@ -146,6 +150,10 @@ def test_get_between_truncation_and_save_cannot_restore_removed_reply(
 
     # The operation itself persisted the shrink.
     assert [row["content"] for row in _load_disk(session_dir, sid)] == SHRUNK
+    # The pending marker is in-memory only: the sidecar schema is untouched.
+    assert not any(
+        "intentional_shrink_pending" in key for key in _raw_disk(session_dir, sid)
+    )
 
     # The next full read is a cache hit and still sees the shrink.
     after = models.get_session(sid)
