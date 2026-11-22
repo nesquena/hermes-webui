@@ -124,7 +124,7 @@ from api.run_drain import RunAdmissionClosed, ShutdownDrain, send_admission_clos
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
-from api.log_redaction import install_server_log_redaction
+from api.log_redaction import install_server_log_redaction, refresh_server_log_redaction
 
 
 class QuietHTTPServer(ThreadingHTTPServer):
@@ -647,6 +647,16 @@ def main() -> None:
             print('     Agent features may not work correctly.', flush=True)
         else:
             print('[ok] Agent dependencies installed successfully.', flush=True)
+
+    # The bootstrap transition above can make the Agent importable AFTER the
+    # redaction handler was installed (issue #8984 round 2): the handler
+    # resolved the Agent's formatter at install time, when the Agent was not
+    # yet importable, and kept the plain fallback for the rest of the
+    # process's life — writing credentials in clear. The handler now resolves
+    # the formatter when a record is formatted, so it picks the Agent's
+    # formatter up on its own; this call just makes the switch happen now
+    # instead of at the next record.
+    refresh_server_log_redaction()
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     SESSION_DIR.mkdir(parents=True, exist_ok=True)

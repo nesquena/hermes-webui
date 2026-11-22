@@ -19,20 +19,35 @@ installed nothing, so the root logger had no handlers after importing
 
 These tests exercise ``api/log_redaction.py`` (wired into ``server.main()``):
 
-* with the Agent importable, the installed root handler uses
-  ``agent.redact.RedactingFormatter`` and a userinfo URL logged through the
+* with the Agent importable, a userinfo URL logged through the
   ``agent.model_metadata`` logger comes out masked;
-* without the Agent, a plain ``logging.Formatter`` is used and nothing
-  raises;
+* without the Agent, nothing raises and the log line is still emitted;
 * the level and the non-secret text are unchanged (same WARNING level, same
   logger name, same message apart from the mask);
 * installation is idempotent — the root logger keeps exactly ONE WebUI
   handler regardless of import/startup ordering.
 
+The bootstrap transition (round 2)
+----------------------------------
+The Agent can become importable AFTER the WebUI installed its handler: the
+bootstrap transition in ``server.main()`` (``auto_install_agent_deps()``)
+installs the Agent's missing dependencies later in the process's life. A
+formatter resolved at install time freezes the plain fallback, and the stale
+handler then writes credentials in clear for the rest of the process's life —
+a privacy regression visible ONLY on that transition, while the ordinary
+startup path (Agent importable from the start) masks correctly. The handler
+therefore resolves the Agent's formatter when a record is FORMATTED.
+
+The transition is covered twice: with a stub Agent (CI, no hermes-agent
+needed) and with the REAL Agent when one is installed — the maintainer's
+requirement that "formatter doubles alone do not establish the real runtime
+contract".
+
 No live server socket is required — the installer is exercised directly with
-an injected stream. Fake credentials only (``alice:<password>@
-proxy.example.invalid``); nothing here touches a real secret.
+an injected stream. Fake credentials only (a reserved-for-docs host with a
+synthetic userinfo password); nothing here touches a real secret.
 """
+import importlib.abc
 import io
 import logging
 import os
@@ -49,6 +64,9 @@ import api.log_redaction as lr
 # Shape mandated by the issue: userinfo ``user:<password>@host`` on a
 # reserved-for-docs host. Never a real credential.
 FAKE_URL = "https://alice:FAKE-PASSWORD-123@proxy.example.invalid/v1"
+# The synthetic password, kept as its own name so the assertions read as
+# "the password is absent" rather than "some substring is absent".
+FAKE_PASSWORD = "FAKE-PASSWORD-123"
 
 
 @pytest.fixture()
@@ -123,9 +141,24 @@ def _webui_handler(root):
 
 @pytest.fixture()
 def no_agent(monkeypatch):
-    """Make ``from agent.redact import ...`` raise ImportError for this test."""
+    """Make ``from agent.redact import ...`` raise ImportError for this test.
+
+    The entries stay set to ``None`` (the documented "this package is not
+    available" sentinel) instead of being deleted: deleting them lets Python
+    import an INSTALLED Agent normally, and the test would then exercise the
+    Agent instead of the fallback it claims to cover.
+    """
     monkeypatch.setitem(sys.modules, "agent", None)
     monkeypatch.setitem(sys.modules, "agent.redact", None)
+
+
+def _emit_userinfo_warning():
+    """Log the credential-bearing warning the way the Agent does."""
+    logging.getLogger("agent.model_metadata").warning(
+        "Could not determine context length for model %r (base_url=%s)",
+        "m",
+        FAKE_URL,
+    )
 
 
 # ── 1. with the Agent: userinfo URL is masked ───────────────────────────────
@@ -133,38 +166,35 @@ def test_userinfo_url_password_is_masked(fake_agent_redact, clean_root_logging):
     buf = io.StringIO()
     assert lr.install_server_log_redaction(stream=buf) is True
 
-    logging.getLogger("agent.model_metadata").warning(
-        "Could not determine context length for model %r (base_url=%s)",
-        "m",
-        FAKE_URL,
-    )
+    _emit_userinfo_warning()
     for handler in clean_root_logging.handlers:
         handler.flush()
     out = buf.getvalue()
 
     # The RED failure mode: the password lands in the log in clear.
-    assert "FAKE-PASSWORD-123" not in out
+    assert FAKE_PASSWORD not in out
     # The scheme and the host stay readable; the userinfo is masked.
     assert "proxy.example.invalid/v1" in out
     assert "Could not determine context length for model 'm'" in out
 
 
-# ── 2. without the Agent: plain formatter, nothing raises ───────────────────
+# ── 2. without the Agent: no Agent formatter, nothing raises ────────────────
 def test_no_agent_uses_plain_formatter_and_does_not_raise(no_agent, clean_root_logging):
     buf = io.StringIO()
     # Must not raise at install time (no agent.redact to import).
     assert lr.install_server_log_redaction(stream=buf) is True
 
     handler = _webui_handler(clean_root_logging)
-    assert type(handler.formatter) is logging.Formatter
+    # The Agent's formatter is resolved when a record is FORMATTED, so the
+    # assertion is on the EFFECT (no Agent formatter is available) rather
+    # than on the handler's formatter class — the transition tests below
+    # cover the class.
+    assert lr._resolve_agent_formatter_class() is None
+    assert handler.formatter._agent_formatter is None
 
     # WARNING+ still reaches the stderr channel — the fix masks, it must not
     # make log lines disappear.
-    logging.getLogger("agent.model_metadata").warning(
-        "Could not determine context length for model %r (base_url=%s)",
-        "m",
-        FAKE_URL,
-    )
+    _emit_userinfo_warning()
     handler.flush()
     assert "Could not determine context length for model 'm'" in buf.getvalue()
 
@@ -184,11 +214,7 @@ def test_level_and_non_secret_text_unchanged(fake_agent_redact, clean_root_loggi
     model_logger = logging.getLogger("agent.model_metadata")
     model_logger.addHandler(capture)
     try:
-        model_logger.warning(
-            "Could not determine context length for model %r (base_url=%s)",
-            "m",
-            FAKE_URL,
-        )
+        _emit_userinfo_warning()
     finally:
         model_logger.removeHandler(capture)
 
@@ -211,8 +237,8 @@ def test_install_is_idempotent_single_handler(fake_agent_redact, clean_root_logg
     buf = io.StringIO()
     assert lr.install_server_log_redaction(stream=buf) is True
     assert lr.install_server_log_redaction(stream=buf) is False
-    handler = _webui_handler(clean_root_logging)
-    assert isinstance(handler.formatter, _FakeRedactingFormatter)
+    assert len([h for h in clean_root_logging.handlers
+                if getattr(h, "_hermes_webui_log_redaction", False)]) == 1
 
 
 def test_clean_process_installs_exactly_one_root_handler():
@@ -270,7 +296,7 @@ def test_clean_process_installs_exactly_one_root_handler():
     assert "SECOND False" in completed.stdout
     assert "HANDLERS 1" in completed.stdout
     out_line = next(line for line in completed.stdout.splitlines() if line.startswith("OUT "))
-    assert "FAKE-PASSWORD-123" not in out_line
+    assert FAKE_PASSWORD not in out_line
     assert "proxy.example.invalid/v1" in out_line
 
 
@@ -286,3 +312,282 @@ def test_server_wires_install_server_log_redaction():
     src = SERVER_SCRIPT.read_text(encoding="utf-8")
     assert "from api.log_redaction import install_server_log_redaction" in src
     assert "install_server_log_redaction()" in src
+    # The bootstrap transition must refresh the formatter: the Agent can
+    # become importable only AFTER the handler was installed.
+    assert "refresh_server_log_redaction()" in src
+
+
+# ── 6. the bootstrap transition (round 2) ───────────────────────────────────
+class _AvailabilitySeam(importlib.abc.MetaPathFinder):
+    """Refuse ``agent.redact`` while the owner says the Agent is unavailable.
+
+    This models the bootstrap transition: the Agent is not importable when
+    the server installs its handler, and becomes importable afterwards.
+    """
+
+    def __init__(self, owner):
+        self._owner = owner
+
+    def find_spec(self, fullname, path=None, target=None):
+        if self._owner.blocked and (
+            fullname == "agent.redact" or fullname.startswith("agent.redact.")
+        ):
+            raise ModuleNotFoundError(f"availability seam: {fullname} unavailable")
+        return None
+
+
+class _AgentAvailability:
+    """Control WHEN the Agent's formatter becomes importable.
+
+    Models the bootstrap transition: the Agent is NOT importable while the
+    server installs its handler, and becomes importable afterwards. The
+    availability is controlled in BOTH places Python looks — ``sys.modules``
+    (where the "not available" sentinel is ``None``) and the import path
+    (a meta-path finder that refuses the module) — so the transition cannot be
+    short-circuited by a stale submodule entry.
+    """
+
+    def __init__(self, monkeypatch):
+        self.blocked = True
+        self._seam = _AvailabilitySeam(self)
+        self._stub_pkg = types.ModuleType("agent")
+        self._stub_redact = types.ModuleType("agent.redact")
+        self._stub_redact.RedactingFormatter = _FakeRedactingFormatter
+        # Save the real entries BEFORE this fixture touches them. The Agent's
+        # modules are process-global, and monkeypatch does NOT see the direct
+        # ``sys.modules[...]`` writes below — so without this, the test would
+        # leave ``sys.modules["agent.redact"] = None`` behind and every later
+        # import from the Agent would fail (the redaction tests that run
+        # after this file would break).
+        self._saved = {}
+        for name in ("agent", "agent.redact"):
+            self._saved[name] = (name in sys.modules, sys.modules.get(name))
+        monkeypatch.setattr(sys, "meta_path", [self._seam] + list(sys.meta_path))
+        self._apply()
+
+    def restore(self):
+        """Put the Agent's module entries back exactly as they were."""
+        for name, (was_present, value) in self._saved.items():
+            if was_present:
+                sys.modules[name] = value
+            else:
+                sys.modules.pop(name, None)
+
+    def _apply(self):
+        if self.blocked:
+            sys.modules["agent"] = None
+            sys.modules["agent.redact"] = None
+        else:
+            sys.modules["agent"] = self._stub_pkg
+            sys.modules["agent.redact"] = self._stub_redact
+
+    def release(self):
+        """The transition: the Agent becomes importable."""
+        self.blocked = False
+        self._apply()
+
+
+@pytest.fixture()
+def agent_availability(monkeypatch):
+    """The Agent is unavailable until the test releases the transition."""
+    availability = _AgentAvailability(monkeypatch)
+    try:
+        yield availability
+    finally:
+        availability.restore()
+
+
+def test_bootstrap_transition_switches_to_the_agent_formatter(
+    agent_availability, clean_root_logging
+):
+    """The Agent becomes importable AFTER the handler was installed.
+
+    A formatter frozen at install time keeps the plain fallback for the rest
+    of the process's life and writes the credential in clear. The handler must
+    pick the Agent's formatter up on the transition instead.
+    """
+    buf = io.StringIO()
+    assert lr.install_server_log_redaction(stream=buf) is True
+
+    # Before the transition: no Agent, so nothing to mask with — but the line
+    # must still be emitted.
+    assert lr._resolve_agent_formatter_class() is None
+    _emit_userinfo_warning()
+    _webui_handler(clean_root_logging).flush()
+    assert "Could not determine context length for model 'm'" in buf.getvalue()
+
+    # ── the transition: the Agent becomes importable ───────────────────────
+    agent_availability.release()
+    assert lr._resolve_agent_formatter_class() is _FakeRedactingFormatter
+
+    buf.truncate(0)
+    buf.seek(0)
+    _emit_userinfo_warning()
+    _webui_handler(clean_root_logging).flush()
+    out = buf.getvalue()
+
+    # The credential must be masked NOW, without reinstalling the handler.
+    assert FAKE_PASSWORD not in out
+    assert "proxy.example.invalid/v1" in out
+
+
+def test_bootstrap_transition_never_leaks_the_password_in_clear(
+    agent_availability, clean_root_logging
+):
+    """The transition oracle: the raw password must never reach the stream.
+
+    The full scan is the oracle: no line of the output may contain the
+    password, in any form.
+    """
+    buf = io.StringIO()
+    assert lr.install_server_log_redaction(stream=buf) is True
+
+    agent_availability.release()
+    _emit_userinfo_warning()
+    _webui_handler(clean_root_logging).flush()
+
+    out = buf.getvalue()
+    assert FAKE_PASSWORD not in out
+    assert "***" in out, "the userinfo must be masked, not merely absent"
+
+
+def test_refresh_server_log_redaction_picks_up_the_agent(
+    agent_availability, clean_root_logging
+):
+    """``refresh_server_log_redaction()`` performs the switch immediately.
+
+    ``server.main()`` calls it right after the bootstrap transition, so the
+    Agent's formatter is in use without waiting for the next record.
+    """
+    buf = io.StringIO()
+    assert lr.install_server_log_redaction(stream=buf) is True
+
+    agent_availability.release()
+    assert lr.refresh_server_log_redaction() == 1
+
+    handler = _webui_handler(clean_root_logging)
+    assert isinstance(handler.formatter, lr._DeferredRedactingFormatter)
+    assert handler.formatter._agent_formatter is not None
+
+
+def test_ordinary_path_still_masks_with_the_agent_available(
+    fake_agent_redact, clean_root_logging
+):
+    """The ordinary startup path (Agent available from the start) still masks.
+
+    This is the control arm of the transition oracle: the fix must not change
+    the behaviour that already worked.
+    """
+    buf = io.StringIO()
+    assert lr.install_server_log_redaction(stream=buf) is True
+
+    _emit_userinfo_warning()
+    _webui_handler(clean_root_logging).flush()
+    out = buf.getvalue()
+
+    assert FAKE_PASSWORD not in out
+    assert "proxy.example.invalid/v1" in out
+
+
+def test_no_agent_keeps_the_line_visible(no_agent, clean_root_logging):
+    """Without the Agent the line is emitted unmasked — but never vanishes.
+
+    The upstream policy cannot be applied by a policy that is not importable
+    yet; the WebUI's contract is that the line is PRESENT, and the transition
+    is what upgrades it to masked.
+    """
+    buf = io.StringIO()
+    assert lr.install_server_log_redaction(stream=buf) is True
+
+    _emit_userinfo_warning()
+    _webui_handler(clean_root_logging).flush()
+    out = buf.getvalue()
+
+    assert "Could not determine context length for model 'm'" in out
+    assert FAKE_URL in out
+
+
+# ── 7. the REAL Agent (the maintainer's requirement) ───────────────────────
+def _real_agent_available():
+    """True when a real hermes-agent with a formatter is importable."""
+    try:
+        import agent.redact as redact
+    except Exception:
+        return False
+    return isinstance(getattr(redact, "RedactingFormatter", None), type)
+
+
+@pytest.mark.skipif(
+    not _real_agent_available(),
+    reason="hermes-agent with agent.redact.RedactingFormatter not installed",
+)
+def test_real_agent_masks_through_the_server_handler(clean_root_logging):
+    """The real Agent's formatter masks the credential on the WebUI's stream.
+
+    A formatter double cannot establish this: the real ``RedactingFormatter``
+    is the mechanism the Agent's own entry points install, and the WebUI must
+    produce the SAME masked shape as the Agent.
+    """
+    buf = io.StringIO()
+    assert lr.install_server_log_redaction(stream=buf) is True
+
+    _emit_userinfo_warning()
+    _webui_handler(clean_root_logging).flush()
+    out = buf.getvalue()
+
+    assert FAKE_PASSWORD not in out
+    assert "proxy.example.invalid/v1" in out
+    # The real formatter masks the WHOLE userinfo pair.
+    assert "***:***@proxy.example.invalid" in out
+
+
+@pytest.mark.skipif(
+    not _real_agent_available(),
+    reason="hermes-agent with agent.redact.RedactingFormatter not installed",
+)
+def test_real_agent_bootstrap_transition_never_leaks(clean_root_logging):
+    """The transition, with the REAL Agent: the credential never lands clear.
+
+    The Agent is hidden while the handler is installed, then released — the
+    bootstrap transition. The password must not appear in clear at any point.
+    """
+    saved_agent = sys.modules.get("agent")
+    saved_redact = sys.modules.get("agent.redact")
+    try:
+        # Hide the already-imported Agent so the handler starts without it.
+        sys.modules["agent"] = None
+        sys.modules["agent.redact"] = None
+
+        buf = io.StringIO()
+        assert lr.install_server_log_redaction(stream=buf) is True
+        assert lr._resolve_agent_formatter_class() is None
+
+        # ── the transition releases the Agent ─────────────────────────────
+        if saved_agent is None:
+            sys.modules.pop("agent", None)
+        else:
+            sys.modules["agent"] = saved_agent
+        if saved_redact is None:
+            sys.modules.pop("agent.redact", None)
+        else:
+            sys.modules["agent.redact"] = saved_redact
+
+        assert lr._resolve_agent_formatter_class() is not None
+
+        buf.truncate(0)
+        buf.seek(0)
+        _emit_userinfo_warning()
+        _webui_handler(clean_root_logging).flush()
+        out = buf.getvalue()
+
+        assert FAKE_PASSWORD not in out
+        assert "proxy.example.invalid/v1" in out
+    finally:
+        if saved_agent is None:
+            sys.modules.pop("agent", None)
+        else:
+            sys.modules["agent"] = saved_agent
+        if saved_redact is None:
+            sys.modules.pop("agent.redact", None)
+        else:
+            sys.modules["agent.redact"] = saved_redact
