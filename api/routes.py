@@ -9515,6 +9515,18 @@ def _context_lookup_record_urls(record: object) -> tuple:
     )
 
 
+def _context_lookup_config_base_url(value: object) -> str:
+    """A config-declared ``base_url`` as a URL, or ``""`` when it isn't one (#8982).
+
+    The same rule as :func:`api.config._config_base_url`, and for the same
+    reason: ``str(123)`` is not an endpoint, so a non-string value declares no
+    URL. Without it a malformed record's ``base_url`` reaches the resolver as
+    the URL-shaped lie ``"123"``, and the key the ownership rule below already
+    refuses to send to a non-string record URL travels beside it.
+    """
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _context_lookup_owned_origins(*urls: object, own_provider: str = "") -> frozenset:
     """Origins a key may go to: its own source's URLs, plus the fixed hosts of the
     provider it belongs to (``own_provider``: a built-in record, the model block
@@ -10019,7 +10031,7 @@ def _context_length_lookup_inputs_for_model(
                 or not _model_cfg_provider
                 or _providers_match_for_context(_owner_provider, _session_provider)
             ):
-                effective_base_url = str(model_cfg.get("base_url") or "").strip()
+                effective_base_url = _context_lookup_config_base_url(model_cfg.get("base_url"))
 
     custom_providers = cfg.get("custom_providers") if isinstance(cfg, dict) else None
     if not isinstance(custom_providers, list):
@@ -10034,7 +10046,7 @@ def _context_length_lookup_inputs_for_model(
             if not _providers_match_for_context(provider_key, effective_provider):
                 continue
             if not effective_base_url:
-                effective_base_url = str(provider_cfg.get("base_url") or "").strip()
+                effective_base_url = _context_lookup_config_base_url(provider_cfg.get("base_url"))
             provider_context_length = _models_config_context_length(
                 provider_cfg.get("models"),
                 bare_model or model_for_lookup,
@@ -10069,7 +10081,7 @@ def _context_length_lookup_inputs_for_model(
                 continue
             entry_name = str(entry.get("name") or "").strip()
             entry_slug = _custom_provider_slug_for_context(entry_name)
-            entry_base = str(entry.get("base_url") or "").strip()
+            entry_base = _context_lookup_config_base_url(entry.get("base_url"))
             entry_base_norm = entry_base.rstrip("/")
             provider_matches = bool(
                 effective_provider
@@ -11263,7 +11275,10 @@ def _session_context_length_lookup_state(
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model_for_resolution)
         model_for_lookup = str(resolved_model or model_for_lookup).strip()
         provider_for_lookup = str(resolved_provider or provider_for_lookup or "").strip()
-        base_url_for_lookup = str(resolved_base_url or "").strip()
+        # #8982: a URL slot only ever holds a string. A non-string base_url in
+        # config is a malformed declaration, not an endpoint to stringify, and
+        # the key below may only travel with an endpoint that exists.
+        base_url_for_lookup = _context_lookup_config_base_url(resolved_base_url)
     except Exception:
         logger.debug("session context-length lookup state resolution failed", exc_info=True)
     if _session_context_lookup_uses_chat_route(provider_for_lookup):
@@ -11299,7 +11314,11 @@ def _session_context_length_lookup_state(
                 lookup_only=True,
             )
             raise_for_custom_provider_route(route)
-            route_url = str(route.get("base_url") or "").strip()
+            # #8982: the merged bundle's endpoint is a str or None
+            # (api.config._custom_record_base_url), so a non-string here means a
+            # route assembled elsewhere still carries one. That is no URL — and
+            # no URL means no key, exactly as with a blank base_url.
+            route_url = _context_lookup_config_base_url(route.get("base_url"))
             if route_url:
                 base_url_for_lookup = route_url
             # #8963: no switched-off verdict of the lookup's own here. The chat
