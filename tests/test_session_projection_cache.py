@@ -632,3 +632,94 @@ def test_unreadable_vault_registry_disables_the_cache(env, monkeypatch):
         "an unknown policy identity must disable reuse rather than risk a stale mask"
     )
     assert _Env.contents(second) == ["hello", "again"]
+
+
+def _stub_agent_redact(**attrs):
+    """A stand-in ``agent`` package exposing ``agent.redact`` with exactly the
+    attributes given (a ``module`` parent, so ``from agent import redact``
+    resolves to the stub rather than a child mock)."""
+    import types
+
+    module = types.ModuleType("agent.redact")
+    for name, value in attrs.items():
+        setattr(module, name, value)
+    package = types.ModuleType("agent")
+    package.redact = module
+    return package, module
+
+
+def test_absent_vault_registry_is_a_known_state_not_an_unknown(env):
+    """An Agent with no vault registry must keep the policy identity known.
+
+    Absence is not "unreadable": there is no registry to register into, so the
+    fingerprint is the constant :data:`_VAULT_REGISTRY_ABSENT`, ``present`` is
+    False (today's #8847 marker fast path) and the payload cache keeps working.
+    Treating it as unknown would disable reuse and re-send every string to the
+    Agent on every install without a vault registry (CI has no agent package at
+    all).
+    """
+    import sys
+    from unittest import mock
+
+    import api.helpers as helpers
+
+    stub = _stub_agent_redact()  # no _VAULT_REDACTION_VALUES, no _vault_scope
+    package, module = stub
+    with mock.patch.dict(sys.modules, {"agent": package, "agent.redact": module}):
+        fingerprint, present = helpers._vault_registry_state()
+        assert present is False, "an absent registry must not claim registered values"
+        assert fingerprint == helpers._VAULT_REGISTRY_ABSENT, (
+            "an absent registry is a known policy, not an unknown one"
+        )
+
+        env.save("proj_absent", ["hello", "again"])
+        first = env.get("proj_absent")
+        assert env.projection_calls == 1
+        assert _Env.contents(first) == ["hello", "again"]
+
+        second = env.get("proj_absent")
+
+        assert helpers.redaction_policy_fingerprint() is not None, (
+            "a known-absent vault registry must not make the policy identity unknown"
+        )
+        assert env.projection_calls == 1, (
+            "a known-absent vault registry must not disable cache reuse"
+        )
+        assert _Env.contents(second) == ["hello", "again"]
+
+
+def test_unreadable_vault_registry_names_fail_closed(env):
+    """A registry that exists but cannot be read is an unknown, not an absence.
+
+    The registry name is present, so a registration is possible; if its scope
+    helper raises, the identity cannot be established and the cache must not run.
+    """
+    import sys
+    from unittest import mock
+
+    import api.helpers as helpers
+
+    def _broken_scope():
+        raise RuntimeError("vault scope unavailable")
+
+    stub = _stub_agent_redact(
+        _VAULT_REDACTION_VALUES={},
+        _VAULT_REDACTION_LOCK=None,
+        _vault_scope=_broken_scope,
+    )
+    package, module = stub
+    with mock.patch.dict(sys.modules, {"agent": package, "agent.redact": module}):
+        fingerprint, present = helpers._vault_registry_state()
+        assert present is True, "a registry that exists but is unreadable must fail closed"
+        assert fingerprint is None
+        assert helpers.redaction_policy_fingerprint() is None, (
+            "an unreadable registry must make the whole policy identity unknown"
+        )
+
+        env.save("proj_unreadable_stub", ["hello"])
+        env.get("proj_unreadable_stub")
+        env.get("proj_unreadable_stub")
+
+        assert env.projection_calls == 2, (
+            "an unknown policy identity must disable reuse rather than risk a stale mask"
+        )

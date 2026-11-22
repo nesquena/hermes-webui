@@ -991,6 +991,14 @@ def _redaction_policy_namespace_of(lru):
 
 _VAULT_FINGERPRINT_SALT = os.urandom(32)
 
+# Policy identity of an Agent that has NO vault-value registry at all (CI, a
+# stripped install, an Agent predating the registry). Absence is a known state:
+# nothing can register against a registry that does not exist, so the payload
+# cache and the #8847 marker fast path stay live. It cannot collide with the
+# digest above, and if the registry appears at runtime the digest replaces it,
+# which moves the policy identity and invalidates everything primed before.
+_VAULT_REGISTRY_ABSENT = "<no-vault-redaction-registry>"
+
 
 def _vault_registry_state():
     """``(fingerprint, present)`` for the profile-scoped vault value registry.
@@ -1010,14 +1018,30 @@ def _vault_registry_state():
     The fingerprint is the owning profile plus a salted digest of the registered
     values in registry order: it moves when the bucket changes, it never carries the
     secret bytes, and the per-process salt makes the digest useless as an offline
-    oracle. An unreadable registry reports ``present=True`` (fail closed) with a
-    ``None`` fingerprint, and callers treat ``None`` as "do not cache".
+    oracle.
+
+    Three states, and they are not interchangeable:
+
+    * **absent** — no ``agent.redact`` in this process, or an Agent that predates
+      the registry: nothing can register against a registry that does not exist,
+      so the identity is the known constant :data:`_VAULT_REGISTRY_ABSENT` and
+      ``present=False``. Reporting this as unknown would disable the payload
+      cache and re-open the marker fast path (#8847) on every install that has no
+      vault registry;
+    * **readable** — the digest and ``present=bool(values)``;
+    * **unreadable** — the registry name exists but its scope, lock or contents
+      cannot be read: ``present=True`` (fail closed) with a ``None`` fingerprint,
+      and callers treat ``None`` as "do not cache".
     """
     try:
         from agent import redact as agent_redact
-
+    except Exception:
+        return (_VAULT_REGISTRY_ABSENT, False)
+    registry = getattr(agent_redact, "_VAULT_REDACTION_VALUES", _REDACTION_POLICY_MISSING)
+    if registry is _REDACTION_POLICY_MISSING:
+        return (_VAULT_REGISTRY_ABSENT, False)
+    try:
         scope = agent_redact._vault_scope()
-        registry = agent_redact._VAULT_REDACTION_VALUES
         lock = agent_redact._VAULT_REDACTION_LOCK
     except Exception:
         return (None, True)
