@@ -162,11 +162,11 @@ def _verified_messaging_owner(home, display_id, owner_id, *, recovering=False):
     """
     db = None
     try:
-        from hermes_state import SessionDB
+        from api.compression_continuation import open_compression_reads
         path = Path(home) / "state.db"
         if not path.is_file():
             return False
-        db = SessionDB(path, read_only=True)
+        db = open_compression_reads(path)
         lineage = db.get_compression_lineage(display_id)
         if not lineage or lineage[0] != owner_id or display_id not in lineage:
             return False

@@ -206,8 +206,10 @@ def test_sending_to_a_copy_never_takes_over_the_session_it_names(store, monkeypa
     generic ownership guard's answer) before anything is mutated: no turn starts, nothing is
     written, the cached copy isn't left mid-turn, and the owner carries on. (#8853 additionally
     refuses this request before the load, because the copy's ownership can't be verified.)"""
+    import api.config as config
     import api.profiles as profiles
     import api.routes as routes
+    import api.run_drain as run_drain
     from api import models
 
     ran = []
@@ -216,24 +218,34 @@ def test_sending_to_a_copy_never_takes_over_the_session_it_names(store, monkeypa
     _copy(store, partials=partials)
     before = _files(store)
 
-    handler = _Handler()
-    routes._handle_chat_start(handler, {"session_id": COPY, "message": "hi", "profile": "default"})
-    assert handler.status == 404, bytes(handler.body)
-    assert ran == []
-    _unchanged_victim(store, before)
-    assert _files(store) == before
-    for cached in (models.SESSIONS.get(COPY), models.SESSIONS.get(VICTIM)):
-        if cached is not None:
-            assert not cached.active_stream_id and not cached.pending_user_message
+    # #8904: the stand-in worker never unregisters the owner turn's stream.
+    streams_before = set(config.STREAMS)
+    try:
+        handler = _Handler()
+        routes._handle_chat_start(handler, {"session_id": COPY, "message": "hi", "profile": "default"})
+        assert handler.status == 404, bytes(handler.body)
+        assert ran == []
+        _unchanged_victim(store, before)
+        assert _files(store) == before
+        for cached in (models.SESSIONS.get(COPY), models.SESSIONS.get(VICTIM)):
+            if cached is not None:
+                assert not cached.active_stream_id and not cached.pending_user_message
 
-    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "work")
-    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "work")
-    owner = _Handler()
-    routes._handle_chat_start(owner, {"session_id": VICTIM, "message": "owner turn", "profile": "work"})
+        monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "work")
+        monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "work")
+        owner = _Handler()
+        routes._handle_chat_start(owner, {"session_id": VICTIM, "message": "owner turn", "profile": "work"})
+    finally:
+        added_streams = set(config.STREAMS) - streams_before
+        for stream_id in added_streams:
+            for registry in vars(config).values():
+                if isinstance(registry, dict):
+                    registry.pop(stream_id, None)
     assert owner.status == 200, bytes(owner.body)
     assert ran == ["agent"]
     victim = json.loads((store / f"{VICTIM}.json").read_text(encoding="utf-8"))
     assert (len(victim["messages"]), victim["profile"], victim["pending_user_message"]) == (10, "work", "owner turn")
+    assert not added_streams & {run["stream_id"] for run in run_drain.all_active_runs()}
 
 
 # --- writers that don't go through save() -----------------------------------------------
@@ -454,7 +466,7 @@ def test_the_import_title_queue_refuses_a_session_loaded_from_a_copy(store, monk
     from api import models, routes
 
     monkeypatch.setattr(routes, "generate_session_title_for_session", lambda session: ("Generated title", "llm", "raw"))
-    monkeypatch.setattr(routes, "_sync_session_title_to_insights", lambda session: None)
+    monkeypatch.setattr(routes, "_sync_session_title_to_insights", lambda session, **_kw: None)
     monkeypatch.setattr(routes, "_publish_session_list_changed", lambda *a, **k: None)
     _victim(store)
     victim = models.Session.load(VICTIM)
@@ -595,7 +607,9 @@ def test_a_background_wakeup_for_a_copy_is_dropped_cleanly(store, monkeypatch, c
     cached copy mid-turn; the process-wakeup runner re-queued the wakeup and logged a traceback on
     every drain (senior review, round 3). It now answers the 404 its callers drop, before anything
     is mutated, and the owner's own wakeup still starts."""
+    import api.config as config
     import api.routes as routes
+    import api.run_drain as run_drain
     from api import models
 
     ran = []
@@ -604,21 +618,31 @@ def test_a_background_wakeup_for_a_copy_is_dropped_cleanly(store, monkeypatch, c
     _copy(store, partials=partials)
     before = _files(store)
 
-    with caplog.at_level(logging.WARNING):
-        resp = routes.start_session_turn(COPY, "wake up")
+    # #8904: the stand-in worker never unregisters the owner wakeup's stream.
+    streams_before = set(config.STREAMS)
+    try:
+        with caplog.at_level(logging.WARNING):
+            resp = routes.start_session_turn(COPY, "wake up")
 
-    assert (resp.get("_status"), resp.get("error")) == (404, "Session not found")
-    assert ran == []
-    _unchanged_victim(store, before)
-    assert _files(store) == before
-    cached = models.SESSIONS.get(COPY)
-    if cached is not None:
-        assert not cached.active_stream_id and not cached.pending_user_message
-    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
+        assert (resp.get("_status"), resp.get("error")) == (404, "Session not found")
+        assert ran == []
+        _unchanged_victim(store, before)
+        assert _files(store) == before
+        cached = models.SESSIONS.get(COPY)
+        if cached is not None:
+            assert not cached.active_stream_id and not cached.pending_user_message
+        assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
 
-    owner = routes.start_session_turn(VICTIM, "owner wake")
+        owner = routes.start_session_turn(VICTIM, "owner wake")
+    finally:
+        added_streams = set(config.STREAMS) - streams_before
+        for stream_id in added_streams:
+            for registry in vars(config).values():
+                if isinstance(registry, dict):
+                    registry.pop(stream_id, None)
     assert owner.get("_status", 200) == 200, owner
     assert ran == ["agent"]
+    assert not added_streams & {run["stream_id"] for run in run_drain.all_active_runs()}
 
 
 def test_a_sidecar_without_a_session_id_never_spawns_files(store):
