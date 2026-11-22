@@ -2784,11 +2784,12 @@ def _project_transcript_context_rows(messages) -> list:
 
 
 # Rows adopted from the Agent's compacted transcript are model context only:
-# the visible transcript already holds the turns they stand for.
-_GATEWAY_COMPACTION_ADOPTED_KEY = "_gateway_compaction_adopted"
+# the visible transcript already holds the turns they stand for. Display edits
+# (truncate/undo/retry/fork) read the same key in api.session_ops.
+from api.session_ops import _GATEWAY_COMPACTION_ADOPTED_KEY  # noqa: E402
 
 
-def _gateway_compacted_context_prefix(session, msg_text, turn_started_at):
+def _gateway_compacted_context_prefix(session, msg_text, turn_started_at, prefill_messages=None):
     """Return the model context the Agent kept when it compacted this turn in place.
 
     A caller-supplied ``conversation_history`` is used by the Gateway as-is, so
@@ -2809,9 +2810,26 @@ def _gateway_compacted_context_prefix(session, msg_text, turn_started_at):
     from api.session_ops import _MERGED_SUMMARY_DELIMITER
     from api.streaming import _is_context_compression_marker, _message_text, _normalize_user_text
 
-    rows = get_state_db_session_messages(
-        getattr(session, "session_id", None), profile=getattr(session, "profile", None),
-    )
+    raw_prompt = str(msg_text or "").strip()
+    prompt = _normalize_user_text(raw_prompt)
+    if not prompt:
+        return None
+
+    def _is_summary(item):
+        # The live prompt row is never compaction authority, whatever its text.
+        if item.get("role") == "user" and _normalize_user_text(_message_text(item.get("content"))) == prompt:
+            return False
+        return _is_context_compression_marker(item) or _MERGED_SUMMARY_DELIMITER in _message_text(item.get("content"))
+
+    sid = getattr(session, "session_id", None)
+    profile = getattr(session, "profile", None)
+    # Cheap probe first: only rows written during this turn can prove a compaction,
+    # so a turn without one never pays for a full-history read.
+    probe = get_state_db_session_messages(sid, profile=profile, since_timestamp=started)
+    if not any(projected and _is_summary(projected[0])
+               for projected in (_project_transcript_context_rows([row]) for row in probe or [])):
+        return None
+    rows = get_state_db_session_messages(sid, profile=profile)
     kept = []
     summary_index = None
     for row in rows or []:
@@ -2823,7 +2841,7 @@ def _gateway_compacted_context_prefix(session, msg_text, turn_started_at):
         text = _message_text(content)
         if not text.strip() and not (isinstance(content, list) and content):
             continue
-        if _is_context_compression_marker(item) or _MERGED_SUMMARY_DELIMITER in text:
+        if _is_summary(item):
             written_at = row.get("timestamp")
             if (
                 isinstance(written_at, (int, float))
@@ -2835,10 +2853,6 @@ def _gateway_compacted_context_prefix(session, msg_text, turn_started_at):
         kept.append(item)
     if summary_index is None:
         return None
-    raw_prompt = str(msg_text or "").strip()
-    prompt = _normalize_user_text(raw_prompt)
-    if not prompt:
-        return None
     # The summary carrier itself may end with the prompt (summary, end marker, live ask).
     for index in range(len(kept) - 1, summary_index - 1, -1):
         row = kept[index]
@@ -2846,12 +2860,32 @@ def _gateway_compacted_context_prefix(session, msg_text, turn_started_at):
             continue
         content = row.get("content")
         if _normalize_user_text(_message_text(content)) == prompt:
-            return kept[:index]
+            return _without_sent_prefill(kept[:index], prefill_messages, summary_index)
         # The Agent folds a prompt into the user row before it; keep that row's own text.
         earlier = _content_without_trailing_prompt(content, raw_prompt)
         if earlier is not None:
-            return kept[:index] + [{**row, "content": earlier}]
+            return _without_sent_prefill(kept[:index] + [{**row, "content": earlier}], prefill_messages, summary_index)
     return None
+
+
+def _without_sent_prefill(prefix, prefill_messages, summary_index):
+    """Drop this turn's prefill block when the compaction kept it just before the prompt.
+
+    Prefill rows ride after the history on every send; adopting them would carry a
+    second copy into each later turn. Only an exact trailing block after the summary
+    is dropped.
+    """
+    from api.streaming import _message_text
+
+    block = [
+        (m.get("role"), _message_text(m.get("content")))
+        for m in prefill_messages or []
+        if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+    ]
+    if not block or len(prefix) - len(block) <= summary_index:
+        return prefix
+    tail = [(m.get("role"), _message_text(m.get("content"))) for m in prefix[-len(block):]]
+    return prefix[:-len(block)] if tail == block else prefix
 
 
 def _content_without_trailing_prompt(content, raw_prompt):
@@ -3855,7 +3889,7 @@ def _run_gateway_chat_streaming(
             if canonical_snapshot is None:
                 try:
                     compacted_prefix = _gateway_compacted_context_prefix(
-                        s, msg_text, active_turn_identity.get("timestamp"),
+                        s, msg_text, active_turn_identity.get("timestamp"), prefill_messages,
                     )
                 except Exception:
                     logger.debug("Failed to read the gateway's compacted context", exc_info=True)

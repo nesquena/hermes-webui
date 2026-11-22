@@ -334,3 +334,189 @@ def test_a_structured_summary_carrier_is_split_from_the_live_ask(structured):
     assert not {"q0", "a0", "q1", "a1"} & {c for c in contents if isinstance(c, str)}
     assert contents == [expected_carrier, "live ask", "turn answer"]
     assert _texts(saved.messages) == ["q0", "a0", "q1", "a1", "live ask", "turn answer", "follow up"]
+
+
+# Adoption -> display edit -> next send: the adopted rows no longer align row-for-row with
+# the display, so a display selection must not be read as a count of compacted rows.
+def _adopted_session(sid):
+    session = make_session(sid, OLD_CONTEXT)
+    started = _start_turn(session, f"{sid}-1", "new question")
+    _write_agent_rows(session.session_id, _compacted_rows(started, "new question"))
+    _run_turn(session.session_id, "new question", f"{sid}-1")
+    return get_session(session.session_id)
+
+
+def _plain_session(sid):
+    session = make_session(sid, OLD_CONTEXT)
+    _start_turn(session, f"{sid}-1", "new question")
+    _run_turn(session.session_id, "new question", f"{sid}-1")
+    return get_session(session.session_id)
+
+
+def _post(path, body):
+    import json
+    from types import SimpleNamespace
+
+    import api.routes as routes
+    from tests.test_session_truncate_keep_count_validation import _JSONHandler
+
+    handler = _JSONHandler(json.dumps(body).encode())
+    with patch.object(routes, "_check_csrf", lambda handler: True):
+        routes.handle_post(handler, SimpleNamespace(path=path))
+    return handler.status, handler.payload()
+
+
+def _send_next(sid, prompt="next ask"):
+    session = get_session(sid)
+    _start_turn(session, f"{sid}-next", prompt)
+    _run_turn(sid, prompt, f"{sid}-next")
+    return history_rows(CAPTURED_BODIES[-1])
+
+
+ORIGINAL_ROWS = [
+    ("user", "old question one"), ("assistant", "old answer one"),
+    ("user", "old question two"), ("assistant", "old answer two"),
+]
+MAKERS = pytest.mark.parametrize("make", ["compacted", "no-compaction"])
+
+
+def _make(kind, sid):
+    return (_adopted_session if kind == "compacted" else _plain_session)(f"{sid}-{kind}")
+
+
+@MAKERS
+@pytest.mark.parametrize("keep", [0, 2, 4])
+def test_truncate_after_adoption_sends_the_selected_display_prefix(make, keep):
+    sid = _make(make, f"adopt-trunc-{keep}").session_id
+    status, payload = _post("/api/session/truncate", {"session_id": sid, "keep_count": keep})
+    assert status == 200 and payload["ok"] is True
+    assert _texts(get_session(sid).messages) == [text for _, text in ORIGINAL_ROWS[:keep]]
+
+    # keep=0 is a deliberate reset: the Gateway gets the empty-history sentinel, never stored turns.
+    expected = ORIGINAL_ROWS[:keep] or [("user", "No earlier conversation turns.")]
+    assert _send_next(sid) == expected
+
+
+@MAKERS
+def test_truncate_keeping_the_adopted_turn_keeps_the_compacted_context(make):
+    sid = _make(make, "adopt-keep").session_id
+    status, _ = _post("/api/session/truncate", {"session_id": sid, "keep_count": 6})
+    assert status == 200
+    sent = _send_next(sid)
+    if make == "compacted":
+        assert sent == [("user", SUMMARY), ("assistant", "old answer two"),
+                        ("user", "new question"), ("assistant", "turn answer")]
+    else:
+        assert sent == ORIGINAL_ROWS + [("user", "new question"), ("assistant", "turn answer")]
+
+
+@MAKERS
+def test_undo_twice_after_adoption_sends_the_remaining_display_prefix(make):
+    from api.session_ops import undo_last
+
+    sid = _make(make, "adopt-undo").session_id
+    undo_last(sid)
+    assert _texts(get_session(sid).messages) == [text for _, text in ORIGINAL_ROWS]
+    undo_last(sid)
+    assert _texts(get_session(sid).messages) == [text for _, text in ORIGINAL_ROWS[:2]]
+    assert _send_next(sid) == ORIGINAL_ROWS[:2]
+
+
+@MAKERS
+def test_retry_after_adoption_resends_from_the_display_prefix(make):
+    from api.session_ops import retry_last
+
+    sid = _make(make, "adopt-retry").session_id
+    retry_last(sid)
+    # Retrying the compacted turn itself selects exactly the rows the summary stands for.
+    assert _send_next(sid, "new question") == ORIGINAL_ROWS
+
+
+@pytest.mark.parametrize("keep", [2, 4])
+def test_fork_after_adoption_carries_the_selected_display_prefix(keep):
+    from api.session_ops import truncate_context_for_display_keep
+
+    saved = _adopted_session(f"adopt-fork-{keep}")
+    forked = truncate_context_for_display_keep(saved.context_messages, saved.messages, keep)
+    assert [(row["role"], row["content"]) for row in forked] == ORIGINAL_ROWS[:keep]
+
+
+# Source-lead discriminators (gate 7022665452).
+def test_a_prompt_that_merely_looks_like_a_marker_is_not_a_compaction():
+    marker_prompt = "[CONTEXT COMPACTION — REFERENCE ONLY] is this header text special?"
+    session = make_session("lead-marker", OLD_CONTEXT)
+    started = _start_turn(session, "lead-marker-1", marker_prompt)
+    _write_agent_rows(session.session_id, [
+        ("user", "old question one", 10.0, 1), ("assistant", "old answer one", 11.0, 1),
+        ("user", "old question two", 12.0, 1), ("assistant", "old answer two", 13.0, 1),
+        ("user", marker_prompt, started + 1, 1), ("assistant", "turn answer", started + 2, 1),
+    ])
+    _run_turn(session.session_id, marker_prompt, "lead-marker-1")
+    saved = get_session(session.session_id)
+    assert not any(row.get("_gateway_compaction_adopted") for row in saved.context_messages)
+
+
+def test_a_repeated_prompt_cuts_at_the_live_ask_not_an_earlier_copy():
+    session = make_session("lead-same-text", OLD_CONTEXT)
+    started = _start_turn(session, "lead-same-1", "continue")
+    _write_agent_rows(session.session_id, [
+        ("user", SUMMARY, started + 1, 1), ("assistant", "ok", started + 1, 1),
+        ("user", "continue", started + 1, 1), ("assistant", "first continuation", started + 1, 1),
+        ("user", "continue", started + 1, 1), ("assistant", "turn answer", started + 2, 1),
+    ])
+    _run_turn(session.session_id, "continue", "lead-same-1")
+    assert _texts(get_session(session.session_id).context_messages) == [
+        SUMMARY, "ok", "continue", "first continuation", "continue", "turn answer",
+    ]
+
+
+PREFILL = [{"role": "user", "content": "recall: notes"}, {"role": "assistant", "content": "noted"}]
+
+
+def test_prefill_rows_the_compaction_kept_are_not_carried_into_the_next_send():
+    import api.streaming as streaming
+
+    loaded = {"status": "loaded", "source": "file", "messages": [dict(r) for r in PREFILL],
+              "message_count": 2}
+    with patch.object(streaming, "_load_webui_prefill_context", lambda cfg=None: dict(loaded)):
+        session = make_session("lead-prefill", OLD_CONTEXT)
+        started = _start_turn(session, "lead-prefill-1", "new question")
+        # The Agent compacts the list it was given: history + prefill + prompt.
+        _write_agent_rows(session.session_id, [
+            ("user", SUMMARY, started + 1, 1), ("assistant", "old answer two", started + 1, 1),
+            ("user", "recall: notes", started + 1, 1), ("assistant", "noted", started + 1, 1),
+            ("user", "new question", started + 1, 1), ("assistant", "turn answer", started + 2, 1),
+        ])
+        _run_turn(session.session_id, "new question", "lead-prefill-1")
+        _send_next(session.session_id, "follow up")
+    sent = history_rows(CAPTURED_BODIES[-1])
+    assert sent.count(("user", "recall: notes")) == 1
+    assert sent == [
+        ("user", SUMMARY), ("assistant", "old answer two"),
+        ("user", "new question"), ("assistant", "turn answer"),
+        ("user", "recall: notes"), ("assistant", "noted"),
+    ]
+
+
+def test_a_turn_without_compaction_adds_no_full_history_read():
+    import api.models as models_mod
+
+    calls = []
+    real = models_mod.get_state_db_session_messages
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs.get("since_timestamp"))
+        return real(*args, **kwargs)
+
+    session = make_session("lead-read", OLD_CONTEXT)
+    started = _start_turn(session, "lead-read-1", "new question")
+    _write_agent_rows(session.session_id, [
+        ("user", "old question one", 10.0, 1), ("assistant", "old answer one", 11.0, 1),
+        ("user", "new question", started + 1, 1), ("assistant", "turn answer", started + 2, 1),
+    ])
+    with patch.object(models_mod, "get_state_db_session_messages", spy):
+        _run_turn(session.session_id, "new question", "lead-read-1")
+    # Base already does exactly one full read per turn (pre-existing); adoption adds
+    # only a since-turn-start probe and no second full-history read.
+    assert calls.count(None) == 1
+    assert [c for c in calls if c is not None] == [started]
