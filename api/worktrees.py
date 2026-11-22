@@ -467,26 +467,37 @@ def _read_all(fd: int) -> bytes:
         chunks.append(chunk)
 
 
-def _unlink_if_it_is_still_the_file_we_read(path: Path, fd: int) -> None:
-    """Unlink *path* only while it still names the inode open as *fd*.
+def _still_the_file_we_attributed(path: Path, fd: int, attributed: bytes) -> bool:
+    """Re-establish ownership from the held descriptor, immediately before destroying.
 
-    ``unlink`` takes a path, so between the attribution read and the call the
-    path can be pointed at a file an editor just saved. Writing or unlinking
-    through the wrong path is how a user's edit is lost; identity is checked
-    against the descriptor we already hold instead.
+    The attribution verdict describes the bytes as they were read; by the time
+    the destructive call runs, an editor may have saved in place (same inode,
+    different bytes) or a rename-save may have repointed the path (different
+    inode). Ownership is a claim about the file *now*, so it is decided here —
+    fresh bytes from the descriptor we hold plus the inode the path names at
+    this instant — and an earlier read never authorises the write. When either
+    fact has moved, the entry is left alone and logged: a stray ignore line is
+    recoverable, a destroyed edit is not.
     """
+    if _read_all(fd) != attributed:
+        logger.warning(
+            "leaving %s alone: its content changed after the Agent's entry was attributed",
+            path,
+        )
+        return False
     held = os.fstat(fd)
     try:
         at_path = os.stat(path)
     except OSError:
-        return
+        logger.warning("leaving %s alone: the path no longer names a file", path)
+        return False
     if (at_path.st_dev, at_path.st_ino) != (held.st_dev, held.st_ino):
-        logger.debug(
+        logger.warning(
             "leaving %s alone: it was replaced while its change was being attributed",
             path,
         )
-        return
-    os.unlink(path)
+        return False
+    return True
 
 
 def _restore_gitignore(root: Path, before: _GitignoreSnapshot) -> None:
@@ -500,11 +511,14 @@ def _restore_gitignore(root: Path, before: _GitignoreSnapshot) -> None:
     function can undo only what it can attribute, and deleting or rewriting
     someone else's ``.gitignore`` is worse than a stray ignore line.
 
-    The file is opened once and every step — the attribution read, the
-    re-verification read, the truncate-and-write — happens on that descriptor,
-    so a save that lands after the check is seen by the second read and the
-    entry is left in place. There is no path-based ownership heuristic to get
-    wrong: if the bytes are not still ours, nothing is written.
+    The file is opened once and every step — the attribution read, the ownership
+    re-check, the truncate-and-write — happens on that descriptor. Ownership is
+    re-established immediately before anything is destroyed (:func:`_still_the_file_we_attributed`
+    re-reads the bytes and re-checks the inode the path names), so a save that
+    lands anywhere after the attribution read is seen before the write, and the
+    entry is then left in place and logged rather than the edit being lost.
+    There is no path-based ownership heuristic to get wrong: if the bytes are not
+    still ours, nothing is written and nothing is unlinked.
     """
     if before.state == GITIGNORE_UNKNOWN:
         logger.debug("leaving %s alone: its prior content could not be read", root / ".gitignore")
@@ -530,17 +544,14 @@ def _restore_gitignore(root: Path, before: _GitignoreSnapshot) -> None:
         if after == (before.content or b""):
             # The helper found the entry already there and wrote nothing.
             return
-        if _read_all(fd) != after:
-            # An editor saved between the two reads. The change is no longer
-            # provably the Agent's, so the entry stays rather than the edit
-            # being lost.
-            logger.debug(
-                "leaving %s alone: it changed while its change was being attributed",
-                path,
-            )
+        if not _still_the_file_we_attributed(path, fd, after):
+            # The check above is the destructive step's own precondition, taken
+            # as late as the syscalls allow: an editor that saved in place, or a
+            # rename-save that repointed the path, is seen here and the entry is
+            # left rather than the edit being destroyed.
             return
         if before.state == GITIGNORE_ABSENT:
-            _unlink_if_it_is_still_the_file_we_read(path, fd)
+            os.unlink(path)
         else:
             # ftruncate does not move the offset, and the reads above left it at
             # EOF: without the seek the write would land after a run of NULs.

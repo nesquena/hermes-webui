@@ -423,6 +423,101 @@ def test_the_agent_created_file_survives_a_rename_save(tmp_path, monkeypatch):
     assert (session / ".gitignore").read_text(encoding="utf-8") == ".worktrees/\n"
 
 
+def test_a_save_in_place_after_attribution_leaves_the_entry_and_logs(tmp_path, monkeypatch, caplog):
+    """An editor appending its own rule in place keeps the inode and changes the
+    bytes. The attribution verdict was taken on the older content, so the entry
+    must be left where it is — byte-identical to the writer's version — and the
+    refusal must be logged, not swallowed into a debug line nobody reads.
+    """
+    primary, session = _session_checkout(tmp_path, "node_modules/\n")
+    saved = "node_modules/\n.worktrees/\ndist/\n"
+
+    def save_after_the_verdict(root: Path, info: dict) -> None:
+        real = api_worktrees._is_the_agents_entry
+
+        def attributing_then_appended(after: bytes, before: bytes | None) -> bool:
+            ours = real(after, before)
+            if ours:
+                # Same inode: an append, exactly what an editor or a user in a
+                # shell does. No rename, no new file.
+                with open(root / ".gitignore", "a", encoding="utf-8") as handle:
+                    handle.write("dist/\n")
+            return ours
+
+        monkeypatch.setattr(api_worktrees, "_is_the_agents_entry", attributing_then_appended)
+
+    caplog.set_level("WARNING", logger="api.worktrees")
+    info = create_worktree_for_workspace(
+        session, setup=_producer_then("hermes-inplace", save_after_the_verdict)
+    )
+
+    assert Path(info["path"]).parent == primary.resolve() / ".worktrees"
+    assert (session / ".gitignore").read_text(encoding="utf-8") == saved
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING" and record.name == "api.worktrees"
+    ]
+    assert any("content changed" in message for message in warnings), warnings
+
+
+def test_a_path_repointed_after_attribution_is_not_touched(tmp_path, monkeypatch, caplog):
+    """A rename-save carries identical bytes, so only the inode tells the two
+    files apart. Rewriting through the descriptor would then truncate a file the
+    path no longer names; the entry must be left and the refusal logged.
+    """
+    primary, session = _session_checkout(tmp_path, "node_modules/\n")
+
+    def replace_after_the_verdict(root: Path, info: dict) -> None:
+        real = api_worktrees._is_the_agents_entry
+
+        def attributing_then_replaced(after: bytes, before: bytes | None) -> bool:
+            ours = real(after, before)
+            if ours:
+                ignore = root / ".gitignore"
+                replacement = root / ".gitignore.saved"
+                replacement.write_bytes(ignore.read_bytes())
+                os.replace(replacement, ignore)
+            return ours
+
+        monkeypatch.setattr(api_worktrees, "_is_the_agents_entry", attributing_then_replaced)
+
+    caplog.set_level("WARNING", logger="api.worktrees")
+    info = create_worktree_for_workspace(
+        session, setup=_producer_then("hermes-repointed", replace_after_the_verdict)
+    )
+
+    ignore = session / ".gitignore"
+    assert Path(info["path"]).parent == primary.resolve() / ".worktrees"
+    assert ignore.read_text(encoding="utf-8") == "node_modules/\n.worktrees/\n"
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING" and record.name == "api.worktrees"
+    ]
+    assert any("replaced" in message for message in warnings), warnings
+
+
+def test_the_clean_restore_still_happens_and_logs_no_warning(tmp_path, caplog):
+    """The conservative fallback must not turn into "never restore": an
+    untouched file whose only change is the Agent's entry is still put back, and
+    nothing is logged at warning level.
+    """
+    primary, session = _session_checkout(tmp_path, "node_modules/\n")
+
+    caplog.set_level("WARNING", logger="api.worktrees")
+    info = create_worktree_for_workspace(session, setup=wt.agent_producer())
+
+    assert Path(info["path"]).parent == primary.resolve() / ".worktrees"
+    assert (session / ".gitignore").read_text(encoding="utf-8") == "node_modules/\n"
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING" and record.name == "api.worktrees"
+    ]
+    assert warnings == [], warnings
+
+
 @pytest.mark.skipif(
     not _MODE_BITS_DENY_READS,
     reason="needs a non-root POSIX user: root and Windows both read through a 000 mode",
