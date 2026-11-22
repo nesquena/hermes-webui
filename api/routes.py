@@ -13281,6 +13281,27 @@ _session_projection_cache: "OrderedDict[tuple, dict]" = OrderedDict()
 _session_projection_cache_lock = threading.Lock()
 
 
+def _display_merge_generation(sid):
+    """Generation stamp of the display-merge entry in force for *sid*, or None.
+
+    The projected payload's rows, window and summary are all derived from that
+    entry, and the entry is rebuilt (replaced, with a fresh ``stored_at``) by
+    invalidations that move no signature the key can read: a hidden-row display
+    setting, a settings toggle, an explicit cache clear. Stamping the generation
+    into the key means a payload built from the old rows cannot be served under
+    the new entry. It can only ever add invalidation, never reuse: the payload's
+    own sources are covered by the sidecar/state.db signatures.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return None
+    with _display_merge_cache_lock:
+        entry = _display_merge_cache.get(sid)
+    if not isinstance(entry, dict):
+        return None
+    return (entry.get("stored_at"), len(entry.get("messages") or ()))
+
+
 def _session_projection_cache_key(
     sid,
     *,
@@ -13300,6 +13321,7 @@ def _session_projection_cache_key(
     pending_started_at,
     redact_enabled,
     redaction_policy,
+    display_generation=None,
 ):
     """Return the validity key for one projected payload, or None to skip caching.
 
@@ -13351,6 +13373,9 @@ def _session_projection_cache_key(
         # recycled while a comparison depends on it.
         redaction_policy,
         parent_sigs,
+        # Generation of the memoized display merge the rows came from (None when
+        # no entry is in force for this session).
+        display_generation,
     )
 
 
@@ -18116,6 +18141,9 @@ def _handle_session_get(handler, parsed) -> bool:
                 pending_started_at=getattr(s, "pending_started_at", None),
                 redact_enabled=_proj_redact_enabled,
                 redaction_policy=_proj_redaction_policy,
+                display_generation=(
+                    _display_merge_generation(sid) if _proj_cache_allowed else None
+                ),
             )
         _proj_payload = _session_projection_cache_get(_proj_key)
         if _proj_payload is not None:

@@ -648,6 +648,50 @@ def _stub_agent_redact(**attrs):
     return package, module
 
 
+def test_display_merge_generation_moves_the_projection_key(env):
+    """A rebuilt display-merge entry must move the projection key.
+
+    The merged rows, the returned window and the summary all come from that
+    entry, and it is rebuilt by invalidations the key cannot see elsewhere: a
+    hidden-row display setting, a settings toggle, a direct clear (the upstream
+    session-GET fixtures clear it between cases while their DB signature stub
+    stays constant). The payload must not outlive the generation it was built
+    from — and an unchanged generation must still reuse.
+    """
+    import api.routes as routes
+
+    env.save("proj_gen", ["hello", "again"])
+
+    def _entry(stored_at):
+        return {"key": ("gen", 1), "messages": [], "summary": {}, "stored_at": stored_at}
+
+    with routes._display_merge_cache_lock:
+        routes._display_merge_cache["proj_gen"] = _entry(1.0)
+    try:
+        env.get("proj_gen")
+        assert env.projection_calls == 1
+        env.get("proj_gen")
+        assert env.projection_calls == 1, "an unchanged merge generation must still reuse"
+
+        with routes._display_merge_cache_lock:
+            routes._display_merge_cache["proj_gen"] = _entry(2.0)
+        env.get("proj_gen")
+        assert env.projection_calls == 2, (
+            "a rebuilt display-merge entry must not be served the projection "
+            "built from the old one"
+        )
+
+        with routes._display_merge_cache_lock:
+            routes._display_merge_cache.pop("proj_gen", None)
+        env.get("proj_gen")
+        assert env.projection_calls == 3, (
+            "a cleared display-merge entry is a different generation, not the last one"
+        )
+    finally:
+        with routes._display_merge_cache_lock:
+            routes._display_merge_cache.pop("proj_gen", None)
+
+
 def test_absent_vault_registry_is_a_known_state_not_an_unknown(env):
     """An Agent with no vault registry must keep the policy identity known.
 
