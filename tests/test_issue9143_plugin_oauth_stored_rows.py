@@ -235,6 +235,7 @@ def named_profile(monkeypatch, tmp_path):
             env_vars=state["env_vars"],
             auth_type="oauth_external",
             aliases=(),
+            fallback_models=("solstice-1", "solstice-2"),
             seed_pool_credentials=seed_pool_credentials,
         )
         if state["refresh"]:
@@ -275,7 +276,10 @@ def named_profile(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "hermes_cli.auth_plugin_providers", fake_app)
 
     fake_cp = types.ModuleType("agent.credential_pool")
-    fake_cp.load_pool = lambda pid: SimpleNamespace(entries=lambda: [_FakePoolEntry(**r) for r in agent.load_pool_entries(pid)])
+    # Like the Agent's loader, it only touches the pool of the provider it is asked for.
+    fake_cp.load_pool = lambda pid: SimpleNamespace(
+        entries=lambda: [_FakePoolEntry(**r) for r in agent.load_pool_entries(pid)] if pid == "solstice" else []
+    )
     fake_agent_pkg = types.ModuleType("agent")
     fake_agent_pkg.__path__ = []
     fake_agent_pkg.credential_pool = fake_cp
@@ -667,3 +671,129 @@ def test_read_only_scope_fingerprint_only_oauth_row_is_not_a_connected_account(n
     assert card["has_key"] is False
     assert card["key_source"] == "none"
     assert card["is_oauth"] is False
+
+
+# --- the network-free model catalog sees the same accounts as the card ---------
+#
+# ``_static_models_catalog_without_live_probes()`` fills the model picker while the
+# live catalog cache is cold. ``_provider_has_key()`` no longer counts an OAuth
+# plugin's pool row, and the catalog's own scan only reads the active profile's
+# ``auth.json``, so an account a named profile inherits from the root profile (which
+# the card counts through ``read_credential_pool()``'s root fallback) used to drop out
+# of the picker. The catalog applies the card's usability rules to the stored rows,
+# read-only, in either scope.
+
+
+def _solstice_group():
+    """The ``solstice`` group of the cold-cache static catalog, or ``None``."""
+    config.invalidate_models_cache()
+    catalog = config._static_models_catalog_without_live_probes()
+    return next((g for g in catalog["groups"] if g["provider_id"] == "solstice"), None)
+
+
+def _assert_group_with_models(group):
+    assert group is not None
+    assert {m["id"] for m in group["models"]} == {"solstice-1", "solstice-2"}
+
+
+def _assert_catalog_left_the_store_alone(named_profile, before):
+    agent = named_profile["agent"]
+    assert _auth_bytes(agent) == before
+    assert agent.loader_calls == []
+    assert named_profile["seed_calls"] == 0
+
+
+@pytest.mark.parametrize("readonly", [False, True], ids=["normal-scope", "read-only-scope"])
+def test_static_catalog_keeps_an_oauth_account_inherited_from_the_root_profile(named_profile, readonly):
+    """Root-only OAuth account, named profile active, no plugin config, no env key, cold cache."""
+    agent = named_profile["agent"]
+    agent.write_pool(agent.root, [_oauth_row(id="row-root", access_token="root-token")])
+    before = _auth_bytes(agent)
+    assert before["named"] is None
+
+    if readonly:
+        with profiles.profile_env_for_active_request_readonly("/api/models"):
+            group = _solstice_group()
+    else:
+        group = _solstice_group()
+    card = _card(named_profile)
+
+    _assert_group_with_models(group)
+    assert card is not None
+    assert (card["has_key"], card["key_source"], card["is_oauth"]) == (True, "oauth", True)
+    _assert_catalog_left_the_store_alone(named_profile, before)
+
+
+def test_static_catalog_keeps_an_expired_refreshable_account_inherited_from_the_root_profile(named_profile):
+    agent = named_profile["agent"]
+    agent.write_pool(
+        agent.root,
+        [_oauth_row(id="row-root", expires_at_ms=_ms_from_now(-3_600_000), refresh_token="refresh-token-1")],
+    )
+    before = _auth_bytes(agent)
+
+    group = _solstice_group()
+
+    _assert_group_with_models(group)
+    _assert_catalog_left_the_store_alone(named_profile, before)
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        pytest.param([_oauth_row(expires_at_ms=_ms_from_now(-3_600_000))], id="expired-no-refresh-token"),
+        pytest.param(
+            [_oauth_row(access_token="", secret_fingerprint="sha256:0123456789abcdef")],
+            id="fingerprint-only-oauth-row",
+        ),
+    ],
+)
+def test_static_catalog_applies_the_cards_usability_rule_to_the_root_account(named_profile, rows):
+    """An inherited root row the card does not count as connected does not enter the catalog."""
+    named_profile["refresh"] = False
+    agent = named_profile["agent"]
+    agent.write_pool(agent.root, rows)
+    before = _auth_bytes(agent)
+
+    group = _solstice_group()
+    card = _card(named_profile)
+
+    assert group is None
+    assert card is not None
+    assert card["has_key"] is False
+    _assert_catalog_left_the_store_alone(named_profile, before)
+
+
+def test_static_catalog_keeps_an_oauth_account_stored_in_the_named_profile(named_profile):
+    """Control: an account in the named profile's own ``auth.json``."""
+    agent = named_profile["agent"]
+    agent.write_pool(agent.named, [_oauth_row()])
+    before = _auth_bytes(agent)
+
+    group = _solstice_group()
+
+    _assert_group_with_models(group)
+    _assert_catalog_left_the_store_alone(named_profile, before)
+
+
+def test_static_catalog_keeps_a_separately_configured_key(named_profile, monkeypatch):
+    """Control: an env key and no pool row at all."""
+    named_profile["env_vars"] = ("SOLSTICE_API_KEY",)
+    named_profile["seeded"] = []
+    monkeypatch.setenv("SOLSTICE_API_KEY", "solstice-env-key")
+    agent = named_profile["agent"]
+    before = _auth_bytes(agent)
+    assert before == {"named": None, "root": None}
+
+    group = _solstice_group()
+
+    _assert_group_with_models(group)
+    _assert_catalog_left_the_store_alone(named_profile, before)
+
+
+def test_static_catalog_has_no_group_without_an_account_or_a_key(named_profile):
+    """Control: nothing stored anywhere."""
+    before = _auth_bytes(named_profile["agent"])
+
+    assert _solstice_group() is None
+    _assert_catalog_left_the_store_alone(named_profile, before)

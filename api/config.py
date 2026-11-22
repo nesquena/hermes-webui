@@ -8558,7 +8558,7 @@ def _minimal_static_models_catalog() -> dict:
 def _static_models_catalog_without_live_probes() -> dict:
     """Return a network-free /api/models catalog from local config/auth only."""
     try:
-        from api.providers import _provider_has_key
+        from api.providers import _plugin_oauth_account_in_stored_rows, _provider_has_key
 
         active_provider = None
         cfg_base_url = ""
@@ -8679,7 +8679,10 @@ def _static_models_catalog_without_live_probes() -> dict:
         # group when the live-rebuild cache is cold.
         try:
             for _plugin_pid in list(_plugin_model_provider_profiles().keys()):
-                if not _plugin_pid or not _provider_has_key(_plugin_pid):
+                if not _plugin_pid or not (
+                    _provider_has_key(_plugin_pid)
+                    or _plugin_oauth_account_in_stored_rows(_plugin_pid)
+                ):
                     continue
                 _canonical = _canonicalise_provider_id(_plugin_pid) or _plugin_pid
                 if _canonical:
@@ -8955,15 +8958,17 @@ def _credential_pool_profile_tag() -> str:
         return ""
 
 
-def _pool_entry_payloads(provider_id: str) -> list[dict[str, Any]]:
+def _pool_entry_payloads(provider_id: str, *, stored_rows_only: bool = False) -> list[dict[str, Any]]:
     """Return explicit credential-pool entry payloads for the active profile.
 
     Readonly profile scopes must not let ``load_pool()`` seed from process env,
     because that can materialize server-default credentials into a named
     profile's auth store. In that mode, read raw auth.json payloads only.
+    ``stored_rows_only`` asks for that read in any scope, for callers that must
+    not run the Agent's pool loader (the network-free static catalog).
     """
     _pid = _resolve_provider_alias(provider_id)
-    if bool(getattr(_thread_ctx, "block_process_env_fallback", False)):
+    if stored_rows_only or bool(getattr(_thread_ctx, "block_process_env_fallback", False)):
         try:
             from hermes_cli.auth import read_credential_pool as _read_credential_pool
 

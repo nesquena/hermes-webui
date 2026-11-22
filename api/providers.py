@@ -1427,7 +1427,9 @@ def _pool_row_token(row: dict[str, Any]) -> str:
     return str(row.get("access_token") or row.get("agent_key") or row.get("runtime_api_key") or "").strip()
 
 
-def _plugin_oauth_pool_account(provider_id: str) -> tuple[str, list[dict[str, Any]], int]:
+def _plugin_oauth_pool_account(
+    provider_id: str, *, stored_rows_only: bool = False
+) -> tuple[str, list[dict[str, Any]], int]:
     """Apply the Agent's usability rules to an OAuth plugin's pool rows.
 
     Same rules as ``get_plugin_oauth_auth_status()`` (Agent), without its
@@ -1438,7 +1440,11 @@ def _plugin_oauth_pool_account(provider_id: str) -> tuple[str, list[dict[str, An
     accounts)``, where state is ``"signed_in"``, ``"needs_refresh"`` or ``""`` (no
     usable account) and ``accounts`` is the number of rows that carry a token.
     """
-    rows = [row for row in _pool_entry_payloads(provider_id) if _pool_row_token(row)]
+    rows = [
+        row
+        for row in _pool_entry_payloads(provider_id, stored_rows_only=stored_rows_only)
+        if _pool_row_token(row)
+    ]
     now = time.time()
     live = [row for row in rows if not _stored_row_expired(row, now)]
     if live:
@@ -1450,7 +1456,7 @@ def _plugin_oauth_pool_account(provider_id: str) -> tuple[str, list[dict[str, An
     return "", [], len(rows)
 
 
-def _plugin_pool_has_api_key_row(provider_id: str) -> bool:
+def _plugin_pool_has_api_key_row(provider_id: str, *, stored_rows_only: bool = False) -> bool:
     """True when the pool holds a row that is evidently an API-key row.
 
     ``hermes auth add <plugin> --type api-key`` stores one, and a plugin's
@@ -1458,7 +1464,26 @@ def _plugin_pool_has_api_key_row(provider_id: str) -> bool:
     env or ambient key. A seeded row keeps no token on disk, only a
     ``secret_fingerprint``, so it is recognised by its type, not by a token.
     """
-    return any(not _pool_row_is_oauth(row) for row in _pool_entry_payloads(provider_id))
+    return any(
+        not _pool_row_is_oauth(row)
+        for row in _pool_entry_payloads(provider_id, stored_rows_only=stored_rows_only)
+    )
+
+
+def _plugin_oauth_account_in_stored_rows(provider_id: str) -> bool:
+    """True when an OAuth plugin has an account the provider card counts as connected.
+
+    For the network-free static model catalog. Same rules as the card in a
+    read-only profile scope (``get_providers()``): a usable OAuth account
+    (``_plugin_oauth_pool_account()``) or a seeded API-key row. The rows are the
+    stored ones, root-profile fallback included, in any scope: the Agent's pool
+    loader (and ``get_auth_status()``) can seed, prune and save rows, and the
+    catalog must not write the credential store.
+    """
+    if not (is_plugin_model_provider(provider_id) and plugin_model_provider_is_oauth(provider_id)):
+        return False
+    state, _rows, _accounts = _plugin_oauth_pool_account(provider_id, stored_rows_only=True)
+    return bool(state) or _plugin_pool_has_api_key_row(provider_id, stored_rows_only=True)
 
 
 def _pool_view_is_stored_rows() -> bool:
