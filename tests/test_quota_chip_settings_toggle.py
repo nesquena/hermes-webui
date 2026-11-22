@@ -94,6 +94,14 @@ def test_quota_chip_localized_in_all_locales():
     assert js.count("settings_desc_quota_chip:") == 15, "12 locales expected"
 
 
+DE_WINDOW_DESC = (
+    "settings_desc_quota_chip_window: 'Bei Anbietern mit mehreren Limits (z. B. 5 Stunden, wöchentlich) "
+    "legst du hier fest, welches Limit der Chip zeigt. Zeig mit der Maus auf den Chip oder öffne "
+    "Einstellungen → Anbieter, um alle zu sehen. Meldet ein Anbieter keine Limitdauern, zeigt der "
+    "Chip das Limit mit dem geringsten Rest.',"
+)
+
+
 def test_quota_chip_window_description_names_the_real_surfaces_and_the_fallback():
     """The description points to the hover and Settings → Providers (there is no
     separate quota panel) and says what happens when lengths aren't reported."""
@@ -105,7 +113,9 @@ def test_quota_chip_window_description_names_the_real_surfaces_and_the_fallback(
     js = I18N.read_text(encoding="utf-8")
     entry = "settings_desc_quota_chip_window: '" + expected.replace("'", "\\'") + "',"
     assert js.count("settings_desc_quota_chip_window:") == 15
-    assert js.count(entry) == 15
+    # Every locale but German carries the English copy; German is translated (#8787).
+    assert js.count(entry) == 14
+    assert js.count(DE_WINDOW_DESC) == 1
     html = INDEX.read_text(encoding="utf-8")
     assert 'data-i18n="settings_desc_quota_chip_window">' + expected + "</div>" in html
     assert "quota panel" not in js and "quota panel" not in html
@@ -116,7 +126,9 @@ def test_quota_chip_window_label_reads_quota_chip_shows():
     ambiguous "Quota chip window". Copy only: the i18n key and select id stay."""
     js = I18N.read_text(encoding="utf-8")
     assert js.count("settings_label_quota_chip_window:") == 15
-    assert js.count("settings_label_quota_chip_window: 'Quota chip shows',") == 15
+    # Every locale but German carries the English copy; German is translated (#8787).
+    assert js.count("settings_label_quota_chip_window: 'Quota chip shows',") == 14
+    assert js.count("settings_label_quota_chip_window: 'Angezeigtes Limit im Kontingent-Chip',") == 1
     assert "Quota chip window" not in js
     html = INDEX.read_text(encoding="utf-8")
     assert (
