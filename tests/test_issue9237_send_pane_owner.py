@@ -83,7 +83,8 @@ const S = {
 const INFLIGHT = {};
 const LIVE = {};
 const _pendingSelections = [];
-let _loadingSessionId = null;
+// A chat switch that was already loading when send() began.
+let _loadingSessionId = SC.loadingAtStart || null;
 let _sendInProgress = false;
 let _sendInProgressSid = null;
 let _queueDrainSid = null;
@@ -91,6 +92,8 @@ let _approvalSessionId = null;
 let _clarifySessionId = null;
 let _projectPickerOpenEpoch = 0;
 const COMMANDS = [];
+// A built-in command whose handler opts out (returns false), like /reasoning <level>.
+if(SC.echoCommand) COMMANDS.push({name:SC.echoCommand, fn(args){ rec('command.fn', args); return false; }});
 const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set();
 const localStorage = {
   setItem(k, v){ rec('localStorage.setItem', k, v); },
@@ -114,6 +117,11 @@ function doSwitch(){
     // loadSession(B) has started: S.session still points at A until B's
     // metadata arrives.
     _loadingSessionId = 'B';
+    return;
+  }
+  if(SC.switchKind === 'loadingBack'){
+    // The user clicked B, then A again before B loaded: A is reloading.
+    _loadingSessionId = 'A';
     return;
   }
   // The switch saved A's composer as A's draft and loaded B's.
@@ -213,6 +221,7 @@ let _forcedSkillDirectivePending = SC.directive ? {
 } : null;
 let startBody = null;
 async function api(url, opts){
+  if(url === '/api/commands/moa/resolve'){ rec('api.moaResolve'); return {}; }
   if(url !== '/api/chat/start') throw new Error('unexpected api ' + url);
   startBody = JSON.parse(opts.body);
   rec('api.start', startBody.session_id);
@@ -530,7 +539,7 @@ def _deleted(label):
     return f"Message not sent: {label} no longer exists, so your text was not saved."
 
 
-@pytest.mark.parametrize("switch_kind", [None, "chain", "cleared"])
+@pytest.mark.parametrize("switch_kind", [None, "chain", "cleared", "loading"])
 def test_slash_lookup_left_names_the_issuing_chat_as_a_warning(switch_kind):
     scenario = {"text": "/custom do it", "switchAt": "slash"}
     if switch_kind:
@@ -653,7 +662,7 @@ def test_the_untitled_phrase_reads_as_a_sentence():
     )
 
 
-@pytest.mark.parametrize("switch_kind", [None, "chain", "cleared"])
+@pytest.mark.parametrize("switch_kind", [None, "chain", "cleared", "loading"])
 @pytest.mark.parametrize("owner_title", DEFAULT_TITLES)
 def test_a_never_started_chat_left_during_slash_lookup_says_it_is_not_in_the_list(owner_title, switch_kind):
     scenario = dict(SLASH, ownerTitle=owner_title, ownerMessages=[])
@@ -735,3 +744,115 @@ def test_a_never_started_chat_left_for_b_then_c_gets_the_new_chat_notice(scenari
     assert result["session"]["session_id"] == "C"
     assert result["composer"] == "c-draft"
     assert _toasts(result) == [[NEW_CHAT, None, "error"]]
+
+
+# ── review 6013609303: a send that began on the empty pane ──────────────────
+#
+# Fresh '/', a restored chat with no messages, or the open chat deleted leave
+# S.session null. A send from there owns only the chat it creates itself; a
+# chat the user opens while the command lookup is loading is not its chat.
+
+
+@pytest.mark.parametrize("switch_kind", [None, "chain"])
+def test_an_empty_pane_send_left_during_slash_lookup_does_not_land_in_the_chat_opened(switch_kind):
+    scenario = dict(SLASH, startWithoutSession=True)
+    if switch_kind:
+        scenario["switchKind"] = switch_kind
+    result = _run(**scenario)
+    assert result["startBody"] is None
+    assert _named(result, "newSession") == []
+    assert _named(result, "_clearComposerDraft") == []
+    assert _named(result, "uploadPendingFiles") == []
+    if switch_kind == "chain":
+        assert result["session"]["session_id"] == "C"
+        assert result["composer"] == "c-draft"
+        assert result["messages"] == [{"role": "user", "content": "c-row"}]
+        assert _after(result, *PANE_WRITES) == []
+    else:
+        _assert_b_untouched(result)
+    # loadSession() saves no draft when no chat was open, so the text is gone.
+    assert _toasts(result) == [[NEW_CHAT, None, "error"]]
+    assert result["sendInProgress"] is False
+
+
+def test_an_empty_pane_send_whose_switch_is_still_loading_does_not_open_a_new_chat():
+    # The user clicked B from the empty pane and B is still loading when the
+    # command lookup resolves: the send must not create its own chat now.
+    result = _run(**dict(SLASH, startWithoutSession=True, switchKind="loading"))
+    assert result["startBody"] is None
+    assert _named(result, "newSession") == []
+    assert _named(result, "_clearComposerDraft") == []
+    assert result["session"] is None
+    assert _toasts(result) == [[NEW_CHAT, None, "error"]]
+    assert result["sendInProgress"] is False
+
+
+def test_control_an_empty_pane_send_issued_while_a_chat_was_already_loading_still_sends():
+    result = _run(text="/custom do it", startWithoutSession=True, loadingAtStart="B")
+    assert _named(result, "newSession") == [[]]
+    assert result["startBody"]["session_id"] == "N"
+    assert [toast for toast in _toasts(result) if toast[0].startswith("Message not sent")] == []
+
+
+def test_control_an_opted_out_echo_command_from_the_empty_pane_still_sends_in_its_new_chat():
+    # The echo branch creates the chat itself, then the handler opts out.
+    result = _run(text="/reasoning high", startWithoutSession=True, echoCommand="reasoning")
+    assert _named(result, "command.fn") == [["high"]]
+    assert _named(result, "newSession") == [[]]
+    assert result["startBody"]["session_id"] == "N"
+    assert result["startBody"]["message"] == "/reasoning high"
+    assert [toast for toast in _toasts(result) if toast[0].startswith("Message not sent")] == []
+
+
+def test_moa_whose_issuing_chat_was_cleared_during_the_lookup_is_not_sent_to_a_replacement_chat():
+    # A /moa from chat A; A is left for the empty pane (or deleted) while the
+    # metadata lookup runs. The new chat /moa creates must not adopt the send.
+    result = _run(text="/moa compare these", switchAt="slash", switchKind="cleared")
+    assert result["startBody"] is None
+    assert result["sendInProgress"] is False
+
+
+def test_control_moa_from_the_empty_pane_still_sends_in_its_new_chat():
+    result = _run(text="/moa compare these", startWithoutSession=True)
+    assert _named(result, "api.moaResolve") == [[]]
+    assert _named(result, "newSession") == [[]]
+    assert result["startBody"]["session_id"] == "N"
+    assert result["startBody"]["message"] == "compare these"
+    assert result["startBody"]["moa_config"] is True
+    assert [toast for toast in _toasts(result) if toast[0].startswith("Message not sent")] == []
+
+
+# ── a slash lookup that resolves while the next chat is still loading ───────
+
+
+def test_slash_lookup_resolving_while_the_next_chat_loads_is_not_sent_off_screen():
+    # loadSession(B) has started and saved A's composer as A's draft, but
+    # S.session still points at A until B's metadata arrives.
+    result = _run(switchKind="loading", **SLASH)
+    assert result["startBody"] is None
+    assert result["session"]["session_id"] == "A"
+    assert result["messages"] == [{"role": "user", "content": "a-row"}]
+    assert _named(result, "_clearComposerDraft") == []
+    assert _named(result, "uploadPendingFiles") == []
+    assert _after(result, *PANE_WRITES) == []
+    # The composer is left for B's load to replace.
+    assert result["composer"] == "/custom do it"
+    assert _toasts(result) == [[_slash_left("\u201cChat A\u201d"), 8000, "warning"]]
+    assert result["sendInProgress"] is False
+
+
+@pytest.mark.parametrize("text", ["hello", "/custom do it"])
+def test_control_a_send_issued_while_a_chat_was_already_loading_keeps_its_path(text):
+    # No switch began during the send: it still goes to the chat that issued
+    # it (off screen, reattached later), as before this guard existed.
+    result = _run(text=text, loadingAtStart="B")
+    assert result["startBody"]["session_id"] == "A"
+    assert result["inflight"]["A"]["reattach"] is True
+    assert [toast for toast in _toasts(result) if toast[0].startswith("Message not sent")] == []
+
+
+def test_control_returning_to_the_issuing_chat_during_the_lookup_still_sends_there():
+    result = _run(switchKind="loadingBack", **SLASH)
+    assert result["startBody"]["session_id"] == "A"
+    assert result["startBody"]["message"] == "/custom do it"
+    assert [toast for toast in _toasts(result) if toast[0].startswith("Message not sent")] == []

@@ -136,6 +136,11 @@ function _takeRestoredForcedSkillDraft(sid,text){
   delete kept[sid];
   return String(text||'').trim()===entry.text?entry.payload:null;
 }
+// Non-consuming check: send() asks before steering, which skips that step.
+function _peekRestoredForcedSkillDraft(sid,text){
+  const entry=sid&&S.restoredForcedSkills?S.restoredForcedSkills[sid]:null;
+  return !!entry&&String(text||'').trim()===entry.text;
+}
 
 function _bgTaskCompleteRingBufferAdd(sid, evt_id) {
   // Missing key → treat as "seen/skip" (return true). The sole caller already
@@ -1738,7 +1743,10 @@ async function send(){
         }
       }
     const defaultMessageMode=window._defaultMessageMode||'steer';
-      if(defaultMessageMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'&&!_goalContinuationId){
+      // #9237: a resend of a restored draft that kept a /use skill is queued
+      // too, so it reaches the forced-skill step that steering skips.
+      const _restoredSkillWaits=typeof _peekRestoredForcedSkillDraft==='function'&&_peekRestoredForcedSkillDraft(S.session&&S.session.session_id,text);
+      if(defaultMessageMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'&&!_goalContinuationId&&!_restoredSkillWaits){
         // Real steer: clear the input first so the user gets immediate
         // feedback, then ship the steer payload via /api/chat/steer.
         // _trySteer captures the owner session/files before awaiting uploads,
@@ -1803,7 +1811,8 @@ async function send(){
   // captured before the metadata awaits in the intercept below. Composer
   // writes after those awaits go through
   // _setComposerAfterCliOnlyExplainer(value,_slashOwner).
-  const _slashOwner={sid:S.session&&S.session.session_id||null,text,title:S.session&&S.session.title||'',
+  const _slashOwner={sid:S.session&&S.session.session_id||null,hadSession:!!S.session,text,title:S.session&&S.session.title||'',
+    loading:typeof _loadingSessionId!=='undefined'?_loadingSessionId:null,
     // Loaded rows, or the session's own counts: switching to a listed chat sets
     // S.session before its rows load, so S.messages alone can read empty.
     hadMessages:!!((S.messages&&S.messages.length)||Number(S.session&&S.session.message_count)>0
@@ -1820,7 +1829,7 @@ async function send(){
     if(_cmd){
       let _pushedUser=false;
       if(!_cmd.noEcho){
-        if(!S.session){await newSession();}
+        if(!S.session){await newSession();_slashOwner.sid=S.session&&S.session.session_id||null;}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         _pushedUser=true;
         renderMessages();
@@ -1964,7 +1973,7 @@ async function send(){
       }
       if(_agentCmdName==='moa'){
         const _moaArgs=(text.split(/\s+/).slice(1).join(' ')||'').trim();
-        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});if(!_slashOwner.sid)_slashOwner.sid=S.session&&S.session.session_id||null;}
         if(!_moaArgs){
           let _moaUsage='/moa <prompt>';
           try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
@@ -2051,9 +2060,13 @@ async function send(){
     }
   }
   // #9237: the slash lookups above can await. If the user left the issuing
-  // chat meanwhile, the switch saved this text as that chat's draft; do not
-  // send it into the chat now on screen.
-  if(_slashOwner.sid&&(!S.session||S.session.session_id!==_slashOwner.sid)){
+  // chat meanwhile (a switch begun meanwhile counts while it still loads), the
+  // switch saved this text as that chat's draft; do not send it into the chat
+  // now on screen. A send from the empty pane owns only a chat it created
+  // itself (sid set above).
+  const _slashLoadMoved=typeof _loadingSessionId!=='undefined'&&_loadingSessionId!==_slashOwner.loading;
+  if(_slashOwner.sid?(!S.session||S.session.session_id!==_slashOwner.sid||(_slashLoadMoved&&!_isSessionCurrentPane(_slashOwner.sid)))
+    :(!_slashOwner.hadSession&&(S.session||_slashLoadMoved))){
     if(_sendOwnerIsNewChat(_slashOwner.title,_slashOwner.hadMessages)){
       showToast(t('send_offscreen_new_chat'),null,'error');
       return;

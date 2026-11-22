@@ -76,6 +76,8 @@ const S = {
   activeStreamId: null,
 };
 const DRAFTS = {};
+const QUEUE = {};
+const SNAPS = {};
 const INFLIGHT = {};
 const _pendingSelections = [];
 let _loadingSessionId = null;
@@ -97,6 +99,7 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 
 // A chat switch: the chat that is opened gets its saved draft in the composer.
 function openChat(sid){
+  _loadingSessionId = null;
   S.session = SESSIONS[sid];
   S.messages = [];
   S.busy = false;
@@ -155,7 +158,11 @@ function renderSessionList(){}
 function markInflight(){}
 function saveInflightState(){}
 function clearInflightState(){}
-function queueSessionMessage(sid, payload){ rec('queueSessionMessage', sid, payload && payload.text); }
+function queueSessionMessage(sid, payload){
+  rec('queueSessionMessage', sid, payload && payload.text);
+  (QUEUE[sid] = QUEUE[sid] || []).push(payload);
+}
+async function _trySteer(text){ rec('_trySteer', text); }
 function _clearComposerAfterQueuedSelectionSend(){}
 function updateQueueBadge(){}
 function showToast(msg){ rec('showToast', String(msg)); }
@@ -171,9 +178,11 @@ let plan = [];
 async function api(url, opts){
   if(url !== '/api/chat/start') throw new Error('unexpected api ' + url);
   const body = JSON.parse(opts.body);
-  starts.push({session_id: body.session_id, message: body.message});
+  starts.push({session_id: body.session_id, message: body.message, goal: body.goal_continuation_id});
   const step = plan.shift() || {};
   if(step.switchTo) openChat(step.switchTo);
+  // loadSession() of another chat has started; S.session is still this one.
+  if(step.loadingTo) _loadingSessionId = step.loadingTo;
   const r = step.start || 'ok';
   if(r === 'ok') return {stream_id:'stream-' + starts.length};
   if(r === '409-conflict'){
@@ -206,9 +215,28 @@ __SEND__
       openChat(step.open);
     } else if(step.type !== undefined){
       input.value = step.type;
+    } else if(step.stage){
+      S.pendingFiles = step.stage;
+    } else if(step.busy){
+      // The chat's earlier run is still streaming.
+      S.busy = true;
+      S.activeStreamId = step.busy;
+    } else if(step.snap){
+      SNAPS[step.snap] = plain({composer: input.value, pending: S.pendingFiles, dataset: input.dataset,
+                                session: S.session && S.session.session_id, loading: _loadingSessionId});
+    } else if(step.drain){
+      // setBusy(false) drains the chat's next queued message into send().
+      S.busy = false;
+      S.activeStreamId = null;
+      const next = (QUEUE[S.session.session_id] || []).shift();
+      if(next){
+        input.value = next.text || '';
+        await send({goalContinuationId: next.goal_continuation_id || ''});
+        await tick();
+      }
     } else if(step.send){
       plan = [step];
-      await send();
+      await send(step.cont ? {goalContinuationId: step.cont} : undefined);
       await tick();
       // The started turn (if any) finishes before the user's next action.
       S.busy = false;
@@ -216,7 +244,7 @@ __SEND__
       for(const sid of Object.keys(INFLIGHT)) delete INFLIGHT[sid];
     }
   }
-  console.log(JSON.stringify({calls, starts, drafts: DRAFTS, composer: input.value,
+  console.log(JSON.stringify({calls, starts, drafts: DRAFTS, composer: input.value, snaps: SNAPS,
                               session: S.session && S.session.session_id}));
 })().catch(error => { console.error(error && error.stack || error); process.exit(1); });
 """
@@ -244,10 +272,14 @@ def _type(text):
     return {"type": text}
 
 
-def _send(start="ok", switch_to=None):
+def _send(start="ok", switch_to=None, loading_to=None, cont=None):
     step = {"send": True, "start": start}
     if switch_to:
         step["switchTo"] = switch_to
+    if loading_to:
+        step["loadingTo"] = loading_to
+    if cont:
+        step["cont"] = cont
     return step
 
 
@@ -352,3 +384,49 @@ def test_control_on_screen_conflict_still_queues_the_skill_message():
     queued = [c["args"] for c in result["calls"] if c["name"] == "queueSessionMessage"]
     assert len(queued) == 1 and queued[0][0] == "A"
     assert _skill_count(queued[0][1]) == 1
+
+
+def _calls(result, name):
+    return [c["args"] for c in result["calls"] if c["name"] == name]
+
+
+# ── the on-screen restore is unchanged ──────────────────────────────────────
+
+
+def test_control_on_screen_failure_still_restores_the_composer_and_token():
+    result = _run(_type("hello"), _send(start="500", cont="goal-1"), {"snap": "after"})
+    after = result["snaps"]["after"]
+    assert after["composer"] == "hello"
+    assert after["dataset"] == {"goalContinuationId": "goal-1", "goalContinuationText": "hello"}
+    assert result["drafts"]["A"]["contId"] == "goal-1"
+
+
+# ── steer mode: the resend of a restored draft that kept a skill ────────────
+#
+# After an off-screen 409 the chat may still be running. Steering the resend
+# returns before the forced-skill step, so the skill would be lost; it is
+# queued instead and gets the skill once when the queue drains.
+
+
+def test_steer_mode_queues_a_restored_skill_draft_and_the_drain_applies_the_skill_once():
+    result = _run(*_fail_off_screen(), _open("A"), {"busy": "stream-a"}, _send(), {"drain": True})
+    assert _calls(result, "_trySteer") == []
+    assert _calls(result, "queueSessionMessage") == [["A", "hello"]]
+    first, drained = result["starts"]
+    assert drained["session_id"] == "A"
+    assert _skill_count(drained["message"]) == 1
+    assert drained["message"] == first["message"]
+
+
+def test_control_steer_mode_still_steers_without_a_restored_skill():
+    result = _run(
+        _type("hello"), _send(start="409-conflict", switch_to="B"), _open("A"), {"busy": "stream-a"}, _send()
+    )
+    assert _calls(result, "_trySteer") == [["hello"]]
+    assert _calls(result, "queueSessionMessage") == []
+
+
+def test_control_steer_mode_still_steers_an_edited_draft():
+    result = _run(*_fail_off_screen(), _open("A"), _type("hello, reworded"), {"busy": "stream-a"}, _send())
+    assert _calls(result, "_trySteer") == [["hello, reworded"]]
+    assert _calls(result, "queueSessionMessage") == []
