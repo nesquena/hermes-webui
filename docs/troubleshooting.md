@@ -692,6 +692,30 @@ python3 -c "import agent.memory_manager as m; print('claim_instance:', callable(
 
 ---
 
+## Credentials appear masked (or unmasked) in the server log (#8984)
+
+**Symptom.** The server log shows a provider `base_url` whose userinfo is replaced by asterisks — `https://***:***@host/v1` — instead of the `user:password@host` form. On a host where the Agent is not importable at startup, the same line can appear with the password in clear until the Agent becomes available.
+
+**Why.** The WebUI installs one root log handler on stderr at WARNING so that Agent library warnings are masked instead of falling through to Python's last-resort handler. The masking is the Agent's own `agent.redact.RedactingFormatter`, so the WebUI's output matches the Agent's exactly: the whole userinfo pair is replaced and the scheme and host stay readable. The handler resolves that formatter **when a record is formatted**, not when the handler is installed, because the Agent can become importable after startup (the bootstrap transition that installs missing Agent dependencies runs later in the process's life). Until the Agent is importable, the line is emitted unmasked — the record still reaches the log, because hiding it would trade a leak for a missing diagnostic.
+
+Masking applies to the server's own stdout/stderr stream only. The Logs panel (`agent.log`, `errors.log`, `gateway.log` under the Hermes home) is written by the Agent with its own handlers and is unaffected.
+
+**Diagnostic commands.**
+
+```bash
+# The server log is the launcher's captured stdout/stderr.
+grep -E 'base_url=' <webui-server-log>
+
+# Confirm the Agent's formatter is reachable from the WebUI's interpreter.
+python3 -c "from agent.redact import RedactingFormatter; print(RedactingFormatter)"
+```
+
+**Fix.** Nothing to fix if the userinfo is masked — that is the intended behavior. If a credential is in clear, the Agent was not importable at the moment that record was written: install the Hermes Agent (or its dependencies) and restart the WebUI so the formatter is available before the first warning. Redaction follows the Agent's `security.redact_secrets` policy, so an Agent configured to allow raw credentials in logs will not mask them.
+
+**When to file a bug.** File a WebUI bug if a credential is in clear in the server log *after* the Agent's formatter is importable from the WebUI's interpreter (the diagnostic command above succeeds), or if masking changes the shape of a non-secret log line.
+
+---
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.
