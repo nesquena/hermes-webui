@@ -6959,6 +6959,29 @@ def _cached_session_lags_disk(cached) -> bool:
     # Fast path: prefix read of just the metadata header.
     disk_count = _persisted_message_count(sid)
     if disk_count is not None:
+        # #9029: retry/undo (and the truncate route) shrink the cached
+        # transcript under LOCK, release it, and save afterwards. In that window
+        # the cache is deliberately SHORTER than its sidecar, which otherwise
+        # looks exactly like a cache that lags the disk: the old file was
+        # reloaded into SESSIONS and the removed reply came back. The in-memory
+        # pending count records the pre-shrink snapshot the cache branched
+        # from. While disk still holds that snapshot (or anything older), the
+        # shorter cache is the newer state and must win.
+        pending_shrink = _parse_nonnegative_int(
+            getattr(cached, '_intentional_shrink_pending_count', None)
+        )
+        if pending_shrink is not None:
+            if disk_count == cached_count:
+                # The shrink's save landed (or disk otherwise reached parity):
+                # the window is over, drop the marker so it cannot outlive it.
+                cached._intentional_shrink_pending_count = None
+            elif disk_count <= pending_shrink:
+                return False
+            else:
+                # A real writer moved the sidecar past the snapshot this shrink
+                # branched from (e.g. a stream checkpoint appended a message).
+                # Disk is genuinely ahead; let the normal check below decide.
+                cached._intentional_shrink_pending_count = None
         if disk_count > cached_count:
             return True
         # Disk is at most as far as cache. Even when counts match, anchor scene

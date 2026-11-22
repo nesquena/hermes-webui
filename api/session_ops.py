@@ -766,6 +766,13 @@ def _stamp_intentional_shrink_generation(session, old_message_count: int, new_me
     session.intentional_shrink_generation = uuid.uuid4().hex
     session.transcript_generation = max(0, int(getattr(session, 'transcript_generation', 0) or 0)) + 1
     session.transcript_generation_baseline = max(0, int(new_message_count))
+    # #9029: in-memory only (never persisted). The cached object is now
+    # intentionally shorter than the sidecar until the caller saves; record the
+    # pre-shrink snapshot so the cache-freshness check can tell this window
+    # apart from a cache that lags the disk. retry_last/undo_last clear it right
+    # after their save; models._cached_session_lags_disk also clears it once
+    # disk reaches parity (the truncate routes save under the same lock).
+    session._intentional_shrink_pending_count = max(0, int(old_message_count))
     return True
 
 
@@ -1182,6 +1189,7 @@ def retry_last(session_id: str) -> dict[str, Any]:
                         s.context_messages
                     )
         s.save()
+        s._intentional_shrink_pending_count = None
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
 
@@ -1243,6 +1251,7 @@ def undo_last(session_id: str) -> dict[str, Any]:
                         s.context_messages
                     )
         s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
+        s._intentional_shrink_pending_count = None
     preview = (removed_text[:40] + '...') if len(removed_text) > 40 else removed_text
     return {
         'removed_count': removed_count,
