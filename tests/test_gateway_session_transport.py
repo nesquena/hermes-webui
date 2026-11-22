@@ -835,3 +835,214 @@ def test_cancel_route_keeps_an_uncertain_submission_recoverable(protocol, monkey
     assert len([m for m, _ in client.calls if m == "prompt.submit"]) == 1, (
         "a stopped-but-uncertain turn must not be submitted twice"
     )
+
+
+class _DelayedAckClient:
+    """A real RPC peer whose submission acknowledgement arrives after `delay`.
+
+    `prompt.submit` parks until the delay elapses, then admits the turn as
+    `started` so a Stop that waited for the acknowledgement interrupts it. The
+    interrupt settles the receipt as terminal/interrupted, which lets the relay
+    finish the turn.
+    """
+
+    def __init__(self, delay):
+        self.calls, self.events = [], asyncio.Queue()
+        self.delay = delay
+        self.status = "started"
+        self.generation = 3
+        self.result = {"final_response": "original session reply"}
+        self.submit_entered = threading.Event()
+
+    async def rpc(self, method, **params):
+        self.calls.append((method, params))
+        if method == "session.resume":
+            return {"session_id": "same-session", "prompts": []}
+        if method == "prompt.submit":
+            await asyncio.to_thread(self.submit_entered.set)
+            await asyncio.to_thread(threading.Event().wait, self.delay)
+            return {"admission_id": "one-admission", "status": "started",
+                    "execution_generation": self.generation}
+        if method == "prompt.receipt":
+            return {"admission_id": "one-admission", "status": self.status,
+                    "execution_generation": self.generation,
+                    "outcome": "interrupted" if self.status == "terminal" else None,
+                    "result": self.result}
+        if method == "session.interrupt":
+            self.status = "terminal"
+            return {"status": "ok"}
+        return {"status": "resolved"}
+
+
+def _drive_cancel_route(instance, client, stream_id, monkeypatch, *, wait_timeout):
+    """Run a REAL relay against `client` and drive the REAL cancel route once."""
+    import urllib.parse
+
+    from api import gateway_chat, routes
+
+    @asynccontextmanager
+    async def connect():
+        yield client
+
+    instance.connector = connect
+    outcome = {}
+
+    def run_relay():
+        try:
+            outcome["value"] = asyncio.run(instance.run())
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run_relay, daemon=True)
+    worker.start()
+    assert client.submit_entered.wait(timeout=5), "the relay never attempted the submission"
+    assert instance.attempted is True and instance.receipt is None
+
+    gateway_chat._mark_gateway_run_starting(stream_id)
+    replies = []
+    monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_args: True)
+    monkeypatch.setattr(routes, "j", lambda _handler, data, status=200, **_kw: replies.append((status, data)))
+    monkeypatch.setattr(routes, "cancel_stream", lambda _stream_id: True)
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda *_args, **_kw: False)
+    monkeypatch.setattr(gateway_chat, "GATEWAY_RUN_ID_WAIT_TIMEOUT", wait_timeout)
+    routes.handle_get(object(), urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}"))
+    return replies, worker, outcome
+
+
+def _settle_relay(client, worker, stream_id):
+    """Let the relay observe a terminal receipt, then join it and clean up."""
+    from api import gateway_chat
+
+    if isinstance(client, _DelayedAckClient):
+        client.status = "terminal"
+    worker.join(timeout=5)
+    gateway_chat._STREAM_RUN_LIFECYCLE.pop(stream_id, None)
+    gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
+
+
+@pytest.mark.parametrize("ack_delay", [0.08, 0.2])
+def test_cancel_route_interrupts_a_submission_acknowledged_inside_the_wait(
+    protocol, monkeypatch, ack_delay,
+):
+    """A Stop during a briefly pending acknowledgement must still interrupt.
+
+    The relay registers its deterministic id before `prompt.submit` returns, so
+    the cancel route reaches it immediately — but it cannot stop an uncertain
+    admission there. The route must keep the bounded published-run-ID wait and
+    then interrupt the acknowledged owner exactly once (#9227 gate).
+    """
+    stream_id = "stable"
+    instance, _events, _records = relay()
+    client = _DelayedAckClient(ack_delay)
+
+    replies, worker, outcome = _drive_cancel_route(
+        instance, client, stream_id, monkeypatch, wait_timeout=1.0,
+    )
+    try:
+        assert replies, "the cancel route produced no response"
+        status, payload = replies[0]
+        assert status == 200, f"a Stop inside the wait budget must interrupt, got {status}: {payload}"
+        assert payload.get("ok") is True and payload.get("cancelled") is True, payload
+        interrupts = [method for method, _ in client.calls if method == "session.interrupt"]
+        assert interrupts == ["session.interrupt"], f"expected exactly one interrupt, got {interrupts!r}"
+        assert len([method for method, _ in client.calls if method == "prompt.submit"]) == 1
+    finally:
+        _settle_relay(client, worker, stream_id)
+    assert not worker.is_alive(), "the relay did not finish after the interrupt"
+    assert "error" not in outcome, outcome.get("error")
+    assert outcome.get("value") == (None, {}), outcome.get("value")
+
+
+def test_cancel_route_keeps_recovery_when_acknowledgement_misses_the_wait(
+    protocol, monkeypatch,
+):
+    """An acknowledgement outside the wait budget keeps the retry contract.
+
+    Regression guard: the turn was attempted, so Stop must not mark it locally
+    cancelled or drop its durable request; the route answers 502 so the client
+    retries once the relay reconnects.
+    """
+    stream_id = "stable"
+    instance, _events, records = relay()
+    client = _DelayedAckClient(0.2)
+
+    replies, worker, outcome = _drive_cancel_route(
+        instance, client, stream_id, monkeypatch, wait_timeout=0.05,
+    )
+    try:
+        assert replies, "the cancel route produced no response"
+        status, payload = replies[0]
+        assert status == 502, f"a Stop past the wait budget must keep recovery, got {status}: {payload}"
+        assert payload.get("ok") is False and payload.get("cancelled") is False, payload
+        assert not instance.cancel.is_set(), (
+            "an attempted submission must not be cancelled locally as if it never happened"
+        )
+        assert records and records[0] == ("", instance.request), (
+            f"the durable request must survive for recovery: {records!r}"
+        )
+        assert len([method for method, _ in client.calls if method == "prompt.submit"]) == 1
+    finally:
+        _settle_relay(client, worker, stream_id)
+    assert not worker.is_alive(), "the relay did not finish after the acknowledgement arrived"
+    assert "error" not in outcome, outcome.get("error")
+
+
+def test_cancel_route_keeps_recovery_when_no_run_id_is_published(protocol, monkeypatch):
+    """An uncertain submission with no published run id must stay recoverable.
+
+    The early registration reaches the relay, but there is no bounded wait to
+    fall back on and no acknowledgement to interrupt. The handler-level 502 is
+    the retry contract here — never a local cancellation.
+    """
+    import urllib.parse
+
+    from api import gateway_chat, routes
+
+    stream_id = "stable"
+    instance, _events, records = relay()
+    client = _SubmitParkedClient()
+
+    @asynccontextmanager
+    async def connect():
+        yield client
+
+    instance.connector = connect
+    outcome = {}
+
+    def run_relay():
+        try:
+            outcome["value"] = asyncio.run(instance.run())
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run_relay, daemon=True)
+    worker.start()
+    assert client.submit_entered.wait(timeout=5), "the relay never attempted the submission"
+    assert instance.attempted is True and instance.receipt is None
+
+    # No `_mark_gateway_run_starting`: nothing published a run id, so the
+    # bounded wait reports `(False, None)` instead of blocking.
+    replies = []
+    monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_args: True)
+    monkeypatch.setattr(routes, "j", lambda _handler, data, status=200, **_kw: replies.append((status, data)))
+    monkeypatch.setattr(routes, "cancel_stream", lambda _stream_id: True)
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda *_args, **_kw: False)
+    monkeypatch.setattr(gateway_chat, "GATEWAY_RUN_ID_WAIT_TIMEOUT", 0.05)
+    try:
+        routes.handle_get(object(), urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}"))
+
+        assert replies, "the cancel route produced no response"
+        status, payload = replies[0]
+        assert status == 502, f"an unresolved submission must keep recovery, got {status}: {payload}"
+        assert payload.get("ok") is False and payload.get("cancelled") is False, payload
+        assert not instance.cancel.is_set()
+        assert records and records[0] == ("", instance.request)
+        assert len([method for method, _ in client.calls if method == "prompt.submit"]) == 1
+    finally:
+        client.submit_release.set()
+        worker.join(timeout=5)
+        gateway_chat._STREAM_RUN_LIFECYCLE.pop(stream_id, None)
+        gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
+
+    assert not worker.is_alive(), "the relay did not finish after the submission was released"
+    assert "error" not in outcome, outcome.get("error")
