@@ -5493,7 +5493,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // literal text instead of becoming a quote-prefixed media node.
     const quotedMatch=/^MEDIA:"([^"\r\n]+)"$/.exec(chunkText)||/^MEDIA:'([^'\r\n]+)'$/.exec(chunkText);
     const bareMatch=quotedMatch?null:/^MEDIA:([^\s\)\]]+)$/.exec(chunkText);
-    const rawRef=quotedMatch?quotedMatch[1]:(bareMatch&&!/^["']/.test(bareMatch[1])?bareMatch[1]:null);
+    let rawRef=quotedMatch?quotedMatch[1]:(bareMatch&&!/^["']/.test(bareMatch[1])?bareMatch[1]:null);
+    if(quotedMatch&&rawRef){
+      // Quoted refs are normalised exactly once before the shared media helper,
+      // matching the settled renderMd contract in static/ui.js:10861-10872.
+      try{ rawRef=decodeURIComponent(rawRef); }catch(_){}
+    }
     const parts=rawRef&&typeof _mediaTokenParts==='function'?_smdMediaTokenParts(chunkText,0,rawRef,entry&&entry.parent):null;
     const emitted=!!(parts && entry && entry.parent && _smdAppendMediaNode(entry.parent, parts[0]));
     if(emitted&&parts[1]) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, parts[1]);
@@ -5506,6 +5511,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _SMD_MEDIA_TAIL.delete(parser);
     _smdMediaTailFlushEntry(entry);
   }
+  // A quoted MEDIA ref is normalised exactly once, before the shared media helper:
+  // the same single decode the settled renderer applies in static/ui.js:10861-10872.
   function _smdMediaAwareAddText(baseAddText, parent, data, text, tailMap, parser, writeText){
     const value=String(text||'');
     const tails=tailMap||(typeof _SMD_MEDIA_TAIL!=='undefined'&&_SMD_MEDIA_TAIL)||null;
@@ -5560,7 +5567,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const eolAt = afterMarker.search(/\r\n|[\r\n]/);
         if(m.index>last) writeCurrent(combined.slice(last, m.index));
         if(closeAt > 0 && (eolAt < 0 || closeAt < eolAt)){
-          const ref = afterMarker.slice(1, closeAt);
+          let ref = afterMarker.slice(1, closeAt);
+          try{ ref = decodeURIComponent(ref); }catch(_){}
           const end = m.index + 6 + closeAt + 1;
           const parts=typeof _mediaTokenParts==='function'?_smdMediaTokenParts(combined,m.index,ref,parent):null;
           if(parts&&_smdAppendMediaNode(parent,parts[0])){
