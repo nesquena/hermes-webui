@@ -3434,8 +3434,26 @@ def _run_gateway_chat_streaming(
         _use_session_rpc = (reattach_run or {}).get("transport") == "session" or configured(vars(s), cfg)
         # Native turns use the profile's private session connection: the REST endpoint (and its routing checks)
         # applies only to REST turns.
-        base_url, api_key = ("", "") if _use_session_rpc else (
-            reattach_endpoint or _gateway_endpoint_for_profile(getattr(s, "profile", None)))
+        try:
+            base_url, api_key = ("", "") if _use_session_rpc else (
+                reattach_endpoint or _gateway_endpoint_for_profile(getattr(s, "profile", None)))
+        except RuntimeError as exc:
+            # A resolver refusal (unresolvable shared URL, doubled profile route) is this turn's terminal error:
+            # keep the prompt and attachments as the user's turn and show an error turn, never drop them.
+            error_payload = _settle_gateway_terminal_error(
+                session_id, stream_id, workspace, model, model_provider,
+                {
+                    "label": "Gateway endpoint unavailable",
+                    "type": "gateway_error",
+                    "message": _redact_text(str(exc))[:500] or "The Gateway endpoint could not be resolved.",
+                    "hint": "Fix the Gateway URL configuration named above, then resend.",
+                },
+                persisted_model=persisted_model,
+                persisted_model_provider=persisted_model_provider,
+            )
+            if error_payload is not None:
+                put_gateway_event("apperror", error_payload)
+            return
         # None: the profile's Gateway moved since admission, so no credential is bound to the saved URL.
         endpoint_moved, api_key = api_key is None, api_key or ""
         keyless_profile = not api_key and _is_named_profile(getattr(s, "profile", None))

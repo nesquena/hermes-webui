@@ -560,3 +560,47 @@ def test_rest_turn_with_the_same_unroutable_shared_url_is_still_refused(work_pro
 
     errors = [e[1] for e in events if e[0] == "apperror"]
     assert calls == [] and errors and "already names a profile route" in json.dumps(errors)
+
+
+@pytest.mark.parametrize("refusal", ["doubled_profile_route", "unresolved_shared_variable"])
+def test_a_resolver_refusal_keeps_the_prompt_and_attachments_as_the_users_turn(
+        work_profile, sessions, monkeypatch, refusal):
+    """Review 5977731568: an endpoint refusal settles through _settle_gateway_terminal_error, so the typed prompt and
+    its attachment stay in the saved session as the user's turn, followed by an error turn, not cleared."""
+    if refusal == "doubled_profile_route":
+        monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", f"{SHARED}/p/alpha")
+    else:  # master's own refusal: an unresolved ${VAR} in the shared config URL
+        monkeypatch.delenv("HERMES_WEBUI_GATEWAY_BASE_URL")
+        monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+        monkeypatch.delenv("GW_HOST", raising=False)
+        (work_profile.parents[1] / "config.yaml").write_text("webui_gateway_base_url: http://${GW_HOST}\n")
+    attachment = {"name": "notes.txt", "path": "/tmp/notes.txt", "mime": "text/plain"}
+    s = new_session()
+    s.profile = "work"
+    s.active_stream_id = "stream-refused"
+    s.pending_user_message = "summarise my notes"
+    s.pending_attachments = [attachment]
+    s.pending_started_at = 1.0
+    s.save()
+    sent, events = [], []
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=None: sent.append(req))
+    channel = create_stream_channel()
+    monkeypatch.setattr(channel, "put_nowait", lambda item: events.append(item[:2]))
+    with STREAMS_LOCK:
+        STREAMS["stream-refused"] = channel
+    try:
+        gateway_chat._run_gateway_chat_streaming(
+            s.session_id, "summarise my notes", "m", str(sessions), "stream-refused", [attachment])
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop("stream-refused", None)
+
+    assert sent == []  # refused before any request: never falls back to another URL
+    errors = [data for event, data in events if event == "apperror"]
+    assert len(errors) == 1 and errors[0]["terminal_session_persisted"] is True, events
+    saved = json.loads((models.SESSION_DIR / f"{s.session_id}.json").read_text())
+    user, error = saved["messages"][-2:]
+    assert user["role"] == "user" and user["content"] == "summarise my notes"
+    assert [a["name"] for a in user.get("attachments") or []] == ["notes.txt"], user
+    assert error["role"] == "assistant" and error["_error"] and "Gateway endpoint unavailable" in error["content"]
+    assert saved["active_stream_id"] is None and not saved.get("pending_user_message")
