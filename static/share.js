@@ -82,7 +82,7 @@ function _shareNormalize(text){
 // The words a reader is expected to see for a published message: its text with
 // the markup that never shows as words removed (standard tag and attribute
 // names, the MEDIA: and file:// markers, task-list boxes, and the mermaid
-// fence language).
+// fence language). Code spans and fences keep their text as written.
 function _shareSourceWords(source){
   let s=_shareDecode5(_shareDecode5(String(source==null?'':source).replace(/\r\n?/g,'\n')));
   // Everything inside an HTML comment is hidden text, including tag syntax, code
@@ -90,15 +90,31 @@ function _shareSourceWords(source){
   // ends later than the first "-->", so this can only keep more words than the
   // page shows (a false alarm), never fewer.
   s=s.replace(/<!--[\s\S]*?(?:-->|$)/g,c=>' '+c.replace(/[<>[\]`:]/g,' ')+' ');
-  s=s.replace(/MEDIA:|file:\/\//g,' ')
-    .replace(/^([ \t]*[-*+][ \t]+)\[[ xX]\](?=[ \t])/gm,'$1')
+  // Lift literal code out before anything else is stripped. Inside a code span or
+  // fence the page shows the text as written, so the marker, task-box, link and
+  // anchor rules below must not touch it: a word shown in code would otherwise
+  // pay for the same word hidden elsewhere. The tag pass skips it too.
+  const literalCode=[];
+  let literalPrefix='\x00SHARE_LITERAL_';
+  while(s.includes(literalPrefix)) literalPrefix+='_';
+  const literalRe=new RegExp(literalPrefix+'(\\d+)\\x00','g');
+  const unlit=t=>t.replace(literalRe,(_m,i)=>literalCode[+i]);
+  s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)|`([^`\n]+)`/g,(part,_lead,ticks,info)=>{
     // A mermaid diagram has no language header; every other one-word language
     // is shown in the block's header, so it stays a word.
+    if(ticks&&/^[ \t]*mermaid[ \t]*$/i.test(info)) part=part.replace(/^(\n?[ ]{0,3}`{3,})[ \t]*mermaid[ \t]*/i,'$1');
+    literalCode.push(part);
+    return literalPrefix+(literalCode.length-1)+'\x00';
+  });
+  s=s.replace(/MEDIA:|file:\/\//g,' ')
+    .replace(/^([ \t]*[-*+][ \t]+)\[[ xX]\](?=[ \t])/gm,'$1')
+    // An unclosed mermaid fence isn't lifted above; it has no header either.
     .replace(/^( {0,3}`{3,})[ \t]*mermaid[ \t]*$/gim,'$1')
     ;
-  // The source and DOM must use the same normalized equality for label/href.
+  // The source and DOM must use the same normalized equality for label/href. A
+  // label may hold a code span: compare its shown text.
   s=s.replace(/\[([^[\]\n]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s)]+)\)/g,(all,label,href)=>
-    _shareSameWords(_shareWordsOf(label),_shareWordsOf(href))?label:all);
+    _shareSameWords(_shareWordsOf(unlit(label)),_shareWordsOf(href))?label:all);
   s=s.replace(/<a\b([^<>]*)>([^<]*)<\/a\s*>/gi,(all,attrs,label)=>{
     let href,hrefCount=0;
     attrs.replace(_SHARE_ATTR_RE,(_m,name,dq,sq,bare)=>{
@@ -108,17 +124,9 @@ function _shareSourceWords(source){
     // The renderer keeps a raw anchor's address only for these schemes; with any other the
     // address is dropped, so the label alone must show its words.
     if(hrefCount!==1||href===undefined||!/^(?:https?:\/\/|mailto:|tel:|message:)/i.test(href)
-      ||!_shareSameWords(_shareWordsOf(label),_shareWordsOf(href))) return all;
+      ||!_shareSameWords(_shareWordsOf(unlit(label)),_shareWordsOf(href))) return all;
     const rest=attrs.replace(_SHARE_ATTR_RE,(part,name)=>name.toLowerCase()==='href'?'':part);
     return '<a'+rest+'>'+label+'</a>';
-  });
-  // Keep literal code intact during the HTML tag comparison pass.
-  const literalCode=[];
-  let literalPrefix='\x00SHARE_LITERAL_';
-  while(s.includes(literalPrefix)) literalPrefix+='_';
-  s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)|`([^`\n]+)`/g,part=>{
-    literalCode.push(part);
-    return literalPrefix+(literalCode.length-1)+'\x00';
   });
   s=s.replace(_SHARE_TAG_RE,(tag,_close,name,attrs)=>{
     const n=name.toLowerCase();
@@ -132,7 +140,7 @@ function _shareSourceWords(source){
     const edge=_SHARE_INLINE_TAGS.has(n)?'':' ';
     return edge+kept+edge;
   });
-  s=s.replace(new RegExp(literalPrefix+'(\\d+)\\x00','g'),(_m,i)=>literalCode[+i]);
+  s=unlit(s);
   return _shareAddWords(_shareNormalize(s),new Map());
 }
 
@@ -170,7 +178,8 @@ function _shareVisibleWords(root){
   const text=[];
   const add=map=>{ for(const [w,c] of map) counts.set(w,(counts.get(w)||0)+c); };
   // `clipped`: inside a block that cuts off anything drawn outside it (code, math, diagram).
-  const walk=(node,clipped)=>{
+  // `literal`: inside code, which shows its text as written (the source side keeps it whole).
+  const walk=(node,clipped,literal)=>{
     for(const child of Array.from(node.childNodes||[])){
       if(child.nodeType===3){ text.push(child.data); continue; }
       if(child.nodeType!==1) continue;  // comments are never shown
@@ -181,7 +190,8 @@ function _shareVisibleWords(root){
       const inline=_SHARE_INLINE_TAGS.has(tag)&&!math;
       if(!inline) text.push(' ');
       const start=text.length;
-      walk(child,clipped||tag==='pre'||attrs.some(a=>a.name==='class'&&/\b(?:katex|mermaid)-block\b/.test(a.value)));
+      walk(child,clipped||tag==='pre'||attrs.some(a=>a.name==='class'&&/\b(?:katex|mermaid)-block\b/.test(a.value)),
+        literal||tag==='code'||tag==='pre');
       if(!inline) text.push(' ');
       const ownText=text.slice(start).join('');
       for(const attr of attrs){
@@ -193,13 +203,16 @@ function _shareVisibleWords(root){
         // numbered list, not inside a block that clips that margin, and in full only up to four
         // digits (longer numbers lose their leading digits on a phone). Otherwise it gives no credit.
         if(name==='value'&&tag==='li'&&!(String(node.tagName||'').toLowerCase()==='ol'&&!clipped&&/^(?:0|[1-9]\d{0,3})$/.test(value))) continue;
+        // A link the renderer makes inside code (it autolinks addresses there) adds no words:
+        // the code's text already shows them, and the source side counts that text once.
+        if(literal&&(name==='href'||name==='src')) continue;
         // A bare link shows its own address: count it once, not twice.
         if(name==='href'&&_shareSameWords(_shareWordsOf(value),_shareWordsOf(ownText))) continue;
         add(_shareWordsOf(value));
       }
     }
   };
-  walk(root,false);
+  walk(root,false,false);
   add(_shareWordsOf(text.join('')));
   return counts;
 }

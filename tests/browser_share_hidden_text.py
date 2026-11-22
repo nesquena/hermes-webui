@@ -99,6 +99,14 @@ HIDING = [
     '<a href="secret-plan">%73%65%63%72%65%74-%70%6C%61%6E</a>',
     '<a href="https://e.com/zqd3x" title="zqd4x">https://e.com/zqd3x</a>',
     '<a href="https://e.com/zqd9x"/title="zqe1x">https://e.com/zqd9x</a>',
+    # A word shown inside code can't pay for the same word hidden in a comment, even where the
+    # marker, task-box, mermaid, link and anchor rules apply outside code.
+    "`MEDIA: hello` <!-- media -->",
+    "`file:///tmp/report.txt` <!-- file -->",
+    "```markdown\n- [x] done\n```\n<!-- x -->",
+    "````markdown\n```mermaid\ngraph TD\n```\n````\n<!-- mermaid -->",
+    f'`<a href="https://example.com/{MARK}">https://example.com/{MARK}</a>` <!-- {MARK} -->',
+    f"`[https://example.com/{MARK}](https://example.com/{MARK})` <!-- {MARK} -->",
 ]
 
 # Realistic content that must keep its formatting.
@@ -145,6 +153,14 @@ ORDINARY = [
     "HTML: `<span>Hello</span><span>world</span>`. See [documentation](https://example.org/html).",
     "```html\n<b>bold</b><i>it</i>\n```",
     "2023. Launched\n2024. Grew",
+    # Markers, task boxes, a mermaid fence and links written inside code are shown as written; a
+    # link labelled with a code span of its own address shows the address once.
+    "Use `MEDIA: path/to/file.png` in a reply to attach a file.",
+    "Open `file:///tmp/report.txt` in a browser.",
+    "```markdown\n- [x] done\n- [ ] todo\n```",
+    "````markdown\n```mermaid\ngraph TD\n```\n````",
+    'Write `<a href="https://example.com/docs">https://example.com/docs</a>` for a link.',
+    "[`https://example.com/docs`](https://example.com/docs)",
 ]
 
 # Random messages: tokens renderMd treats specially, with numbered marker words.

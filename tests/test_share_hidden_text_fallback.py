@@ -180,6 +180,72 @@ def test_markers_inside_a_comment_keep_their_words(call):
     assert got["d"] == 2
 
 
+_CODE_HEADER = ["div", {"class": "pre-header"}, "markdown"]
+
+
+@pytest.mark.parametrize(
+    "src,dom,hidden",
+    [
+        ("`MEDIA: hello` <!-- media -->", ["p", {}, ["code", {}, "MEDIA: hello"], " ", {"comment": " media "}], "media"),
+        ("`file:///tmp/report.txt` <!-- file -->",
+         ["p", {}, ["code", {}, "file:///tmp/report.txt"], " ", {"comment": " file "}], "file"),
+        ("```markdown\n- [x] done\n```\n<!-- x -->",
+         [_CODE_HEADER, ["pre", {}, ["code", {}, "- [x] done"]], {"comment": " x "}], "x"),
+        ("````markdown\n```mermaid\ngraph TD\n```\n````\n<!-- mermaid -->",
+         [_CODE_HEADER, ["pre", {}, ["code", {}, "```mermaid\ngraph TD\n```"]], {"comment": " mermaid "}], "mermaid"),
+        ('`<a href="https://example.com/zyxraw">https://example.com/zyxraw</a>` <!-- zyxraw -->',
+         ["p", {}, ["code", {}, '<a href="https://example.com/zyxraw">https://example.com/zyxraw</a>'], " ",
+          {"comment": " zyxraw "}], "zyxraw"),
+        ("`[https://e.com/zqcedar](https://e.com/zqcedar)` <!-- zqcedar -->",
+         ["p", {}, ["code", {}, "[https://e.com/zqcedar](https://e.com/zqcedar)"], " ", {"comment": " zqcedar "}],
+         "zqcedar"),
+    ],
+    ids=["media", "file", "task-box", "nested-mermaid", "raw-anchor", "markdown-link"],
+)
+def test_a_word_shown_in_code_cannot_pay_for_a_hidden_copy(call, src, dom, hidden):
+    # Code shows its text as written, so the marker, task-box, mermaid, link and anchor rules
+    # must not shorten it: the hidden copy is caught, and without it nothing is missing.
+    dom = dom if isinstance(dom[0], list) else [dom]
+    assert call("_shareMissingWords", src, {"dom": dom}) == [hidden]
+    shown_src = src.rsplit("<!--", 1)[0].rstrip()
+    shown_dom = [n for n in dom if not (isinstance(n, dict) and "comment" in n)]
+    shown_dom = [[*n[:2], *[c for c in n[2:] if not (isinstance(c, dict) and "comment" in c)]]
+                 if isinstance(n, list) else n for n in shown_dom]
+    assert call("_shareMissingWords", shown_src, {"dom": shown_dom}) == []
+
+
+def test_a_link_labelled_with_a_code_span_of_its_address_counts_it_once(call):
+    dom = ["p", {}, ["a", {"href": "https://e.com/zqd"}, ["code", {}, "https://e.com/zqd"]]]
+    assert _missing(call, "[`https://e.com/zqd`](https://e.com/zqd)", dom) == []
+    dom = ["p", {}, ["a", {"href": "https://e.com/zqr"}, ["code", {}, "https://e.com/zqr"]]]
+    assert _missing(call, '<a href="https://e.com/zqr">`https://e.com/zqr`</a>', dom) == []
+
+
+def test_a_link_made_inside_code_gives_no_extra_credit(call):
+    # renderMd autolinks an address even inside a code span; that link's address must not pay
+    # for a hidden copy of a word the code already shows.
+    code = ["code", {}, '<a href="',
+            ["a", {"href": 'https://example.com/zqmark">https://example.com/zqmark</a>'},
+             "https://example.com/zqmark&quot;&gt;https://example.com/zqmark&lt;/a&gt"], ";"]
+    src = '`<a href="https://example.com/zqmark">https://example.com/zqmark</a>`'
+    assert _missing(call, src + " <!-- zqmark -->", ["p", {}, code, " ", {"comment": " zqmark "}]) == ["zqmark"]
+    assert _missing(call, src, ["p", {}, code]) == []
+    # An address written in code still shows in full.
+    dom = ["p", {}, "Open ", ["code", {}, ["a", {"href": "https://example.com/docs"}, "https://example.com/docs"]]]
+    assert _missing(call, "Open `https://example.com/docs`", dom) == []
+
+
+def test_a_mermaid_fence_keeps_no_label_word_closed_or_not(call):
+    assert call("_shareSourceWords", "```mermaid\ngraph TD\n```") == {"graph": 1, "td": 1}
+    assert call("_shareSourceWords", "```mermaid\ngraph TD") == {"graph": 1, "td": 1}
+
+
+def test_an_anchor_with_two_addresses_is_not_collapsed(call):
+    # The label-equals-address credit applies only to an anchor with exactly one href.
+    got = call("_shareSourceWords", '<a href="https://e.com/zz" href="https://e.com/zz">https://e.com/zz</a>')
+    assert got["zz"] == 3
+
+
 # ── One normalization on both sides ───────────────────────────────────────────
 
 
@@ -203,6 +269,9 @@ def test_percent_escapes_count_once_in_one_form(call):
 
 def test_math_spans_break_words(call):
     dom = ["p", {}, "这是", ["span", {"class": "katex-inline", "data-katex": "inline"}, "x"], "的值"]
+    assert _missing(call, "这是$x$的值", dom) == []
+    # The data-katex attribute alone marks a math span too.
+    dom = ["p", {}, "这是", ["span", {"data-katex": "inline"}, "x"], "的值"]
     assert _missing(call, "这是$x$的值", dom) == []
 
 
