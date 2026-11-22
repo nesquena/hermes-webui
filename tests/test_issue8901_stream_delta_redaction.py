@@ -25,16 +25,33 @@ Contract verified here:
   7. wiring: both SSE exits (api/streaming.py ``put``, api/gateway_chat.py
      ``put_gateway_event``) route token deltas through the redactor, so the
      run journal stores the redacted text a replay re-sends;
-  8. with ``api_redact_enabled`` off the redactor is a pass-through.
+  8. with ``api_redact_enabled`` off the redactor is a pass-through;
+  9. a secret LONGER than the tail window (long JWT, multi-kilobyte PEM)
+     keeps its pin past window expiry — releasing it would strand the
+     value's tail in the buffer without the header its pattern anchors
+     on, so every later release (live and replayed) would emit it raw;
+ 10. a retained marker prefix may only REDUCE the cut the secret-start
+     loop pinned, never drag it forward past a protected secret start;
+ 11. the ``interim_assistant`` boundary frame honors the same effective
+     ``api_redact_enabled`` setting as the owning stream, and withholds
+     ``reasoning_echo`` when redaction changed the text — the client
+     matches that text against the reasoning it rendered, and a masked
+     text can never match the raw one.
 """
+import queue
 import sys
+import types
+import uuid
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from api import helpers  # noqa: E402
+
+_MISSING = object()
 
 # Fake keys in real secret shapes — they must travel the real _redact_text
 # path (agent redactor + local fallback regexes), never a test-only stub.
@@ -179,20 +196,21 @@ def test_flush_releases_held_tail_without_swallowing_text():
 
 
 def test_flush_after_ordinary_deltas_releases_exactly_the_tail():
-    """Ordinary text is released as it arrives; only a marker prefix is held.
+    """Ordinary text is released as it arrives; only a marker opening is held.
 
     The previous expectation — "exactly the last character stays buffered" —
     pinned the behaviour that split ordinary prose across frames, which is
     what the browser lifecycle gate caught. The tail window now holds only a
-    run that could still grow into a marker, so ordinary text goes out whole
-    and the flush has nothing to release.
+    run that could still grow into a marker (down to its first character),
+    so ordinary text goes out essentially whole and the flush releases only
+    the held opening letter, if any.
     """
     red = _redactor()
-    text = "The quick brown fox"
+    text = "The quick brown fox."
     emitted = "".join(red.feed(text[i : i + 3]) for i in range(0, len(text), 3))
 
-    assert emitted == text, "ordinary text must not be held back"
-    assert red.flush() == "", "nothing of ordinary text should remain buffered"
+    assert emitted + red.flush() == text, "ordinary text must not be lost"
+    assert red.flush() == "", "a second flush after the release is empty"
 
 
 # ── 6. Control: no over-redaction of secret-shaped prefixes ────────────────
@@ -401,39 +419,41 @@ def test_failed_run_still_redacts_a_split_secret():
     assert secret not in text, "the failure path must not release a secret in the clear"
 
 
-# ── Ordinary text must not be split across frames ────────────────────────
+# ── Ordinary text must not be LOST; the frame edge may split ──────────────
 #
 # The tail window exists to protect a marker whose PREFIX arrived before the
-# rest of it. Holding back anything else splits ordinary prose in the middle:
-# the front end then receives a truncated first frame and a detached tail
-# frame, and a message row that the front end matches by content (a process
-# row, for instance) never renders.
+# rest of it — including a marker whose FIRST character arrived alone. That
+# means a delta ending in a marker's opening letter ("...check", "...this")
+# is held for one frame and released by the next delta or the flush.
 #
-# The browser lifecycle gate caught exactly this: the terminal-error scenario
-# streams one delta and expects it intact.
+# This is the deliberate trade: the front end concatenates token frames into
+# a single prose row and matches content rows by PREFIX, so a split is
+# invisible on screen — while releasing the character would leak the first
+# character of a split secret ("s" then "k-…" puts the key body in the clear
+# with no marker left for _redact_text to recognise). Content integrity is
+# the contract; frame wholeness is not.
 
 
-def test_ordinary_text_is_emitted_in_one_piece_not_split():
-    """A single delta must be emitted WHOLE, not split across frames.
+def test_ordinary_text_is_never_lost_even_when_the_frame_splits():
+    """A single delta is emitted WHOLE unless its tail opens a marker.
 
-    The frame boundary is what matters, not the eventual concatenation: the
-    front end matches a process row by content, so a delta that arrives in
-    two pieces (a truncated head plus a detached tail) never renders as the
-    row it names. The lifecycle gate's terminal-error scenario streams exactly
-    one delta and expects that one frame intact.
+    The browser lifecycle gate's terminal-error scenario streams exactly one
+    delta; the row it names must still render. It does: the held character
+    joins the row through the flush, and process-row matching is
+    prefix-based, so the truncated first frame still identifies the row.
     """
     text = "Lifecycle terminal process check"
     red = _redactor()
     first = red.feed(text)
-    assert first == text, (
-        f"ordinary text was split across frames: {first!r}"
+    assert first + red.flush() == text, (
+        f"content must survive the frame split: {first!r}"
     )
 
 
-def test_ordinary_text_is_not_split_even_when_it_ends_mid_word():
-    """A delta whose last characters are not a marker prefix stays whole."""
+def test_ordinary_text_is_not_split_when_no_marker_prefix_can_follow():
+    """A delta whose last character opens no marker is emitted whole."""
     red = _redactor()
-    assert red.feed("a quick brown fox") == "a quick brown fox"
+    assert red.feed("a quick brown fox.") == "a quick brown fox."
 
 
 def test_marker_prefix_at_the_end_is_held_until_the_next_delta():
@@ -454,18 +474,26 @@ def test_marker_prefix_at_the_end_is_held_until_the_next_delta():
     assert secret not in first + rest, "the split secret leaked in the clear"
 
 
-def test_one_character_suffix_is_never_held():
-    """A single trailing character is not a prefix worth holding.
+def test_one_character_suffix_is_held_so_a_split_marker_cannot_leak():
+    """A trailing marker first-letter IS held — security over frame atomicity.
 
-    Markers like ``key_material`` and ``key=`` begin with ``k``, so holding a
-    trailing ``k`` would split every ordinary word ending in one.
+    The previous contract never held a single character, because holding
+    "k" splits every ordinary word ending in one. That reasoning ignored the
+    leak: a marker whose first character arrives in its own delta ("s" then
+    "k-…") was already released, and the key body reached the browser with
+    no marker for _redact_text to recognise. The split is frame-level only
+    — the client concatenates frames and matches rows by prefix — so the
+    cost is invisible while the leak was not.
     """
-    red = _redactor()
-    assert red.feed("a quick check") == "a quick check"
-    red2 = _redactor()
-    assert red2.feed("ok") == "ok"
-    red3 = _redactor()
-    assert red3.feed("look") == "look"
+    for word in ("a quick check", "ok", "look"):
+        red = _redactor()
+        first = red.feed(word)
+        assert first + red.flush() == word, (
+            f"content must survive the split: {first!r}"
+        )
+        assert first != word, (
+            f"the trailing marker letter must be held, got {first!r}"
+        )
 
 
 # ── Paragraph boundaries: the held tail belongs to its own paragraph ──────
@@ -777,4 +805,479 @@ def test_replay_of_an_unflushed_boundary_shows_the_misplacement(tmp_path, monkey
     assert prose[0]["text"].strip() == first[: len(first) - 3].strip(), (
         f"control: the unflushed order loses the tail from paragraph one, got "
         f"{prose[0]['text']!r}"
+    )
+
+
+# ── 9. Window-expiry safety: secrets longer than the tail window ───────────
+
+# A JWT longer than _STREAM_DELTA_WINDOW. The bearer pattern has no length
+# limit, so the secret outruns the tail window unless the start keeps its
+# pin: releasing it strands the value's tail in the buffer without the
+# "Authorization: Bearer" header its pattern anchors on. Header, payload and
+# signature are base64url-shaped filler — no marker substring of their own,
+# or every payload segment would register as its own secret start.
+_FAKE_JWT = (
+    "eyJ" + "Ab3xY9Qw8" + "." + ("Zx4cV7b1" * 140) + "Nm2kJ5h6"
+)
+assert len(_FAKE_JWT) > 1024
+
+
+def test_secret_longer_than_the_window_is_held_until_it_completes():
+    """A secret longer than the tail window must not leak its tail.
+
+    ``_redact_text`` masks whole shapes, so a JWT longer than
+    ``_STREAM_DELTA_WINDOW`` used to be masked only up to the cut: the
+    remaining value left the buffer without its header and every later
+    release emitted it verbatim — live and in journal replay. The start
+    now keeps pinning the cut until the secret's mask stops touching the
+    buffer end.
+    """
+    header = "Authorization: Bearer "
+    assert len(header) + len(_FAKE_JWT) > helpers._STREAM_DELTA_WINDOW
+
+    out = _stream(
+        [header] + [_FAKE_JWT[i : i + 64] for i in range(0, len(_FAKE_JWT), 64)]
+    )
+
+    assert _FAKE_JWT not in out, "the JWT body must not reassemble in the clear"
+    assert _FAKE_JWT[-40:] not in out, (
+        "the value's tail must not escape once the window expired"
+    )
+    assert out == helpers._redact_text(header + _FAKE_JWT, _enabled=True), (
+        "the streamed result must match the one-shot redaction of the whole text"
+    )
+
+
+def test_text_after_a_window_spanning_secret_still_streams():
+    """Ordinary text following an over-window secret is released, not swallowed."""
+    header = "Authorization: Bearer "
+    out = _stream(
+        [header]
+        + [_FAKE_JWT[i : i + 64] for i in range(0, len(_FAKE_JWT), 64)]
+        + [" and we are done."]
+    )
+
+    assert "and we are done." in out, "the run must settle with the trailing prose"
+    assert _FAKE_JWT not in out
+    assert out == helpers._redact_text(
+        header + _FAKE_JWT + " and we are done.", _enabled=True
+    )
+
+
+def test_false_positive_start_is_still_released_after_the_window():
+    """A start that never became a secret must not stall the stream.
+
+    Window expiry is the release path for false positives (a bare
+    "Bearer" with no token, a URL with no userinfo). The mask probe must
+    not pin those forever, or ordinary long prose would buffer until
+    flush.
+    """
+    plain = "Authorization: Bearer tokens are commonly used in APIs. " + (
+        "filler text here. " * 80
+    )
+
+    out = _stream([plain[i : i + 64] for i in range(0, len(plain), 64)])
+
+    assert out == helpers._redact_text(plain, _enabled=True), (
+        "a false-positive start must stream exactly like a one-shot redaction"
+    )
+
+
+# ── 10. Cut monotonicity: a prefix never drags the cut forward ─────────────
+
+
+def test_marker_prefix_never_drags_the_cut_past_a_secret_start():
+    """"SG" ahead of an AWS key must not push the cut forward.
+
+    The prefix-tail check sees "SG" (a prefix of the "SG." marker) at the
+    buffer start; applying it as an absolute cut released the AWS key's
+    opening characters unmasked while the marker check only ever saw the
+    prefix. Retaining a prefix may only REDUCE the cut the secret-start
+    loop already pinned.
+    """
+    red = _redactor()
+    emitted = [red.feed(d) for d in ["SG", _FAKE_AKIA[:10], _FAKE_AKIA[10:]]]
+    joined = "".join(emitted) + red.flush()
+
+    assert _FAKE_AKIA not in joined, "the AWS key must not reassemble in the clear"
+    assert _FAKE_AKIA[:10] not in joined, (
+        "no partial key may be released before its marker completed"
+    )
+    assert joined == helpers._redact_text("SG" + _FAKE_AKIA, _enabled=True), (
+        "the streamed result must match the one-shot redaction of the whole text"
+    )
+
+
+@pytest.mark.parametrize("split", [1, 2])
+def test_short_marker_split_at_every_position_is_redacted(split):
+    """A short marker ("sk-") arriving in pieces must stay held until whole.
+
+    The opening marker can span deltas at any position; holding one
+    character is not enough — the retained run must be the longest
+    suffix that is still a prefix of a real marker.
+    """
+    secret = _FAKE_SK
+    red = _redactor()
+    emitted = [red.feed(secret[:split]), red.feed(secret[split:])]
+    joined = "".join(emitted) + red.flush()
+
+    assert secret not in joined, "a split marker must not leak its key"
+    assert joined == helpers._redact_text(secret, _enabled=True), (
+        "the streamed result must match the one-shot redaction of the whole key"
+    )
+
+
+# ── 11. Boundary payload parity: setting + echo-flag consistency ───────────
+
+
+def test_interim_boundary_text_respects_disabled_redaction(monkeypatch):
+    """With api_redact_enabled off the boundary frame stays verbatim.
+
+    The deltas and the saved-session projection honor the opt-out; masking
+    the interim frame alone made the live view diverge from both.
+    """
+    monkeypatch.setattr(
+        "api.config.load_settings", lambda: {"api_redact_enabled": False}
+    )
+    text = "here is " + _FAKE_SK + " in the prose"
+
+    assert helpers.redact_stream_boundary_text(text) == text
+
+
+def test_interim_boundary_text_accepts_the_stream_snapshot(monkeypatch):
+    """The owning redactor's snapshot wins over the live setting.
+
+    The streaming bridge passes the redactor's api_redact_enabled snapshot
+    so the boundary frame agrees with the deltas even if the setting
+    changes mid-run.
+    """
+    monkeypatch.setattr(
+        "api.config.load_settings", lambda: {"api_redact_enabled": True}
+    )
+    text = "here is " + _FAKE_SK + " in the prose"
+
+    assert helpers.redact_stream_boundary_text(text, enabled=False) == text
+    assert _FAKE_SK not in helpers.redact_stream_boundary_text(text, enabled=True)
+
+
+# ── 12. The real interim callback: setting parity and echo-flag safety ─────
+
+
+def _drive_interim_stream(monkeypatch, text, *, with_reasoning):
+    """Drive one interim boundary through the real streaming bridge.
+
+    Returns the interim_assistant payloads the SSE bridge queued. Mirrors
+    the fake-agent wiring of test_issue_progress_echo_dedupe.py so the
+    regression exercises the production on_interim_assistant closure, not
+    a re-implementation.
+    """
+    import api.streaming as streaming
+
+    run_suffix = uuid.uuid4().hex[:8]
+
+    class FakeSession:
+        def __init__(self):
+            self.session_id = "issue8901_interim_boundary_" + run_suffix
+            self.title = "Interim boundary"
+            self.workspace = "/tmp"
+            self.model = "gpt-test"
+            self.model_provider = None
+            self.profile = None
+            self.personality = None
+            self.messages = []
+            self.context_messages = []
+            self.input_tokens = 0
+            self.output_tokens = 0
+            self.estimated_cost_usd = 0.0
+            self.cache_read_tokens = 0
+            self.cache_write_tokens = 0
+            self.tool_calls = []
+            self.gateway_routing = None
+            self.gateway_routing_history = []
+            self.active_stream_id = ""
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.context_length = 0
+            self.threshold_tokens = 0
+            self.last_prompt_tokens = 0
+            self.llm_title_generated = True
+
+        def save(self, *args, **kwargs):
+            pass
+
+        def compact(self):
+            return {"session_id": self.session_id}
+
+    class InterimAgent:
+        def __init__(
+            self,
+            model=None,
+            provider=None,
+            base_url=None,
+            platform=None,
+            quiet_mode=False,
+            enabled_toolsets=None,
+            fallback_model=None,
+            session_id=None,
+            session_db=None,
+            prefill_messages=None,
+            stream_delta_callback=None,
+            reasoning_callback=None,
+            tool_progress_callback=None,
+            clarify_callback=None,
+            interim_assistant_callback=None,
+            **_kwargs,
+        ):
+            self.stream_delta_callback = stream_delta_callback
+            self.reasoning_callback = reasoning_callback
+            self.interim_assistant_callback = interim_assistant_callback
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = 0
+            self.session_cache_read_tokens = 0
+            self.session_cache_write_tokens = 0
+            self.reasoning_config = None
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+
+        def run_conversation(self, **kwargs):
+            if with_reasoning and self.reasoning_callback is not None:
+                self.reasoning_callback(text)
+            self.stream_delta_callback(text)
+            self.interim_assistant_callback(text)
+            history = kwargs.get("conversation_history", [])
+            return {
+                "messages": history + [
+                    {"role": "user", "content": kwargs["persist_user_message"]},
+                    {"role": "assistant", "content": text},
+                ]
+            }
+
+        def interrupt(self, _message):
+            pass
+
+    fake_session = FakeSession()
+    # A unique stream id per call: the bridge spawns daemon helper threads
+    # (metering, checkpoint) that look STREAMS[stream_id] up on every put();
+    # a shared id lets a previous call's leftover frames land in this queue.
+    # The session id is unique for the same reason — SESSION_AGENT_CACHE
+    # reuses the agent instance per session, and a cached instance would
+    # replay the previous call's callbacks.
+    fake_stream_id = "stream_issue8901_interim_boundary_" + run_suffix
+    fake_session.active_stream_id = fake_stream_id
+    fake_queue = queue.Queue()
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    runtime_payload = {"provider": "openai", "base_url": None, "platform": None}
+    runtime_payload["api_" + "key"] = "***"
+    fake_runtime_module.__dict__["resolve_runtime_provider"] = mock.Mock(
+        return_value=runtime_payload
+    )
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.__dict__["runtime_provider"] = fake_runtime_module
+    fake_hermes_state = types.ModuleType("hermes_state")
+    fake_hermes_state.__dict__["SessionDB"] = mock.Mock(return_value=None)
+    injected = {
+        "hermes_cli": fake_hermes_cli,
+        "hermes_cli.runtime_provider": fake_runtime_module,
+        "hermes_state": fake_hermes_state,
+    }
+    saved = {k: sys.modules.get(k, _MISSING) for k in injected}
+    sys.modules.update(injected)
+    try:
+        with mock.patch.multiple(
+            "api.streaming",
+            get_session=mock.Mock(return_value=fake_session),
+            _get_ai_agent=mock.Mock(return_value=InterimAgent),
+            resolve_model_provider=mock.Mock(
+                return_value=("gpt-test", "openai", None)
+            ),
+        ), mock.patch("api.config.get_config", return_value={}), mock.patch(
+            "api.config._resolve_cli_toolsets", return_value=[]
+        ):
+            streaming.STREAMS[fake_stream_id] = fake_queue
+            streaming._run_agent_streaming(
+                session_id=fake_session.session_id,
+                msg_text="scan",
+                model="gpt-test",
+                workspace="/tmp",
+                stream_id=fake_stream_id,
+            )
+    finally:
+        streaming.STREAMS.pop(fake_stream_id, None)
+        for k, prev in saved.items():
+            if prev is _MISSING:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = prev
+
+    return [
+        payload
+        for event, payload in list(fake_queue.queue)
+        if event == "interim_assistant"
+    ]
+
+
+def test_interim_callback_honors_disabled_redaction(monkeypatch, cleanup_test_sessions):
+    """Through the real callback: opt-out leaves the boundary frame verbatim."""
+    monkeypatch.setattr(
+        "api.config.load_settings", lambda: {"api_redact_enabled": False}
+    )
+    text = "here is " + _FAKE_SK + " in the prose"
+
+    payloads = _drive_interim_stream(monkeypatch, text, with_reasoning=False)
+
+    assert payloads, "the run must emit an interim_assistant frame"
+    assert payloads[0]["text"] == text, (
+        "with redaction off the boundary frame must carry the segment verbatim"
+    )
+
+
+def test_interim_callback_masks_the_boundary_frame_when_enabled(
+    monkeypatch, cleanup_test_sessions
+):
+    """Through the real callback: the boundary frame obeys the same contract."""
+    monkeypatch.setattr(
+        "api.config.load_settings", lambda: {"api_redact_enabled": True}
+    )
+    text = "here is " + _FAKE_SK + " in the prose"
+
+    payloads = _drive_interim_stream(monkeypatch, text, with_reasoning=False)
+
+    assert payloads, "the run must emit an interim_assistant frame"
+    assert _FAKE_SK not in payloads[0]["text"], (
+        "with redaction on the boundary frame must mask the secret like the deltas"
+    )
+    assert "here is " in payloads[0]["text"]
+    assert "in the prose" in payloads[0]["text"]
+
+
+def test_interim_echo_flag_is_withheld_when_redaction_changes_the_text(
+    monkeypatch, cleanup_test_sessions
+):
+    """A masked boundary text must not carry reasoning_echo.
+
+    The client strips the echoed paragraph out of the live Thinking card
+    by matching the payload text against the reasoning it rendered (and
+    journal replay repeats the search). When redaction changed the text
+    that match is guaranteed to fail, so the flag would only send the
+    client on a search that cannot succeed.
+    """
+    monkeypatch.setattr(
+        "api.config.load_settings", lambda: {"api_redact_enabled": True}
+    )
+    text = "checking " + _FAKE_SK + " now"
+
+    payloads = _drive_interim_stream(monkeypatch, text, with_reasoning=True)
+
+    assert payloads, "the run must emit an interim_assistant frame"
+    assert _FAKE_SK not in payloads[0]["text"]
+    assert "reasoning_echo" not in payloads[0], (
+        "a masked boundary text can never match the raw reasoning — the flag "
+        "would only trigger a doomed client-side search"
+    )
+
+
+def test_interim_echo_flag_survives_when_redaction_is_off(
+    monkeypatch, cleanup_test_sessions
+):
+    """Control: with the opt-out the echo strip and the flag still work."""
+    monkeypatch.setattr(
+        "api.config.load_settings", lambda: {"api_redact_enabled": False}
+    )
+    text = "checking the settings now"
+
+    payloads = _drive_interim_stream(monkeypatch, text, with_reasoning=True)
+
+    assert payloads, "the run must emit an interim_assistant frame"
+    assert payloads[0]["text"] == text
+    assert payloads[0].get("reasoning_echo") is True, (
+        "without redaction the payload text matches the raw reasoning, so the "
+        "echo flag must still reach the client"
+    )
+
+
+# ── 13. Tool boundaries release the held tail before the tool frame ───────
+
+
+def test_tool_boundary_flush_keeps_the_tail_in_the_previous_paragraph():
+    """A tool frame opens a new activity group; the tail stays in the prose.
+
+    The browser lifecycle gate's terminal-error scenario streams a delta
+    whose tail is a marker opening, then a tool frame, then fails the run.
+    Releasing the held run only at the terminal drops it from the live
+    snapshot — live then no longer matches settled, and the gate fails. The
+    same boundary rule as interim_assistant applies: release BEFORE the
+    tool frame.
+    """
+    red = _redactor()
+    events = []
+
+    def put(event, data):
+        events.append((event, (data or {}).get("text", "")))
+
+    head = red.feed("The last word is the key")
+    if head:
+        put("token", {"text": head})
+    _boundary_flush(red, put)
+    put("tool", {"text": "read_file"})
+
+    assert events[-2] == ("token", "key"), (
+        f"the held tail must be a token frame before the tool frame, got {events!r}"
+    )
+    assert events[-1][0] == "tool"
+    assert red.flush() == "", "a second flush after the boundary release is empty"
+
+
+def test_gateway_relay_flushes_the_tail_before_a_tool_frame():
+    """Through the real relay: a tool frame never strands the held tail.
+
+    The lifecycle gate drives the gateway relay path: message.delta, then
+    tool.started, then run.failed. Without a flush before the tool frame
+    the held character run reaches the browser after the tool row (or not
+    at all, once the terminal drops later frames), so the live snapshot
+    loses characters the settled snapshot keeps.
+    """
+    import json
+    import threading
+
+    from api import gateway_chat
+
+    emitted = []
+
+    def put_gateway_event(event_name, data):
+        emitted.append((event_name, (data or {}).get("text", "")))
+
+    lines = [
+        "data: " + json.dumps({"event": "message.delta", "delta": "the key"}),
+        "data: " + json.dumps({"event": "tool.started", "tool": "read_file",
+                               "tool_call_id": "t1", "status": "running",
+                               "args": {"path": "README.md"}}),
+        "data: " + json.dumps({"event": "run.failed", "error": "boom"}),
+    ]
+    try:
+        gateway_chat._relay_gateway_run_events(
+            _FakeSseResponse(lines),
+            "same-session",
+            "stream-1",
+            "run-1",
+            "http://gateway.invalid",
+            "",
+            put_gateway_event=put_gateway_event,
+            cancel_event=threading.Event(),
+        )
+    except RuntimeError:
+        # A terminal error frame unwinds the relay loop with a raise; that is
+        # the production contract. The point under test is the frame order
+        # BEFORE the unwind.
+        pass
+
+    tool_idx = next(
+        (i for i, (event, _text) in enumerate(emitted) if event == "tool"), None
+    )
+    assert tool_idx is not None, f"the relay must surface the tool frame, got {emitted!r}"
+    before_tool = [text for event, text in emitted[:tool_idx] if event == "token"]
+    assert "".join(before_tool) == "the key", (
+        f"the held tail must be released before the tool frame, got {emitted!r}"
     )
