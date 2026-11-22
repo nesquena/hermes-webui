@@ -11224,8 +11224,13 @@ function renderMd(raw){
     // runs before the link pass, so a stored link may contain a stashed image
     // token (e.g. `[![alt](i.png)](u)` → L token body is `\x00G0\x00`); expand
     // G tokens INSIDE the stashed link body only, never rescanning the text,
-    // so the linked image survives without re-opening the boundary bug.
-    t=t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='L'?_link_stash[+i].replace(/\x00G(\d+)\x00/g,(_,gi)=>_img_stash[+gi]):k==='G'?_img_stash[+i]:m);
+    // so the linked image survives without re-opening the boundary bug. The
+    // scoped scan is kind-bounded (\x00([A-Z]+)\d*\x00) and restores only G,
+    // so a label mixing math + text + image
+    // (e.g. `[$x$G0![alt](i.png)](u)` → body `\x00M0\x00G0\x00G0\x00`) never
+    // joins the math token's closing NUL, literal G0 and the image token's
+    // opening NUL into a fake token — everything else stays for the outer pass.
+    t=t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='L'?_link_stash[+i].replace(/\x00([A-Z]+)(\d*)\x00/g,(m2,k2,i2)=>k2==='G'?_img_stash[+i2]:m2):k==='G'?_img_stash[+i]:m);
     // Escape any plain text that isn't already wrapped in a tag we produced
     // by escaping bare < > that are not part of our own tags
     const SAFE_INLINE=/^<\/?(strong|em|del|code|a|img|br)([\s>]|$)/i;

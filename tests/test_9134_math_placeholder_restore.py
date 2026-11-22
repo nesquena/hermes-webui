@@ -216,6 +216,41 @@ class TestLinkedImageRestore:
         assert 'src="https://e.com/x.png"' in out and out.count("<img ") == 1
 
 
+    def test_math_inside_link_label_keeps_math_literal_and_link(self, driver_path):
+        r"""Math+literal G0 INSIDE the link label: `[$x$G0![alt](..)](..)`.
+
+        Greptile P1 (r4653337391): the inner scoped G restore
+        `/\x00G(\d+)\x00/g` has no token-kind boundary, so on the label body
+        `\x00M0\x00G0\x00G0\x00` it matches \x00M0's closing NUL + literal G0 +
+        the image token's opening NUL as a fake \x00G0\x00. That consumes the
+        literal as an image index, tears the math token open (leaving \x00M0
+        with no closing NUL so the outer restore can never fix it) and leaks a
+        trailing NUL. The scoped restore must scan by kind too, restoring only
+        G entries and leaving everything else for the outer single pass.
+        """
+        out = _render(driver_path, "- [$x$G0![alt](https://e.com/x.png)](https://f.com)")
+        assert "\x00" not in out, f"NUL leaked into rendered HTML. Got: {out!r}"
+        math_idx = out.find('<span class="katex-inline" data-katex="inline">x</span>')
+        literal_idx = out.find("G0")
+        a_open = out.find('<a href="https://f.com"')
+        a_close = out.find("</a>")
+        img_open = out.find("<img")
+        assert a_open >= 0 and a_close > a_open, f"link missing. Got: {out!r}"
+        # math, literal G0 and the linked image all live inside the anchor
+        for idx in (math_idx, literal_idx, img_open):
+            assert a_open < idx < a_close, (
+                f"html segment must be inside the <a>. idx={idx} (math={math_idx}, "
+                f"lit={literal_idx}, img={img_open}), a_open={a_open}, a_close={a_close}. Got: {out!r}"
+            )
+        assert math_idx < literal_idx < img_open, (
+            "math, literal G0 then img must keep their order inside the label. "
+            f"Got: {out!r}"
+        )
+        img_tag = out[img_open:out.find(">", img_open) + 1]
+        assert 'src="https://e.com/x.png"' in img_tag, f"img src wrong. Got: {img_tag!r}"
+        assert out.count("<img ") == 1, f"image duplicated. Got: {out!r}"
+
+
 class TestRegressionControls:
     """Ordinary renders must not change: links, images, code, uppercase tags.
 
