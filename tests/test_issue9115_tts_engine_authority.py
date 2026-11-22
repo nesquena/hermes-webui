@@ -210,3 +210,107 @@ def test_a_refused_engine_edit_keeps_the_truthful_refusal_indication():
     'the refused engine edit must still mark the control unapplied');
 
 """)
+
+
+# ── #9242 P1 on the engine key (Greptile discussion_r4651157429) ───────────
+# The TTS engine key takes the same near-limit path as the voice key: storage
+# can refuse the server's LONGER engine while accepting a rewrite of the cached
+# one, and hydration re-syncs that stale value through
+# `_syncSpeechPreferenceCache('tts_engine', ...)`. The landed rewrite must not
+# release the pending server engine, or an unrelated save persists the stale
+# engine over the server preference. The fix itself lives in #9242 (the written
+# value is passed into `_reconcileSpeechRefusalOnMirrorLanded`); these tests
+# cover the engine path of that shared fix.
+
+
+def test_stale_engine_rewrite_keeps_the_guard_against_unrelated_saves():
+    """#9243 engine-path coverage for #9242's P1: after a refused longer server
+    engine, hydration's stale-cache rewrite must keep the per-key guard so an
+    unrelated save omits the stale engine instead of overwriting the server."""
+    _upstream._run_native_select_scenario(r"""
+  const hasKey = (key) => Object.prototype.hasOwnProperty.call(_unappliedSpeechServerValues, key);
+
+  REFUSE = false;
+  REFUSE_LONGER = false;
+  hydrateNative('browser', 'Old Voice');
+  assert.strictEqual(store.get('hermes-tts-engine'), 'browser');
+
+  // The server's engine is longer than the cached one; near-limit storage
+  // refuses growing the entry while still accepting a rewrite of 'browser'.
+  REFUSE_LONGER = true;
+  const payload = nativePayload('elevenlabs', 'Old Voice');
+  __hydrateHead(payload);
+  __hydrate(payload);
+
+  assert.strictEqual(store.get('hermes-tts-engine'), 'browser',
+    'the longer server engine was refused, so the cache keeps the old engine');
+  assert.strictEqual(hasKey('tts_engine'), true,
+    'the refused server engine must stay pending after hydration');
+  assert.strictEqual(_unappliedSpeechServerValues['tts_engine'], 'elevenlabs',
+    'the pending entry holds the refused server engine');
+
+  // Hydration already re-synced the stale engine through
+  // `_syncSpeechPreferenceCache('tts_engine', saved)`. That write landed and
+  // must NOT release the pending server engine.
+  assert.strictEqual(hasKey('tts_engine'), true,
+    'a successful stale-cache rewrite must NOT clear the pending server engine');
+
+  // An unrelated save must omit the stale engine so the server keeps its value.
+  els.settingsNotificationsEnabled.checked = true;
+  const notifListener = els.settingsNotificationsEnabled.listeners.find((l) => l.type === 'change');
+  assert.ok(notifListener, 'notification toggle must be wired to the autosave');
+  notifListener.fn();
+  await pendingTimers.shift()();
+  const body = JSON.parse(posts[posts.length - 1].body);
+  assert.strictEqual(body.notifications_enabled, true, 'the unrelated edit is saved');
+  assert.ok(!Object.prototype.hasOwnProperty.call(body, 'tts_engine'),
+    'unrelated save must omit the withheld engine: ' + JSON.stringify(body));
+  assert.notStrictEqual(body.tts_engine, 'browser',
+    'the stale cached engine must never be written back to the server');
+
+  // The engine control keeps telling the truth about the pending server value.
+  assert.ok(els.settingsTtsEngine.title === 'settings_unapplied_note'
+    || els.settingsTtsEngine.dataset.unapplied === 'true',
+    'the engine control keeps its unapplied indication');
+
+""")
+
+
+def test_landed_server_engine_releases_the_guard_for_unrelated_saves():
+    """#9243 control for the engine path: once the real server engine lands the
+    guard releases, so the fix withholds the key only while the server value is
+    pending — not forever. The landing sync carries the server value itself, so
+    this pins the `writtenValue` match branch (not the hydration-wide recount,
+    which `_mirrorSpeechSettingsFromServer` performs on its own)."""
+    _upstream._run_native_select_scenario(r"""
+  const hasKey = (key) => Object.prototype.hasOwnProperty.call(_unappliedSpeechServerValues, key);
+
+  REFUSE = false;
+  REFUSE_LONGER = false;
+  hydrateNative('browser', 'Old Voice');
+
+  REFUSE_LONGER = true;
+  const payload = nativePayload('elevenlabs', 'Old Voice');
+  __hydrateHead(payload);
+  __hydrate(payload);
+  assert.strictEqual(hasKey('tts_engine'), true, 'the refused server engine is pending');
+
+  // Storage frees up and the real server engine finally lands through a sync
+  // that carries the server value itself.
+  REFUSE_LONGER = false;
+  assert.strictEqual(_syncSpeechPreferenceCache('tts_engine', 'elevenlabs'), true,
+    'storage accepts the server engine once it is no longer growing the entry');
+  assert.strictEqual(store.get('hermes-tts-engine'), 'elevenlabs',
+    'the real server engine landed in the cache');
+  assert.strictEqual(hasKey('tts_engine'), false,
+    'a landed server engine must release the pending protection');
+
+  els.settingsNotificationsEnabled.checked = true;
+  const notifListener = els.settingsNotificationsEnabled.listeners.find((l) => l.type === 'change');
+  notifListener.fn();
+  await pendingTimers.shift()();
+  const body = JSON.parse(posts[posts.length - 1].body);
+  assert.ok(Object.prototype.hasOwnProperty.call(body, 'tts_engine'),
+    'the landed engine is no longer withheld from unrelated saves: ' + JSON.stringify(body));
+
+""")
