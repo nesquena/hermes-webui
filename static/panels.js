@@ -6162,14 +6162,25 @@ function _renderMemoryEdit(section) {
   if (ta) ta.focus();
 }
 
-async function loadNotesSources(force) {
+// #9077: External notes source cache outlives the load; publish only if the
+// reply still belongs to the active profile and has not been superseded.
+async function loadNotesSources(force, isStale) {
   if (_notesSourcesData && !force) return _notesSourcesData;
+  const owner = S.activeProfile;
+  const stale = () => S.activeProfile !== owner || (typeof isStale === 'function' && isStale());
+  let data;
   try {
-    _notesSourcesData = await api('/api/notes/sources');
+    data = await api('/api/notes/sources');
+    if (data && typeof data === 'object' && !('error' in data)) {
+      data.error = null;
+    }
   } catch (e) {
-    _notesSourcesData = {sources: [], automatic_recall_unchanged: true, error: e && e.message ? e.message : String(e)};
+    data = {sources: [], automatic_recall_unchanged: true, error: e && e.message ? e.message : String(e)};
   }
-  return _notesSourcesData;
+  if (!stale()) {
+    _notesSourcesData = data;
+  }
+  return data;
 }
 
 function selectExternalNotesSource(source) {
@@ -8406,7 +8417,7 @@ async function loadMemory(force) {
       _currentMemorySection = null;
     }
     if (_currentMemorySection === 'external_notes') {
-      await loadNotesSources(!!force);
+      await loadNotesSources(!!force, stale);
       if (stale()) return;
     }
     if (panel) {
