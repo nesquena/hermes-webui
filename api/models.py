@@ -1394,6 +1394,32 @@ _MESSAGE_COUNT_MARKER = 1
 _ROW_LAYOUT_VERSION = 1
 
 
+def _decode_metadata_window(raw):
+    """Decode one budgeted-read window, rejecting malformed metadata bytes.
+
+    Returns the decoded text, or ``None`` when ``raw`` is not valid UTF-8. The
+    ONLY truncation a window reader may excuse is an incomplete code point at
+    the very end of the window: the byte budget can split a multi-byte character
+    in half, and everything up to that point is still usable. Every other decode
+    error means the file itself is malformed, and the full reader
+    (``json.loads(path.read_text(encoding='utf-8'))``) rejects such a file
+    outright. Decoding with ``errors='ignore'`` instead silently DELETES the bad
+    bytes, so the prefix parses and the row is listed with altered text -- a row
+    the full reader would have skipped.
+    """
+    try:
+        return raw.decode('utf-8')
+    except UnicodeDecodeError as exc:
+        if exc.reason != 'unexpected end of data':
+            return None
+        # The decoder reports the FIRST error, so everything before it is valid
+        # bytes: a truncated tail is all this branch can have seen.
+        try:
+            return raw[:exc.start].decode('utf-8')
+        except UnicodeDecodeError:
+            return None
+
+
 def _read_metadata_json_prefix(path, max_prefix_bytes=_METADATA_PREFIX_MAX_BYTES):
     """Read only the metadata portion before the large arrays.
 
@@ -1444,8 +1470,13 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=_METADATA_PREFIX_MAX_BYTES
             raw += chunk
             # A byte budget can truncate a multi-byte character at the boundary;
             # dropping it is safe because a stop key straddling the cap is a miss
-            # either way.
-            buf = raw.decode('utf-8', errors='ignore')
+            # either way. Anything ELSE that fails to decode is malformed
+            # metadata, and the full reader rejects that whole file -- so this
+            # window must decline it too instead of serving a prefix with the bad
+            # bytes silently deleted (``errors='ignore'``).
+            buf = _decode_metadata_window(raw)
+            if buf is None:
+                return None
             stop_pos = _find_top_level_json_key(buf, 'messages')
             scenes_pos = _find_top_level_json_key(buf, 'anchor_activity_scenes')
             if scenes_pos is not None and (stop_pos is None or scenes_pos < stop_pos):

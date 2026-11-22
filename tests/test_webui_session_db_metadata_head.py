@@ -1032,7 +1032,7 @@ def test_unreadable_sidecar_falls_back_to_its_own_row(session_store, monkeypatch
         return real_budgeted(path, *args, **kwargs)
 
     monkeypatch.setattr(models, "_read_metadata_json_prefix", _unreadable)
-    monkeypatch.setattr(DB, "_read_metadata_head", classmethod(lambda cls, p: None))
+    monkeypatch.setattr(DB, "_probe_metadata_head", classmethod(lambda cls, p: (None, False)))
 
     assert DB._read_metadata_row_source(doomed) is None
     rows = DB(session_store).list_sessions()
@@ -1138,3 +1138,274 @@ def test_head_derived_row_keeps_the_eager_checkpoint_fact(session_store):
     assert isinstance(plain_source, dict) and "messages" not in plain_source
     rows = {row["session_id"]: row for row in db.list_sessions()}
     assert "_pending_hidden_wakeup_at" not in rows["plain"]
+
+
+# ─── Re-gate: the two RED blockers, exercised through the real writers ────────
+
+
+def _save_pending_wakeup_without_a_checkpointed_row(session_store, sid="owed", now=5000.0):
+    """Save a sidecar whose pending hidden wakeup never landed in the transcript.
+
+    The session is in the eager-checkpoint shape (``pending_user_source`` names
+    a hidden delegation wakeup and the stamp exists in memory) but the
+    transcript carries no ``delegation_wakeup`` row, so ``Session.save()`` --
+    which validates the fact against the rows it is about to persist -- OMITS
+    it from the file. Nothing is checkpointed, so nothing is excluded, and the
+    sidebar still owes that row its discount.
+    """
+    session = models.Session(
+        session_id=sid,
+        title="Owed Wakeup",
+        workspace=str(session_store.parent),
+        model="test-model",
+        messages=[
+            {"role": "user", "content": "Do the task.", "timestamp": now - 1000.0},
+            {"role": "assistant", "content": "working", "timestamp": now - 999.0},
+        ],
+        pending_user_message="Do the task.",
+        pending_user_source="delegation_wakeup",
+        pending_started_at=now,
+        _pending_hidden_wakeup_at=now,
+    )
+    session.save()
+    return session_store / f"{sid}.json", now
+
+
+def test_update_metadata_refuses_the_eager_checkpoint_fact(session_store):
+    """Blocker 1: the row-projection field must not be writable.
+
+    ``_pending_hidden_wakeup_at`` is a writer-vouched fact: ``Session.load()``
+    trusts a fact read from a sidecar (``_pending_hidden_wakeup_from_writer``)
+    and skips the transcript check, so persisting an unvalidated value through
+    ``update_metadata()`` laundered it into trust. Frozen master rejects the key
+    as unknown; the projection-only field set must keep that rejection.
+    """
+    path, now = _save_pending_wakeup_without_a_checkpointed_row(session_store)
+    sid = "owed"
+    db = DB(session_store)
+    before = path.read_bytes()
+
+    # Precondition: the real writer refused the fact (no checkpointed row), so
+    # this is exactly the value master would never let reach the file.
+    assert "_pending_hidden_wakeup_at" not in json.loads(before.decode("utf-8"))
+
+    with pytest.raises(
+        ValueError, match="Unsafe session metadata fields: _pending_hidden_wakeup_at"
+    ):
+        db.update_metadata(sid, {"_pending_hidden_wakeup_at": now})
+
+    # Rejected before the read/write pair: the sidecar is untouched.
+    assert path.read_bytes() == before
+
+    # The downstream symptom that made this a blocker: a reloaded session must
+    # not emit the fact, or the sidebar treats the still-owed hidden row as
+    # already excluded.
+    loaded = models.Session.load(sid)
+    assert loaded is not None
+    assert loaded.compact(include_runtime=True).get("_pending_hidden_wakeup_at") is None
+    assert "_pending_hidden_wakeup_at" not in DB(session_store).list_sessions()[0]
+
+    # Control: ordinary metadata is still writable, so the rejection above is
+    # the projection/write split and not an over-tightened allowlist.
+    row = db.update_metadata(sid, {"archived": True})
+    assert row["archived"] is True
+
+
+def test_invalid_utf8_metadata_is_skipped_like_the_full_read(session_store):
+    """Blocker 2: a sidecar the full reader rejects is not listed from a prefix.
+
+    One invalid UTF-8 byte inside the saved ``title``. The full reader
+    (``json.loads(path.read_text(encoding="utf-8"))``) rejects the file, so
+    every prefix path must decline it as well instead of decoding with
+    ``errors="ignore"``, silently deleting the byte and listing the row with
+    altered text.
+    """
+    path = _save_modern_session(
+        session_store,
+        sid="corrupt",
+        messages=_big_messages(count=120, text_size=1200),
+        title="ValidTitle",
+    )
+    _save_modern_session(
+        session_store, sid="healthy", messages=[{"role": "user", "content": "hi"}], title="Healthy"
+    )
+    raw = path.read_bytes()
+    assert raw.count(b'"ValidTitle"') == 1
+    path.write_bytes(raw.replace(b'"ValidTitle"', b'"ValidTi\xfftle"', 1))
+
+    # Frozen master's behaviour: the whole document is unreadable.
+    assert DB._read_path(path) is None
+    # So must the strict head read ...
+    assert DB._read_metadata_head(path) is None
+    # ... and the budgeted fallback, which is the path that admitted the row.
+    assert models._read_metadata_json_prefix(path) is None
+
+    db = DB(session_store)
+    assert [row["session_id"] for row in db.list_sessions()] == ["healthy"]
+    assert db.read_session("corrupt") is None
+
+
+def test_invalid_utf8_beyond_the_head_window_is_not_listed(session_store):
+    """The budgeted reader's own corrupt-metadata case, past the head window.
+
+    Metadata larger than the head window forces the budgeted fallback (the head
+    sees no cut at all). A byte that is invalid UTF-8 deep inside that metadata
+    must make the fallback decline, not decode lossily and admit the row.
+    """
+    filler = "Y" * (DB._METADATA_HEAD_BYTES + 8 * 1024)
+    payload = {
+        "session_id": "deep",
+        "title": "Deep Corruption",
+        "workspace": "/tmp/deep",
+        "model": "test-model",
+        "created_at": 100.0,
+        "updated_at": 200.0,
+        "last_message_at": 200.0,
+        "compression_anchor_summary": filler,
+        "message_count": 2,
+        "_mc_v": models._MESSAGE_COUNT_MARKER,
+        "_row_layout": models._ROW_LAYOUT_VERSION,
+        "archived": False,
+        "profile": "default",
+        "pinned": False,
+        "raw_source": "webui",
+        "source_label": "WebUI",
+        "messages": [{"role": "user", "content": "hi"}] * 2,
+    }
+    path = session_store / "deep.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    raw = bytearray(path.read_bytes())
+    corrupt_at = raw.index(b"Y" * 32) + DB._METADATA_HEAD_BYTES + 4096
+    # ``\xc3`` followed by a non-continuation byte: one byte, no shift, so the
+    # JSON text is still structurally intact and only the UTF-8 is broken.
+    assert corrupt_at > DB._METADATA_HEAD_BYTES
+    raw[corrupt_at] = 0xC3
+    path.write_bytes(bytes(raw))
+
+    assert DB._read_path(path) is None
+    assert DB._read_metadata_head(path) is None
+    assert models._read_metadata_json_prefix(path) is None
+    assert DB(session_store).list_sessions() == []
+
+
+def test_window_decode_tolerates_only_a_code_point_cut_at_the_boundary():
+    """The tolerance is narrow: a truncated tail is excusable, corruption is not.
+
+    Without this branch the strict window would decline a legitimate large
+    prefix whose last byte lands inside a multi-byte character; with a wider
+    one it would keep deleting corrupted bytes as ``errors="ignore"`` did.
+    """
+    base = '{"title": "ok→'
+    raw = base.encode("utf-8")
+    assert models._decode_metadata_window(raw) == base
+    # The byte budget cut the three-byte character: drop it, keep the rest.
+    assert models._decode_metadata_window(raw[:-1]) == base[:-1]
+    assert models._decode_metadata_window(raw[:-2]) == base[:-1]
+    # Any other decode error is malformed metadata and must decline.
+    assert models._decode_metadata_window(b'{"title": "a\xffb"}') is None
+    assert models._decode_metadata_window(raw[:-1] + b"\xff") is None
+
+
+def test_budgeted_prefix_with_multibyte_metadata_still_lists_the_row(session_store):
+    """End-to-end control for the strict decode: a valid prefix is still served."""
+    summary = "→" * 30000  # 90,000 bytes of 3-byte code points inside the prefix
+    payload = {
+        "session_id": "wide",
+        "title": "Multibyte Prefix",
+        "workspace": "/tmp/wide",
+        "model": "test-model",
+        "created_at": 100.0,
+        "updated_at": 200.0,
+        "last_message_at": 200.0,
+        "compression_anchor_summary": summary,
+        "message_count": 2,
+        "_mc_v": models._MESSAGE_COUNT_MARKER,
+        "_row_layout": models._ROW_LAYOUT_VERSION,
+        "archived": False,
+        "profile": "default",
+        "pinned": False,
+        "raw_source": "webui",
+        "source_label": "WebUI",
+        "messages": [{"role": "user", "content": "hi"}] * 2,
+    }
+    path = session_store / "wide.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    assert DB._read_metadata_head(path) is None, "the prefix must overflow the head window"
+    raw_prefix = models._read_metadata_json_prefix(path)
+    assert raw_prefix is not None, "a valid prefix must not be read as corrupt metadata"
+    assert json.loads(raw_prefix)["compression_anchor_summary"] == summary
+
+    rows = DB(session_store).list_sessions()
+    assert [row["session_id"] for row in rows] == ["wide"]
+    assert rows[0]["title"] == "Multibyte Prefix"
+
+
+def test_torn_body_is_not_listed(session_store, monkeypatch):
+    """A marked sidecar with intact metadata but a torn body is skipped.
+
+    Frozen master's full read rejects the truncated document, so the head read
+    must not list the session on the strength of its metadata alone. The tail
+    is checked structurally (the writer's object always ends with ``}``), which
+    keeps the multi-megabyte parse off the path.
+    """
+    path = _save_modern_session(
+        session_store, sid="torn", messages=_big_messages(count=200, text_size=1000)
+    )
+    raw = path.read_bytes()
+    assert raw.rstrip()[-1:] == b"}"
+    path.write_bytes(raw[: int(len(raw) * 0.6)])
+    assert path.read_bytes().rstrip()[-1:] != b"}"
+
+    assert DB._read_path(path) is None, "the full reader must reject the torn document"
+    assert DB._read_metadata_head(path) is None
+
+    # The metadata itself is intact and admissible: the tail check is what
+    # declines the row, not a broken prefix.
+    with monkeypatch.context() as patch_ctx:
+        patch_ctx.setattr(DB, "_document_closes", staticmethod(lambda fh: True))
+        assert isinstance(DB._read_metadata_head(path), dict)
+
+    assert DB(session_store).list_sessions() == []
+
+
+def test_head_row_equals_the_full_row_for_every_projected_field(session_store):
+    """Prove the whole row, not only ``_PROJECTED_FIELDS``.
+
+    The admission set is the six measured fields plus the ordering values; the
+    row itself returns every ``_METADATA_FIELDS`` key present in the document.
+    A writer sidecar therefore has to agree key for key with the full read.
+    """
+    session = models.Session(
+        session_id="rich",
+        title="Rich",
+        workspace=str(session_store.parent),
+        model="test-model",
+        model_provider="test-provider",
+        project_id="proj-1",
+        profile="default",
+        pinned=True,
+        archived=False,
+        raw_source="webui",
+        source_label="WebUI",
+        input_tokens=11,
+        output_tokens=22,
+        estimated_cost=0.5,
+        personality="concise",
+        enabled_toolsets=["a", "b"],
+        composer_draft="draft text",
+        messages=_big_messages(count=200, text_size=800),
+    )
+    session.save()
+    path = session_store / "rich.json"
+
+    source = DB._read_metadata_row_source(path)
+    full = DB._read_path(path)
+    assert isinstance(source, dict) and isinstance(full, dict)
+    assert "messages" not in source, "the head row must come from a cut prefix"
+
+    expected = session_db._METADATA_FIELDS & set(full)
+    missing = sorted(expected - set(source))
+    assert not missing, f"the head row dropped metadata the full read carries: {missing}"
+    assert DB._metadata_row("rich", source) == DB._metadata_row("rich", full)

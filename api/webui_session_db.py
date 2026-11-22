@@ -193,12 +193,36 @@ _METADATA_FIELDS = frozenset({
         # deliberately NOT in ``_PROJECTED_FIELDS``: the writer omits it whenever
         # no checkpoint is pending, and that set is a *required* admission key --
         # listing a conditional field there would decline the head read for every
-        # steady-state sidecar.
+        # steady-state sidecar. It is also absent from
+        # ``_WRITABLE_METADATA_FIELDS``: projection is read-only, so
+        # ``update_metadata()`` rejects the key exactly as frozen master does.
         "_pending_hidden_wakeup_at",
     }
 )
 
 _UNSAFE_FIELDS = frozenset({"session_id", "messages", "tool_calls", "message_count"})
+
+#: Fields the row *projection* carries but no generic writer may ever persist.
+#:
+#: ``_pending_hidden_wakeup_at`` is a writer-vouched fact: ``Session.save()``
+#: emits it only after validating it against the transcript it just wrote (see
+#: ``models._validated_pending_hidden_wakeup_at``). ``Session.load()`` trusts a
+#: fact read back from a sidecar as already validated
+#: (``_pending_hidden_wakeup_from_writer``) and therefore skips the transcript
+#: check. Admitting the key through ``update_metadata()`` would launder an
+#: arbitrary value into that trust: a fact the real writer refuses (a pending
+#: turn with no checkpointed row) would be persisted, reloaded as vouched, and
+#: emitted by ``compact(include_runtime=True)``, so the sidebar would treat a
+#: still-owed hidden row as already excluded. Projection and writability are
+#: therefore separate sets -- same rejection frozen master gives the unknown
+#: key.
+_ROW_VOUCHED_FIELDS = frozenset({"_pending_hidden_wakeup_at"})
+
+#: Metadata keys the generic writers (``update_metadata``, ``archive``) may
+#: persist. ``_METADATA_FIELDS`` is the row *projection* allowlist and must stay
+#: a superset of this: growing one to carry a read-only field must never widen
+#: the other.
+_WRITABLE_METADATA_FIELDS = _METADATA_FIELDS - _ROW_VOUCHED_FIELDS
 
 #: Fields ``_metadata_row`` derives itself, so a cut prefix is only complete
 #: when the metadata it needs is already present alongside them.
@@ -256,7 +280,9 @@ class WebUIJsonSessionDB:
         """
         if not isinstance(fields, dict):
             raise TypeError("fields must be a dict")
-        unsafe = sorted((set(fields) & _UNSAFE_FIELDS) | (set(fields) - _METADATA_FIELDS))
+        unsafe = sorted(
+            (set(fields) & _UNSAFE_FIELDS) | (set(fields) - _WRITABLE_METADATA_FIELDS)
+        )
         if unsafe:
             raise ValueError(f"Unsafe session metadata fields: {', '.join(unsafe)}")
 
@@ -388,16 +414,41 @@ class WebUIJsonSessionDB:
         prefix that overflowed the window), so the caller can fall back to
         ``models._read_metadata_json_prefix`` or a full parse.
         """
+        return cls._probe_metadata_head(path)[0]
+
+    @classmethod
+    def _probe_metadata_head(cls, path: Path) -> tuple[dict[str, Any] | None, bool]:
+        """Return ``(_read_metadata_head(path), cut_seen)``.
+
+        ``cut_seen`` is True when the head window physically contained the
+        top-level ``messages`` key, i.e. when the only reason the cut was
+        refused is the layout/commitment proof rather than a prefix that
+        overflowed the window. The caller uses it to decide whether the budgeted
+        reader (which only ever finds a cut further out) can help at all: a head
+        that already saw the cut and still failed proves the prefix is not
+        admissible, so re-reading up to 1 MiB of the same prefix only pays for a
+        full parse it was going to take anyway.
+        """
         try:
             with open(path, "rb") as fh:
                 head = fh.read(cls._METADATA_HEAD_BYTES)
+                cut_seen = _metadata_cut_offset(head) >= 0
+                if not cut_seen:
+                    return None, False
+                # The cut is only a shortcut under the writer's layout: when the
+                # head does not prove every metadata key precedes ``messages``,
+                # refuse it and let the caller read the document whole.
+                if not _head_shows_metadata_first(head):
+                    return None, True
+                # A cut prefix can only be the row if the document it was cut
+                # from is a whole document. A sidecar torn inside the body keeps
+                # intact metadata -- the prefix parses and would list a session
+                # the full reader rejects as truncated. One cheap tail read
+                # settles it: the writer's JSON object always ends with ``}``.
+                if not cls._document_closes(fh):
+                    return None, True
         except OSError:
-            return None
-        # The cut is only a shortcut under the writer's layout: when the head
-        # does not prove every metadata key precedes ``messages``, refuse it and
-        # let the caller read the document whole.
-        if not _head_shows_metadata_first(head):
-            return None
+            return None, False
         cut = _metadata_cut_offset(head)
         prefix = head[:cut].rstrip()
         # Drop any trailing separator so the object closes cleanly.
@@ -406,8 +457,29 @@ class WebUIJsonSessionDB:
         try:
             data = json.loads(prefix.decode("utf-8") + "\n}")
         except (UnicodeDecodeError, json.JSONDecodeError):
-            return None
-        return data if isinstance(data, dict) else None
+            return None, True
+        return (data if isinstance(data, dict) else None), True
+
+    @staticmethod
+    def _document_closes(fh) -> bool:
+        """True when the open sidecar ends with the closing brace of its object.
+
+        The check is deliberately structural, not a parse: the last non-blank
+        byte of a document written by ``json.dump`` is ``}``. A file truncated
+        inside ``messages``/``tool_calls``/the scenes map fails it, so a torn
+        sidecar is skipped exactly as the full reader skips it (frozen master),
+        without paying for the multi-megabyte parse the head read exists to
+        avoid. Trailing blank lines are allowed.
+        """
+        try:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            window = min(64, size)
+            fh.seek(size - window)
+            tail = fh.read(window)
+        except OSError:
+            return False
+        return tail.rstrip()[-1:] == b"}"
 
     @classmethod
     def _read_metadata_row_source(cls, path: Path) -> dict[str, Any] | None:
@@ -427,7 +499,7 @@ class WebUIJsonSessionDB:
         silently drops those fields from the row, so nothing but the explicit
         layout marker admits a prefix -- any other shape takes the full read.
         """
-        data = cls._read_metadata_head(path)
+        data, cut_seen = cls._probe_metadata_head(path)
         if not _has_complete_row_layout(data):
             # Either metadata overflowed the head window (measured worst case: a
             # 73 KB ``compression_anchor_summary``, #4633), the layout is not the
@@ -440,11 +512,20 @@ class WebUIJsonSessionDB:
             # instead of stopping at a byte offset -- and it is held to the same
             # layout proof.
             #
+            # It is consulted ONLY when the head saw no cut at all
+            # (``cut_seen`` False): the budgeted reader can only find a cut
+            # further out, so if the head already found ``messages`` and still
+            # failed the proof, the extra window holds the same unusable prefix
+            # -- its 64 KiB to 1 MiB of reads buy nothing ahead of the full
+            # parse that follows.
+            #
             # The shared reader opens the file itself, so this fallback needs
             # the same error boundary the head read has: a sidecar removed or
             # unreadable after enumeration must skip its own row, never raise
             # out of the whole ``list_sessions()``.
             data = None
+            if cut_seen:
+                return cls._read_path(path)
             try:
                 raw_prefix = models._read_metadata_json_prefix(path)
             except (OSError, ValueError):
