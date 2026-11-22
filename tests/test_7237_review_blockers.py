@@ -2218,3 +2218,34 @@ class TestRoundNDirectBranchDiscriminators:
             "zero rows; it must not fail closed and drop the raw context "
             "(#7237 round-N blocker 2)"
         )
+
+
+def test_settlement_reports_first_projected_mismatch(caplog):
+    caplog.set_level("INFO")
+    projected = [
+        {"role": "user", "content": "private-prompt"},
+        {"role": "assistant", "tool_calls": [{"id": "private-tool"}]},
+        {"role": "tool", "content": "private-result"},
+    ]
+    raw = [dict(row, timestamp=1) for row in projected]
+    reply = {"role": "assistant", "content": "new reply"}
+    changed = [projected[0], dict(projected[1], tool_calls=[]),
+               dict(projected[2], content="changed"), reply]
+    for returned, detail in [
+        (changed, "index=1 field=tool_calls projected_len=3 returned_len=4"),
+        (projected[:2], "index=2 field=returned_exhausted projected_len=3 returned_len=2"),
+    ]:
+        caplog.clear()
+        settled, _ = _dedupe_replayed_context_messages(
+            raw, returned, "next", None, projected_history=projected,
+        )
+        assert settled == raw
+        assert detail in caplog.text
+        assert "private-" not in caplog.text
+
+    caplog.clear()
+    settled, _ = _dedupe_replayed_context_messages(
+        raw, raw + [reply], "next", None, projected_history=projected,
+    )
+    assert settled == raw + [reply]
+    assert "projected_len=" not in caplog.text
