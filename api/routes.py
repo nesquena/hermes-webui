@@ -8507,7 +8507,8 @@ def _login_client_ip(handler) -> str:
     X-Forwarded-For through and the client could pick its bucket. Every field
     of both headers is checked, as the resolver reads them all: fall back to the
     raw peer when they differ, a field is empty, X-Real-IP is repeated with
-    different values, or a value is not an IP address.
+    different values, a value is not an IP address, or the forwarded client
+    carries an IPv6 zone ID ("fe80::1%eth0").
 
     A request with no X-Forwarded-For keys on the raw peer even when X-Real-IP
     is a valid address: X-Real-IP alone may be the client's own value relayed
@@ -8541,7 +8542,11 @@ def _login_client_ip(handler) -> str:
                     _forwarded_client_ip_from_trusted_proxy(handler, consult_real_ip=False)
                 )
                 real_ips = {ipaddress.ip_address(v.strip()) for v in _fields("X-Real-IP")}
-                if real_ips <= {client}:
+                # An IPv6 zone ID ("fe80::1%eth0") is free-form header text
+                # that ipaddress keeps verbatim (control characters included)
+                # and that means nothing off-host. Treat a scoped forwarded
+                # client as unusable, as the request log does. IPv4 has none.
+                if getattr(client, "scope_id", None) is None and real_ips <= {client}:
                     return str(client)
         except ValueError:
             pass
@@ -15036,7 +15041,7 @@ _LOGIN_LOCALE = {
     "de": {
         "lang": "de-DE",
         "title": "Anmelden",
-        "subtitle": "Geben Sie Ihr Passwort ein, um fortzufahren",
+        "subtitle": "Gib dein Passwort ein, um fortzufahren",
         "placeholder": "Passwort",
         "btn": "Anmelden",
         "invalid_pw": "Ung\u00fcltiges Passwort",
@@ -19509,7 +19514,8 @@ def handle_get(handler, parsed) -> bool:
         qs = parse_qs(parsed.query)
         category = qs.get("category", [None])[0]
         data = _skills_list_from_dir(_active_skills_dir(), category=category)
-        return j(handler, {"skills": data.get("skills", [])})
+        # ``profile``: the owner the panel's writes echo back as expected_profile (#9077).
+        return j(handler, {"skills": data.get("skills", []), "profile": _get_active_profile_name()})
 
     if parsed.path == "/api/skills/usage":
         from api.skill_usage import read_skill_usage
@@ -20504,17 +20510,22 @@ def handle_post(handler, parsed) -> bool:
         requested_profile, requested_profile_invalid = _new_session_requested_profile(body)
         if requested_profile_invalid:
             return bad(handler, "invalid profile", 400)
+        # Stage timers: one [SLOW] line (same 2s threshold / _safe_webui_print
+        # route as GET /api/session) so tail latency can be attributed.
+        _sn_t0 = time.monotonic()
         workspace_prev_session_id = body.get("prev_session_id")
         if workspace_prev_session_id and not _session_id_visible_to_request_profile(
             handler, workspace_prev_session_id, emit_error=False
         ):
             workspace_prev_session_id = None
+        _sn_t1 = time.monotonic()
         try:
             workspace = _resolve_new_session_workspace(
                 body, workspace_prev_session_id, profile=requested_profile or None
             )
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
+        _sn_t2 = time.monotonic()
         worktree_info = None
         worktree_skipped = None
         # Three-value worktree model (#6022): an explicit body value always
@@ -20567,6 +20578,7 @@ def handle_post(handler, parsed) -> bool:
             except Exception as e:
                 logger.exception("failed to create worktree-backed session")
                 return bad(handler, f"Failed to create worktree: {e}", status=500)
+        _sn_t3 = time.monotonic()
         model, model_provider = _session_model_state_from_request(
             body.get("model"),
             body.get("model_provider"),
@@ -20631,6 +20643,7 @@ def handle_post(handler, parsed) -> bool:
                 # thread the drain snapshot already missed).
                 if _register_background_commit_thread(t):
                     t.start()
+        _sn_t4 = time.monotonic()
         s = new_session(
             workspace=workspace,
             model=model,
@@ -20640,12 +20653,14 @@ def handle_post(handler, parsed) -> bool:
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,
         )
+        _sn_t5 = time.monotonic()
         if worktree_info:
             publish_session_list_changed(
                 "session_new",
                 profile=getattr(s, "profile", None),
                 session_id=getattr(s, "session_id", None),
             )
+        _sn_t6 = time.monotonic()
         payload = {
             "session": public_session_projection(s.compact() | {"messages": s.messages})
         }
@@ -20653,7 +20668,24 @@ def handle_post(handler, parsed) -> bool:
             # Config-default worktree was skipped (non-git workspace); tell the
             # client the session is plain so the UI doesn't assume isolation.
             payload["worktree_skipped"] = worktree_skipped
-        return j(handler, payload)
+        _sn_t7 = time.monotonic()
+        resp = j(handler, payload)
+        _sn_t8 = time.monotonic()
+        _sn_total_ms = (_sn_t8 - _sn_t0) * 1000
+        _slow_print = getattr(handler, '_safe_webui_print', None)
+        if callable(_slow_print) and _sn_total_ms >= 2000:
+            _slow_print(
+                "[SLOW] session_new total=%.1fms prev_check=%.1fms workspace=%.1fms "
+                "worktree=%.1fms prep=%.1fms new_session=%.1fms publish=%.1fms "
+                "projection=%.1fms json_write=%.1fms" % (
+                    _sn_total_ms,
+                    (_sn_t1 - _sn_t0) * 1000, (_sn_t2 - _sn_t1) * 1000,
+                    (_sn_t3 - _sn_t2) * 1000, (_sn_t4 - _sn_t3) * 1000,
+                    (_sn_t5 - _sn_t4) * 1000, (_sn_t6 - _sn_t5) * 1000,
+                    (_sn_t7 - _sn_t6) * 1000, (_sn_t8 - _sn_t7) * 1000,
+                )
+            )
+        return resp
 
     if parsed.path == "/api/session/compression-recovery/start":
         return _handle_session_compression_recovery_start(handler, body)
@@ -29200,6 +29232,7 @@ def _handle_memory_read(handler, parsed=None):
             "project_context_mtime": project_context["mtime"],
             "project_context_shadowed": project_context["shadowed"],
             "external_notes_enabled": _external_notes_sources_enabled(cfg),
+            "profile": _get_active_profile_name(),  # write owner, see _refuse_stale_profile_write
         },
     )
 
@@ -37171,11 +37204,53 @@ def _handle_handoff_summary(handler, body):
         })
 
 
+_STALE_PROFILE_WRITE_TEXT = {
+    "memory": "This editor was opened for profile '{expected}', but the active profile is now '{active}'. "
+              "Nothing was saved. Your text is still here: copy it before you close or reload this page.",
+    "toggle": "This list was loaded for profile '{expected}', but the active profile is now '{active}'. "
+              "Nothing was changed; the list now shows '{active}'.",
+    "save": "This request was made for profile '{expected}', but the active profile is now '{active}'. "
+            "Nothing was saved.",
+    "delete": "This request was made for profile '{expected}', but the active profile is now '{active}'. "
+              "Nothing was deleted.",
+}
+
+
+def _refuse_stale_profile_write(handler, body, surface: str) -> bool:
+    """Refuse (409) a Memory/Skills panel write made from another profile's data (#9077).
+
+    The panel echoes the ``profile`` its GET reply was served for as
+    ``expected_profile``. The active profile is a shared cookie, so it can move
+    under a tab (another tab, a late reply, a session-load switch); a mismatch
+    would write that profile's stale view here. An absent field (or JSON null)
+    keeps today's behaviour; any other value must be a non-blank string, and a
+    malformed one is refused (400) rather than read as absent or coerced.
+    """
+    if not isinstance(body, dict) or body.get("expected_profile") is None:
+        return False
+    expected = body["expected_profile"]
+    if not isinstance(expected, str) or not expected.strip():
+        bad(handler, "expected_profile must be a non-empty string", 400)
+        return True
+    active = _get_active_profile_name()
+    if _profiles_match(expected, active):
+        return False
+
+    def shown(name):  # the root's aliases display as 'default'
+        return "default" if _is_root_profile(name) else name
+
+    message = _STALE_PROFILE_WRITE_TEXT[surface].format(expected=shown(expected), active=shown(active))
+    j(handler, {"error": message, "code": "profile_mismatch"}, status=409)
+    return True
+
+
 def _handle_skill_save(handler, body):
     try:
         require(body, "name", "content")
     except ValueError as e:
         return bad(handler, str(e))
+    if _refuse_stale_profile_write(handler, body, "save"):
+        return
     skill_name = body["name"].strip().lower().replace(" ", "-")
     if not skill_name or "/" in skill_name or ".." in skill_name:
         return bad(handler, "Invalid skill name")
@@ -37207,6 +37282,8 @@ def _handle_skill_delete(handler, body):
         require(body, "name")
     except ValueError as e:
         return bad(handler, str(e))
+    if _refuse_stale_profile_write(handler, body, "delete"):
+        return
     import shutil
 
     skill_name = str(body["name"]).strip().lower().replace(" ", "-")
@@ -37286,6 +37363,8 @@ def _handle_skill_toggle(handler, body):
         require(body, "name", "enabled")
     except ValueError as e:
         return bad(handler, str(e))
+    if _refuse_stale_profile_write(handler, body, "toggle"):
+        return
 
     name = body["name"].strip()
     enabled = bool(body["enabled"])
@@ -37362,6 +37441,8 @@ def _handle_memory_write(handler, body):
         require(body, "section", "content")
     except ValueError as e:
         return bad(handler, str(e))
+    if _refuse_stale_profile_write(handler, body, "memory"):
+        return
     section = body["section"]
 
     # Respect memory_enabled and user_profile_enabled config flags (#6406)
