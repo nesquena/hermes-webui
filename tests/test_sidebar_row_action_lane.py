@@ -420,6 +420,23 @@ EXPANDED_MEASURE = """() => {
       ? rect(main).width - parseFloat(mainStyle.paddingLeft) - parseFloat(mainStyle.paddingRight)
       : 0,
     fork1LabelClipped: main ? main.scrollWidth > main.clientWidth + 0.5 : true,
+    // Advance width of the label in its OWN computed font, measured off-document.
+    // The short label's pixel width is a property of the browser's font stack
+    // (50.55px with DejaVu here, ~59px on a CI runner), never of this stylesheet,
+    // so a test that hardcodes a threshold encodes the host's font instead of
+    // the layout. Assertions compare the label box against this measurement.
+    fork1LabelTextWidth: (() => {
+      if (!main) return 0;
+      const probe = document.createElement('span');
+      probe.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap;';
+      probe.style.font = mainStyle.font;
+      probe.style.letterSpacing = mainStyle.letterSpacing;
+      probe.textContent = main.textContent;
+      document.body.appendChild(probe);
+      const w = probe.getBoundingClientRect().width;
+      probe.remove();
+      return w;
+    })(),
     fork1LabelText: main ? main.textContent.trim() : null,
     nestedPaddingRight: parseFloat(getComputedStyle(kids).paddingRight),
     expanded: expanded,
@@ -683,22 +700,49 @@ def test_minimum_sidebar_width_keeps_the_fork_label_readable():
 
 
 def test_a_short_fork_label_is_never_clipped_by_the_lane():
-    # The twin fixture of the long label above: "-> F1 - 1m" is 59px of text at
-    # the fork row's 11px font, so from a 200px sidebar up it fits and must be
-    # shown whole. A long label hides this half of the bug — it ellipsizes
-    # either way — while a label box that has been squeezed (the removed 40px
-    # nested gutter, or a `max-width:calc(...)` on a width:auto flex row, which
-    # collapses instead of clamping) cuts a short label that would have fit.
+    # The twin fixture of the long label above: "-> F1 - 1m" is short enough to be
+    # shown whole as soon as the row has room for it, so a label box that has been
+    # squeezed (the removed 40px nested gutter, or a `max-width:calc(...)` on a
+    # width:auto flex row, which collapses instead of clamping) cuts a short label
+    # that would have fit. A long label hides this half of the bug — it ellipsizes
+    # either way.
+    #
+    # The label's pixel width belongs to the browser, not to this stylesheet: the
+    # same ten glyphs are 50.55px in DejaVu Sans and ~59px on the CI runner's font
+    # stack, at the fork row's 11px. A 200px sidebar leaves the label a 56px content
+    # box in BOTH cases (the geometry is font-free), so "not clipped at 200px" was
+    # really an assertion about which font the machine installed: it passed on the
+    # dev box with 5.45px of slack and failed on CI. Measure the text in the page's
+    # own font instead and assert the rule that does hold at every font — the label
+    # is cut only when its own text is wider than the box — then demand a real,
+    # font-independent margin where the sidebar has one to give.
     for width in (200, 240, 320):
         m = _measure_expanded(width, running=True, short_label=True)
+        content = m["fork1MainContent"]
+        text = m["fork1LabelTextWidth"]
         assert m["fork1LabelText"] == "-> F1 - 1m", (
             f"{width}px: the fork label fixture is not the short one: "
             f"{m['fork1LabelText']!r}"
         )
-        assert not m["fork1LabelClipped"], (
-            f"{width}px: the short fork label is clipped (button content "
-            f"{m['fork1MainContent']}px): a label that fits is being cut"
-        )
+        if m["fork1LabelClipped"]:
+            assert content < text, (
+                f"{width}px: the short fork label is clipped with {content:.2f}px "
+                f"of content for {text:.2f}px of text: a label that fits is being cut"
+            )
+        # 240px and up leave the label 96px and 176px of content for ~50-60px of
+        # text, so not clipping there and the slack below are pure layout: a box
+        # clamped by a `max-width` or narrowed by a nested gutter fails both, at
+        # any font.
+        if width >= 240:
+            assert not m["fork1LabelClipped"], (
+                f"{width}px: the short fork label is clipped ({content:.2f}px of "
+                f"content for {text:.2f}px of text): a label that fits is being cut"
+            )
+            assert content - text >= 24, (
+                f"{width}px: the fork's label box is {content:.2f}px wide for "
+                f"{text:.2f}px of text — only {content - text:.2f}px of slack, less "
+                "than the 24px the layout leaves when it is not squeezing the box"
+            )
         assert not m["parentTriggerOverFork"], (
             f"{width}px: the parent's trigger reaches the fork's kebab"
         )
