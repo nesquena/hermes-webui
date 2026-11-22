@@ -11472,9 +11472,15 @@ function renderMd(raw){
   // never `<`. Escaping the already-escaped form instead double-escapes it:
   // `[x](https://e.com/?q=1<2)` decoded back to `?q=1&lt;2`, losing a destination
   // the renderer preserved before the emphasis stash existed. See #8235 review.
+  // Stash tokens are dropped first, exactly as _safeAttrValue does: a token left
+  // in an attribute is replaced by rendered HTML after this sanitizer runs, so
+  // `[x](https://e.com/$a$)` would put a live <span class="katex-inline"> inside
+  // the quoted href and break the link.
   function _decodeAttrEntities(v){
     const ent={'&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&#39;':"'"};
-    return String(v==null?'':v).replace(/&(?:amp|lt|gt|quot|#39);/g,m=>ent[m]);
+    return String(v==null?'':v)
+      .replace(/\x00[^\x00]*\x00/g,'').replace(/\x00/g,'')
+      .replace(/&(?:amp|lt|gt|quot|#39);/g,m=>ent[m]);
   }
   function _markdownHref(raw){
     const href=String(raw||'').replace(/"/g,'%22');
@@ -11646,7 +11652,9 @@ function renderMd(raw){
       const cls=_cls(a.class,['msg-media-img']);
       const alt=` alt="${esc(_safeAttrValue(a.alt||''))}"`;
       const loading=a.loading==='lazy'?' loading="lazy"':'';
-      return `<img${cls} src="${esc(_safeAttrValue(a.src))}"${alt}${loading}>`;
+      // Same one-level decode as the anchor: _mdImageHtml() already escaped this
+      // src, and escaping the escaped form again decoded `?q=1<2` to `?q=1&lt;2`.
+      return `<img${cls} src="${esc(_decodeAttrEntities(a.src))}"${alt}${loading}>`;
     }
     return '';
   }

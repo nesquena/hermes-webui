@@ -276,6 +276,25 @@ def test_adjacent_backtick_token_text_stays_plain(driver_path):
     assert "<code>a</code>I0<code>b</code>" in out, out
 
 
+def test_link_destination_with_math_token_keeps_no_markup(driver_path):
+    """A stash token inside a destination must be dropped, not restored as
+    markup: the math pass would otherwise insert ``<span class="katex-inline">``
+    into the quoted href after the sanitizer ran and break the link."""
+    out = _render(driver_path, "[x](https://e.com/$a$)")
+    assert "katex" not in out, out
+    assert _attr(out, "href") == "https://e.com/", out
+
+
+def test_image_destination_with_angle_bracket_survives(driver_path):
+    """The image sanitizer re-emits the src _mdImageHtml() already escaped; it
+    must decode one level too, or ``?q=1<2`` decodes to ``?q=1&lt;2`` and the
+    request goes to the wrong URL."""
+    out = _render(driver_path, "![p](https://app.example/image.png?q=1<2)")
+    tag = re.search(r"<img\b[^>]*>", out)
+    assert tag, out
+    assert _attr(tag.group(0), "src") == "https://app.example/image.png?q=1<2", out
+
+
 # ── No regression for the previously-working shapes ──────────────────────────
 
 @pytest.mark.parametrize("src,expected", [
