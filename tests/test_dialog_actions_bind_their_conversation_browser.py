@@ -1,12 +1,18 @@
-"""Real-browser regression: the conversation panel's Share acts only on the
-conversation it was opened for, and session shortcuts do nothing while a shared
-app dialog is open.
+"""Real-browser regression: a shared app dialog acts only on the conversation it
+was opened for.
 
-Starts a real ``server.py`` with its own state, seeds three conversations through
+* Share and Stop sharing in the conversation panel are bound to the conversation
+  on screen when they were clicked;
+* a conversation change through browser history dismisses an open dialog (as
+  Escape would) before switching, so its action never runs against another
+  conversation (Share, Stop sharing, Clear conversation, a workspace file delete);
+* the session shortcuts (J/K, Ctrl+K) do nothing while a dialog is open.
+
+Starts a real ``server.py`` with its own state, seeds conversations through
 ``/api/session/import`` (A shared through the real ``/api/share/create``, B and C
-never shared), then drives headless Chromium: Settings -> Conversation -> Share
-on A opens the "already shared" confirm dialog. Every ``/api/share/create``
-request body is recorded, and share state is read back from the server.
+never shared; the later tests seed their own), then drives headless Chromium.
+Request bodies of the writing endpoints are recorded, and state is read back from
+the server and the disk.
 """
 import json
 import os
@@ -93,7 +99,8 @@ def server(tmp_path_factory):
     # Hermes home reaches this server.
     env = {
         "PATH": os.environ.get("PATH", os.defpath),
-        "HOME": os.environ.get("HOME", str(state)),
+        # Workspaces under HOME are trusted, so tests can give conversations their own.
+        "HOME": str(state),
         "LANG": "C.UTF-8",
         "TMPDIR": str(state / "tmp"),
         "PYTHONUNBUFFERED": "1",
@@ -146,7 +153,7 @@ def server(tmp_path_factory):
             sids[name] = reply["session"]["session_id"]
         status, reply = _request(base, "/api/share/create", {"session_id": sids["A"]})
         assert status == 200, reply
-        yield {"base": base, **sids, "a_token": reply["share"]["token"]}
+        yield {"base": base, **sids, "a_token": reply["share"]["token"], "state": state, "workspace": workspace}
     finally:
         proc.terminate()
         try:
@@ -186,10 +193,14 @@ def page(browser, shares):
     pg = ctx.new_page()
     pg.share_posts = []
     pg.share_statuses = []
+    pg.writes = []  # (path, body) of the other writing endpoints under test
 
     def on_request(req):
         if req.method == "POST" and req.url.endswith("/api/share/create"):
             pg.share_posts.append(json.loads(req.post_data or "{}").get("session_id"))
+        for path in ("/api/session/clear", "/api/share/revoke", "/api/file/delete"):
+            if req.method == "POST" and req.url.endswith(path):
+                pg.writes.append((path, json.loads(req.post_data or "{}")))
 
     def on_response(resp):
         if resp.request.method == "POST" and resp.url.endswith("/api/share/create"):
@@ -215,25 +226,64 @@ def _active(page, sid):
     _wait_until(page, "(sid) => typeof S !== 'undefined' && !!S.session && S.session.session_id === sid", sid)
 
 
-def _open_a_after_b(page, server):
-    """Browser history B -> A, A opened from its sidebar row."""
-    page.goto(f"/session/{server['B']}", wait_until="domcontentloaded")
+def _open_after(page, first, second):
+    """Browser history first -> second, second opened from its sidebar row."""
+    page.goto(f"/session/{first}", wait_until="domcontentloaded")
     page.wait_for_selector("#msg", timeout=30000)
-    _active(page, server["B"])
-    row = f".session-item[data-sid='{server['A']}'] .session-title"
+    _active(page, first)
+    row = f".session-item[data-sid='{second}'] .session-title"
     page.wait_for_selector(row, timeout=WAIT_MS)
     page.click(row)
-    _active(page, server["A"])
+    _active(page, second)
     page.wait_for_timeout(800)
 
 
-def _open_panel_share_dialog(page):
+def _open_a_after_b(page, server):
+    _open_after(page, server["B"], server["A"])
+
+
+def _open_panel_dialog(page, button):
+    """Settings -> Conversation, then the panel button that opens a confirm dialog."""
     page.click(".rail-btn[data-panel='settings']")
-    page.wait_for_selector("#btnShareSession", state="visible", timeout=WAIT_MS)
-    _wait_until(page, "() => !document.getElementById('btnShareSession').disabled")
-    page.click("#btnShareSession")
+    page.wait_for_selector(button, state="visible", timeout=WAIT_MS)
+    _wait_until(page, "(sel) => !document.querySelector(sel).disabled", button)
+    page.click(button)
     _wait_until(page, "() => _isAppDialogOpen()")
     page.wait_for_timeout(300)
+
+
+def _open_panel_share_dialog(page):
+    _open_panel_dialog(page, "#btnShareSession")
+
+
+def _import(server, title, workspace=None):
+    status, reply = _request(server["base"], "/api/session/import", {
+        "title": title,
+        "workspace": str(workspace or server["workspace"]),
+        "messages": [
+            {"role": "user", "content": f"{title} question"},
+            {"role": "assistant", "content": f"{title} answer"},
+        ],
+    })
+    assert status == 200, reply
+    return reply["session"]["session_id"]
+
+
+def _message_count(server, sid):
+    status, reply = _request(server["base"], f"/api/session?session_id={sid}")
+    assert status == 200, reply
+    return len(reply["session"].get("messages") or [])
+
+
+def _back_then_confirm_if_still_open(page, sid):
+    """Browser Back to ``sid``; if the dialog survived the change, press its confirm
+    button (the user's next click). Returns whether it survived."""
+    _browser_back_to(page, sid)
+    survived = page.evaluate(_STATE_JS)["dialogOpen"]
+    if survived:
+        page.click("#appDialogConfirm")
+    page.wait_for_timeout(SETTLE_MS)
+    return survived
 
 
 def _browser_back_to(page, sid, presses=3):
@@ -268,21 +318,23 @@ def test_conversation_change_while_the_dialog_is_open_writes_nothing(page, share
     _open_a_after_b(page, shares)
     _open_panel_share_dialog(page)
     _browser_back_to(page, shares["B"])
-    assert page.evaluate(_STATE_JS)["dialogOpen"] is True
-    if answer == "Escape":
-        page.keyboard.press("Escape")
-    else:
-        page.click(answer)
+    survived = page.evaluate(_STATE_JS)["dialogOpen"]
+    if survived:  # answer the dialog that is still on screen over B
+        if answer == "Escape":
+            page.keyboard.press("Escape")
+        else:
+            page.click(answer)
     page.wait_for_timeout(SETTLE_MS)
     state = page.evaluate(_STATE_JS)
     assert state["sid"] == shares["B"]
     assert state["dialogOpen"] is False
-    # Fail closed: the answer belonged to A's dialog, and A is no longer on
-    # screen, so nothing is written, copied or opened for either conversation.
+    # Fail closed: the dialog belonged to A, and A is no longer on screen, so
+    # nothing is written, copied or opened for either conversation.
     assert page.share_posts == []
     assert state["copied"] == [] and state["opened"] == []
     assert page.evaluate("() => S.session.share_token || null") is None
     _assert_only_a_shared(shares)
+    assert survived is False, "the conversation change should dismiss the dialog"
 
 
 def test_session_keys_are_ignored_while_the_dialog_is_open(page, shares):
@@ -376,3 +428,67 @@ def test_sidebar_menu_share_still_shares_its_own_row(page, shares):
     assert page.evaluate("() => S.session.share_token") == shares["a_token"]
     assert _share_token(shares["base"], target)
     assert _share_token(shares["base"], shares["B"]) is None
+
+
+# ── other dialogs: a conversation change dismisses them ──────────────────────
+
+def test_clear_conversation_confirm_never_clears_another_conversation(page, server):
+    first, second = _import(server, "Clear first"), _import(server, "Clear second")
+    _open_after(page, first, second)
+    _open_panel_dialog(page, "#btnClearConvModal")
+    survived = _back_then_confirm_if_still_open(page, first)
+    assert page.evaluate(_STATE_JS)["sid"] == first
+    outcome = {"writes": page.writes, "first_messages": _message_count(server, first),
+               "second_messages": _message_count(server, second)}
+    assert outcome == {"writes": [], "first_messages": 2, "second_messages": 2}, outcome
+    assert survived is False, "the conversation change should dismiss the dialog"
+
+
+def test_stop_sharing_confirm_never_revokes_another_conversation(page, server):
+    first, second = _import(server, "Stop first"), _import(server, "Stop second")
+    tokens = {}
+    for sid in (first, second):
+        status, reply = _request(server["base"], "/api/share/create", {"session_id": sid})
+        assert status == 200, reply
+        tokens[sid] = reply["share"]["token"]
+    _open_after(page, first, second)
+    _open_panel_dialog(page, "#btnStopSharingSession")
+    survived = _back_then_confirm_if_still_open(page, first)
+    assert page.evaluate(_STATE_JS)["sid"] == first
+    outcome = {"writes": page.writes, "first_token": _share_token(server["base"], first),
+               "second_token": _share_token(server["base"], second)}
+    assert outcome == {"writes": [], "first_token": tokens[first], "second_token": tokens[second]}, outcome
+    assert survived is False, "the conversation change should dismiss the dialog"
+
+
+def test_stop_sharing_without_a_switch_still_revokes_the_open_conversation(page, server):
+    sid = _import(server, "Stop control")
+    status, reply = _request(server["base"], "/api/share/create", {"session_id": sid})
+    assert status == 200, reply
+    _open_after(page, server["B"], sid)
+    _open_panel_dialog(page, "#btnStopSharingSession")
+    page.click("#appDialogConfirm")
+    _wait_until(page, "() => !S.session.share_token")
+    assert page.writes == [("/api/share/revoke", {"session_id": sid})]
+    assert _share_token(server["base"], sid) is None
+
+
+def test_workspace_file_delete_confirm_never_deletes_in_another_workspace(page, server):
+    files = {}
+    sids = []
+    for name in ("one", "two"):
+        workspace = server["state"] / f"files-{name}"
+        workspace.mkdir()
+        files[name] = workspace / "notes.txt"
+        files[name].write_text(f"{name} notes\n", encoding="utf-8")
+        sids.append(_import(server, f"Files {name}", workspace))
+    first, second = sids
+    _open_after(page, first, second)
+    # The file tree's Delete action calls this handler for the open conversation.
+    page.evaluate("() => { deleteWorkspaceFile('notes.txt', 'notes.txt'); return true; }")
+    _wait_until(page, "() => _isAppDialogOpen()")
+    survived = _back_then_confirm_if_still_open(page, first)
+    assert page.evaluate(_STATE_JS)["sid"] == first
+    outcome = {"writes": page.writes, "one": files["one"].exists(), "two": files["two"].exists()}
+    assert outcome == {"writes": [], "one": True, "two": True}, outcome
+    assert survived is False, "the conversation change should dismiss the dialog"

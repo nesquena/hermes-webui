@@ -6918,6 +6918,15 @@ function _syncSessionShareState(session, nextSession){
   void renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
 }
 
+// The conversation panel acts on the conversation on screen ({requireActive:true}).
+// Once its dialog is answered, act only if that conversation is still on screen and
+// no switch to another conversation is in flight; otherwise fail closed.
+function _sessionLeftScreen(session, opts){
+  if(!(opts&&opts.requireActive)) return false;
+  if(!(S.session&&S.session.session_id===session.session_id)) return true;
+  return !!(_loadingSessionId&&_loadingSessionId!==session.session_id);
+}
+
 async function _createOrRefreshSessionShare(session, opts){
   if(!session||!session.session_id) return;
   const existing=_sessionPublicShareUrl(session);
@@ -6931,10 +6940,7 @@ async function _createOrRefreshSessionShare(session, opts){
     });
     // Closing the dialog (×, Escape, backdrop) is not "Refresh snapshot": do nothing.
     if(reuse===null) return;
-    // The conversation panel asks about the conversation on screen. If another one
-    // was opened while the dialog was up, the answer no longer matches what the
-    // user is looking at: fail closed, write and copy nothing.
-    if(opts&&opts.requireActive&&!(S.session&&S.session.session_id===session.session_id)) return;
+    if(_sessionLeftScreen(session,opts)) return;
     if(reuse){
       let copied=true;
       try{ await _copyTextToClipboard(existing); }catch(_){ copied=false; }
@@ -6959,7 +6965,7 @@ async function _createOrRefreshSessionShare(session, opts){
   window.open(href,'_blank','noopener');
 }
 
-async function _revokeSessionShare(session){
+async function _revokeSessionShare(session, opts){
   if(!session||!session.session_id||!session.share_token) return;
   const ok=await showConfirmDialog({
     title:t('stop_sharing_session'),
@@ -6967,7 +6973,7 @@ async function _revokeSessionShare(session){
     confirmLabel:t('stop_sharing_session'),
     danger:true,
   });
-  if(!ok) return;
+  if(!ok||_sessionLeftScreen(session,opts)) return;
   const res=await api('/api/share/revoke',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
   if(res&&res.session) _syncSessionShareState(session,res.session);
   showToast(t('share_session_revoked'));
@@ -12563,6 +12569,8 @@ if(typeof window!=='undefined'){
       if(typeof showToast==='function') showToast('Finish the current turn before switching sessions.',3000);
       return;
     }
+    // An open app dialog belongs to this conversation: dismiss it first.
+    if(typeof _isAppDialogOpen==='function'&&_isAppDialogOpen()) _finishAppDialog(_appDialogDismissResult());
     void loadSession(sid);
   });
 }

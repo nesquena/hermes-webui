@@ -2772,19 +2772,11 @@ $('btnShareSession').onclick=async()=>{
   }
 };
 $('btnStopSharingSession').onclick=async()=>{
-  if(!S.session||!S.session.share_token) return;
-  const ok=await showConfirmDialog({
-    title:t('stop_sharing_session'),
-    message:t('stop_sharing_session_confirm'),
-    confirmLabel:t('stop_sharing_session'),
-    danger:true,
-  });
-  if(!ok) return;
+  // Bound to the conversation on screen at click time, like Share above.
+  const session=S.session;
+  if(!session||!session.share_token) return;
   try{
-    const res=await api('/api/share/revoke',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
-    if(res&&res.session) S.session=res.session;
-    showToast(t('share_session_revoked'));
-    if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
+    await _revokeSessionShare(session,{requireActive:true});
   }catch(err){
     showToast(t('share_session_revoke_failed')+(err&&err.message?err.message:String(err||'')),4000,'error');
   }
