@@ -14,7 +14,8 @@ the shared ``_resetProfileScopedPanelState()`` that both switch paths already
 run (#9069/#9080), so an in-flight load for the profile being left behind is
 retired at the switch.
 
-These tests drive the REAL helpers (``loadMemory``, ``loadSkills``,
+These tests drive the REAL helpers (``loadMemory``, ``loadNotesSources``,
+``loadSkills``,
 ``submitMemorySave``, ``loadWorkspacesPanel``, ``loadKanban``,
 ``loadCronGatewayNotice``, ``_resetProfileScopedPanelState``,
 ``_retireProfileScopedPanelLoads`` and sessions.js''
@@ -113,6 +114,7 @@ const S = { activeProfile:'alpha', activeProfileIsDefault:false, session:null, m
 // ── panels.js module state ──────────────────────────────────────────────
 let _currentPanel = 'chat';
 let _memoryData = null;
+let _notesSourcesData = null;
 let _currentMemorySection = null;
 let _memoryMode = 'read';
 let _memoryLoadGeneration = 0;
@@ -151,7 +153,6 @@ function _memorySectionLabel(s){ return s.key; }
 function _memorySectionPath(){ return ''; }
 function _memorySectionMeta(){ return { readOnly:false }; }
 function openMemorySection(){}
-async function loadNotesSources(){}
 function li(){ return ''; }
 function esc(v){ return String(v); }
 function t(key){ return key; }
@@ -204,6 +205,7 @@ function _takeHold(url){
 const payloads = {
   '/api/memory': prof => ({ memory: prof.toUpperCase() + '-ONLY', external_notes_enabled:false }),
   '/api/skills': prof => ({ skills:[{ name: prof + '-skill', category:'core' }] }),
+  '/api/notes/sources': prof => ({ sources:[prof + '-source'], automatic_recall_unchanged:true }),
   '/api/kanban/config': () => ({ columns:['todo'] }),
   '/api/kanban/assignees': () => ({ assignees:[] }),
   '/api/kanban/board': prof => ({ columns:[{ name:'todo', tasks:[{ id: prof + '-task',
@@ -255,6 +257,7 @@ def _real_helpers() -> str:
         _extract_optional(PANELS_JS, "_resetProfileScopedPanelState"),
         _extract_optional(PANELS_JS, "_retireProfileScopedPanelLoads"),
         _extract_function(PANELS_JS, "loadMemory"),
+        _extract_function(PANELS_JS, "loadNotesSources"),
         _extract_function(PANELS_JS, "submitMemorySave"),
         _extract_function(PANELS_JS, "loadSkills"),
         _extract_function(PANELS_JS, "loadWorkspacesPanel"),
@@ -646,3 +649,185 @@ process.stdout.write(JSON.stringify({ before, after }));
 """))
     for key, value in result["before"].items():
         assert result["after"][key] == value + 1, f"{key}: {result['after'][key]} != {value + 1}"
+
+
+def test_notes_sources_reply_issued_for_the_previous_profile_does_not_replace_the_active_cache():
+    """#9077 review (2026-11-19): the External Notes step of the Memory load
+    publishes inside the helper, before ``loadMemory()``'s own stale check, so
+    an ``/api/notes/sources`` reply issued for Alpha must not overwrite the
+    cache Beta populated after the switch."""
+    result = _run_node(_script(r"""
+const out = {};
+S.activeProfile = 'alpha';
+_currentPanel = 'memory';
+_currentMemorySection = 'external_notes';
+holdNext('/api/memory');
+holdNext('/api/notes/sources');
+const alphaLoad = loadMemory();
+await _tick();
+holds['/api/memory'].resolve({ memory:'ALPHA-ONLY', external_notes_enabled:true });
+await _tick();
+out.alphaNotesIssued = !!(holds['/api/notes/sources'] && !holds['/api/notes/sources'].pending);
+_currentPanel = 'chat';
+await _switchProfileForSessionLoad('beta');
+_currentPanel = 'memory';
+_currentMemorySection = 'external_notes';
+holdNext('/api/memory');
+const betaLoad = loadMemory();
+await _tick();
+holds['/api/memory'].resolve({ memory:'BETA-ONLY', external_notes_enabled:true });
+await betaLoad;
+await _tick();
+out.afterBeta = { active:S.activeProfile,
+  sources:_notesSourcesData && _notesSourcesData.sources,
+  memory:_memoryData && _memoryData.memory };
+holds['/api/notes/sources'].resolve({ sources:['alpha-source'], automatic_recall_unchanged:true });
+await alphaLoad;
+await _tick();
+out.afterStaleReply = { active:S.activeProfile,
+  sources:_notesSourcesData && _notesSourcesData.sources,
+  memory:_memoryData && _memoryData.memory };
+process.stdout.write(JSON.stringify(out));
+"""))
+    assert result["alphaNotesIssued"] is True, "Alpha's notes-source request never reached the server"
+    assert result["afterBeta"] == {"active": "beta", "sources": ["beta-source"],
+                                  "memory": "BETA-ONLY"}
+    after = result["afterStaleReply"]
+    assert after["active"] == "beta"
+    assert after["memory"] == "BETA-ONLY"
+    assert after["sources"] == ["beta-source"], (
+        "Alpha's late /api/notes/sources reply replaced the active profile's cache"
+        f" (got {after['sources']!r})"
+    )
+
+
+def test_notes_sources_failure_issued_for_the_previous_profile_does_not_poison_the_active_cache():
+    """The helper's ``catch`` also published into the shared cache: a rejection
+    that belongs to the previous profile must leave the active profile's
+    sources in place instead of replacing them with the error payload."""
+    result = _run_node(_script(r"""
+const out = {};
+S.activeProfile = 'alpha';
+_currentPanel = 'memory';
+_currentMemorySection = 'external_notes';
+holdNext('/api/memory');
+holdNext('/api/notes/sources');
+const alphaLoad = loadMemory();
+await _tick();
+holds['/api/memory'].resolve({ memory:'ALPHA-ONLY', external_notes_enabled:true });
+await _tick();
+_currentPanel = 'chat';
+await _switchProfileForSessionLoad('beta');
+_currentPanel = 'memory';
+_currentMemorySection = 'external_notes';
+holdNext('/api/memory');
+const betaLoad = loadMemory();
+await _tick();
+holds['/api/memory'].resolve({ memory:'BETA-ONLY', external_notes_enabled:true });
+await betaLoad;
+await _tick();
+out.afterBeta = { sources:_notesSourcesData && _notesSourcesData.sources };
+holds['/api/notes/sources'].reject(new Error('notes backend exploded'));
+let escaped = null;
+try { await alphaLoad; } catch (e) { escaped = String(e && e.message); }
+await _tick();
+out.afterStaleFailure = { active:S.activeProfile, escaped,
+  sources:_notesSourcesData && _notesSourcesData.sources,
+  error:_notesSourcesData && _notesSourcesData.error };
+process.stdout.write(JSON.stringify(out));
+"""))
+    assert result["afterBeta"] == {"sources": ["beta-source"]}
+    after = result["afterStaleFailure"]
+    assert after["escaped"] is None, "the retired notes-source rejection escaped loadMemory"
+    assert after["sources"] == ["beta-source"], (
+        "Alpha's late notes-source failure replaced the active profile's cache"
+        f" (got {after['sources']!r})"
+    )
+    assert not after["error"], f"Alpha's failure message landed in Beta's cache: {after['error']!r}"
+
+
+def test_notes_sources_reply_superseded_within_the_same_profile_does_not_publish():
+    """A second Memory load of the SAME profile supersedes the first one, so the
+    profile check alone cannot tell them apart: the older reply must still be
+    dropped instead of replacing the sources the newer load cached."""
+    result = _run_node(_script(r"""
+const out = {};
+S.activeProfile = 'alpha';
+_currentPanel = 'memory';
+_currentMemorySection = 'external_notes';
+holdNext('/api/memory');
+holdNext('/api/notes/sources');
+const firstLoad = loadMemory();
+await _tick();
+holds['/api/memory'].resolve({ memory:'ALPHA-FIRST', external_notes_enabled:true });
+await _tick();
+const firstNotesHold = holds['/api/notes/sources'];
+holdNext('/api/memory');
+holdNext('/api/notes/sources');
+const secondLoad = loadMemory(true);
+await _tick();
+holds['/api/memory'].resolve({ memory:'ALPHA-SECOND', external_notes_enabled:true });
+await _tick();
+holds['/api/notes/sources'].resolve({ sources:['alpha-second'], automatic_recall_unchanged:true });
+await secondLoad;
+await _tick();
+out.afterSecond = { sources:_notesSourcesData && _notesSourcesData.sources,
+  memory:_memoryData && _memoryData.memory };
+firstNotesHold.resolve({ sources:['alpha-first'], automatic_recall_unchanged:true });
+await firstLoad;
+await _tick();
+out.afterSupersededReply = { sources:_notesSourcesData && _notesSourcesData.sources };
+process.stdout.write(JSON.stringify(out));
+"""))
+    assert result["afterSecond"] == {"sources": ["alpha-second"], "memory": "ALPHA-SECOND"}
+    assert result["afterSupersededReply"]["sources"] == ["alpha-second"], (
+        "the superseded load's notes-source reply replaced the newer cache"
+    )
+
+
+def test_notes_sources_direct_caller_does_not_publish_across_a_profile_switch():
+    """``openMemorySection()`` calls the helper without a load predicate; the
+    helper still has to drop a reply it fetched for the profile that is no
+    longer active."""
+    result = _run_node(_script(r"""
+const out = {};
+S.activeProfile = 'alpha';
+holdNext('/api/notes/sources');
+const pending = loadNotesSources(false);
+await _tick();
+await _switchProfileForSessionLoad('beta');
+out.requestLeftAlpha = !!(holds['/api/notes/sources'] && !holds['/api/notes/sources'].pending);
+holds['/api/notes/sources'].resolve({ sources:['alpha-source'], automatic_recall_unchanged:true });
+const returned = await pending;
+await _tick();
+out.after = { active:S.activeProfile, cached:_notesSourcesData,
+  returned: returned && returned.sources };
+process.stdout.write(JSON.stringify(out));
+"""))
+    assert result["requestLeftAlpha"] is True, "the notes-source request never reached the server"
+    assert result["after"]["active"] == "beta"
+    assert result["after"]["cached"] is None, (
+        "a reply fetched for the previous profile was cached under the new one"
+    )
+
+
+def test_notes_sources_ordinary_load_still_publishes_for_its_other_callers():
+    """Control: the helper's own caller path (``openMemorySection``) keeps
+    caching a normal reply — the ownership guard must not turn the cache off."""
+    result = _run_node(_script(r"""
+const out = {};
+S.activeProfile = 'alpha';
+const first = await loadNotesSources(false);
+out.first = { returned:first && first.sources,
+  cached:_notesSourcesData && _notesSourcesData.sources };
+const forced = await loadNotesSources(true);
+out.forced = { returned:forced && forced.sources,
+  cached:_notesSourcesData && _notesSourcesData.sources };
+out.cachedFirst = await loadNotesSources(false);
+process.stdout.write(JSON.stringify(out));
+"""))
+    assert result["first"] == {"returned": ["alpha-source"], "cached": ["alpha-source"]}
+    assert result["forced"] == {"returned": ["alpha-source"], "cached": ["alpha-source"]}
+    assert result["cachedFirst"]["sources"] == ["alpha-source"], (
+        "the uncontended cached read stopped returning the published sources"
+    )
