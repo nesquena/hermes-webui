@@ -2,6 +2,7 @@
 
 import io
 import json
+import re
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -128,6 +129,201 @@ def test_has_active_goal_reports_only_active_state(monkeypatch):
     assert webui_goals.has_active_goal("") is False
 
 
+def test_profile_goal_evaluation_supports_native_judge_contract(monkeypatch, tmp_path):
+    """Profile goals accept the current five-field native judge result."""
+    from api import goals as webui_goals
+    native_goals = pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+
+    judge = lambda *args, **kwargs: ("continue", "work remains", False, None, False)
+    monkeypatch.setattr(webui_goals, "judge_goal", judge)
+    monkeypatch.setattr(native_goals, "judge_goal", judge)
+    monkeypatch.syspath_prepend(str(Path(native_goals.__file__).resolve().parents[1]))
+    from hermes_constants import get_hermes_home
+
+    original_home = get_hermes_home()
+    webui_goals._DB_CACHE.clear()
+    native_goals._DB_CACHE.clear()
+    __import__("hermes_state")
+
+    home = tmp_path / "profile"
+    webui_goals.goal_command_payload("sid-native-contract", "finish it", profile_home=home)
+    decision = webui_goals.evaluate_goal_after_turn(
+        "sid-native-contract",
+        "not finished",
+        profile_home=home,
+    )
+    state = webui_goals.goal_state_snapshot("sid-native-contract", profile_home=home)
+
+    assert decision["verdict"] == "continue"
+    assert decision["should_continue"] is True
+    assert state.turns_used == 1
+    assert state.last_verdict == "continue"
+
+    snapshot = webui_goals.goal_state_snapshot("sid-native-contract", profile_home=home)
+    webui_goals.goal_command_payload("sid-native-contract", "replacement", profile_home=home)
+    webui_goals.restore_goal_state("sid-native-contract", snapshot, profile_home=home)
+    restored = webui_goals.goal_state_snapshot("sid-native-contract", profile_home=home)
+    assert restored.goal == "finish it"
+    assert restored.turns_used == 1
+    assert get_hermes_home() == original_home
+
+
+def test_profile_goal_evaluation_preserves_native_wait_semantics(monkeypatch, tmp_path):
+    """Profile goals park when the native judge returns a wait directive."""
+    from api import goals as webui_goals
+    native_goals = pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+
+    judge = lambda *args, **kwargs: (
+        "wait",
+        "rate limited",
+        False,
+        {"seconds": 30},
+        False,
+    )
+    monkeypatch.setattr(webui_goals, "judge_goal", judge)
+    monkeypatch.setattr(native_goals, "judge_goal", judge)
+    monkeypatch.syspath_prepend(str(Path(native_goals.__file__).resolve().parents[1]))
+    webui_goals._DB_CACHE.clear()
+    native_goals._DB_CACHE.clear()
+    __import__("hermes_state")
+
+    home = tmp_path / "profile"
+    webui_goals.goal_command_payload("sid-native-wait", "finish it", profile_home=home)
+    decision = webui_goals.evaluate_goal_after_turn(
+        "sid-native-wait",
+        "rate limited",
+        profile_home=home,
+    )
+    state = webui_goals.goal_state_snapshot("sid-native-wait", profile_home=home)
+
+    assert decision["verdict"] == "wait"
+    assert decision["should_continue"] is False
+    assert state.waiting_until > 0
+    assert state.waiting_reason == "rate limited"
+
+
+def test_profile_goal_context_isolated_across_threads(monkeypatch, tmp_path):
+    """Concurrent profiles with the same session id cannot cross-write goals."""
+    from api import goals as webui_goals
+    native_goals = pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+
+    monkeypatch.syspath_prepend(str(Path(native_goals.__file__).resolve().parents[1]))
+    from hermes_constants import get_hermes_home
+
+    original_home = get_hermes_home()
+    webui_goals._DB_CACHE.clear()
+    native_goals._DB_CACHE.clear()
+    __import__("hermes_state")
+    barrier = threading.Barrier(2)
+    failures = []
+
+    def set_goal(profile):
+        try:
+            barrier.wait()
+            result = webui_goals.goal_command_payload(
+                "shared-session",
+                f"goal-{profile}",
+                profile_home=tmp_path / profile,
+            )
+            assert result["ok"] is True
+        except Exception as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=set_goal, args=(profile,)) for profile in ("a", "b")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert webui_goals.goal_state_snapshot(
+        "shared-session", profile_home=tmp_path / "a"
+    ).goal == "goal-a"
+    assert webui_goals.goal_state_snapshot(
+        "shared-session", profile_home=tmp_path / "b"
+    ).goal == "goal-b"
+    assert get_hermes_home() == original_home
+
+
+def test_profile_goal_falls_back_when_session_db_path_is_frozen(monkeypatch, tmp_path):
+    """A context API alone cannot make an import-time SessionDB path profile-safe."""
+    from api import goals as webui_goals
+    native_goals = pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+    # Ensure the agent dir is on sys.path before importing the sibling top-level
+    # `hermes_state` module. importorskip("hermes_cli.goals") can succeed from a
+    # cached sys.modules entry even after a prior shard test stripped the agent
+    # dir from sys.path, but the bare `import hermes_state` below is uncached and
+    # would then fail with ModuleNotFoundError under full-suite ordering (every
+    # other test in this file already does this prepend).
+    monkeypatch.syspath_prepend(str(Path(native_goals.__file__).resolve().parents[1]))
+    import hermes_state
+
+    frozen_db_path = tmp_path / "frozen-home" / "state.db"
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", frozen_db_path)
+    webui_goals._DB_CACHE.clear()
+    native_goals._DB_CACHE.clear()
+
+    profile_a = tmp_path / "profile-a"
+    profile_b = tmp_path / "profile-b"
+    try:
+        assert webui_goals.goal_command_payload(
+            "shared-session", "goal-a", profile_home=profile_a
+        )["ok"] is True
+        assert webui_goals.goal_command_payload(
+            "shared-session", "goal-b", profile_home=profile_b
+        )["ok"] is True
+
+        assert webui_goals.goal_state_snapshot(
+            "shared-session", profile_home=profile_a
+        ).goal == "goal-a"
+        assert webui_goals.goal_state_snapshot(
+            "shared-session", profile_home=profile_b
+        ).goal == "goal-b"
+    finally:
+        for cache in (webui_goals._DB_CACHE, native_goals._DB_CACHE):
+            for db in cache.values():
+                close = getattr(db, "close", None)
+                if close is not None:
+                    close()
+            cache.clear()
+
+
+def test_profile_goal_context_resets_when_native_call_raises(monkeypatch, tmp_path):
+    """A failed delegated call cannot leak its profile into the next task."""
+    from api import goals as webui_goals
+    native_goals = pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+
+    monkeypatch.syspath_prepend(str(Path(native_goals.__file__).resolve().parents[1]))
+    from hermes_constants import (
+        get_hermes_home,
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    class RaisingGoalManager:
+        state = None
+
+        def __init__(self, session_id, default_max_turns=20):
+            self.session_id = session_id
+            self.default_max_turns = default_max_turns
+
+        def explode(self):
+            raise RuntimeError("boom")
+
+    original_home = get_hermes_home()
+    monkeypatch.setattr(webui_goals, "_NativeGoalManager", RaisingGoalManager)
+    manager = webui_goals._ProfileGoalManager(
+        "sid-context-reset",
+        profile_home=tmp_path / "profile",
+        context_api=(set_hermes_home_override, reset_hermes_home_override),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        manager.explode()
+
+    assert get_hermes_home() == original_home
+
+
 def test_goal_continuation_decision_emits_status_and_normal_user_prompt(monkeypatch):
     """Post-turn hook returns the visible status event plus a normal continuation prompt."""
     from api import goals as webui_goals
@@ -201,7 +397,7 @@ def test_goal_endpoint_sets_goal_and_starts_kickoff_stream(
 
     monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
     monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
     monkeypatch.setattr(
         routes,
         "webui_gateway_chat_enabled",
@@ -323,7 +519,7 @@ def test_goal_endpoint_adapter_keeps_full_set_text_and_legacy_payload_status(mon
     monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "legacy-journal")
     monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
     monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",
@@ -388,7 +584,7 @@ def test_routes_register_goal_endpoint_and_kickoff_stream():
 
 
 def test_chat_start_forwards_goal_related_to_gateway_worker(monkeypatch, tmp_path):
-    from api import routes
+    from api import config, gateway_chat, routes, run_drain
     import api.turn_journal as turn_journal
 
     class FakeSession:
@@ -426,21 +622,33 @@ def test_chat_start_forwards_goal_related_to_gateway_worker(monkeypatch, tmp_pat
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
     monkeypatch.setattr(routes.uuid, "uuid4", lambda: SimpleNamespace(hex="goal-stream-id"))
 
-    response = routes._start_chat_stream_for_session(
-        FakeSession(),
-        msg="continue the goal",
-        attachments=[],
-        workspace=str(tmp_path),
-        model="gpt-5.5",
-        model_provider="openai-codex",
-        goal_related=True,
-    )
+    # #8904: FakeThread never runs the Gateway worker that unregisters the stream
+    # and releases its Gateway launch row.
+    streams_before = set(config.STREAMS)
+    try:
+        response = routes._start_chat_stream_for_session(
+            FakeSession(),
+            msg="continue the goal",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="gpt-5.5",
+            model_provider="openai-codex",
+            goal_related=True,
+        )
+    finally:
+        added_streams = set(config.STREAMS) - streams_before
+        for stream_id in added_streams:
+            for registry in vars(config).values():
+                if isinstance(registry, dict):
+                    registry.pop(stream_id, None)
+            gateway_chat.release_gateway_stream_state(stream_id)
 
     assert response["stream_id"] == "goal-stream-id"
     assert captured["target"] is routes._run_gateway_chat_streaming
     assert captured["kwargs"]["goal_related"] is True
     assert captured["kwargs"]["model_provider"] == "openai-codex"
     assert captured["started"] is True
+    assert not added_streams & {run["stream_id"] for run in run_drain.all_active_runs()}
 
 
 def test_streaming_post_turn_goal_hook_surfaces_and_continues():
@@ -475,7 +683,14 @@ def test_frontend_has_goal_slash_command_and_status_event_handler():
     assert "goal'" in MESSAGES_JS
     assert "source.addEventListener('goal'" in MESSAGES_JS
     assert "source.addEventListener('goal_continue'" in MESSAGES_JS
-    assert "['steer','interrupt','queue','terminal','goal','yolo'].includes(_pc.name)" in MESSAGES_JS
+    # #6962 added 'stop' to this busy-command passthrough list so a busy /stop
+    # cancels immediately. Assert /goal's membership rather than the exact list
+    # literal, so adding another passthrough command does not fail this test.
+    _passthrough = re.search(
+        r"if\(_pc&&\[([^\]]*)\]\.includes\(_pc\.name\)\)", MESSAGES_JS
+    )
+    assert _passthrough, "busy-command passthrough list not found in messages.js"
+    assert "'goal'" in _passthrough.group(1)
     assert "queueSessionMessage" in MESSAGES_JS
 
 
@@ -485,3 +700,655 @@ def test_frontend_goal_evaluating_state_uses_calm_composer_indicator():
     assert "if(goalState==='evaluating')" in MESSAGES_JS
     assert "setComposerStatus(goalEvaluatingMessage);" in MESSAGES_JS
     assert "return;" in MESSAGES_JS
+
+
+def test_goal_kickoff_forwards_explicit_model_pick_to_resolver(monkeypatch, tmp_path):
+    """#6703: /api/goal must carry explicit_model_pick to the model resolver.
+
+    Without it a persisted cross-provider pick (e.g. provider1:model1 chosen
+    for the session) is treated as stale by _resolve_compatible_session_model_state
+    and "repaired" back to the profile default mid-session, switching the
+    provider while /goal runs.
+    """
+    from api import goals as webui_goals
+    from api import routes
+
+    class FakeState:
+        goal = "ship the feature"
+        status = "active"
+        turns_used = 0
+        max_turns = 20
+        last_verdict = None
+        last_reason = None
+        paused_reason = None
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.session_id = session_id
+            self.default_max_turns = default_max_turns
+
+        def set(self, goal):
+            state = FakeState()
+            state.goal = goal
+            return state
+
+    class FakeSession:
+        session_id = "sid-goal-explicit"
+        profile = "default"
+        workspace = str(tmp_path)
+        model = "deepseek/deepseek-v4-flash"
+        model_provider = "deepseek"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+        active_stream_id = None
+
+    resolver_kwargs = {}
+
+    def fake_resolve(model, provider, **kwargs):
+        resolver_kwargs.update(kwargs)
+        return model, provider, False
+
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fake_resolve)
+
+    started = []
+
+    def fake_start(session, **kwargs):
+        started.append(kwargs)
+        return {"stream_id": "goal-stream", "session_id": session.session_id, "pending_started_at": 123.0}
+
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", fake_start)
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+
+    result = routes._handle_goal_command(
+        object(),
+        {
+            "session_id": "sid-goal-explicit",
+            "args": "ship the feature",
+            "workspace": str(tmp_path),
+            "model": "deepseek/deepseek-v4-flash",
+            "model_provider": "deepseek",
+            "explicit_model_pick": True,
+        },
+    )
+
+    assert result["status"] == 200
+    assert started and started[0]["model"] == "deepseek/deepseek-v4-flash"
+    assert started[0]["model_provider"] == "deepseek"
+    # The explicit-pick marker must reach the resolver so the persisted
+    # cross-provider model is honored instead of reverted to the default.
+    assert resolver_kwargs.get("explicit_model_pick") is True
+
+
+def test_goal_kickoff_defaults_explicit_model_pick_false(monkeypatch, tmp_path):
+    """#6703: without the marker the resolver receives explicit_model_pick=False."""
+    from api import goals as webui_goals
+    from api import routes
+
+    class FakeState:
+        goal = "ship the feature"
+        status = "active"
+        turns_used = 0
+        max_turns = 20
+        last_verdict = None
+        last_reason = None
+        paused_reason = None
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.session_id = session_id
+            self.default_max_turns = default_max_turns
+
+        def set(self, goal):
+            state = FakeState()
+            state.goal = goal
+            return state
+
+    class FakeSession:
+        session_id = "sid-goal-default"
+        profile = "default"
+        workspace = str(tmp_path)
+        model = "gpt-5.5"
+        model_provider = "openai-codex"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+        active_stream_id = None
+
+    resolver_kwargs = {}
+
+    def fake_resolve(model, provider, **kwargs):
+        resolver_kwargs.update(kwargs)
+        return model, provider, False
+
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fake_resolve)
+
+    started = []
+
+    def fake_start(session, **kwargs):
+        started.append(kwargs)
+        return {"stream_id": "goal-stream", "session_id": session.session_id, "pending_started_at": 123.0}
+
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", fake_start)
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+
+    result = routes._handle_goal_command(
+        object(),
+        {
+            "session_id": "sid-goal-default",
+            "args": "ship the feature",
+            "workspace": str(tmp_path),
+            "model": "gpt-5.5",
+            "model_provider": "openai-codex",
+        },
+    )
+
+    assert result["status"] == 200
+    assert resolver_kwargs.get("explicit_model_pick") is False
+
+
+def test_frontend_goal_sends_explicit_model_pick():
+    """#6703: cmdGoal must include explicit_model_pick in the /api/goal payload.
+
+    Mirrors the chat/start marker (messages.js) so the server honors a
+    persisted cross-provider session pick instead of reverting to the default.
+    """
+    goal_idx = COMMANDS_JS.find("function cmdGoal")
+    assert goal_idx != -1
+    goal_fn = COMMANDS_JS[goal_idx : COMMANDS_JS.find("\n}", goal_idx)]
+    assert "explicit_model_pick:_explicitPick" in goal_fn
+    assert "api('/api/goal'" in goal_fn
+    assert "_isCrossProviderPick" in goal_fn
+    assert "_readPendingSessionModel" in goal_fn
+
+
+def test_goal_kickoff_stamps_explicit_pick_signature(monkeypatch, tmp_path):
+    """#6703: /api/goal must stamp model_explicit_pick_signature on explicit picks.
+
+    Parity with /api/chat/start (#5979): the streaming resolver preserves a
+    custom-proxy vendor namespace on a cold catalog only when the persisted
+    signature matches the current routing context. Without the stamp, a first
+    /goal launch after a deliberate custom-provider pick loses the vendor
+    namespace and the provider reverts to the profile default mid-session.
+    """
+    from api import goals as webui_goals
+    from api import routes
+
+    class FakeState:
+        goal = "ship the feature"
+        status = "active"
+        turns_used = 0
+        max_turns = 20
+        last_verdict = None
+        last_reason = None
+        paused_reason = None
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.session_id = session_id
+            self.default_max_turns = default_max_turns
+
+        def set(self, goal):
+            state = FakeState()
+            state.goal = goal
+            return state
+
+    class FakeSession:
+        session_id = "sid-goal-sig"
+        profile = "default"
+        workspace = str(tmp_path)
+        model = "deepseek/deepseek-v4-flash"
+        model_provider = "deepseek"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+        active_stream_id = None
+        model_explicit_pick_signature = None
+
+    def fake_resolve(model, provider, **kwargs):
+        return model, provider, False
+
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fake_resolve)
+
+    def fake_start(session, **kwargs):
+        return {"stream_id": "goal-stream", "session_id": session.session_id, "pending_started_at": 123.0}
+
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", fake_start)
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+
+    session = FakeSession()
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
+
+    result = routes._handle_goal_command(
+        object(),
+        {
+            "session_id": "sid-goal-sig",
+            "args": "ship the feature",
+            "workspace": str(tmp_path),
+            "model": "deepseek/deepseek-v4-flash",
+            "model_provider": "deepseek",
+            "explicit_model_pick": True,
+        },
+    )
+
+    assert result["status"] == 200
+    from api.models import model_explicit_pick_signature as _mk_sig
+
+    assert session.model_explicit_pick_signature == _mk_sig("deepseek/deepseek-v4-flash", "deepseek")
+
+
+def test_goal_kickoff_does_not_stamp_signature_without_explicit_pick(monkeypatch, tmp_path):
+    """#6703: without the marker no signature is stamped (parity with chat/start)."""
+    from api import goals as webui_goals
+    from api import routes
+
+    class FakeState:
+        goal = "ship the feature"
+        status = "active"
+        turns_used = 0
+        max_turns = 20
+        last_verdict = None
+        last_reason = None
+        paused_reason = None
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.session_id = session_id
+            self.default_max_turns = default_max_turns
+
+        def set(self, goal):
+            state = FakeState()
+            state.goal = goal
+            return state
+
+    class FakeSession:
+        session_id = "sid-goal-nosig"
+        profile = "default"
+        workspace = str(tmp_path)
+        model = "deepseek/deepseek-v4-flash"
+        model_provider = "deepseek"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+        active_stream_id = None
+        model_explicit_pick_signature = "stale-previous-sig"
+
+    def fake_resolve(model, provider, **kwargs):
+        return model, provider, False
+
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fake_resolve)
+
+    def fake_start(session, **kwargs):
+        return {"stream_id": "goal-stream", "session_id": session.session_id, "pending_started_at": 123.0}
+
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", fake_start)
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+
+    session = FakeSession()
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
+
+    result = routes._handle_goal_command(
+        object(),
+        {
+            "session_id": "sid-goal-nosig",
+            "args": "ship the feature",
+            "workspace": str(tmp_path),
+            "model": "deepseek/deepseek-v4-flash",
+            "model_provider": "deepseek",
+        },
+    )
+
+    assert result["status"] == 200
+    # A non-explicit kickoff leaves any prior signature untouched (chat-start parity).
+    assert session.model_explicit_pick_signature == "stale-previous-sig"
+
+
+def test_frontend_goal_consumes_pending_model_marker():
+    """#6703/#6705: cmdGoal must consume the one-shot pending session-model marker.
+
+    Mirrors the chat/start path (messages.js) so a later /goal with an unchanged
+    dropdown isn't treated as an explicit pick. The consume-clear is deferred to
+    AFTER a successful kickoff (r.stream_id) and gated on a re-read of the stored
+    marker that still matches the captured model/provider (#6705), so a control
+    command (e.g. /goal status, which never produces a stream_id) leaves the
+    marker intact for the next real send.
+    """
+    goal_idx = COMMANDS_JS.find("function cmdGoal")
+    assert goal_idx != -1
+    goal_fn = COMMANDS_JS[goal_idx : COMMANDS_JS.find("\n}", goal_idx)]
+    assert "_clearPendingSessionModel(activeSid)" in goal_fn
+    assert "_pendingPickMatch && typeof _readPendingSessionModel==='function' && typeof _clearPendingSessionModel==='function'" in goal_fn
+    # The consume-clear must come AFTER the kickoff guard: a control command
+    # (no stream_id) returns before reaching it.
+    assert goal_fn.index("_clearPendingSessionModel(activeSid)") > goal_fn.index("if(!r||!r.stream_id)return;")
+    # Re-check: the marker is re-read and only cleared while it still matches
+    # the captured model/provider.
+    assert "_stillPending.model===_goalModel" in goal_fn
+    assert "_stillPending.model_provider" in goal_fn
+
+
+def test_frontend_goal_control_command_keeps_pending_marker():
+    """#6705: a control-only /goal (e.g. `/goal status`) must NOT consume the
+    pending explicit-pick marker.
+
+    The server skips model resolution for control commands (api/routes.py
+    will_kickoff excludes status/pause/resume/clear/stop/done), so clearing the
+    marker before the request would drop the explicit pick without using it and
+    the next real send would revert to the default model. The marker must
+    survive the control round-trip and still be read for the next kickoff.
+    """
+    goal_idx = COMMANDS_JS.find("function cmdGoal")
+    assert goal_idx != -1
+    goal_fn = COMMANDS_JS[goal_idx : COMMANDS_JS.find("\n}", goal_idx)]
+
+    # 1) No clear may run before the /api/goal request: the marker must
+    #    survive a control command.
+    pre_request = goal_fn.split("const r=await api('/api/goal'")[0]
+    assert "_clearPendingSessionModel" not in pre_request, (
+        "the pending explicit-pick marker must NOT be cleared before /api/goal — "
+        "a control command like /goal status never kicks off, so a pre-request "
+        "clear would drop the pick without using it (#6705)"
+    )
+
+    # 2) The consume-clear sits after the kickoff guard (r.stream_id present).
+    post_request = goal_fn.split("const r=await api('/api/goal'")[1]
+    assert "if(!r||!r.stream_id)return;" in post_request
+    assert "_clearPendingSessionModel(activeSid)" in post_request
+    assert post_request.index("if(!r||!r.stream_id)return;") < post_request.index("_clearPendingSessionModel(activeSid)")
+
+    # 3) The marker is re-read and only cleared while it still matches the
+    #    captured model/provider.
+    assert "_stillPending=_readPendingSessionModel(activeSid)" in post_request
+    assert re.search(r"_stillPending\.model\s*===\s*_goalModel", post_request)
+    assert re.search(r"_stillPending\.model_provider", post_request)
+    assert re.search(r"_clearPendingSessionModel\(activeSid\)", post_request)
+
+
+_CONTRACT_GOAL_TEXT = (
+    "Ship the export endpoint\n"
+    "outcome: GET /export returns CSV for every active account\n"
+    "verification: uv run pytest tests/test_export.py passes and the response shows a CSV header\n"
+    "constraints: existing export tests stay unchanged\n"
+    "boundaries: api/export.py and tests/test_export.py only\n"
+    "stop when: the schema needs a migration"
+)
+
+
+def test_goal_command_payload_parses_inline_contract_fields(monkeypatch, tmp_path):
+    """Inline contract lines become the goal's contract, not part of the goal text."""
+    from api import goals as webui_goals
+    pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    payload = webui_goals.goal_command_payload("sid-contract", _CONTRACT_GOAL_TEXT)
+    state = webui_goals._manager("sid-contract").state
+
+    assert payload["ok"] is True
+    assert payload["kickoff_prompt"] == _CONTRACT_GOAL_TEXT
+    assert state.goal == "Ship the export endpoint"
+    assert state.contract.outcome == "GET /export returns CSV for every active account"
+    assert state.contract.verification.startswith("uv run pytest tests/test_export.py passes")
+    assert state.contract.constraints == "existing export tests stay unchanged"
+    assert state.contract.boundaries == "api/export.py and tests/test_export.py only"
+    assert state.contract.stop_when == "the schema needs a migration"
+
+
+def test_goal_command_payload_keeps_plain_goal_without_contract(monkeypatch):
+    """Plain goal text is still passed through unchanged with no contract."""
+    from api import goals as webui_goals
+
+    calls = []
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.state = None
+
+        def set(self, goal, **kwargs):
+            calls.append((goal, kwargs))
+            return SimpleNamespace(goal=goal, max_turns=20)
+
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(webui_goals, "_default_max_turns", lambda: 20)
+
+    payload = webui_goals.goal_command_payload("sid-plain", "fix: the flaky test")
+
+    assert payload["kickoff_prompt"] == "fix: the flaky test"
+    assert calls == [("fix: the flaky test", {})]
+
+
+def test_goal_gate_command_is_refused_and_keeps_goal(monkeypatch, tmp_path):
+    """/goal gate … never replaces the goal, adds a gate, or kicks off a turn."""
+    from api import goals as webui_goals
+    pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    webui_goals.goal_command_payload("sid-gate", "ship the feature")
+    for args in ("gate add uv run pytest", "gate", "GATE list"):
+        payload = webui_goals.goal_command_payload("sid-gate", args)
+        assert payload["ok"] is False
+        assert payload["error"] == "unsupported_gate"
+        assert "kickoff_prompt" not in payload or not payload["kickoff_prompt"]
+
+    state = webui_goals._manager("sid-gate").state
+    assert state.goal == "ship the feature"
+    assert not state.gates
+
+
+def test_goal_command_payload_keeps_contract_of_long_goal(monkeypatch, tmp_path):
+    """Contract lines after a long headline still reach the contract, not the truncated goal."""
+    from api import goals as webui_goals
+    pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    headline = "Ship the export endpoint " + "with careful detail " * 120
+
+    webui_goals.goal_command_payload("sid-long", headline + "\nverification: pytest passes")
+    state = webui_goals._manager("sid-long").state
+
+    assert state.goal == headline.strip()
+    assert "verification:" not in state.goal
+    assert state.contract.verification == "pytest passes"
+
+
+def test_legacy_profile_goal_manager_stores_inline_contract(monkeypatch, tmp_path):
+    """The explicit-DB fallback manager keeps the parsed contract too."""
+    from api import goals as webui_goals
+    pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+    monkeypatch.setattr(webui_goals, "_native_profile_context_api", lambda _home: None)
+
+    webui_goals.goal_command_payload("sid-legacy", _CONTRACT_GOAL_TEXT, profile_home=tmp_path)
+    mgr = webui_goals._manager("sid-legacy", profile_home=tmp_path)
+
+    assert isinstance(mgr, webui_goals._LegacyProfileGoalManager)
+    assert mgr.state.goal == "Ship the export endpoint"
+    assert mgr.state.contract.stop_when == "the schema needs a migration"
+
+
+def test_legacy_profile_goal_manager_judges_and_continues_with_contract(monkeypatch, tmp_path):
+    """The fallback manager's judge and continuation prompt both see every contract field."""
+    from api import goals as webui_goals
+    pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+    monkeypatch.setattr(webui_goals, "_native_profile_context_api", lambda _home: None)
+    judged = []
+
+    def fake_judge(goal, response, **kwargs):
+        judged.append((goal, kwargs.get("contract")))
+        return "continue", "not yet", False, None, False
+
+    monkeypatch.setattr(webui_goals, "judge_goal", fake_judge)
+    webui_goals.goal_command_payload("sid-legacy-judge", _CONTRACT_GOAL_TEXT, profile_home=tmp_path)
+    mgr = webui_goals._manager("sid-legacy-judge", profile_home=tmp_path)
+
+    result = mgr.evaluate_after_turn("working on it")
+
+    goal, contract = judged[0]
+    assert goal == "Ship the export endpoint"
+    assert contract.outcome == "GET /export returns CSV for every active account"
+    assert contract.verification.startswith("uv run pytest tests/test_export.py passes")
+    assert contract.constraints == "existing export tests stay unchanged"
+    assert contract.boundaries == "api/export.py and tests/test_export.py only"
+    assert contract.stop_when == "the schema needs a migration"
+    prompt = result["continuation_prompt"]
+    for line in _CONTRACT_GOAL_TEXT.splitlines()[1:]:
+        assert line.split(": ", 1)[1] in prompt
+
+
+def test_goal_command_payload_double_dash_sets_goal_starting_with_control_word(monkeypatch):
+    """`/goal -- <text>` sets goal text that starts with gate or another control word."""
+    from api import goals as webui_goals
+
+    calls = []
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.state = None
+
+        def set(self, goal, **kwargs):
+            calls.append(goal)
+            return SimpleNamespace(goal=goal, max_turns=20)
+
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(webui_goals, "_default_max_turns", lambda: 20)
+
+    gate_goal = webui_goals.goal_command_payload("sid-dash", "-- gate the release behind a flag")
+    pause_goal = webui_goals.goal_command_payload("sid-dash", "-- pause the cron")
+
+    assert gate_goal["ok"] is True and gate_goal["kickoff_prompt"] == "gate the release behind a flag"
+    assert pause_goal["ok"] is True and pause_goal["kickoff_prompt"] == "pause the cron"
+    assert calls == ["gate the release behind a flag", "pause the cron"]
+
+
+@pytest.mark.parametrize("adapter_mode", ["", "legacy-journal", "runner-local"])
+def test_goal_endpoint_refuses_gate_without_kickoff_or_goal_change(monkeypatch, tmp_path, adapter_mode):
+    """POST /api/goal `gate add …` is a 400 refusal before any kickoff setup, in every adapter mode."""
+    from api import goals as webui_goals
+    from api import routes
+
+    existing = SimpleNamespace(
+        goal="ship the feature", status="active", turns_used=0, max_turns=20,
+        last_verdict=None, last_reason=None, paused_reason=None, gates=[],
+    )
+    set_calls = []
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.state = existing
+
+        def set(self, goal, **kwargs):
+            set_calls.append(goal)
+            raise AssertionError("a gate command must not set the goal")
+
+    class FakeSession:
+        session_id = "sid-goal-route"
+        profile = "default"
+        workspace = str(tmp_path)
+        model = "gpt-5.5"
+        model_provider = "openai-codex"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+        active_stream_id = None
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("kickoff setup must not run for /goal gate")
+
+    session = FakeSession()
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", adapter_mode)
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", fail)
+    monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fail)
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", fail)
+    monkeypatch.setattr(routes, "build_runtime_adapter", fail, raising=False)
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+
+    result = routes._handle_goal_command(
+        object(),
+        {
+            "session_id": "sid-goal-route",
+            "args": "gate add uv run pytest tests/test_export.py",
+            "workspace": str(tmp_path),
+            "model": "gpt-5.5",
+            "model_provider": "openai-codex",
+            "explicit_model_pick": True,
+        },
+    )
+
+    assert result["status"] == 400
+    assert result["payload"]["ok"] is False
+    assert result["payload"]["error"] == "unsupported_gate"
+    assert "/goal gate is not supported" in result["payload"]["message"]
+    assert "stream_id" not in result["payload"]
+    assert "kickoff_prompt" not in result["payload"]
+    assert set_calls == []
+    assert existing.goal == "ship the feature" and existing.gates == []
+    assert not hasattr(session, "model_explicit_pick_signature")
+
+
+def test_goal_endpoint_stores_inline_contract_and_kicks_off_with_contract(monkeypatch, tmp_path):
+    """POST /api/goal with contract lines stores the contract and starts the first turn with it."""
+    from api import goals as webui_goals
+    from api import routes
+    pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+
+    class FakeSession:
+        session_id = "sid-goal-contract-route"
+        profile = "default"
+        workspace = str(tmp_path)
+        model = "gpt-5.5"
+        model_provider = "openai-codex"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+        active_stream_id = None
+
+    started = []
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_WEBUI_RUNTIME_ADAPTER", raising=False)
+    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda _profile: None)
+    monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider, **_: (model, provider, False),
+    )
+
+    def fake_start(session, **kwargs):
+        started.append(kwargs)
+        return {"stream_id": "goal-stream", "session_id": session.session_id, "pending_started_at": 123.0}
+
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", fake_start)
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+
+    result = routes._handle_goal_command(
+        object(),
+        {"session_id": "sid-goal-contract-route", "args": _CONTRACT_GOAL_TEXT, "workspace": str(tmp_path)},
+    )
+    state = webui_goals._manager("sid-goal-contract-route").state
+
+    assert result["status"] == 200
+    assert started and started[0]["msg"] == _CONTRACT_GOAL_TEXT
+    assert state.goal == "Ship the export endpoint"
+    assert state.contract.verification.startswith("uv run pytest tests/test_export.py passes")
+    assert state.contract.stop_when == "the schema needs a migration"

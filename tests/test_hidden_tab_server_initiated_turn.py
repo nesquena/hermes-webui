@@ -21,7 +21,13 @@ tests pinning the contract:
   tab that transitions to hidden via the ``visibilitychange`` hook.
 """
 
+import json
+import shutil
+import subprocess
+import textwrap
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
@@ -89,7 +95,7 @@ def test_hidden_poll_hits_session_status_and_attaches_as_replay():
     """
     start = MESSAGES_JS.find("function _startHiddenActiveStreamPoll(sid)")
     assert start != -1
-    body = MESSAGES_JS[start:start + 2400]
+    body = MESSAGES_JS[start:MESSAGES_JS.index("function _stopHiddenActiveStreamPoll()", start)]
     assert "api/session/status?session_id=" in body
     assert "d.active_stream_id" in body
     # attaches as replay (recovered=true) — turn is already mid-flight
@@ -172,9 +178,7 @@ def test_poll_stops_only_when_attach_succeeds():
     """
     start = MESSAGES_JS.find("function _startHiddenActiveStreamPoll(sid)")
     assert start != -1, "_startHiddenActiveStreamPoll signature not found"
-    # Window 2400: the multi-pane follow-up adds an explanatory comment block
-    # before the attach call, pushing it past a narrower slice.
-    body = MESSAGES_JS[start:start + 3200]
+    body = MESSAGES_JS[start:MESSAGES_JS.index("function _stopHiddenActiveStreamPoll()", start)]
     assert "const attached = _attachServerInitiatedStream(sid, streamId, true)" in body
     # Stop the poll only on a true attach (the false branch keeps polling within
     # the bounded-retry budget rather than stopping).
@@ -183,3 +187,320 @@ def test_poll_stops_only_when_attach_succeeds():
     # The bounded-retry give-up: a never-current pane stops after the budget.
     assert "_sessionStreamHiddenPollFalseCount" in body
     assert "_SESSION_STREAM_HIDDEN_POLL_MAX_FALSE" in body
+
+
+# ── Missing-session responses preserve recoverable profile ownership ──────
+
+NODE = shutil.which("node")
+
+
+@pytest.fixture(scope="module")
+def hidden_poll_results():
+    """Execute the real poll and visibility handler with deterministic responses."""
+    if NODE is None:
+        pytest.skip("node not available")
+    start = MESSAGES_JS.index("function _startHiddenActiveStreamPoll(sid)")
+    poll_end = MESSAGES_JS.index("function _chatStreamActiveForSession(sid)", start)
+    stream_end = MESSAGES_JS.index("function stopSessionStream()", poll_end)
+    functions = {
+        "poll": MESSAGES_JS[start:poll_end],
+        "session": MESSAGES_JS[poll_end:stream_end],
+    }
+
+    driver = textwrap.dedent(
+        r"""
+        const functions = JSON.parse(process.argv[1]);
+        let _sessionStreamHiddenPollTimer = null;
+        let _sessionStreamHiddenPollSid = null;
+        let _sessionStreamHiddenPollFalseStreamId = null;
+        let _sessionStreamHiddenPollFalseCount = 0;
+        let _sessionStreamHiddenSid = null;
+        let _sessionStreamSessionId = null;
+        let _sessionEventSource = null;
+        let _sessionStreamReconnectTimer = null;
+        const _SESSION_STREAM_HIDDEN_POLL_MAX_FALSE = 20;
+        let visibilityChange = null;
+        const document = {
+          hidden: true,
+          addEventListener: (type, listener) => {
+            if (type === 'visibilitychange') visibilityChange = listener;
+          },
+        };
+        const S = {
+          activeStreamId: null,
+          messages: [],
+          session: {session_id: 'session-a', message_count: 0},
+        };
+        const _apiUrl = value => value;
+        let attachCalls = 0;
+        const _attachServerInitiatedStream = () => { attachCalls += 1; return true; };
+        let intervalFn = null;
+        let intervalSeq = 0;
+        let fetchCalls = 0;
+        let eventSourceCalls = 0;
+
+        class EventSource {
+          constructor() {
+            eventSourceCalls += 1;
+            this.readyState = 1;
+          }
+          addEventListener() {}
+          close() { this.readyState = 2; }
+        }
+
+        globalThis.setInterval = fn => {
+          intervalFn = fn;
+          return ++intervalSeq;
+        };
+        globalThis.clearInterval = () => { intervalFn = null; };
+        eval(functions.poll);
+
+        function stopSessionStream() {
+          if (_sessionEventSource) _sessionEventSource.close();
+          _sessionEventSource = null;
+          _sessionStreamSessionId = null;
+          _stopHiddenActiveStreamPoll();
+        }
+
+        eval(functions.session);
+
+        const flush = () => new Promise(resolve => setImmediate(resolve));
+        const response = status => ({
+          ok: status >= 200 && status < 300,
+          status,
+          json: async () => ({active_stream_id: null}),
+        });
+
+        async function settle() {
+          await flush();
+          await flush();
+        }
+
+        function reset() {
+          stopSessionStream();
+          _sessionStreamHiddenSid = null;
+          document.hidden = true;
+          document._hermesSessionStreamVisibilityHook = false;
+          visibilityChange = null;
+          intervalFn = null;
+          fetchCalls = 0;
+          eventSourceCalls = 0;
+          attachCalls = 0;
+        }
+
+        async function runStatus(status, reject = false) {
+          reset();
+          _sessionStreamHiddenSid = 'session-a';
+          globalThis.fetch = () => {
+            fetchCalls += 1;
+            return reject ? Promise.reject(new Error('offline')) : Promise.resolve(response(status));
+          };
+          _startHiddenActiveStreamPoll('session-a');
+          await settle();
+          const nextTick = intervalFn;
+          if (nextTick) {
+            nextTick();
+            await settle();
+          }
+          return {
+            fetchCalls,
+            running: intervalFn !== null,
+            pollSid: _sessionStreamHiddenPollSid,
+            hiddenSid: _sessionStreamHiddenSid,
+          };
+        }
+
+        async function runStaleResponse(status, sameSession = false) {
+          reset();
+          let resolveA;
+          globalThis.fetch = url => {
+            fetchCalls += 1;
+            if (fetchCalls === 1) {
+              return new Promise(resolve => { resolveA = resolve; });
+            }
+            return Promise.resolve(response(200));
+          };
+          _sessionStreamHiddenSid = 'session-a';
+          _startHiddenActiveStreamPoll('session-a');
+          const oldTick = intervalFn;
+          const replacementSid = sameSession ? 'session-a' : 'session-b';
+          _sessionStreamHiddenSid = replacementSid;
+          _startHiddenActiveStreamPoll(replacementSid);
+          await settle();
+          resolveA(response(status));
+          await settle();
+          oldTick();
+          await settle();
+          return {
+            running: intervalFn !== null,
+            pollSid: _sessionStreamHiddenPollSid,
+            hiddenSid: _sessionStreamHiddenSid,
+          };
+        }
+
+        async function runVisibilityRecovery(status) {
+          reset();
+          globalThis.fetch = () => {
+            fetchCalls += 1;
+            return Promise.resolve(response(status));
+          };
+          startSessionStream('session-a');
+          await settle();
+          if (!visibilityChange) throw new Error('visibilitychange listener was not installed');
+          document.hidden = false;
+          visibilityChange();
+          await settle();
+          return {
+            eventSourceCalls,
+            running: intervalFn !== null,
+            pollSid: _sessionStreamHiddenPollSid,
+            hiddenSid: _sessionStreamHiddenSid,
+          };
+        }
+
+        async function runLateJson() {
+          reset();
+          let resolveBody;
+          globalThis.fetch = () => {
+            fetchCalls++;
+            if (fetchCalls === 1) return Promise.resolve({ok: true, status: 200,
+              json: () => new Promise(resolve => { resolveBody = resolve; })});
+            return Promise.resolve(response(200));
+          };
+          _sessionStreamHiddenSid = 'session-a';
+          _startHiddenActiveStreamPoll('session-a');
+          await settle();
+          _startHiddenActiveStreamPoll('session-a');
+          resolveBody({active_stream_id: 'old-stream'});
+          await settle();
+          return {attachCalls, running: intervalFn !== null};
+        }
+
+        async function runSequence(statuses) {
+          reset();
+          const states = [];
+          globalThis.fetch = () => {
+            const status = statuses[fetchCalls++];
+            if (status === -1) return Promise.reject(new Error('offline'));
+            if (status === 'active') return Promise.resolve({ok: true, status: 200,
+              json: async () => ({active_stream_id: 'live-a'})});
+            return Promise.resolve(response(status));
+          };
+          startSessionStream('session-a');
+          for (let i = 0; i < statuses.length; i++) {
+            if (i && intervalFn) intervalFn();
+            await settle();
+            states.push({running: intervalFn !== null, hiddenSid: _sessionStreamHiddenSid});
+          }
+          document.hidden = false;
+          visibilityChange();
+          await settle();
+          return {states, fetchCalls, eventSourceCalls, attachCalls};
+        }
+
+        (async () => {
+          const result = {
+            missing404: await runStatus(404),
+            missing410: await runStatus(410),
+            server500: await runStatus(500),
+            profile409: await runStatus(409),
+            auth401: await runStatus(401),
+            forbidden403: await runStatus(403),
+            rate429: await runStatus(429),
+            offline: await runStatus(0, true),
+            idle200: await runStatus(200),
+            stale404: await runStaleResponse(404),
+            stale410: await runStaleResponse(410),
+            sameSession410: await runStaleResponse(410, true),
+            visible404: await runVisibilityRecovery(404),
+            visible410: await runVisibilityRecovery(410),
+            repeated404: await runSequence([404, 404, 404, 404]),
+            recoveredProfile: await runSequence([404, 'active']),
+            recoveredKnownProfile: await runSequence([409, 'active']),
+            reset200: await runSequence([404, 404, 200, 404, 404, 404]),
+            reset500: await runSequence([404, 404, 500, 404, 404, 404]),
+            resetOffline: await runSequence([404, 404, -1, 404, 404, 404]),
+            reset409: await runSequence([404, 404, 409, 404, 404, 404]),
+            lateJson: await runLateJson(),
+          };
+          process.stdout.write(JSON.stringify(result));
+        })().catch(error => {
+          console.error(error);
+          process.exit(1);
+        });
+        """
+    )
+
+    proc = subprocess.run(
+        [NODE, "-e", driver, json.dumps(functions)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_hidden_poll_transient_404_preserves_visibility_recovery(hidden_poll_results):
+    result = hidden_poll_results
+    assert result["visible404"]["eventSourceCalls"] == 1
+    assert result["missing404"] == {
+        "fetchCalls": 2, "running": True, "pollSid": "session-a", "hiddenSid": "session-a",
+    }
+    assert result["recoveredProfile"]["attachCalls"] == 1
+    assert result["recoveredKnownProfile"]["attachCalls"] == 1
+
+
+def test_hidden_poll_repeated_404_is_bounded_but_can_resume(hidden_poll_results):
+    result = hidden_poll_results["repeated404"]
+    assert [s["running"] for s in result["states"]] == [True, True, False, False]
+    assert all(s["hiddenSid"] == "session-a" for s in result["states"])
+    assert result["fetchCalls"] == 3
+    assert result["eventSourceCalls"] == 1
+
+
+@pytest.mark.parametrize("key", ["reset200", "reset500", "resetOffline", "reset409"])
+def test_hidden_poll_404_budget_requires_consecutive_responses(hidden_poll_results, key):
+    result = hidden_poll_results[key]
+    assert [s["running"] for s in result["states"]] == [True] * 5 + [False]
+    assert result["eventSourceCalls"] == 1
+
+
+def test_hidden_poll_410_stops_and_clears_resume_owner(hidden_poll_results):
+    result = hidden_poll_results
+    assert result["visible410"] == {
+            "eventSourceCalls": 0,
+            "running": False,
+            "pollSid": None,
+            "hiddenSid": None,
+    }
+    assert result["missing410"] == {
+            "fetchCalls": 1,
+            "running": False,
+            "pollSid": None,
+            "hiddenSid": None,
+    }
+
+
+def test_hidden_poll_transient_failures_and_idle_remain_retryable(hidden_poll_results):
+    result = hidden_poll_results
+    for key in ("server500", "offline", "idle200", "profile409", "auth401", "forbidden403", "rate429"):
+        assert result[key]["fetchCalls"] == 2
+        assert result[key]["running"] is True
+        assert result[key]["pollSid"] == "session-a"
+        assert result[key]["hiddenSid"] == "session-a"
+
+
+@pytest.mark.parametrize("key,sid", [
+    ("stale404", "session-b"), ("stale410", "session-b"), ("sameSession410", "session-a"),
+])
+def test_hidden_poll_stale_response_and_tick_cannot_stop_replacement(hidden_poll_results, key, sid):
+    assert hidden_poll_results[key] == {
+        "running": True,
+        "pollSid": sid,
+        "hiddenSid": sid,
+    }
+
+
+def test_hidden_poll_late_json_cannot_attach_into_replacement(hidden_poll_results):
+    assert hidden_poll_results["lateJson"] == {"attachCalls": 0, "running": True}

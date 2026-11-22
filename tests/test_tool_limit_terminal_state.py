@@ -4,12 +4,45 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from api import models
+from api.process_event_utils import build_active_turn_token
 from api import streaming
 from api.models import Session
+from api.config import PENDING_GOAL_CONTINUATION
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _looks_like_full_conversation(messages, history):
+    """True when ``messages`` already starts with ``history`` as a prefix.
+
+    Compares only durable identity (role + visible text + tool identifiers) so
+    volatile bookkeeping fields (``id``, ``timestamp``) that every fixture
+    mints differently cannot defeat the check. Used to keep the full-
+    conversation fixture prepend idempotent (#7237 review fixture fix).
+    """
+    def _key(row):
+        if not isinstance(row, dict):
+            return (str(row),)
+        content = row.get("content", "")
+        if not isinstance(content, str):
+            import json as _json
+            try:
+                content = _json.dumps(content, sort_keys=True, ensure_ascii=False)
+            except Exception:
+                content = str(content)
+        return (
+            str(row.get("role") or ""),
+            str(content),
+            str(row.get("tool_call_id") or ""),
+        )
+
+    if len(messages) < len(history):
+        return False
+    return [_key(m) for m in messages[: len(history)]] == [_key(h) for h in history]
 
 
 def _run_streaming_with_fake_agent(
@@ -19,6 +52,14 @@ def _run_streaming_with_fake_agent(
     *,
     prior_messages=None,
     prior_context_messages=None,
+    msg_text="Do the long task.",
+    pending_started_at=1.0,
+    current_turn_user_idx=None,
+    turn_id="turn-current",
+    agent_results=None,
+    enable_auth_retry=False,
+    full_conversation_fixture=False,
+    prepend_current_user=False,
 ):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
@@ -30,7 +71,7 @@ def _run_streaming_with_fake_agent(
     streaming.STREAMS.clear()
     streaming.AGENT_INSTANCES.clear()
     streaming.SESSION_AGENT_LOCKS.clear()
-    streaming.PENDING_GOAL_CONTINUATION.clear()
+    PENDING_GOAL_CONTINUATION.clear()
     try:
         from api.config import SESSION_AGENT_CACHE
 
@@ -40,22 +81,31 @@ def _run_streaming_with_fake_agent(
 
     session_id = "tool_limit_session"
     stream_id = "stream-tool-limit"
+    session_messages = list(prior_messages or [])
+    session_context_messages = list(prior_context_messages or [])
+    for history in (session_messages, session_context_messages):
+        for message in history:
+            if isinstance(message, dict) and message.get("role") == "user":
+                message.setdefault("timestamp", 1.0)
+                message.setdefault("_source", "webui")
+                message.setdefault("attachments", [])
     session = Session(
         session_id=session_id,
         title="Tool limit test",
         workspace=str(tmp_path),
         model="gpt-4o",
-        messages=list(prior_messages or []),
-        context_messages=list(prior_context_messages or []),
+        messages=session_messages,
+        context_messages=session_context_messages,
     )
     session.active_stream_id = stream_id
-    session.pending_user_message = "Do the long task."
-    session.pending_started_at = 1.0
+    session.pending_user_message = msg_text
+    session.pending_started_at = pending_started_at
     session.save()
     models.SESSIONS[session_id] = session
     streaming.SESSIONS[session_id] = session
     event_queue = queue.Queue()
     streaming.STREAMS[stream_id] = event_queue
+    result_queue = list(agent_results or [])
 
     class FakeAgent:
         def __init__(self, **kwargs):
@@ -70,9 +120,83 @@ def _run_streaming_with_fake_agent(
             self.reasoning_config = None
             self.ephemeral_system_prompt = None
             self._last_error = None
+            self._persist_user_message_idx = current_turn_user_idx
+            self._current_turn_id = turn_id if current_turn_user_idx is not None else ""
+
+        @staticmethod
+        def _full_conversation_result(sent_history, result, current_user_message=None,
+                                     prepend_current_user=False):
+            """Production full-conversation result contract (#7237 review).
+
+            ``agent.run_conversation()`` returns the FULL conversation: the
+            exact ``conversation_history`` it was handed (the sanitized
+            projection) followed by the rows the current turn produced. The
+            fixtures must honour that contract — returning only the
+            current-turn rows without the received projection is what forced
+            the dedupe gate to be relaxed (6 regressions in this file,
+            nesquena-hermes 2026-09-27).
+
+            The prepend is IDEMPOTENT: a fixture whose ``messages`` already
+            start with the sent history (either because the fixture author
+            wrote the full conversation, or because this helper already ran
+            for it, or because the test is a projection-less delta-repair
+            case that owns its own shape) is returned untouched. Only a
+            genuine delta-only fixture is extended. A fixture whose messages
+            are empty stays empty (the no-response / empty-agent-result
+            shape), which is a distinct production result the classifier must
+            still see.
+            """
+            if not isinstance(result, dict):
+                return result
+            messages = result.get("messages")
+            if not isinstance(messages, list) or not messages:
+                return result
+            history = list(sent_history or [])
+            if history and _looks_like_full_conversation(messages, history):
+                # Already full-conversation: the fixture author wrote the whole
+                # conversation (a projection-less delta-repair case owns its own
+                # shape) — never double-prepend.
+                return result
+            # The Agent is handed the sanitized history WITHOUT the current
+            # user row; it mints that row itself as part of the turn, so a
+            # full-conversation result is history + the current user row +
+            # whatever the turn produced. Opt in with ``prepend_current_user``
+            # when the fixture's rows are all turn output and no user row is
+            # otherwise implied (the projection already carrying the checkpoint
+            # user row is the normal case, where prepending would duplicate).
+            prefix = list(history)
+            if (prepend_current_user and current_user_message and messages
+                    and (not history
+                         or str(history[-1].get("role") or "") != "user")):
+                prefix = prefix + [
+                    {"role": "user", "content": current_user_message, "_source": "webui"}
+                ]
+            rebuilt = dict(result)
+            rebuilt["messages"] = prefix + list(messages)
+            return rebuilt
 
         def run_conversation(self, **kwargs):
-            return agent_result
+            _sent_history = kwargs.get("conversation_history")
+            if not full_conversation_fixture:
+                # Legacy delta-repair fixture: the agent returns ONLY the
+                # current-turn rows. maintainer (2026-09-27): keep these
+                # separate instead of weakening production ownership.
+                if result_queue:
+                    next_result = result_queue.pop(0)
+                    if isinstance(next_result, BaseException):
+                        raise next_result
+                    return next_result
+                return agent_result
+            if result_queue:
+                next_result = result_queue.pop(0)
+                if isinstance(next_result, BaseException):
+                    raise next_result
+                return self._full_conversation_result(
+                    _sent_history, next_result, kwargs.get("user_message"),
+                    prepend_current_user)
+            return self._full_conversation_result(
+                _sent_history, agent_result, kwargs.get("user_message"),
+                prepend_current_user)
 
         def interrupt(self, _message):
             return None
@@ -87,9 +211,15 @@ def _run_streaming_with_fake_agent(
         m.setattr("api.config.get_config", lambda *_args, **_kwargs: {})
         m.setattr("api.config._resolve_cli_toolsets", lambda *_args, **_kwargs: [])
         m.setitem(sys.modules, "hermes_state", fake_hermes_state)
+        if enable_auth_retry:
+            m.setattr(
+                streaming,
+                "_attempt_credential_self_heal",
+                lambda *_args, **_kwargs: {"api_key": "retry-key", "provider": "openai"},
+            )
         streaming._run_agent_streaming(
             session_id=session_id,
-            msg_text="Do the long task.",
+            msg_text=msg_text,
             model="gpt-4o",
             workspace=str(tmp_path),
             stream_id=stream_id,
@@ -253,6 +383,437 @@ def test_streaming_tool_limit_with_final_answer_persists_clean_done_state(tmp_pa
     assert assistant["role"] == "assistant"
     assert assistant["_terminal_state"] == "tool_limit_reached"
     assert assistant["_statusCard"]["title"] == "Tool iteration limit reached"
+
+
+@pytest.mark.parametrize("marker", ["_verification_stop_synthetic", "_pre_verify_synthetic"])
+@pytest.mark.parametrize("delta_only", [False, True])
+def test_verification_nudge_is_removed_while_corrective_followup_persists(
+    tmp_path,
+    monkeypatch,
+    marker,
+    delta_only,
+):
+    corrective = "Verification failed. I fixed the parser and reran the tests."
+    # Provider-shape call row (``tool_calls`` array, not a display content
+    # list): the outbound sanitizer keeps the call/result pair, so the
+    # projected history stays 4 rows == the raw prior turn and the
+    # full-conversation settle can prefix-align without rewriting (#7237
+    # review fixture fix — a display-shape content list would orphan the
+    # tool row, shrink the projection, and force the display merge to
+    # re-append the projected rows).
+    prior_turn = [
+        {"role": "user", "content": "Fix the failing test."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "terminal",
+                    "type": "function",
+                    "function": {"name": "terminal", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "terminal",
+            "content": "Tests passed.",
+            "verification_evidence": {
+                "status": "passed",
+                "kind": "terminal",
+                "scope": "workspace",
+                "canonical_command": "pytest tests/test_app.py -q",
+            },
+        },
+        {"role": "assistant", "content": "The failing test is fixed."},
+    ]
+    result_messages = [
+        {"role": "user", "content": "[System: verify the workspace]", marker: True},
+        {"role": "assistant", "content": corrective},
+    ]
+    if not delta_only:
+        result_messages = prior_turn + result_messages
+    # The delta_only variant ships the SAME full-conversation result: the
+    # agent returns the conversation it was handed plus its own rows
+    # (#7237 review 2026-09-27). Returning a bare delta is what previously
+    # forced the dedupe gate to be relaxed; maintainer rejected weakening
+    # production ownership to accommodate those mocks. The parameter now only
+    # documents which shape the fixture author started from, so the sent
+    # result is built ONCE from the full conversation and never re-prefixed.
+    result = {"messages": result_messages}
+
+    _events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=prior_turn,
+        prior_context_messages=prior_turn,
+        msg_text="Fix the failing test.",
+        current_turn_user_idx=0,
+        full_conversation_fixture=True,
+    )
+
+    expected_sequence = [
+        (message["role"], message.get("content"))
+        for message in prior_turn
+    ] + [("assistant", corrective)]
+    for field in ("messages", "context_messages"):
+        serialized = json.dumps(payload[field])
+        assert marker not in serialized
+        assert "[System: verify the workspace]" not in serialized
+        assert [
+            (message["role"], message.get("content"))
+            for message in payload[field]
+        ] == expected_sequence
+        assert [message.get("content") for message in payload[field]].count(
+            "Fix the failing test."
+        ) == 1
+
+
+@pytest.mark.parametrize("marker", ["_verification_stop_synthetic", "_pre_verify_synthetic"])
+def test_deferred_repeated_old_prompt_marked_followup_materializes_current_turn(
+    tmp_path,
+    monkeypatch,
+    marker,
+):
+    prompt = "Fix the failing test."
+    old_turn = [
+        {"role": "user", "content": prompt, "timestamp": 1.0},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    corrective = "Verification failed. I fixed the parser and reran the tests."
+    result = {
+        "messages": old_turn + [
+            {"role": "user", "content": "[System: verify the workspace]", marker: True},
+            {"role": "assistant", "content": corrective},
+        ],
+    }
+
+    _events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=old_turn,
+        prior_context_messages=old_turn,
+        msg_text=prompt,
+        pending_started_at=2.0,
+        current_turn_user_idx=len(old_turn),
+    )
+
+    expected = [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+        ("assistant", corrective),
+    ]
+    for field in ("messages", "context_messages"):
+        assert [(message["role"], message.get("content")) for message in payload[field]] == expected
+        assert [message.get("content") for message in payload[field]].count(prompt) == 2
+        assert marker not in json.dumps(payload[field])
+
+
+@pytest.mark.parametrize("marker", ["_verification_stop_synthetic", "_pre_verify_synthetic"])
+def test_same_second_repeated_prompt_keeps_current_user_turn(tmp_path, monkeypatch, marker):
+    prompt = "Fix the failing test."
+    old_turn = [
+        {"role": "user", "content": prompt, "timestamp": 1.1},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    corrective = "Verification failed. I fixed the parser and reran the tests."
+    result = {
+        "messages": old_turn + [
+            {"role": "user", "content": "[System: verify the workspace]", marker: True},
+            {"role": "assistant", "content": corrective},
+        ],
+    }
+
+    _events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=old_turn,
+        prior_context_messages=old_turn,
+        msg_text=prompt,
+        pending_started_at=1.9,
+        current_turn_user_idx=len(old_turn),
+    )
+
+    expected = [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+        ("assistant", corrective),
+    ]
+    for field in ("messages", "context_messages"):
+        assert [(message["role"], message.get("content")) for message in payload[field]] == expected
+        assert [message.get("content") for message in payload[field]].count(prompt) == 2
+        assert marker not in json.dumps(payload[field])
+
+
+@pytest.mark.parametrize("marker", ["_verification_stop_synthetic", "_pre_verify_synthetic"])
+def test_eager_exact_checkpoint_does_not_duplicate_repeated_prompt(
+    tmp_path,
+    monkeypatch,
+    marker,
+):
+    prompt = "Fix the failing test."
+    old_turn = [
+        {"role": "user", "content": prompt, "timestamp": 1.0},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    current_checkpoint = [
+        {
+            "role": "user",
+            "content": prompt,
+            "timestamp": 2.0,
+            "_source": "webui",
+            "attachments": [],
+            "_active_turn_token": "stream-tool-limit:2",
+        },
+    ]
+    corrective = "Verification failed. I fixed the parser and reran the tests."
+    result = {
+        "messages": [
+            {"role": "user", "content": "[System: verify the workspace]", marker: True},
+            {"role": "assistant", "content": corrective},
+        ]
+    }
+
+    _events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=old_turn,
+        prior_context_messages=old_turn + current_checkpoint,
+        msg_text=prompt,
+        pending_started_at=2.0,
+        current_turn_user_idx=2,
+        full_conversation_fixture=True,
+        prepend_current_user=True,
+    )
+
+    expected = [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+        ("assistant", corrective),
+    ]
+    for field in ("messages", "context_messages"):
+        assert [(message["role"], message.get("content")) for message in payload[field]] == expected
+        assert [message.get("content") for message in payload[field]].count(prompt) == 2
+        assert marker not in json.dumps(payload[field])
+
+
+@pytest.mark.parametrize("marker", ["_verification_stop_synthetic", "_pre_verify_synthetic"])
+def test_eager_checkpoint_reused_by_exact_token(tmp_path, monkeypatch, marker):
+    prompt = "Fix the failing test."
+    old_turn = [
+        {"role": "user", "content": prompt, "timestamp": 1.1},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    current_checkpoint = [
+        {
+            "role": "user",
+            "content": prompt,
+            "timestamp": 1.9,
+            "_source": "webui",
+            "attachments": [],
+            "_active_turn_token": build_active_turn_token("stream-tool-limit", 1.9),
+        },
+    ]
+    corrective = "Verification failed. I fixed the parser and reran the tests."
+    result = {
+        "messages": [
+            {"role": "user", "content": "[System: verify the workspace]", marker: True},
+            {"role": "assistant", "content": corrective},
+        ]
+    }
+
+    _events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=old_turn,
+        prior_context_messages=old_turn + current_checkpoint,
+        msg_text=prompt,
+        pending_started_at=1.9,
+        current_turn_user_idx=2,
+        full_conversation_fixture=True,
+        prepend_current_user=True,
+    )
+
+    expected = [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+        ("assistant", corrective),
+    ]
+    for field in ("messages", "context_messages"):
+        assert [(message["role"], message.get("content")) for message in payload[field]] == expected
+        assert [message.get("content") for message in payload[field]].count(prompt) == 2
+        assert marker not in json.dumps(payload[field])
+
+
+@pytest.mark.parametrize("marker", ["_verification_stop_synthetic", "_pre_verify_synthetic"])
+def test_tool_limit_exit_uses_shared_settlement_owner(tmp_path, monkeypatch, marker):
+    prompt = "Fix the failing test."
+    old_turn = [
+        {"role": "user", "content": prompt, "timestamp": 1.1},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    corrective = "Verification failed. I fixed the parser and reran the tests."
+    result = {
+        "turn_exit_reason": "max_iterations_reached(30/30)",
+        "messages": old_turn + [
+            {"role": "user", "content": "[System: verify the workspace]", marker: True},
+            {"role": "assistant", "content": corrective},
+        ],
+    }
+    settle_calls = []
+    original = streaming._settle_result_messages
+
+    def _spy(*args, **kwargs):
+        settle_calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(streaming, "_settle_result_messages", _spy)
+    _events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=old_turn,
+        prior_context_messages=old_turn,
+        msg_text=prompt,
+        pending_started_at=1.9,
+        current_turn_user_idx=len(old_turn),
+    )
+
+    assert len(settle_calls) == 1
+    assert [(message["role"], message.get("content")) for message in payload["messages"]] == [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+        ("assistant", corrective),
+    ]
+
+
+@pytest.mark.parametrize("marker", ["_verification_stop_synthetic", "_pre_verify_synthetic"])
+def test_shared_settlement_owner_handles_exception_style_delta(tmp_path, monkeypatch, marker):
+    prompt = "Fix the failing test."
+    old_turn = [
+        {"role": "user", "content": prompt, "timestamp": 1.1},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    corrective = "Verification failed. I fixed the parser and reran the tests."
+    heal_result = {
+        "messages": old_turn + [
+            {"role": "user", "content": "[System: verify the workspace]", marker: True},
+            {"role": "assistant", "content": corrective},
+        ],
+    }
+    session = types.SimpleNamespace(messages=list(old_turn), context_messages=list(old_turn))
+    streaming._settle_result_messages(
+        session,
+        old_turn,
+        old_turn,
+        heal_result["messages"],
+        prompt,
+        "webui",
+        {
+            "token": "stream-tool-limit:1.9",
+            "text": prompt,
+            "timestamp": 1.9,
+            "source": "webui",
+            "attachments": [],
+            "current_turn_user_idx": len(old_turn),
+            "turn_id": "turn-current",
+        },
+    )
+
+    assert [(message["role"], message.get("content")) for message in session.messages] == [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+        ("assistant", corrective),
+    ]
+
+
+def test_missing_agent_authority_fails_closed(tmp_path, monkeypatch):
+    prompt = "Fix the failing test."
+    old_turn = [
+        {"role": "user", "content": prompt, "timestamp": 1.1},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    result = {
+        "messages": old_turn + [
+            {"role": "user", "content": "[System: verify the workspace]", "_verification_stop_synthetic": True},
+            {"role": "assistant", "content": "Verification failed. I fixed the parser and reran the tests."},
+        ],
+    }
+
+    _events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=old_turn,
+        prior_context_messages=old_turn,
+        msg_text=prompt,
+        pending_started_at=1.9,
+        current_turn_user_idx=None,
+    )
+
+    assert [(message["role"], message.get("content")) for message in payload["messages"]] == [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+        ("assistant", "Verification failed. I fixed the parser and reran the tests."),
+    ]
+
+
+@pytest.mark.parametrize("marker", ["_verification_stop_synthetic", "_pre_verify_synthetic"])
+def test_synthetic_only_verification_delta_preserves_prior_histories(tmp_path, monkeypatch, marker):
+    prior_turn = [
+        {
+            "role": "user",
+            "content": "Fix the failing test.",
+            "_active_turn_token": build_active_turn_token("stream-tool-limit", 1.0),
+        },
+        {"role": "assistant", "content": [{"type": "tool_use", "name": "terminal"}]},
+        {
+            "role": "tool",
+            "tool_call_id": "terminal",
+            "content": "Tests passed.",
+            "verification_evidence": {
+                "status": "passed",
+                "kind": "terminal",
+                "scope": "workspace",
+                "canonical_command": "pytest tests/test_app.py -q",
+            },
+        },
+        {"role": "assistant", "content": "The failing test is fixed."},
+    ]
+    result = {
+        "messages": [
+            {"role": "user", "content": "[System: verify the workspace]", marker: True},
+        ],
+    }
+
+    _events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=prior_turn,
+        prior_context_messages=prior_turn,
+        msg_text="Fix the failing test.",
+        current_turn_user_idx=0,
+    )
+
+    for field in ("messages", "context_messages"):
+        assert payload[field] == payload["messages"]
+        serialized = json.dumps(payload[field])
+        assert marker not in serialized
+        assert "[System: verify the workspace]" not in serialized
+        assert "The failing test is fixed." in serialized
 
 
 def test_streaming_tool_limit_partial_without_final_answer_emits_no_final_apperror(tmp_path, monkeypatch):
@@ -478,4 +1039,170 @@ def test_streaming_empty_result_messages_do_not_treat_prior_assistant_as_current
     assert apperror_payloads, "expected silent-failure apperror"
     assert apperror_payloads[-1]["type"] == "no_response"
     assert not [payload for event, payload in events if event == "done"]
+    assert payload["messages"][-1]["_error"] is True
+
+
+def test_streaming_empty_result_same_text_does_not_treat_prior_assistant_as_current_answer(
+    tmp_path,
+    monkeypatch,
+):
+    prompt = "Fix the failing test."
+    prior = [
+        {"role": "user", "content": prompt, "timestamp": 1.1},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    result = {"messages": []}
+
+    events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=prior,
+        prior_context_messages=prior,
+        msg_text=prompt,
+        pending_started_at=1.9,
+        current_turn_user_idx=len(prior),
+    )
+
+    apperror_payloads = [event_payload for event, event_payload in events if event == "apperror"]
+    assert apperror_payloads, "expected silent-failure apperror"
+    assert apperror_payloads[-1]["type"] == "no_response"
+    assert not [event_payload for event, event_payload in events if event == "done"]
+    assert [(message["role"], message.get("content")) for message in payload["messages"][:-1]] == [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+    ]
+    assert payload["messages"][-1]["role"] == "assistant"
+    assert payload["messages"][-1]["_error"] is True
+
+
+def test_streaming_empty_result_without_exact_checkpoint_materializes_current_user(
+    tmp_path,
+    monkeypatch,
+):
+    prompt = "Fix the failing test."
+    prior = [
+        {"role": "user", "content": prompt, "timestamp": 1.1},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    result = {"messages": []}
+
+    events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=prior,
+        prior_context_messages=prior,
+        msg_text=prompt,
+        pending_started_at=1.9,
+        current_turn_user_idx=0,
+    )
+
+    apperror_payloads = [event_payload for event, event_payload in events if event == "apperror"]
+    assert apperror_payloads, "expected silent-failure apperror"
+    assert apperror_payloads[-1]["type"] == "no_response"
+    assert not [event_payload for event, event_payload in events if event == "done"]
+    assert [(message["role"], message.get("content")) for message in payload["messages"][:-1]] == [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+    ]
+    assert payload["messages"][0].get("_active_turn_token") is None
+    assert payload["messages"][2]["_active_turn_token"] == build_active_turn_token(
+        "stream-tool-limit",
+        1.9,
+    )
+    assert payload["messages"][-1]["role"] == "assistant"
+    assert payload["messages"][-1]["_error"] is True
+
+
+def test_streaming_empty_result_divergent_context_index_does_not_reuse_historical_assistant(
+    tmp_path,
+    monkeypatch,
+):
+    prompt = "Fix the failing test."
+    current_token = build_active_turn_token("stream-tool-limit", 1.9)
+    prior = [
+        {"role": "user", "content": prompt, "timestamp": 1.0},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    prior_context = [
+        {"role": "user", "content": prompt, "timestamp": 1.0, "attachments": []},
+        {
+            "role": "user",
+            "content": prompt,
+            "timestamp": 1.9,
+            "attachments": [],
+            "_active_turn_token": current_token,
+        },
+    ]
+    result = {"messages": []}
+
+    events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=prior,
+        prior_context_messages=prior_context,
+        msg_text=prompt,
+        pending_started_at=1.9,
+        current_turn_user_idx=0,
+    )
+
+    apperror_payloads = [event_payload for event, event_payload in events if event == "apperror"]
+    assert apperror_payloads, "expected silent-failure apperror"
+    assert apperror_payloads[-1]["type"] == "no_response"
+    assert not [event_payload for event, event_payload in events if event == "done"]
+    assert [(message["role"], message.get("content")) for message in payload["messages"][:-1]] == [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+    ]
+    assert payload["messages"][0].get("_active_turn_token") is None
+    assert payload["messages"][-1]["role"] == "assistant"
+    assert payload["messages"][-1]["_error"] is True
+
+
+def test_streaming_tool_limit_empty_result_without_exact_checkpoint_materializes_current_user(
+    tmp_path,
+    monkeypatch,
+):
+    prompt = "Fix the failing test."
+    prior = [
+        {"role": "user", "content": prompt, "timestamp": 1.1},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    result = {
+        "turn_exit_reason": "max_iterations_reached(30/30)",
+        "messages": [],
+    }
+
+    events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=prior,
+        prior_context_messages=prior,
+        msg_text=prompt,
+        pending_started_at=1.9,
+        current_turn_user_idx=0,
+    )
+
+    apperror_payloads = [event_payload for event, event_payload in events if event == "apperror"]
+    assert apperror_payloads, "expected tool-limit apperror"
+    assert apperror_payloads[-1]["type"] == "tool_limit_reached"
+    assert apperror_payloads[-1]["terminal_state"] == "tool_limit_reached"
+    assert not [event_payload for event, event_payload in events if event == "done"]
+    assert [(message["role"], message.get("content")) for message in payload["messages"][:-1]] == [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+    ]
+    assert payload["messages"][0].get("_active_turn_token") is None
+    assert payload["messages"][2]["_active_turn_token"] == build_active_turn_token(
+        "stream-tool-limit",
+        1.9,
+    )
+    assert payload["messages"][-1]["role"] == "assistant"
     assert payload["messages"][-1]["_error"] is True

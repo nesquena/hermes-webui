@@ -50,12 +50,13 @@ def test_terminal_survives_short_lived_request_thread(tmp_path):
         assert term.is_alive()
 
         marker = f"lifecycle-ok-{os.getpid()}"
+        out = term.subscribe()
         write_terminal(sid, f"printf '{marker}\\n'\n")
         deadline = time.monotonic() + 1.0
         seen = ""
         while time.monotonic() < deadline:
             try:
-                event, payload = term.output.get(timeout=0.1)
+                _seq, event, payload = out.get(timeout=0.1)
             except queue.Empty:
                 continue
             if event == "output":
@@ -63,6 +64,7 @@ def test_terminal_survives_short_lived_request_thread(tmp_path):
                 if f"{marker}\r\n" in seen or f"{marker}\n" in seen:
                     break
         assert f"{marker}\r\n" in seen or f"{marker}\n" in seen
+        term.unsubscribe(out)
     finally:
         close_terminal(sid)
 
