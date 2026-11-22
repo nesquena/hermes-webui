@@ -26382,9 +26382,17 @@ def _detect_text_lang(text: str) -> str:
     # whole words instead of splitting into fragments that match nothing.
     # An apostrophe splits: Italian c'è/dov'è/com'è then count the stopword
     # "è", and French c'est/qu'il leave "est"/"il" as they would standing alone.
+    # A token is elided only when a letter precedes the apostrophe (s'il,
+    # qu'il, d'un): an opening quotation ('La build non passa.') elides
+    # nothing, so its first word keeps its vote.
     lowered = (text or "").lower()
     tokens = [
-        (m.group(), m.start() > 0 and lowered[m.start() - 1] in "'’")
+        (
+            m.group(),
+            m.start() > 1
+            and lowered[m.start() - 1] in "'’"
+            and re.match(r"[a-zà-öø-ÿ]", lowered[m.start() - 2]) is not None,
+        )
         for m in re.finditer(r"[a-zà-öø-ÿ]+", lowered)
     ]
     words = [w for w, _ in tokens]

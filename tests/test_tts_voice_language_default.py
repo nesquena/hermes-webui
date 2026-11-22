@@ -94,6 +94,16 @@ def _patch_profile_config(monkeypatch, cfg):
 # ── language detection ────────────────────────────────────────────────────
 
 
+# Italian replies opening with a quotation mark ('...' and ‘...’).
+_QUOTED_ITALIAN_REPLIES = [
+    "'La build non passa.'",
+    "'Il file non passa.'",
+    "‘La build non passa.’",
+    "‘Il file non passa.’",
+    "Ho scritto 'la build non passa' nel ticket.",
+]
+
+
 @pytest.mark.parametrize(
     "text,expected",
     [
@@ -174,6 +184,8 @@ def _patch_profile_config(monkeypatch, cfg):
         ("L'errore è stato corretto.", "it"),
         ("Dell'errore ho già parlato.", "it"),
         ("Nell'ultima build l'errore non c'è.", "it"),
+        # An opening quotation mark is no elision: the quoted first word votes.
+        *[(text, "it") for text in _QUOTED_ITALIAN_REPLIES],
         ("", ""),
     ],
 )
@@ -421,6 +433,27 @@ _FRENCH_NON_REPLIES = [
     "Non, la connexion fonctionne.",
     "Non, la compilation fonctionne.",
 ]
+
+
+@pytest.mark.parametrize("text", _QUOTED_ITALIAN_REPLIES)
+@pytest.mark.parametrize(
+    "cfg, expected",
+    [
+        ({}, "it-IT-ElsaNeural"),
+        (
+            {"tts": {"edge": {"voice": "en-US-GuyNeural", "voices": {"it": "it-IT-IsabellaNeural"}}}},
+            "it-IT-IsabellaNeural",
+        ),
+    ],
+)
+def test_quoted_italian_reply_selects_an_italian_voice(monkeypatch, text, cfg, expected):
+    _patch_profile_config(monkeypatch, cfg)
+    captured = {}
+    _stub_edge_tts(monkeypatch, captured)
+    h = _post({"text": text}, client="10.42.1.10")
+    routes._handle_tts(h, None)
+    assert h.status == 200, h.payload()
+    assert captured["voice"] == expected
 
 
 _FRENCH_ELISION_REPLIES = [
