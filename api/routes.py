@@ -1438,14 +1438,14 @@ def _active_skill_search_dirs(skills_dir: Path) -> list[Path]:
     """The request profile's local skills root plus its ``skills.external_dirs``.
 
     The Agent's ``get_external_skills_dirs()`` reads the process profile's config,
-    so external roots are resolved from the request profile's own files (#7842).
+    so external roots are resolved from the files of the profile that owns
+    *skills_dir* (#7842).
     """
-    from api.profiles import get_active_hermes_home
     from api.skill_runtime import profile_external_skill_dirs
 
     dirs = [skills_dir]
     try:
-        dirs.extend(profile_external_skill_dirs(Path(get_active_hermes_home())))
+        dirs.extend(profile_external_skill_dirs(Path(skills_dir).parent))
     except Exception:
         logger.debug("External skill-directory lookup failed", exc_info=True)
     return [p for p in dirs if p.exists()]

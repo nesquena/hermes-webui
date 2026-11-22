@@ -69,7 +69,7 @@ def profile_external_skill_dirs(profile_home: Path) -> list[Path]:
     for entry in entries:
         try:
             expanded = _PATH_ENV_VAR.sub(expand_var, entry)
-            if expanded == '~' or expanded.startswith(('~/', '~\\')):
+            if expanded == '~' or expanded.startswith('~/'):
                 expanded = str(HOME) + expanded[1:]
             else:
                 expanded = os.path.expanduser(expanded)  # ~user, as the Agent's expanduser

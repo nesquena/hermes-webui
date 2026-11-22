@@ -70,20 +70,18 @@ def process_profile_agent(monkeypatch):
     monkeypatch.setitem(sys.modules, "agent.skill_utils", skill_utils)
 
 
-def test_skills_search_dirs_follow_the_request_profile(homes, monkeypatch, process_profile_agent):
+def test_skills_search_dirs_follow_the_request_profile(homes, process_profile_agent):
     """A named profile sharing root's skills lists them; root's own entries stay root's."""
-    from api import profiles, routes
+    from api import routes
 
     root_only = _dir(homes.tmp / "root-only")
     _config(homes.root, [str(root_only), str(homes.root / "skills")])
     _config(homes.work, [str(homes.root / "skills")])  # the reported setup
 
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: homes.work)
     assert routes._active_skill_search_dirs(homes.work / "skills") == [
         homes.work / "skills", (homes.root / "skills").resolve(),
     ]
 
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: homes.root)
     # Root's own skills dir is its local root, not an external one.
     assert routes._active_skill_search_dirs(homes.root / "skills") == [homes.root / "skills", root_only]
 
