@@ -29,6 +29,8 @@
 
 ### Security
 
+- **A switched-off provider entry no longer routes a model or supplies its address (#9248, @chhxbchhxb, refs #8954).** With two spellings of one built-in provider in `providers` (for example `OpenAI` with `enabled: false` and `openai`), and the switched-off one listing the chat's model, WebUI picked that entry's `base_url` while Hermes Agent authenticated with the enabled entry's key. So the enabled entry's key went to the switched-off entry's address. The model lookup now skips switched-off entries, so the chat routes as if that entry didn't list the model. Enabled entries, the `enabled` default and its string forms, `custom:` entries and the active-provider guard are unchanged.
+
 - **A malformed passkey response is refused with 400/401, never a server error.** Registering or signing in with a
   crafted passkey response, for example one whose declared credential ID is longer than the real one, could make the
   CBOR reader raise an unexpected error and answer `500 Internal server error`. Every malformed registration or login
