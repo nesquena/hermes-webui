@@ -653,6 +653,11 @@ def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
     return p.exists()
 
 
+def _sidecar_stem_names_session(stem: str, session_id: str) -> bool:
+    """Accept the canonical name and the supported Hermes-core legacy alias."""
+    return stem == session_id or stem == f"session_{session_id}"
+
+
 def _write_session_index(updates=None, *, session_dir: Path | None = None, session_index_file: Path | None = None):
     """Update the session index file.
 
@@ -685,7 +690,9 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                     if s:
                         c = s.compact()
                         sid = c.get('session_id')
-                        if sid:
+                        # Check ownership before dedup: a larger foreign copy
+                        # must not claim the owner's row. Preserve legacy aliases.
+                        if sid and _sidecar_stem_names_session(p.stem, sid):
                             # Dedup by session_id: prefer entry with more messages
                             # (handles old-format session_xxx.json files alongside
                             #  WebUI-format xxx.json with the same session_id)
