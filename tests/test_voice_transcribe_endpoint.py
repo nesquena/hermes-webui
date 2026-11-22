@@ -3,6 +3,8 @@ import json
 import sys
 import types
 
+import pytest
+
 import api.upload as upload
 from api.upload import (
     _stt_provider_capability_from_module,
@@ -97,6 +99,121 @@ def test_handle_transcribe_surfaces_provider_error(monkeypatch):
 
     assert handler.status == 503
     assert handler.payload()["error"] == "STT not configured"
+
+
+def test_handle_transcribe_treats_no_speech_as_empty_success(monkeypatch):
+    """A provider that exits cleanly with no transcript found no speech.
+
+    transcription_command.py reports it with this message only after the exit
+    code has been checked, so it cannot mean "the provider crashed". Answering
+    400 made the composer report a failure for a silent clip.
+    """
+    fake_mod = types.ModuleType("tools.transcription_tools")
+    fake_mod.transcribe_audio = lambda path: {
+        "success": False,
+        "error": (
+            "Command STT provider wrote no output file at /tmp/stt-out/x.txt "
+            "and produced no stdout"
+        ),
+    }
+    _install_fake_transcription_tools(monkeypatch, fake_mod)
+
+    body, content_type = _multipart_body(
+        files={"file": ("voice.webm", b"RIFFfakeaudio", "audio/webm")}
+    )
+    handler = _FakeHandler(body, content_type)
+    handle_transcribe(handler)
+
+    assert handler.status == 200
+    assert handler.payload() == {"ok": True, "transcript": "", "no_speech": True}
+
+
+def test_handle_transcribe_keeps_provider_crash_as_error(monkeypatch):
+    """A non-zero exit is a real failure, not silence: keep it a 4xx."""
+    fake_mod = types.ModuleType("tools.transcription_tools")
+    fake_mod.transcribe_audio = lambda path: {
+        "success": False,
+        "error": "STT command provider 'stt-gw' exited with code 1: boom",
+    }
+    _install_fake_transcription_tools(monkeypatch, fake_mod)
+
+    body, content_type = _multipart_body(
+        files={"file": ("voice.webm", b"RIFFfakeaudio", "audio/webm")}
+    )
+    handler = _FakeHandler(body, content_type)
+    handle_transcribe(handler)
+
+    assert handler.status == 400
+    assert "exited with code 1" in handler.payload()["error"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # Review 5674873058: a real nonzero exit whose stderr happens to quote
+        # the clean-run wording was reported as a successful silent clip.
+        "STT command provider 'review-fixture' exited with code 7: stderr: produced no stdout",
+        "STT command provider 'x' exited with code 7: stderr: wrote no output file",
+        "Command provider crashed\nTraceback: produced no stdout",
+        # Same words, but not the producer's clean-run message.
+        "stderr: Command STT provider wrote no output file at /tmp/x.txt and produced no stdout",
+        "warning: produced no stdout",
+        "Command STT provider wrote no output file\nand produced no stdout",
+    ],
+)
+def test_handle_transcribe_keeps_marker_collisions_as_errors(monkeypatch, error):
+    fake_mod = types.ModuleType("tools.transcription_tools")
+    fake_mod.transcribe_audio = lambda path: {"success": False, "error": error}
+    _install_fake_transcription_tools(monkeypatch, fake_mod)
+
+    body, content_type = _multipart_body(
+        files={"file": ("voice.webm", b"RIFFfakeaudio", "audio/webm")}
+    )
+    handler = _FakeHandler(body, content_type)
+    handle_transcribe(handler)
+
+    assert handler.status == 400, "a crashed provider is not a silent clip"
+    assert handler.payload().get("no_speech") is None
+    assert handler.payload()["error"] == error
+
+
+def test_is_no_speech_error_matches_only_the_producers_complete_message():
+    # The exact message transcription_tools raises on a clean exit with no output.
+    assert upload._is_no_speech_error(
+        "Command STT provider wrote no output file at /tmp/stt-out/x.txt and produced no stdout"
+    )
+    assert upload._is_no_speech_error(
+        "  Command STT provider wrote no output file at /tmp/stt-out/x.txt "
+        "and produced no stdout.\n"
+    )
+    assert not upload._is_no_speech_error("")
+    assert not upload._is_no_speech_error("STT not configured")
+    assert not upload._is_no_speech_error(
+        "exited with code 0: stderr: produced no stdout"
+    )
+    assert not upload._is_no_speech_error("produced no stdout")
+    assert not upload._is_no_speech_error("wrote no output file")
+
+
+def test_handle_transcribe_reports_clean_empty_run_as_no_speech(monkeypatch):
+    # The positive side of the contract: the producer's own clean-run message is
+    # still answered as a successful empty transcript.
+    fake_mod = types.ModuleType("tools.transcription_tools")
+    fake_mod.transcribe_audio = lambda path: {
+        "success": False,
+        "error": "Command STT provider wrote no output file at /tmp/stt-out/x.txt "
+                 "and produced no stdout",
+    }
+    _install_fake_transcription_tools(monkeypatch, fake_mod)
+
+    body, content_type = _multipart_body(
+        files={"file": ("voice.webm", b"RIFFfakeaudio", "audio/webm")}
+    )
+    handler = _FakeHandler(body, content_type)
+    handle_transcribe(handler)
+
+    assert handler.status == 200
+    assert handler.payload() == {"ok": True, "transcript": "", "no_speech": True}
 
 
 def test_handle_transcribe_capability_reports_unavailable_without_provider(monkeypatch):

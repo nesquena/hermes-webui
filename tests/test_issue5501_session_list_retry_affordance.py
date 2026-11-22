@@ -257,7 +257,7 @@ console.log(JSON.stringify({
         "disabled": True,
         "ariaBusy": "true",
         "phases": ["idle", "retrying"],
-        "renderCalls": [{"deferWhileInteracting": False}],
+        "renderCalls": [{"deferWhileInteracting": False, "keepProjectPicker": True}],
     }
 
 
@@ -295,7 +295,7 @@ console.log(JSON.stringify({
         "ariaBusy": "true",
         "onclick": True,
         "phases": ["idle", "blocked"],
-        "renderCalls": [{"deferWhileInteracting": False}],
+        "renderCalls": [{"deferWhileInteracting": False, "keepProjectPicker": True}],
     }
 
 
@@ -355,7 +355,7 @@ retryFlow.resolve();
         "onclick": "function",
     }
     assert body["phases"] == ["idle", "blocked", "blocked"]
-    assert body["renderCalls"] == [{"deferWhileInteracting": False}]
+    assert body["renderCalls"] == [{"deferWhileInteracting": False, "keepProjectPicker": True}]
     assert body["error"] is None
 
 
@@ -415,7 +415,7 @@ retryFlow.reject(new Error('boom'));
         "onclick": "function",
     }
     assert body["phases"] == ["idle", "blocked", "blocked"]
-    assert body["renderCalls"] == [{"deferWhileInteracting": False}]
+    assert body["renderCalls"] == [{"deferWhileInteracting": False, "keepProjectPicker": True}]
     assert body["error"] == {
         "message": "Could not load conversations.",
         "detail": "boom",
@@ -470,7 +470,7 @@ retryFlow.resolve();
         "ariaBusy": "true",
     }
     assert body["phases"] == ["idle", "retrying", "idle"]
-    assert body["renderCalls"] == [{"deferWhileInteracting": False}]
+    assert body["renderCalls"] == [{"deferWhileInteracting": False, "keepProjectPicker": True}]
     assert body["error"] is None
     assert body["rows"] == [{"className": "session-item", "text": "row-1"}]
 
@@ -529,7 +529,7 @@ retryFlow.reject(new Error('boom'));
         "ariaBusy": "true",
     }
     assert body["phases"] == ["idle", "retrying", "idle"]
-    assert body["renderCalls"] == [{"deferWhileInteracting": False}]
+    assert body["renderCalls"] == [{"deferWhileInteracting": False, "keepProjectPicker": True}]
     assert body["error"] == {
         "message": "Could not load conversations.",
         "detail": "boom",

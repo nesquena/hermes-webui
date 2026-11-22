@@ -2,44 +2,225 @@
 
 State-extraction prelude to the routes.py split tracked in #1907.
 Extracts approval state, not handlers, by design.
+
+Gateway approvals carry two pieces of state with one lifecycle:
+
+* the **producer** entry in ``tools.approval._gateway_queues`` — the queued
+  approval itself, which owns the lifecycle; and
+* the **mirror** entry in ``_pending`` — this module's projection of that
+  producer for the UI.
+
+A producer is consumed only by an explicit settlement operation, which assigns
+its result and signals its waiter before fallible projection work begins.
+``retire_gateway_pending_mirror`` cleans up the UI projection; it must not
+silently delete a producer, because that would strand the agent thread parked
+on the producer's event. For a provider-qualified response,
+``resolve_gateway_pending_run`` matches the exact ``(run_id, approval_id)``
+pair, settles that producer, and preserves same-run siblings and other runs.
+When a run becomes terminal, ``settle_gateway_pending_run`` fail-closes every
+producer owned by that run with ``deny`` before retiring its mirrors; producers
+owned by another run remain live.
 """
+import functools
+import inspect
+import logging
 import queue
 import threading
 import uuid
+from contextlib import contextmanager
 
 from api.session_events import publish_session_list_changed
 
-# Approval system (optional -- graceful fallback if agent not available)
+logger = logging.getLogger(__name__)
+
+# ── Agent approval bridge (#9119) ────────────────────────────────────────────
+# WebUI shares live state with the Agent's ``tools.approval``: its lock, its
+# gateway queues, and the functions that resolve, grant and toggle YOLO. Most of
+# these names are private to the Agent, so bind each one separately. A single
+# ``from tools.approval import (...)`` swapped ALL of them for private stubs when
+# ANY one was missing (the Agent removed ``_pending``/``submit_pending``), and
+# approvals then "succeeded" in WebUI while the Agent thread timed out.
+#
+# * No Agent importable (CI, agent-less installs): local WebUI-only mode. Every
+#   name below is a local stand-in; there is no Agent approval to bridge to.
+# * Agent importable: each name binds to the Agent's own object. A missing name
+#   is recorded in ``APPROVAL_BRIDGE`` and logged, and the routes that need it
+#   fail closed instead of acting on a private stand-in.
 try:
-    from tools.approval import (
-        submit_pending as _submit_pending_raw,
-        approve_session,
-        approve_permanent,
-        save_permanent_allowlist,
-        is_approved,
-        _pending,
-        _lock,
-        _permanent_approved,
-        _gateway_queues,
-        resolve_gateway_approval,
-        enable_session_yolo,
-        disable_session_yolo,
-        is_session_yolo_enabled,
-    )
+    import tools.approval as _agent_approval
 except ImportError:
-    _submit_pending_raw = lambda *a, **k: None
-    approve_session = lambda *a, **k: None
-    approve_permanent = lambda *a, **k: None
-    save_permanent_allowlist = lambda *a, **k: None
-    is_approved = lambda *a, **k: True
-    resolve_gateway_approval = lambda *a, **k: 0
-    enable_session_yolo = lambda *a, **k: None
-    disable_session_yolo = lambda *a, **k: None
-    is_session_yolo_enabled = lambda *a, **k: False
+    _agent_approval = None
+
+
+# The Agent's ``save_permanent_allowlist`` reads config.yaml before it takes
+# ``_lock``, so two saves in one profile can overlap: the one that writes last
+# merges a read taken before the other's write, and both grants can be lost.
+# One lock held across each whole save closes that window. The module attribute
+# is replaced because the Agent's own ``_persist_choice`` looks the name up when
+# it runs, so its saves and WebUI's go through the same lock.
+#
+# Lock order: this lock first, then the Agent's ``_lock`` inside the save. Never
+# call the save while holding ``_lock`` (the Agent releases it before saving,
+# and every WebUI caller saves outside it).
+def _serialize_allowlist_saves(module):
+    """Wrap ``module.save_permanent_allowlist`` in one lock, once; return that lock."""
+    save = getattr(module, "save_permanent_allowlist", None)
+    if not callable(save):
+        return None
+    if getattr(save, "_webui_serialized", False):  # a reload or second import
+        return save._webui_save_lock
+    lock = threading.Lock()
+
+    @functools.wraps(save)
+    def serialized_save(*args, **kwargs):
+        with lock:
+            return save(*args, **kwargs)
+
+    serialized_save._webui_serialized = True
+    serialized_save._webui_original = save
+    serialized_save._webui_save_lock = lock
+    module.save_permanent_allowlist = serialized_save
+    return lock
+
+
+_allowlist_save_lock = _serialize_allowlist_saves(_agent_approval)
+
+
+def _keys_persist_choice(module):
+    """The Agent's ``_persist_choice(session_key, choice, keys)``, else None.
+
+    Agents before 2026-10-06 (v2026.9.24) take ``(key, description, is_tirith)``
+    tuples as the third argument; WebUI then grants and saves the keys itself.
+    """
+    persist = getattr(module, "_persist_choice", None)
+    if not callable(persist):
+        return None
+    try:
+        params = list(inspect.signature(persist).parameters)
+    except Exception:
+        return None
+    return persist if len(params) >= 3 and params[2] == "keys" else None
+
+
+# Read once. Not a bridge failure when None: WebUI uses its own grant calls.
+persist_grant_choice = _keys_persist_choice(_agent_approval)
+
+_MISSING = object()
+# Without these WebUI cannot see or settle the Agent's parked approvals.
+_BRIDGE_CRITICAL_NAMES = ("_lock", "_gateway_queues", "resolve_gateway_approval")
+# "session" / "always" choices persist through these.
+_SCOPE_GRANT_NAMES = (
+    "approve_session",
+    "approve_permanent",
+    "save_permanent_allowlist",
+    "_permanent_approved",
+)
+_YOLO_NAMES = ("enable_session_yolo", "disable_session_yolo", "is_session_yolo_enabled")
+_missing_agent_names: list[str] = []
+
+
+def _bind_agent_name(name: str, local_fallback):
+    """Return the Agent's own ``tools.approval.<name>``, else ``local_fallback``."""
+    if _agent_approval is None:
+        return local_fallback
+    value = getattr(_agent_approval, name, _MISSING)
+    if value is _MISSING:
+        _missing_agent_names.append(name)
+        return local_fallback
+    return value
+
+
+# Current Agents use a re-entrant lock; older ones used a plain Lock, so WebUI
+# must never take ``_lock`` while already holding it (no WebUI path does). The
+# Agent-less stand-in is a plain Lock too, so a re-entry hangs in CI instead of
+# only against an older Agent.
+_lock = _bind_agent_name("_lock", threading.Lock())
+_gateway_queues = _bind_agent_name("_gateway_queues", {})
+resolve_gateway_approval = _bind_agent_name("resolve_gateway_approval", lambda *a, **k: 0)
+approve_session = _bind_agent_name("approve_session", lambda *a, **k: None)
+approve_permanent = _bind_agent_name("approve_permanent", lambda *a, **k: None)
+save_permanent_allowlist = _bind_agent_name("save_permanent_allowlist", lambda *a, **k: None)
+_permanent_approved = _bind_agent_name("_permanent_approved", set())
+enable_session_yolo = _bind_agent_name("enable_session_yolo", lambda *a, **k: None)
+disable_session_yolo = _bind_agent_name("disable_session_yolo", lambda *a, **k: None)
+is_session_yolo_enabled = _bind_agent_name("is_session_yolo_enabled", lambda *a, **k: False)
+# ``_pending`` is WebUI's projection of pending approvals. Older Agents also
+# write raw no-notifier entries into their own ``_pending`` (and never read it),
+# so share that dict while it exists; newer Agents dropped it and WebUI keeps
+# the projection locally. Not a bridge failure either way.
+_pending = getattr(_agent_approval, "_pending", None)
+if not isinstance(_pending, dict):
     _pending = {}
-    _lock = threading.Lock()
-    _permanent_approved = set()
-    _gateway_queues = {}
+
+APPROVAL_BRIDGE = {
+    "agent": _agent_approval is not None,
+    "available": not any(n in _missing_agent_names for n in _BRIDGE_CRITICAL_NAMES),
+    "scopes_available": not any(n in _missing_agent_names for n in _SCOPE_GRANT_NAMES),
+    "yolo_available": not any(n in _missing_agent_names for n in _YOLO_NAMES),
+    "missing": sorted(_missing_agent_names),
+}
+if _agent_approval is None:
+    logger.info("tools.approval is not importable; approvals use local WebUI-only state")
+elif _missing_agent_names:
+    (logger.error if not APPROVAL_BRIDGE["available"] else logger.warning)(
+        "Hermes Agent tools.approval (%s) lacks %s; WebUI approval bridge %s",
+        getattr(_agent_approval, "__file__", "?"),
+        ", ".join(APPROVAL_BRIDGE["missing"]),
+        "is UNAVAILABLE: approval responses will fail closed"
+        if not APPROVAL_BRIDGE["available"]
+        else "is degraded: the affected approval features will refuse requests",
+    )
+
+_APPROVAL_BRIDGE_UNAVAILABLE_ERROR = (
+    "The installed Hermes Agent lacks approval functions this WebUI needs ({missing}), "
+    "so {feature} cannot reach the agent. Update WebUI and Hermes Agent together."
+)
+
+
+class ApprovalBridgeUnavailable(RuntimeError):
+    """The Agent's approvals cannot be settled from WebUI (see APPROVAL_BRIDGE)."""
+
+
+def require_approval_bridge() -> None:
+    """Raise before WebUI shows an Agent approval it could never settle.
+
+    The streaming notify callback calls this first: the Agent treats a raising
+    notifier as ``notify_failed`` and denies at once, instead of parking the
+    turn until ``approvals.timeout`` behind a card whose answer goes nowhere.
+    """
+    if not APPROVAL_BRIDGE["available"]:
+        raise ApprovalBridgeUnavailable(
+            "WebUI approval bridge unavailable; tools.approval lacks "
+            + ", ".join(APPROVAL_BRIDGE["missing"])
+        )
+
+
+def approval_bridge_failure(*, choice: str = "", yolo: bool = False) -> tuple[dict, int] | None:
+    """Return a fail-closed ``(payload, status)`` when the Agent cannot honour this, else None.
+
+    ``choice`` is the approval answer about to be applied in-process; ``yolo`` is
+    true for a YOLO toggle. Agent-less mode has no Agent to bridge to and never
+    fails here.
+    """
+    if choice and not APPROVAL_BRIDGE["available"]:
+        code, status, feature = "approval_bridge_unavailable", 503, "this approval response"
+    elif choice in ("session", "always") and not APPROVAL_BRIDGE["scopes_available"]:
+        code, status, feature = "approval_scope_unavailable", 409, f"an '{choice}' approval"
+    elif yolo and not APPROVAL_BRIDGE["yolo_available"]:
+        code, status, feature = "yolo_unavailable", 503, "session YOLO"
+    else:
+        return None
+    payload = {
+        "ok": False,
+        "code": code,
+        "error": _APPROVAL_BRIDGE_UNAVAILABLE_ERROR.format(
+            missing=", ".join(APPROVAL_BRIDGE["missing"]), feature=feature
+        ),
+        "missing": list(APPROVAL_BRIDGE["missing"]),
+    }
+    if choice:
+        payload["choice"] = choice
+    return payload, status
 
 
 # ── Approval SSE subscribers (long-connection push) ──────────────────────────
@@ -49,7 +230,156 @@ _GATEWAY_MIRROR_TOKEN = "_gateway_mirror_token"
 _GATEWAY_MIRROR_RETAINED = "_gateway_mirror_retained"
 _GATEWAY_ENTRY_DATA_TOKEN_KEY = "_webui_mirror_token"
 _GATEWAY_AGENT_IDENTITY_V1 = "_gateway_agent_identity_v1"
+_GATEWAY_EXECUTION_GENERATION = "_gateway_execution_generation"
 _gateway_relay_owners: dict[tuple[str, str], str] = {}
+_yolo_transition_lock = threading.Lock()
+_yolo_transitions: dict[str, dict] = {}
+_gateway_yolo_handoff_guard = threading.Lock()
+_gateway_yolo_handoffs: dict[str, dict] = {}
+
+# ── Session YOLO revision (#9101) ────────────────────────────────────────────
+# The flag lives in the Agent's memory. WebUI stamps every value it writes or
+# observes with a number from one process-wide counter, and the GET/POST and
+# approval answers carry it, so a POST can be made conditional on what its
+# caller read (``expected_revision`` -> 409 ``yolo_changed`` when it moved).
+# The epoch names this server process: a restart clears the flag and restarts
+# the counter, so revisions from different epochs are never equal. Nothing here
+# is persisted or pushed on a stream.
+_YOLO_EPOCH = uuid.uuid4().hex[:16]
+_yolo_revision_counter = 0
+_yolo_revisions: dict[str, tuple[int, bool]] = {}  # session -> (revision, enabled)
+
+
+def _yolo_state_locked(session_key: str) -> dict:
+    """Current YOLO state of one session; a changed flag takes the next revision.
+
+    Caller holds ``_yolo_transition_lock``. Writers call this right after
+    writing, so revision order is write order.
+    """
+    global _yolo_revision_counter
+    enabled = bool(is_session_yolo_enabled(session_key))
+    entry = _yolo_revisions.get(session_key)
+    moved = (entry[1] != enabled) if entry else enabled
+    if moved:
+        _yolo_revision_counter += 1
+        entry = (_yolo_revision_counter, enabled)
+        _yolo_revisions[session_key] = entry
+    return {
+        "yolo_enabled": enabled,
+        "yolo_revision": entry[0] if entry else 0,
+        "yolo_epoch": _YOLO_EPOCH,
+    }
+
+
+def session_yolo_state(session_key: str) -> dict:
+    """``{yolo_enabled, yolo_revision, yolo_epoch}`` for one session."""
+    session_key = str(session_key or "").strip()
+    with _yolo_transition_lock:
+        return _yolo_state_locked(session_key)
+
+
+def yolo_revision_conflict(session_key: str, expected: tuple[int, str | None] | None) -> dict | None:
+    """Refusal payload when the session's YOLO moved past ``expected``, else None."""
+    if expected is None:
+        return None
+    state = session_yolo_state(session_key)
+    revision, epoch = expected
+    if state["yolo_revision"] == revision and epoch in (None, state["yolo_epoch"]):
+        return None
+    return {
+        "ok": False,
+        "code": "yolo_changed",
+        "error": "YOLO changed since it was read; nothing was toggled.",
+        **state,
+    }
+
+
+@contextmanager
+def gateway_yolo_handoff(session_key: str):
+    """Serialize one session's YOLO toggles with gateway approval dispatch."""
+    session_key = str(session_key or "").strip()
+    with _gateway_yolo_handoff_guard:
+        entry = _gateway_yolo_handoffs.get(session_key)
+        if entry is None:
+            entry = {"lock": threading.Lock(), "users": 0}
+            _gateway_yolo_handoffs[session_key] = entry
+        entry["users"] += 1
+    lock = entry["lock"]
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+        with _gateway_yolo_handoff_guard:
+            entry["users"] -= 1
+            if entry["users"] == 0:
+                _gateway_yolo_handoffs.pop(session_key, None)
+
+
+def begin_session_yolo_transition(session_key: str) -> object | None:
+    """Register a pending YOLO enable until one approval relay settles.
+
+    Multiple tabs may relay approvals for different runs in the same session.
+    Track every in-flight enable intent so one failed relay cannot undo another
+    successful or explicit enable. Do not publish an unconfirmed enable to the
+    shared session flag: the gateway stream may only auto-approve later prompts
+    after a relay succeeds or an explicit enable wins.
+    """
+    session_key = str(session_key or "").strip()
+    if not session_key:
+        return None
+    token = object()
+    with _yolo_transition_lock:
+        transition = _yolo_transitions.get(session_key)
+        if transition is None:
+            transition = {
+                "was_enabled": bool(is_session_yolo_enabled(session_key)),
+                "tokens": set(),
+                "committed": False,
+            }
+            _yolo_transitions[session_key] = transition
+        transition["tokens"].add(token)
+    return token
+
+
+def finish_session_yolo_transition(session_key: str, token: object | None, *, succeeded: bool) -> None:
+    """Settle one pending YOLO enable without exposing or applying stale state."""
+    session_key = str(session_key or "").strip()
+    if not session_key or token is None:
+        return
+    with _yolo_transition_lock:
+        transition = _yolo_transitions.get(session_key)
+        if transition is None or token not in transition["tokens"]:
+            return
+        transition["tokens"].remove(token)
+        if succeeded:
+            transition["committed"] = True
+            # The first confirmed relay commits YOLO immediately. Any remaining
+            # tokens may fail later but cannot revoke this successful enable.
+            enable_session_yolo(session_key)
+            _yolo_state_locked(session_key)
+        if transition["tokens"]:
+            return
+        _yolo_transitions.pop(session_key, None)
+        if transition["committed"] or transition["was_enabled"]:
+            enable_session_yolo(session_key)
+        else:
+            disable_session_yolo(session_key)
+        _yolo_state_locked(session_key)
+
+
+def set_session_yolo_enabled(session_key: str, enabled: bool) -> None:
+    """Apply an explicit YOLO choice and supersede in-flight rollbacks."""
+    session_key = str(session_key or "").strip()
+    if not session_key:
+        return
+    with _yolo_transition_lock:
+        _yolo_transitions.pop(session_key, None)
+        if enabled:
+            enable_session_yolo(session_key)
+        else:
+            disable_session_yolo(session_key)
+        _yolo_state_locked(session_key)
 
 
 def _approval_sse_subscribe(session_id: str) -> queue.Queue:
@@ -150,29 +480,51 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
 
     live_head_entry = live_gateway_queue[0] if live_gateway_queue else None
     live_head_data = getattr(live_head_entry, "data", None) or {}
-    has_no_run_mirror = any(
-        _is_gateway_mirror_entry(entry)
-        and not str(entry.get("run_id") or "").strip()
-        for entry in queue_list
-    )
     live_run_id = str(live_head_data.get("run_id") or "").strip()
-    live_has_token = bool(live_head_data.get(_GATEWAY_ENTRY_DATA_TOKEN_KEY))
+    # Tokenize EVERY live no-run producer, and derive `live_token` from the
+    # authoritative head, whenever `_gateway_queues[session_key]` has live
+    # producers. This deliberately does NOT defer to a pre-existing no-run
+    # mirror: an unmatched/tokenless mirror A (which the fail-closed binding in
+    # submit_gateway_pending_mirror leaves deliberately unbound) must never
+    # suppress the live producer's token, or A masks the real pending approval
+    # B — B never surfaces as the head and can't be actioned, while responding
+    # to A resolves nothing. While any producer is live, a mirror survives only
+    # if it is bound to some live producer's own token — the head's via
+    # `live_token`, a non-head producer's via `live_local_tokens` (which is what
+    # keeps a non-head mirror resolvable) — so unmatched and tokenless copies
+    # are discarded instead of masking a real one. Tokenless-orphan retention is
+    # reserved for the genuine no-producer case (#7093), which lands here with an
+    # empty `live_gateway_queue` and therefore a `None` `live_token` anyway.
     live_local_tokens: set[str] = set()
     for live_entry in live_gateway_queue:
         live_data = getattr(live_entry, "data", None) or {}
         if str(live_data.get("run_id") or "").strip():
             continue
-        live_entry_token = str(live_data.get(_GATEWAY_ENTRY_DATA_TOKEN_KEY) or "").strip()
-        if live_entry_token or not has_no_run_mirror:
-            live_entry_token = _gateway_mirror_entry_token(live_entry) or ""
-            if live_entry_token:
-                live_local_tokens.add(live_entry_token)
-                if not str(live_data.get("approval_id") or "").strip():
-                    live_data["approval_id"] = f"gwlocal:{live_entry_token}"
+        live_entry_token = _gateway_mirror_entry_token(live_entry) or ""
+        if live_entry_token:
+            live_local_tokens.add(live_entry_token)
+            if not str(live_data.get("approval_id") or "").strip():
+                live_data["approval_id"] = f"gwlocal:{live_entry_token}"
+
+    # A raw id-less LOCAL entry in `_pending` (agent-side _pending_result drops
+    # `{command, pattern_key, pattern_keys, description}` verbatim when no
+    # gateway notifier is registered) is unactionable by contract: the frontend
+    # owner-capture requires an approval_id, so its card can neither be
+    # approved nor dismissed — the poll re-serves it forever. Mint a stable id
+    # on the entry itself (the same contract the producer-tokenization loop
+    # above applies to _gateway_queues producers). Minting on the stored dict
+    # keeps the id stable across polls, so frontend dismiss markers persist.
+    for entry in queue_list:
+        if not isinstance(entry, dict) or _is_gateway_mirror_entry(entry):
+            continue
+        if str(entry.get("approval_id") or "").strip():
+            continue
+        if str(entry.get("run_id") or "").strip():
+            continue
+        entry["approval_id"] = f"gwlocal-mirrorless:{uuid.uuid4().hex}"
     live_token = (
         _gateway_mirror_entry_token(live_head_entry)
         if live_head_entry and live_head_data
-        and (live_run_id or live_has_token or not has_no_run_mirror)
         else None
     )
     if live_token and live_run_id and not str(live_head_data.get("approval_id") or "").strip():
@@ -210,18 +562,28 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
                 live_mirror_present = True
                 continue
             if live_token:
+                if entry.get(_GATEWAY_MIRROR_RETAINED):
+                    rebuilt.append(entry)
+                    continue
                 if entry_token:
                     changed = True
                     continue
                 deferred_run_entries.append(entry)
                 continue
-            if not entry_token:
+            if entry.get(_GATEWAY_MIRROR_RETAINED) or not entry_token:
                 rebuilt.append(entry)
                 continue
             changed = True
             continue
 
-        if entry.get(_GATEWAY_MIRROR_RETAINED):
+        # A retained mirror is one whose own producer had already vanished when
+        # the user responded (the missing-producer 409 kept visible until an
+        # explicit teardown). It survives ONLY while no producer is live: once
+        # `_gateway_queues[session_key]` holds a real producer again, an
+        # unresolvable retained mirror must not mask it, so fall through to the
+        # normal matching below (which keeps it if it still matches a live
+        # token and discards it otherwise).
+        if entry.get(_GATEWAY_MIRROR_RETAINED) and not live_gateway_queue:
             rebuilt.append(entry)
             continue
 
@@ -276,10 +638,16 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
     return head, total, changed
 
 
-def _gateway_pending_mirror_locked(session_key: str, approval_id: str = "", run_id: str = "") -> dict | None:
+def _gateway_pending_mirror_locked(
+    session_key: str,
+    approval_id: str = "",
+    run_id: str = "",
+    mirror_token: str = "",
+) -> dict | None:
     """Return the exact live run-backed mirror under `_lock`."""
     approval_id = str(approval_id or "").strip()
     run_id = str(run_id or "").strip()
+    mirror_token = str(mirror_token or "").strip()
     queue = _pending.get(session_key)
     entries = queue if isinstance(queue, list) else [queue] if queue else []
     if approval_id:
@@ -296,6 +664,8 @@ def _gateway_pending_mirror_locked(session_key: str, approval_id: str = "", run_
                 continue
             if run_id and entry_run_id != run_id:
                 continue
+            if mirror_token and str(entry.get(_GATEWAY_MIRROR_TOKEN) or "").strip() != mirror_token:
+                continue
             if run_id:
                 return entry
             if matched_entry is not None:
@@ -305,17 +675,44 @@ def _gateway_pending_mirror_locked(session_key: str, approval_id: str = "", run_
     for entry in entries:
         if not _is_gateway_mirror_entry(entry) or not str(entry.get("run_id") or "").strip():
             continue
-        if run_id and entry.get("run_id") == run_id:
-            return entry
+        if mirror_token and str(entry.get(_GATEWAY_MIRROR_TOKEN) or "").strip() != mirror_token:
+            continue
+        if run_id:
+            if entry.get("run_id") == run_id:
+                return entry
+            continue
+        # With no caller-supplied identity, the queue order is authoritative:
+        # return the current run-backed projection and let its embedded
+        # `(approval_id, run_id)` identify the exact relay owner.
+        return entry
     return None
 
 
-def gateway_pending_mirror(session_key: str, approval_id: str = "", run_id: str = "") -> dict | None:
+def gateway_pending_mirror(
+    session_key: str,
+    approval_id: str = "",
+    run_id: str = "",
+    mirror_token: str = "",
+) -> dict | None:
     """Return an exact live run-backed mirror for this session."""
     with _lock:
         reconcile_gateway_pending_mirror_locked(session_key)
-        entry = _gateway_pending_mirror_locked(session_key, approval_id, run_id)
+        entry = _gateway_pending_mirror_locked(session_key, approval_id, run_id, mirror_token)
         return dict(entry) if entry else None
+
+
+def gateway_pending_mirrors(session_key: str) -> list[dict]:
+    """Return every currently parked run-backed mirror in queue order."""
+    with _lock:
+        reconcile_gateway_pending_mirror_locked(session_key)
+        queue = _pending.get(session_key)
+        entries = queue if isinstance(queue, list) else [queue] if queue else []
+        return [
+            dict(entry)
+            for entry in entries
+            if _is_gateway_mirror_entry(entry)
+            and str(entry.get("run_id") or "").strip()
+        ]
 
 
 def claim_gateway_approval_relay_owner(session_key: str, run_id: str, approval_id: str) -> bool:
@@ -348,18 +745,33 @@ def release_gateway_approval_relay_owner(session_key: str, run_id: str, approval
         _gateway_relay_owners.pop(key, None)
 
 
-def retire_gateway_pending_mirror(session_key: str, approval_id: str = "", run_id: str = "") -> bool:
-    """Retire one approval, or every mirror for a terminal run."""
+def _settle_gateway_entry(entry, choice: str, reason: str | None = None) -> None:
+    """Complete a removed producer before any fallible projection work."""
+    entry.result = choice
+    if reason:
+        entry.reason = reason
+    entry.event.set()
+
+
+def retire_gateway_pending_mirror(
+    session_key: str,
+    approval_id: str = "",
+    run_id: str = "",
+    mirror_token: str = "",
+) -> bool:
+    """Retire one approval mirror, or every mirror for a terminal run."""
     with _lock:
         reconcile_gateway_pending_mirror_locked(session_key)
         queue = _pending.get(session_key)
         entries = queue if isinstance(queue, list) else [queue] if queue else []
         normalized_run_id = str(run_id or "").strip()
-        gateway_queue = _gateway_queues.get(session_key) or []
-        retained_gateway_queue = gateway_queue
-        gateway_queue_changed = False
         if approval_id:
-            match = _gateway_pending_mirror_locked(session_key, approval_id, run_id)
+            match = _gateway_pending_mirror_locked(
+                session_key,
+                approval_id,
+                run_id,
+                mirror_token,
+            )
             if match is None and not normalized_run_id:
                 match = next((entry for entry in entries if _is_gateway_mirror_entry(entry)
                               and not str(entry.get("run_id") or "").strip()
@@ -375,15 +787,7 @@ def retire_gateway_pending_mirror(session_key: str, approval_id: str = "", run_i
                 if _is_gateway_mirror_entry(entry)
                 and not str(entry.get("run_id") or "").strip()
             ]
-            if normalized_run_id:
-                retained_gateway_queue = []
-                for entry in gateway_queue:
-                    data = getattr(entry, "data", None) or {}
-                    if str(data.get("run_id") or "").strip() == normalized_run_id:
-                        gateway_queue_changed = True
-                        continue
-                    retained_gateway_queue.append(entry)
-        if not retired and not gateway_queue_changed:
+        if not retired:
             head, total, changed = reconcile_gateway_pending_mirror_locked(session_key)
             _approval_sse_notify_locked(session_key, head, total)
             if changed:
@@ -391,11 +795,6 @@ def retire_gateway_pending_mirror(session_key: str, approval_id: str = "", run_i
             return changed
         for match in retired:
             entries.remove(match)
-        if normalized_run_id and not approval_id:
-            if retained_gateway_queue:
-                _gateway_queues[session_key] = retained_gateway_queue
-            else:
-                _gateway_queues.pop(session_key, None)
         if entries:
             _pending[session_key] = entries
         else:
@@ -404,6 +803,60 @@ def retire_gateway_pending_mirror(session_key: str, approval_id: str = "", run_i
         _approval_sse_notify_locked(session_key, head, total)
     publish_session_list_changed("attention_resolved")
     return True
+
+
+def settle_gateway_pending_run(
+    session_key: str,
+    run_id: str,
+    *,
+    reason: str,
+) -> tuple[int, dict | None, int]:
+    """Fail-close every producer and mirror owned by a terminal gateway run."""
+    run_id = str(run_id or "").strip()
+    if not run_id:
+        return 0, None, 0
+
+    targets = []
+    with _lock:
+        gateway_queue = _gateway_queues.get(session_key) or []
+        retained_gateway_queue = []
+        for entry in gateway_queue:
+            data = getattr(entry, "data", None) or {}
+            if str(data.get("run_id") or "").strip() == run_id:
+                targets.append(entry)
+            else:
+                retained_gateway_queue.append(entry)
+        if retained_gateway_queue:
+            _gateway_queues[session_key] = retained_gateway_queue
+        else:
+            _gateway_queues.pop(session_key, None)
+
+        # Removal and waiter settlement are one semantic operation. In
+        # particular, reconciliation and SSE notification below may raise.
+        for entry in targets:
+            _settle_gateway_entry(entry, "deny", reason)
+
+        queue = _pending.get(session_key)
+        entries = queue if isinstance(queue, list) else [queue] if queue else []
+        retained_pending = [
+            entry
+            for entry in entries
+            if not (
+                _is_gateway_mirror_entry(entry)
+                and str(entry.get("run_id") or "").strip() == run_id
+            )
+        ]
+        mirrors_retired = len(retained_pending) != len(entries)
+        if retained_pending:
+            _pending[session_key] = retained_pending
+        else:
+            _pending.pop(session_key, None)
+
+        head, total, changed = reconcile_gateway_pending_mirror_locked(session_key)
+        _approval_sse_notify_locked(session_key, head, total)
+    if targets or mirrors_retired or changed:
+        publish_session_list_changed("attention_resolved")
+    return len(targets), head, total
 
 
 def _gateway_mirrored_pending_run_id(session_key: str, approval_id: str) -> str | None:
@@ -418,9 +871,34 @@ def _gateway_mirrored_pending_run_id(session_key: str, approval_id: str) -> str 
     return None
 
 
-def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dict | None, int]:
-    """Mirror the live gateway head into WebUI polling state under a typed tag."""
+def submit_gateway_pending_mirror(session_key: str, approval: dict, *, cancel_event=None) -> tuple[dict | None, int]:
+    """Mirror the live gateway head into WebUI polling state under a typed tag.
+
+    Every mirrored entry describes one pending approval to the UI. Run-backed
+    mirrors carry ``run_id`` (remote gateway runs) and are bound to the parked
+    ``_ApprovalEntry`` via ``approval_id``. No-run mirrors, which represent an
+    in-process (legacy) approval parked in ``_gateway_queues``, have no
+    ``run_id`` and instead bind back to the live entry through
+    ``_GATEWAY_MIRROR_TOKEN``: ``_resolve_approval_legacy()`` matches
+    ``pending[_GATEWAY_MIRROR_TOKEN]`` against the live entry's
+    ``_webui_mirror_token`` before it will call ``resolve_gateway_pending_local()``
+    to unblock the agent thread. A no-run mirror's token is stamped from its
+    OWN live producer — resolved via the mirror's ``request_id``/
+    ``approval_id`` — and from nothing else. If no live producer's identity
+    matches, the mirror is left tokenless (fail closed): guessing ownership
+    from "first unclaimed token" or the queue head would let approving THIS
+    (possibly stale/foreign) mirror resolve a DIFFERENT live producer than
+    the one the user actually saw, which is an approval-integrity violation,
+    not a convenience. A tokenless mirror is only wired up automatically when
+    there is truly no live producer at all (#7093); ``reconcile_gateway_
+    pending_mirror_locked`` binds a fresh, correctly-bound mirror to the
+    authoritative live head on its own. Without a token, THIS specific click
+    returns ``ok:true`` and the card clears without unblocking any producer —
+    the correct producer's own card reappears on the next reconcile.
+    """
     with _lock:
+        if cancel_event is not None and cancel_event.is_set():
+            return None, 0
         run_id = str(approval.get("run_id") or "").strip()
         approval_id = str(approval.get("approval_id") or "").strip()
         live_gateway_queue = _gateway_queues.get(session_key) or []
@@ -523,8 +1001,23 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dic
                 mirror_entry["run_id"] = run_id
                 mirror_entry["approval_id"] = approval_id
                 mirror_entry[_GATEWAY_MIRROR_FLAG] = True
-                if not _gateway_pending_mirror_locked(session_key, approval_id=approval_id, run_id=run_id):
+                mirror_entry[_GATEWAY_MIRROR_TOKEN] = uuid.uuid4().hex
+                mirror_entry[_GATEWAY_MIRROR_RETAINED] = True
+                existing_mirror = _gateway_pending_mirror_locked(
+                    session_key, approval_id=approval_id, run_id=run_id
+                )
+                if existing_mirror is None:
                     _normalize_pending_queue_locked(session_key).append(mirror_entry)
+                elif existing_mirror.get(_GATEWAY_EXECUTION_GENERATION) != mirror_entry.get(
+                    _GATEWAY_EXECUTION_GENERATION
+                ):
+                    # The run re-published this prompt id at a new generation:
+                    # the old mirror's answer is a stale 409, so the live
+                    # payload replaces it (new payload, new mirror token)
+                    # instead of being deduped away by the id alone.
+                    queue = _normalize_pending_queue_locked(session_key)
+                    queue[:] = [entry for entry in queue if entry is not existing_mirror]
+                    queue.append(mirror_entry)
         elif not exact_local_entry:
             if not approval_id:
                 approval_id = uuid.uuid4().hex
@@ -543,9 +1036,51 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dic
             if no_run_mirror:
                 approval["approval_id"] = str(no_run_mirror.get("approval_id") or approval_id).strip()
             elif not _gateway_pending_mirror_locked(session_key, approval_id=approval_id):
+                # Stamp the mirror token from the mirror's OWN live producer so
+                # the first respond can link this mirror to the right
+                # _ApprovalEntry in _gateway_queues. Without it,
+                # _resolve_approval_legacy cannot match the no-run mirror to its
+                # gateway entry (both token fields are empty) and the agent
+                # thread is never unblocked on the first click (#6008 legacy).
+                # We MUST NOT blindly take the live head: for a non-head mirror
+                # (multiple parked producers, #7093 exact-producer isolation)
+                # the head belongs to a sibling, and stamping its token would
+                # bind the mirror to the wrong entry. Only an explicit
+                # request_id/approval_id match may bind a token.
+                #
+                # FAIL CLOSED when no producer's identity matches: never infer
+                # ownership from "first unclaimed token" or the queue head. A
+                # stale/foreign approval (mismatched request_id, or no
+                # identity at all) that borrows another live producer's token
+                # would let approving THIS mirror resolve a DIFFERENT producer
+                # than the one the user actually saw — an approval-integrity
+                # violation, not a convenience (found in review of 818fd2fd).
+                # A tokenless orphan is only legitimate when there is no live
+                # producer at all (#7093); reconcile_gateway_pending_mirror_locked
+                # binds a real mirror to the authoritative live head on its own.
+                live_queue_for_mirror = _gateway_queues.get(session_key) or []
+                request_id_for_mirror = str(approval.get("request_id") or "").strip()
+                mirror_producer = None
+                if request_id_for_mirror or approval_id:
+                    for cand in live_queue_for_mirror:
+                        cand_data = getattr(cand, "data", None) or {}
+                        if (request_id_for_mirror and
+                                str(cand_data.get("request_id") or "").strip() == request_id_for_mirror):
+                            mirror_producer = cand
+                            break
+                        if (approval_id and not request_id_for_mirror and
+                                str(cand_data.get("approval_id") or "").strip() == approval_id):
+                            mirror_producer = cand
+                            break
+                mirror_token = (
+                    _gateway_mirror_entry_token(mirror_producer)
+                    if mirror_producer is not None else None
+                )
                 mirror_entry = dict(approval)
                 mirror_entry["approval_id"] = approval_id
                 mirror_entry[_GATEWAY_MIRROR_FLAG] = True
+                if mirror_token:
+                    mirror_entry[_GATEWAY_MIRROR_TOKEN] = mirror_token
                 _normalize_pending_queue_locked(session_key).append(mirror_entry)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
@@ -570,14 +1105,50 @@ def resolve_gateway_pending_local(
             _gateway_queues[session_key] = gateway_queue
         else:
             _gateway_queues.pop(session_key, None)
+        if target is not None:
+            _settle_gateway_entry(target, choice, reason)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
     if target is None:
         return 0, head, total
-    target.result = choice
-    if reason:
-        target.reason = reason
-    target.event.set()
+    publish_session_list_changed("attention_resolved")
+    return 1, head, total
+
+
+def resolve_gateway_pending_run(
+    session_key: str,
+    approval_id: str,
+    run_id: str,
+    choice: str,
+    reason: str | None = None,
+) -> tuple[int, dict | None, int]:
+    """Resolve one exact run-backed producer and wake its parked waiter."""
+    target = None
+    approval_id = str(approval_id or "").strip()
+    run_id = str(run_id or "").strip()
+    if not approval_id or not run_id:
+        return 0, None, 0
+    with _lock:
+        gateway_queue = _gateway_queues.get(session_key) or []
+        retained_gateway_queue = []
+        for entry in gateway_queue:
+            data = getattr(entry, "data", None) or {}
+            entry_approval_id = str(data.get("approval_id") or "").strip()
+            entry_run_id = str(data.get("run_id") or "").strip()
+            if target is None and entry_approval_id == approval_id and entry_run_id == run_id:
+                target = entry
+            else:
+                retained_gateway_queue.append(entry)
+        if retained_gateway_queue:
+            _gateway_queues[session_key] = retained_gateway_queue
+        else:
+            _gateway_queues.pop(session_key, None)
+        if target is not None:
+            _settle_gateway_entry(target, choice, reason)
+        head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
+        _approval_sse_notify_locked(session_key, head, total)
+    if target is None:
+        return 0, head, total
     publish_session_list_changed("attention_resolved")
     return 1, head, total
 
@@ -622,14 +1193,82 @@ def resolve_gateway_pending_local_no_run_mirror(
             _pending[session_key] = entries
         else:
             _pending.pop(session_key, None)
+        _settle_gateway_entry(target, choice, reason)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
-    target.result = choice
-    if reason:
-        target.reason = reason
-    target.event.set()
     publish_session_list_changed("attention_resolved")
     return True, 1, head, total
+
+
+def resolve_gateway_pending_local_all(
+    session_key: str,
+    choice: str,
+    reason: str | None = None,
+) -> tuple[int, dict | None, int]:
+    """Resolve every parked local/no-run approval without touching remote runs."""
+    targets = []
+    removed_pending = False
+    with _lock:
+        reconcile_gateway_pending_mirror_locked(session_key)
+
+        gateway_queue = _gateway_queues.get(session_key) or []
+        retained_gateway_queue = []
+        for entry in gateway_queue:
+            data = getattr(entry, "data", None) or {}
+            if str(data.get("run_id") or "").strip():
+                retained_gateway_queue.append(entry)
+            else:
+                targets.append(entry)
+        if retained_gateway_queue:
+            _gateway_queues[session_key] = retained_gateway_queue
+        else:
+            _gateway_queues.pop(session_key, None)
+
+        queue = _pending.get(session_key)
+        entries = queue if isinstance(queue, list) else [queue] if queue else []
+        retained_pending = [
+            entry
+            for entry in entries
+            if _is_gateway_mirror_entry(entry)
+            and str(entry.get("run_id") or "").strip()
+        ]
+        removed_pending = len(retained_pending) != len(entries)
+        if retained_pending:
+            _pending[session_key] = retained_pending
+        else:
+            _pending.pop(session_key, None)
+
+        for entry in targets:
+            _settle_gateway_entry(entry, choice, reason)
+        head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
+        _approval_sse_notify_locked(session_key, head, total)
+
+    if targets or removed_pending:
+        publish_session_list_changed("attention_resolved")
+    return len(targets), head, total
+
+
+def settle_gateway_pending_local_notification(
+    session_key: str,
+    approval: dict,
+) -> tuple[bool, dict | None, int]:
+    """Auto-resolve or publish one local approval at the YOLO handoff boundary.
+
+    The Agent adds its blocking entry before invoking WebUI's notify callback.
+    Serialize that callback with session YOLO commit/disable so a waiter arriving
+    after a drain snapshot cannot be parked behind an already-committed enable.
+    Run-backed approvals stay on the Runs API path and are never resolved here.
+    """
+    with gateway_yolo_handoff(session_key):
+        run_id = str((approval or {}).get("run_id") or "").strip()
+        if not run_id and is_session_yolo_enabled(session_key):
+            _resolved, head, total = resolve_gateway_pending_local_all(
+                session_key,
+                "once",
+            )
+            return True, head, total
+        head, total = submit_gateway_pending_mirror(session_key, approval)
+        return False, head, total
 
 
 def submit_pending(session_key: str, approval: dict) -> None:

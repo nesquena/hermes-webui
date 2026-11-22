@@ -10,6 +10,13 @@ LOG_FILE="${HERMES_WEBUI_LOG_FILE:-${HERMES_HOME}/webui.log}"
 STATE_FILE="${HERMES_WEBUI_CTL_STATE_FILE:-${HERMES_HOME}/webui.ctl.env}"
 DEFAULT_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-${HERMES_HOME}/webui}"
 DEFAULT_LAUNCHD_LABEL="${HERMES_WEBUI_LAUNCHD_LABEL:-com.parantoux.hermes-webui}"
+# Stop drain (#7293). The server answers the first SIGTERM with a bounded drain
+# of HERMES_WEBUI_SHUTDOWN_DRAIN_SECONDS (default 90, capped at 3600), then
+# settles what is still running as interrupted and exits. `stop` waits that
+# budget plus a margin before it escalates to SIGKILL.
+DEFAULT_SHUTDOWN_DRAIN_SECONDS=90
+MAX_SHUTDOWN_DRAIN_SECONDS=3600
+STOP_WAIT_MARGIN_SECONDS=5
 
 usage() {
   cat <<'EOF'
@@ -238,6 +245,7 @@ _write_state() {
   local state_dir="${HERMES_WEBUI_STATE_DIR:-${DEFAULT_STATE_DIR}}"
   {
     printf 'PID=%q\n' "${pid}"
+    printf 'SHUTDOWN_DRAIN_SECONDS=%q\n' "$(_shutdown_drain_budget_seconds)"
     printf 'REPO_ROOT=%q\n' "${REPO_ROOT}"
     printf 'PYTHON_EXE=%q\n' "${python_exe}"
     printf 'HOST=%q\n' "${host}"
@@ -246,6 +254,49 @@ _write_state() {
     printf 'STATE_DIR=%q\n' "${state_dir}"
     printf 'STARTED_AT=%q\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "${STATE_FILE}"
+}
+
+# Print the server's stop-drain budget in whole seconds, rounded up. Mirrors
+# api/run_drain.shutdown_drain_budget_seconds(): plain decimal seconds only,
+# empty or any other spelling -> the default, negatives -> 0, capped at the max.
+# Pure bash (3.2-safe): this runs on `stop`, where HERMES_WEBUI_PYTHON may not
+# be a usable interpreter.
+_shutdown_drain_budget_seconds() {
+  local raw="${HERMES_WEBUI_SHUTDOWN_DRAIN_SECONDS:-}"
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  if [[ -z "${raw}" ]]; then
+    printf '%s\n' "${DEFAULT_SHUTDOWN_DRAIN_SECONDS}"
+    return 0
+  fi
+  local re='^([+-]?)([0-9]*)(\.?)([0-9]*)$'
+  if [[ ! "${raw}" =~ ${re} ]]; then
+    printf '%s\n' "${DEFAULT_SHUTDOWN_DRAIN_SECONDS}"
+    return 0
+  fi
+  local sign="${BASH_REMATCH[1]}" whole="${BASH_REMATCH[2]}" dot="${BASH_REMATCH[3]}" frac="${BASH_REMATCH[4]}"
+  if [[ -z "${whole}" && ( -z "${dot}" || -z "${frac}" ) ]]; then
+    printf '%s\n' "${DEFAULT_SHUTDOWN_DRAIN_SECONDS}"
+    return 0
+  fi
+  if [[ "${sign}" == "-" ]]; then
+    printf '0\n'
+    return 0
+  fi
+  whole="${whole#"${whole%%[!0]*}"}"
+  if [[ ${#whole} -gt 4 ]]; then
+    printf '%s\n' "${MAX_SHUTDOWN_DRAIN_SECONDS}"
+    return 0
+  fi
+  local seconds=0
+  [[ -n "${whole}" ]] && seconds=$((10#${whole}))
+  if [[ "${frac}" =~ [1-9] ]]; then
+    seconds=$((seconds + 1))
+  fi
+  if [[ ${seconds} -gt ${MAX_SHUTDOWN_DRAIN_SECONDS} ]]; then
+    seconds=${MAX_SHUTDOWN_DRAIN_SECONDS}
+  fi
+  printf '%s\n' "${seconds}"
 }
 
 _load_state_if_present() {
@@ -720,19 +771,36 @@ stop_cmd() {
     return 0
   fi
 
-  echo "[ctl] Stopping Hermes WebUI (PID ${pid})"
+  # #7293: the first SIGTERM starts the server's bounded run drain. Wait for
+  # that budget (the value the server was started with, saved in the state
+  # file; else the current .env / environment) plus a margin before SIGKILL,
+  # so active runs can finish or be settled durably as interrupted.
+  # The state file is read for this one key, not sourced: sourcing would
+  # overwrite HOST/PORT/REPO_ROOT that `restart` hands to start_cmd next.
+  _load_repo_dotenv_preserving_env
+  _load_hermes_dotenv
+  local drain_seconds=""
+  if [[ -f "${STATE_FILE}" ]]; then
+    drain_seconds="$(sed -n 's/^SHUTDOWN_DRAIN_SECONDS=//p' "${STATE_FILE}" 2>/dev/null | tail -n 1 || true)"
+  fi
+  if [[ ! "${drain_seconds}" =~ ^[0-9]+$ ]]; then
+    drain_seconds="$(_shutdown_drain_budget_seconds)"
+  fi
+  local wait_seconds=$((drain_seconds + STOP_WAIT_MARGIN_SECONDS))
+  echo "[ctl] Stopping Hermes WebUI (PID ${pid}); active runs may take up to ${drain_seconds}s to drain"
   _stop_webui_pid "${pid}" TERM
-  local i
-  for i in {1..50}; do
+  local ticks=$((wait_seconds * 10)) i=0
+  while [[ ${i} -lt ${ticks} ]]; do
     if ! _is_alive "${pid}"; then
       rm -f "${PID_FILE}" "${STATE_FILE}"
       echo "[ctl] Stopped"
       return 0
     fi
     sleep 0.1
+    i=$((i + 1))
   done
 
-  echo "[ctl] Process did not exit after SIGTERM; sending SIGKILL" >&2
+  echo "[ctl] Process did not exit within ${wait_seconds}s of SIGTERM; sending SIGKILL" >&2
   _stop_webui_pid "${pid}" KILL
   rm -f "${PID_FILE}" "${STATE_FILE}"
 }

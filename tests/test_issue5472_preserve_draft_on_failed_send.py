@@ -32,6 +32,16 @@ import pytest
 
 ROOT = Path(__file__).parents[1]
 MESSAGES_JS = ROOT.joinpath("static", "messages.js").read_text(encoding="utf-8")
+UI_JS = ROOT.joinpath("static", "ui.js").read_text(encoding="utf-8")
+SESSIONS_JS = ROOT.joinpath("static", "sessions.js").read_text(encoding="utf-8")
+
+
+def _source_between(src: str, start: str, end: str) -> str:
+    start_idx = src.find(start)
+    assert start_idx != -1, f"{start} must exist in source"
+    end_idx = src.find(end, start_idx)
+    assert end_idx != -1, f"{end} must exist after {start}"
+    return src[start_idx:end_idx]
 
 
 # ---------------------------------------------------------------------------
@@ -46,9 +56,9 @@ def _helper_body() -> str:
     return MESSAGES_JS[start:end]
 
 
-def test_helper_has_new_three_arg_signature_and_guards():
+def test_helper_has_new_signature_and_guards():
     body = _helper_body()
-    assert "function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise)" in body
+    assert "function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, goalContinuationId)" in body
     # No-op when there is nothing to restore (no text AND no staged files).
     assert "if(!restore&&!files.length) return false;" in body
     # Session-aware: never mutate a different session's visible composer.
@@ -87,9 +97,10 @@ def test_error_branch_restores_original_snapshot_not_mutated_payload():
     assert start != -1, "the /api/chat/start error branch must still push an Error turn"
     window = MESSAGES_JS[start:start + 1100]
     assert (
-        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);"
+        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId);"
         in window
-    ), "the send-error path must restore the ORIGINAL captured snapshot (not `text`)"
+    ), ("the send-error path must restore the ORIGINAL captured snapshot (not `text`) "
+        "together with the invocation-bound continuation ID (#7855 round 6)")
 
 
 def test_send_still_clears_composer_on_the_happy_path():
@@ -152,7 +163,7 @@ def test_restore_persist_chains_after_the_clear_promise():
     assert "let _composerDraftClearPromise=null;" in MESSAGES_JS
     call = (
         "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, "
-        "_failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);"
+        "_failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId);"
     )
     assert call in MESSAGES_JS, "send() must pass the clear promise into the restore helper"
 
@@ -161,6 +172,25 @@ def test_restore_persist_chains_after_the_clear_promise():
 # Behavioral test — actually execute the helper in a JS sandbox
 # ---------------------------------------------------------------------------
 
+def _messages_slice(start_marker: str, end_marker: str) -> str:
+    """Return a top-level function (or slice) from static/messages.js, inclusive."""
+    start = MESSAGES_JS.index(start_marker)
+    return MESSAGES_JS[start:MESSAGES_JS.index(end_marker, start)]
+
+
+# #7855 (round 6): the restore helper re-marks the composer as an identifiable
+# continuation draft, so every harness that runs it must also run the REAL
+# normalizer + draft accessors from static/messages.js (its module-scope
+# siblings) — a stubbed-out set would mask a regression in the wiring.
+_GUARD = (
+    _messages_slice("function _normalizeGoalContinuationId(", "\n// #7855")
+    + _messages_slice("function _setRestoredGoalContinuationDraft(",
+                      "function _clearRestoredGoalContinuationDraft(")
+    + _messages_slice("function _clearRestoredGoalContinuationDraft(",
+                      "\nfunction _bgTaskCompleteRingBufferAdd(")
+)
+
+
 def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, sid="sid-1"):
     """Execute _restoreComposerDraftAfterFailedSend in a node vm sandbox."""
     node = shutil.which("node")
@@ -168,6 +198,13 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
         pytest.skip("node not available")
 
     body = _helper_body()
+    # #7855 (round 6): the restore helper re-marks the composer as an
+    # identifiable continuation draft, so the harness must run the REAL
+    # normalizer + draft accessors alongside it (module-scope siblings in
+    # static/messages.js) — a stubbed-out set would mask a wiring regression.
+    for _name in ("_normalizeGoalContinuationId", "_setRestoredGoalContinuationDraft",
+                  "_clearRestoredGoalContinuationDraft"):
+        assert f"function {_name}(" in MESSAGES_JS, f"{_name} must exist in static/messages.js"
     harness = textwrap.dedent(
         """
         const state = {
@@ -184,6 +221,8 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
         function renderTray(){ state.trayRendered = true; }
         function _saveComposerDraftNow(sid, text, files){ state.saved = {sid, text, files}; }
 
+        %(guard)s
+        %(guard)s
         %(helper)s
 
         const ret = _restoreComposerDraftAfterFailedSend(%(draft_text)s, %(files)s, %(sid)s);
@@ -200,6 +239,7 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
     ) % {
         "initial_input": json.dumps(initial_input),
         "session": json.dumps({"session_id": visible_sid} if visible_sid else None),
+        "guard": _GUARD,
         "helper": body,
         "draft_text": json.dumps(draft_text),
         "files": json.dumps(files_snapshot),
@@ -208,6 +248,196 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
     return json.loads(proc.stdout.strip())
+
+
+def _run_node_script(script):
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip())
+
+
+def _lock_clarify_body() -> str:
+    return _source_between(
+        UI_JS,
+        "function lockComposerForClarify(",
+        "\nfunction unlockComposerForClarify(",
+    )
+
+
+def _draft_failure_reporting_body() -> str:
+    return (
+        _source_between(
+            SESSIONS_JS,
+            "function _handleComposerDraftPostFailure(",
+            "\nfunction _postComposerDraftPayload",
+        )
+        + "\n"
+        + _source_between(
+            SESSIONS_JS,
+            "function _composerDraftHasPayload(",
+            "\nfunction _sessionComposerDraftHasPayload",
+        )
+    )
+
+
+def test_lock_composer_for_clarify_rejects_persistence_without_unhandled_and_retains_payload():
+    body = _lock_clarify_body()
+    script = textwrap.dedent(
+        """
+        const assert = require('assert');
+        let unhandled = 0;
+        process.on('unhandledRejection', () => {{ unhandled += 1; }});
+
+        const sid = 'sid-clarify';
+        const pending = [{{name:'clarify-a', size:10}}, {{name:'clarify-b', size:11}}];
+        const S = {{
+          session: {{session_id: sid, composer_draft: null}},
+          pendingFiles: pending,
+        }};
+        const input = {{
+          value: 'Need clarification',
+          disabled: false,
+          placeholder: '',
+        }};
+        const saveCalls = [];
+        const warnCalls = [];
+        const known = new Set();
+        const failBody = %(failure_body)s;
+        const _composerDraftKnownPayloadSessions = known;
+        eval(failBody);
+        const oldWarn = console.warn;
+        console.warn = (...args) => {{ warnCalls.push(args); }};
+        let _composerLockState = null;
+
+        const $ = (id) => (id === 'msg' ? input : null);
+        function autoResize() {{}}
+        function updateSendBtn() {{}}
+
+        function _saveComposerDraftNow(sid, text, files) {{
+          saveCalls.push({{sid, text, files: (Array.isArray(files)?files.filter(Boolean):[])}});
+          return Promise.reject(new Error('draft persist failed'));
+        }}
+
+        function showToast() {{}}
+
+        %(lock_fn)s
+
+        S.pendingFiles.push({{name: 'later'}});
+        lockComposerForClarify('Locked for clarify');
+        assert.strictEqual(input.disabled, true);
+        Promise.resolve().then(() => {{
+          console.warn = oldWarn;
+          const draft = S.session && S.session.composer_draft ? S.session.composer_draft : null;
+          console.log(JSON.stringify({{
+            sid,
+            unhandled,
+            saveCalls,
+            warnCount: warnCalls.length,
+            composerDraft: draft,
+            placeholder: input.placeholder,
+            warning: warnCalls[0] || null,
+            hasKnown: known.has(sid),
+            restoredText: input.value,
+            inputDisabled: input.disabled,
+          }}));
+        }}).catch((error) => {{
+          console.log(JSON.stringify({{error: String(error && error.message || error || 'failure')}}));
+        }});
+        """
+    ).strip().replace("{{", "{").replace("}}", "}")
+    script = script % {
+        "lock_fn": body,
+        "failure_body": json.dumps(_draft_failure_reporting_body()),
+    }
+    out = _run_node_script(script)
+    assert out["sid"] == "sid-clarify"
+    assert out["unhandled"] == 0
+    assert out["saveCalls"] == [{
+        "sid": "sid-clarify",
+        "text": "Need clarification",
+        "files": [{"name": "clarify-a", "size": 10}, {"name": "clarify-b", "size": 11}, {"name": "later"}],
+    }], out
+    assert out["warnCount"] == 1
+    assert out["hasKnown"] is True
+    assert out["composerDraft"] == {
+        "text": "Need clarification",
+        "files": [{"name": "clarify-a", "size": 10}, {"name": "clarify-b", "size": 11}, {"name": "later"}],
+    }
+    assert out["inputDisabled"] is True
+    assert out["restoredText"] == "Need clarification"
+
+
+def test_restore_after_failed_send_persistence_rejection_is_consumed_and_owned_payload_retained():
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    body = _helper_body()
+    failure_body = _draft_failure_reporting_body()
+    script = textwrap.dedent(
+        """
+        const assert = require('assert');
+        let unhandled = 0;
+        process.on('unhandledRejection', () => { unhandled += 1; });
+
+        const sid = 'sid-1';
+        const state = {
+          input: {value: ''},
+          pendingFiles: [{name: 'queued.png'}],
+        };
+        const S = {
+          session: {session_id: sid, composer_draft: {text: '', files: []}},
+          pendingFiles: state.pendingFiles,
+        };
+        const known = new Set();
+        const saveCalls = [];
+
+        const $ = (id) => (id === 'msg' ? state.input : null);
+        function autoResize() {}
+        function updateSendBtn() {}
+        function renderTray() {}
+        const failureBody = %(failure_body)s;
+        const _composerDraftKnownPayloadSessions = known;
+        eval(failureBody);
+        function _saveComposerDraftNow(sid, text, files) {
+          saveCalls.push({sid, text, files: (Array.isArray(files)?files.filter(Boolean):[])});
+          return Promise.reject(new Error('forced save failure'));
+        }
+
+        %(restore_fn)s
+
+        _restoreComposerDraftAfterFailedSend('failed in send', [{name: 'recover.pdf'}], sid);
+        Promise.resolve().then(() => {
+          const draft = S.session && S.session.composer_draft ? S.session.composer_draft : null;
+          console.log(JSON.stringify({
+            sid,
+            unhandled,
+            saveCalls,
+            draft,
+            knownPayload: known.has(sid),
+            inputValue: state.input.value,
+          }));
+        }).catch((error) => {
+          console.log(JSON.stringify({error: String(error && error.message || error || 'failure')}));
+        });
+        """
+    ).strip() % {
+        "failure_body": json.dumps(failure_body),
+        "restore_fn": body,
+    }
+    out = _run_node_script(script)
+    assert out["sid"] == "sid-1"
+    assert out["unhandled"] == 0
+    assert out["saveCalls"] == [{
+        "sid": "sid-1",
+        "text": "failed in send",
+        "files": [{"name": "recover.pdf"}],
+    }], out
+    assert out["knownPayload"] is True
+    assert out["draft"] == {"text": "failed in send", "files": [{"name": "recover.pdf"}]}
+    assert out["inputValue"] == "failed in send"
 
 
 def test_restores_typed_text_into_empty_composer():
@@ -285,6 +515,7 @@ def test_persist_is_ordered_after_the_clear_promise():
         function renderTray(){}
         function _saveComposerDraftNow(sid, text, files){ order.push('persist:' + text); }
 
+        %(guard)s
         %(helper)s
 
         // Clear POST resolves on a microtask; record its completion first.
@@ -295,7 +526,7 @@ def test_persist_is_ordered_after_the_clear_promise():
           console.log(JSON.stringify({order}));
         });
         """
-    ) % {"helper": body}
+    ) % {"guard": _GUARD, "helper": body}
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
     out = json.loads(proc.stdout.strip())
@@ -330,6 +561,7 @@ def test_deferred_persist_captures_a_post_restore_edit_not_the_stale_snapshot():
         function renderTray(){}
         function _saveComposerDraftNow(sid, text, files){ saved = {sid, text}; }
 
+        %(guard)s
         %(helper)s
 
         // Clear POST settles on a microtask; the deferred persist runs after it.
@@ -343,7 +575,7 @@ def test_deferred_persist_captures_a_post_restore_edit_not_the_stale_snapshot():
           console.log(JSON.stringify({afterRestore, saved}));
         });
         """
-    ) % {"helper": body}
+    ) % {"guard": _GUARD, "helper": body}
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
     out = json.loads(proc.stdout.strip())
@@ -372,6 +604,7 @@ def test_deferred_persist_skips_when_user_switched_away_after_restore():
         function renderTray(){}
         function _saveComposerDraftNow(sid, text, files){ saveCalls.push({sid, text}); }
 
+        %(guard)s
         %(helper)s
 
         const clearPromise = Promise.resolve();
@@ -383,7 +616,7 @@ def test_deferred_persist_skips_when_user_switched_away_after_restore():
           console.log(JSON.stringify({saveCalls}));
         });
         """
-    ) % {"helper": body}
+    ) % {"guard": _GUARD, "helper": body}
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
     out = json.loads(proc.stdout.strip())
@@ -413,6 +646,7 @@ def test_background_failure_persists_snapshot_since_no_live_composer():
         function renderTray(){}
         function _saveComposerDraftNow(sid, text, files){ saveCalls.push({sid, text}); }
 
+        %(guard)s
         %(helper)s
 
         const ret = _restoreComposerDraftAfterFailedSend('bg failed msg', [], 'sid-1', null);
@@ -420,7 +654,7 @@ def test_background_failure_persists_snapshot_since_no_live_composer():
           console.log(JSON.stringify({ret, saveCalls, visibleUntouched: state.input.value}));
         });
         """
-    ) % {"helper": body}
+    ) % {"guard": _GUARD, "helper": body}
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
     out = json.loads(proc.stdout.strip())

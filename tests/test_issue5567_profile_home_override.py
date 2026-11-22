@@ -534,6 +534,227 @@ def test_run_agent_streaming_falls_back_to_skill_module_patch_for_static_modules
     assert _stream_id not in _streaming.STREAMS
 
 
+@pytest.mark.skipif(
+    not HAS_OVERRIDE,
+    reason="requires the v0.18.0 context-local home override for dynamic skill resolution",
+)
+def test_run_agent_streaming_turns_overlap_when_skill_manager_shares_skills_tool_resolver(
+    tmp_path,
+    monkeypatch,
+):
+    """Two streaming turns overlap with the skill-module layout of Agents with 17b953d8b7cd.
+
+    There tools.skill_manager_tool has no HERMES_HOME/SKILLS_DIR/_SKILLS_DIR_AT_IMPORT and
+    imports tools.skills_tool._skills_dir. Both turns run through the real
+    _run_agent_streaming entry, real context-local home override and real capability
+    check; each must be inside run_conversation at the same time, resolve its own
+    profile's skills dir, and never take _SKILL_HOME_MODULE_PATCH_LOCK.
+    """
+    import api.streaming as _streaming
+    import api.profiles as profiles_api
+    import api.config as _config_mod
+
+    import_home = tmp_path / "import-home"
+    homes = {"alpha": tmp_path / "alpha", "beta": tmp_path / "beta"}
+    for home in homes.values():
+        (home / "skills").mkdir(parents=True)
+    _workspace = tmp_path / "workspace"
+    _workspace.mkdir()
+
+    fake_skills_tool = types.ModuleType("tools.skills_tool")
+    fake_skills_tool.HERMES_HOME = import_home
+    fake_skills_tool.SKILLS_DIR = import_home / "skills"
+    fake_skills_tool._SKILLS_DIR_AT_IMPORT = fake_skills_tool.SKILLS_DIR
+
+    def _skills_dir():  # body of the Agent's tools.skills_tool._skills_dir
+        configured = Path(fake_skills_tool.SKILLS_DIR)
+        if configured != fake_skills_tool._SKILLS_DIR_AT_IMPORT:
+            return configured
+        return hermes_constants.get_hermes_home() / "skills"
+
+    fake_skills_tool._skills_dir = _skills_dir
+    fake_skill_manager_tool = types.ModuleType("tools.skill_manager_tool")
+    fake_skill_manager_tool._skills_dir = fake_skills_tool._skills_dir
+    monkeypatch.setitem(sys.modules, "tools.skills_tool", fake_skills_tool)
+    monkeypatch.setitem(sys.modules, "tools.skill_manager_tool", fake_skill_manager_tool)
+
+    class _RecordingLock:
+        """Stands in for _SKILL_HOME_MODULE_PATCH_LOCK; still serializes if taken."""
+
+        def __init__(self):
+            self._lock = threading.RLock()
+            self.acquisitions = 0
+
+        def acquire(self, *args, **kwargs):
+            self.acquisitions += 1
+            return self._lock.acquire(*args, **kwargs)
+
+        def release(self):
+            self._lock.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    patch_lock = _RecordingLock()
+    monkeypatch.setattr(profiles_api, "_SKILL_HOME_MODULE_PATCH_LOCK", patch_lock)
+
+    legacy_calls = []
+
+    def _patch_skill_home_modules(home):
+        legacy_calls.append(("patch", str(home)))
+
+    def _snapshot_skill_home_modules():
+        legacy_calls.append(("snapshot",))
+        return {}
+
+    monkeypatch.setattr(profiles_api, "patch_skill_home_modules", _patch_skill_home_modules)
+    monkeypatch.setattr(profiles_api, "snapshot_skill_home_modules", _snapshot_skill_home_modules)
+    monkeypatch.setattr(profiles_api, "restore_skill_home_modules", lambda snapshot: None)
+
+    both_inside = threading.Barrier(2, timeout=5)
+    seen: dict[str, dict[str, object]] = {}
+    seen_lock = threading.Lock()
+
+    class _Session:
+        def __init__(self, sid):
+            profile = sid.rsplit("-", 1)[-1]
+            self.session_id = sid
+            self.workspace = str(_workspace)
+            self.profile = profile
+            self.model = "gpt-4"
+            self.model_provider = "hermes"
+            self.messages = []
+            self.context_messages = []
+            self.path = str(_workspace / f"{sid}.json")
+            self.active_stream_id = f"stream-{sid}"
+            self.pending_user_message = None
+            self.pending_started_at = None
+            self.pending_user_source = None
+            self.pending_attachments = []
+
+        def save(self, *args, **kwargs):
+            return None
+
+    class _FakeMeter:
+        def begin_session(self, *args, **kwargs):
+            pass
+
+        def end_session(self, *args, **kwargs):
+            pass
+
+        def get_interval(self):
+            return 11.0
+
+        def set_pending_started_at(self, *args, **kwargs):
+            pass
+
+        def get_ttft_ms(self, *args, **kwargs):
+            return None
+
+        def get_stats(self):
+            return {}
+
+    class _OverlapAgent:
+        def __init__(self, *args, session_id=None, **kwargs):
+            self._session_id = session_id
+
+        def run_conversation(self, *args, **kwargs):
+            profile = str(hermes_constants.get_hermes_home().name)
+            record = {
+                "manager_skills_dir": fake_skill_manager_tool._skills_dir(),
+                "skills_tool_skills_dir": fake_skills_tool._skills_dir(),
+                "lock_acquisitions_at_entry": patch_lock.acquisitions,
+            }
+            try:
+                both_inside.wait()
+                record["overlapped"] = True
+            except threading.BrokenBarrierError:
+                record["overlapped"] = False
+            with seen_lock:
+                seen[profile] = record
+            raise RuntimeError("streaming overlap sentinel")
+
+    monkeypatch.setattr(_streaming, "register_active_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_streaming, "update_active_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_streaming, "get_session", lambda sid: _Session(sid))
+    monkeypatch.setattr(_streaming, "_get_session_agent_lock", lambda sid: contextlib.nullcontext())
+    monkeypatch.setattr(_streaming, "_set_thread_env", lambda **kwargs: None)
+    monkeypatch.setattr(_streaming, "_prewarm_skill_tool_modules", lambda: None)
+    monkeypatch.setattr(_streaming, "_install_streaming_cronjob_profile_wrapper", lambda: None)
+    monkeypatch.setattr(_streaming, "_clear_thread_env", lambda: None)
+    monkeypatch.setattr(_streaming, "_get_ai_agent", lambda: _OverlapAgent)
+    monkeypatch.setattr(_streaming, "_materialize_pending_user_turn_before_error", lambda *a, **k: None)
+    monkeypatch.setattr(_streaming, "_snapshot_and_append_partial_on_error", lambda *a, **k: None)
+    monkeypatch.setattr(_streaming, "append_turn_journal_event_for_stream", lambda *a, **k: None)
+    monkeypatch.setattr(_streaming, "meter", lambda: _FakeMeter())
+    monkeypatch.setattr(_streaming, "RunJournalWriter", lambda *a, **k: None)
+    monkeypatch.setattr(_streaming, "_build_agent_thread_env", lambda *a, **k: {})
+    monkeypatch.setattr(
+        _streaming,
+        "resolve_model_provider",
+        lambda model_with_provider_context, explicitly_picked=None: (model_with_provider_context, None, None),
+    )
+    monkeypatch.setattr(_streaming, "_runtime_preferred_base_url", lambda rt, provider, configured_base_url: configured_base_url)
+    monkeypatch.setattr(
+        _streaming,
+        "_apply_profile_home_context_to_streaming_model",
+        lambda model, provider_context, profile_home, has_profile: (model, provider_context, False),
+    )
+    _fake_mcp_module = types.ModuleType("tools.mcp_tool")
+    _fake_mcp_module.discover_mcp_tools = lambda: None
+    monkeypatch.setitem(sys.modules, "tools.mcp_tool", _fake_mcp_module)
+    monkeypatch.setattr(_config_mod, "_resolve_cli_toolsets", lambda cfg: [])
+    monkeypatch.setattr(_config_mod, "get_config_for_profile_home", lambda profile_home: {})
+    monkeypatch.setattr(profiles_api, "get_hermes_home_for_profile", lambda name: homes[name])
+    monkeypatch.setattr(profiles_api, "get_profile_runtime_env", lambda home: {})
+    monkeypatch.setattr(profiles_api, "filter_runtime_env_for_gateway_parity", lambda env: {})
+    monkeypatch.setenv("HERMES_HOME", str(import_home))
+
+    assert hermes_constants.get_hermes_home_override() is None
+    errors = []
+
+    def _turn(profile):
+        sid = f"overlap-{tmp_path.name}-{profile}"
+        _streaming.STREAMS[f"stream-{sid}"] = queue.Queue()
+        try:
+            _streaming._run_agent_streaming(
+                session_id=sid,
+                msg_text="hi",
+                model="gpt-4",
+                workspace=str(_workspace),
+                stream_id=f"stream-{sid}",
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append((profile, exc))
+        finally:
+            _streaming.STREAMS.pop(f"stream-{sid}", None)
+
+    threads = [threading.Thread(target=_turn, args=(name,), daemon=True) for name in homes]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+
+    assert not any(thread.is_alive() for thread in threads), "streaming turns stalled"
+    assert not errors, errors
+    assert set(seen) == set(homes), seen
+    for name, record in seen.items():
+        assert record["overlapped"] is True, f"turns ran one at a time: {seen}"
+        assert record["lock_acquisitions_at_entry"] == 0, seen
+        assert record["manager_skills_dir"] == homes[name] / "skills"
+        assert record["skills_tool_skills_dir"] == homes[name] / "skills"
+    assert patch_lock.acquisitions == 0
+    assert legacy_calls == []
+    for attr in ("HERMES_HOME", "SKILLS_DIR", "_SKILLS_DIR_AT_IMPORT"):
+        assert not hasattr(fake_skill_manager_tool, attr)
+    assert fake_skills_tool.SKILLS_DIR == fake_skills_tool._SKILLS_DIR_AT_IMPORT
+    assert hermes_constants.get_hermes_home_override() is None
+
+
 def test_profile_env_for_background_worker_uses_static_modules_fallback_when_dynamic_checks_fail(
     tmp_path,
     monkeypatch,
@@ -733,7 +954,12 @@ def test_profile_env_for_background_worker_serializes_static_module_scope_with_l
     reason="requires v0.18.0 context-local home override support",
 )
 def test_profile_env_for_background_worker_uses_real_modules_and_serializes_overlap(tmp_path, monkeypatch):
-    """Real skill modules should serialize static fallback scopes across profiles."""
+    """Real skill modules should serialize static fallback scopes across profiles.
+
+    On Agents with upstream 17b953d8b7cd tools.skill_manager_tool has no globals of
+    its own and resolves through tools.skills_tool._skills_dir, so only skills_tool
+    is pre-patched; the shared-resolver manager must still not count as dynamic.
+    """
 
     try:
         import tools.skills_tool as skills_tool
@@ -742,13 +968,16 @@ def test_profile_env_for_background_worker_uses_real_modules_and_serializes_over
         pytest.skip(f"hermes-agent skill modules unavailable for this environment: {exc}")
 
     required_attrs = ("_SKILLS_DIR_AT_IMPORT", "SKILLS_DIR", "HERMES_HOME")
-    for _name, _mod in (
-        ("tools.skills_tool", skills_tool),
-        ("tools.skill_manager_tool", skill_manager_tool),
-    ):
-        for _attr in required_attrs:
-            if not hasattr(_mod, _attr):
-                pytest.skip(f"{_name} missing {_attr}")
+    for _attr in required_attrs:
+        if not hasattr(skills_tool, _attr):
+            pytest.skip(f"tools.skills_tool missing {_attr}")
+    manager_has_own_dir = all(hasattr(skill_manager_tool, _attr) for _attr in required_attrs)
+    manager_shares_resolver = (
+        not any(hasattr(skill_manager_tool, _attr) for _attr in required_attrs)
+        and getattr(skill_manager_tool, "_skills_dir", None) is skills_tool._skills_dir
+    )
+    if not (manager_has_own_dir or manager_shares_resolver):
+        pytest.skip("tools.skill_manager_tool has an unrecognised skills-dir layout")
 
     if not hasattr(skills_tool, "skills_list"):
         pytest.skip("tools.skills_tool missing skills_list API")
@@ -797,16 +1026,17 @@ def test_profile_env_for_background_worker_uses_real_modules_and_serializes_over
 
     baseline_skill_dir = skills_tool.SKILLS_DIR
     baseline_skill_home = getattr(skills_tool, "HERMES_HOME", None)
-    baseline_skill_manager_dir = skill_manager_tool.SKILLS_DIR
+    baseline_skill_manager_dir = getattr(skill_manager_tool, "SKILLS_DIR", None)
     baseline_skill_manager_home = getattr(skill_manager_tool, "HERMES_HOME", None)
 
     alpha_skills_dir = str(alpha_home / "skills")
 
-    # Start with both modules deliberately patched to alpha.
+    # Start with the modules' own globals deliberately patched to alpha.
     skills_tool.HERMES_HOME = str(alpha_home)
     skills_tool.SKILLS_DIR = alpha_skills_dir
-    skill_manager_tool.HERMES_HOME = str(alpha_home)
-    skill_manager_tool.SKILLS_DIR = alpha_skills_dir
+    if manager_has_own_dir:
+        skill_manager_tool.HERMES_HOME = str(alpha_home)
+        skill_manager_tool.SKILLS_DIR = alpha_skills_dir
 
     monkeypatch.setenv("HERMES_HOME", str(alpha_home))
     monkeypatch.setattr(
@@ -892,8 +1122,12 @@ def test_profile_env_for_background_worker_uses_real_modules_and_serializes_over
         assert hermes_constants.get_hermes_home_override() == baseline_override
         assert skills_tool.HERMES_HOME == str(alpha_home)
         assert skills_tool.SKILLS_DIR == alpha_skills_dir
-        assert skill_manager_tool.HERMES_HOME == str(alpha_home)
-        assert skill_manager_tool.SKILLS_DIR == alpha_skills_dir
+        if manager_has_own_dir:
+            assert skill_manager_tool.HERMES_HOME == str(alpha_home)
+            assert skill_manager_tool.SKILLS_DIR == alpha_skills_dir
+        else:
+            assert not any(hasattr(skill_manager_tool, _attr) for _attr in required_attrs)
+            assert Path(skill_manager_tool._skills_dir()) == alpha_home / "skills"
         assert os.environ.get("HERMES_HOME") == str(alpha_home)
     finally:
         thread_alpha.join(timeout=1)
@@ -914,11 +1148,9 @@ def test_profile_env_for_background_worker_uses_real_modules_and_serializes_over
         else:
             skills_tool.__dict__.pop("HERMES_HOME", None)
 
-        skill_manager_tool.SKILLS_DIR = baseline_skill_manager_dir
-        if baseline_skill_manager_home is not None:
+        if manager_has_own_dir:
+            skill_manager_tool.SKILLS_DIR = baseline_skill_manager_dir
             skill_manager_tool.HERMES_HOME = baseline_skill_manager_home
-        else:
-            skill_manager_tool.__dict__.pop("HERMES_HOME", None)
 
 
 def test_profile_env_for_background_worker_resets_override_when_dynamic_check_raises(
@@ -1013,6 +1245,10 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
     also clobber env to alpha.
     Both threads call real `tools.skills_tool.skills_list()` and should see their
     own profile's skill directory.
+
+    Agents with upstream 17b953d8b7cd give tools.skill_manager_tool no SKILLS_DIR /
+    HERMES_HOME of its own (it resolves through tools.skills_tool._skills_dir), so
+    manager globals are read with a sentinel and must stay absent throughout.
     """
 
     import api.streaming as _streaming
@@ -1054,18 +1290,24 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
     _baseline_env = os.environ.get("HERMES_HOME")
     _baseline_skill_dir = skills_tool.SKILLS_DIR
     _baseline_skill_home = getattr(skills_tool, "HERMES_HOME", None)
-    _baseline_manager_skill_dir = skill_manager_tool.SKILLS_DIR
+    _missing = object()
+    _baseline_manager_skill_dir = getattr(skill_manager_tool, "SKILLS_DIR", _missing)
     _baseline_manager_skill_home = getattr(skill_manager_tool, "HERMES_HOME", None)
+    if _baseline_manager_skill_dir is _missing:
+        # The only manager shape without SKILLS_DIR that WebUI treats as dynamic.
+        assert skill_manager_tool._skills_dir is skills_tool._skills_dir
+        assert not hasattr(skill_manager_tool, "_SKILLS_DIR_AT_IMPORT")
 
     # Force deterministic resolution path independent of previous suite side effects.
     skills_tool.SKILLS_DIR = skills_tool._SKILLS_DIR_AT_IMPORT
     if _baseline_skill_home is not None:
         skills_tool.HERMES_HOME = _baseline_skill_home
-    skill_manager_tool.SKILLS_DIR = getattr(
-        skill_manager_tool,
-        "_SKILLS_DIR_AT_IMPORT",
-        _baseline_manager_skill_dir,
-    )
+    if _baseline_manager_skill_dir is not _missing:
+        skill_manager_tool.SKILLS_DIR = getattr(
+            skill_manager_tool,
+            "_SKILLS_DIR_AT_IMPORT",
+            _baseline_manager_skill_dir,
+        )
     if _baseline_manager_skill_home is not None:
         skill_manager_tool.HERMES_HOME = _baseline_manager_skill_home
     os.environ["HERMES_HOME"] = str(_baseline_skill_home) if _baseline_skill_home else ""
@@ -1089,6 +1331,7 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
     start_barrier = threading.Barrier(2)
     clobber_barrier = threading.Barrier(2)
     _results: dict[str, set[str]] = {}
+    _manager_skill_dirs: dict[str, Path] = {}
     _worker_errors: list[tuple[str, BaseException]] = []
     _lock = threading.Lock()
     _post_reset_overrides: dict[str, object | None] = {}
@@ -1118,6 +1361,7 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
             names = _parse_skills(skills_tool.skills_list())
             with _lock:
                 _results["alpha"] = names
+                _manager_skill_dirs["alpha"] = Path(skill_manager_tool._skills_dir())
         except BaseException as exc:
             with _lock:
                 _worker_errors.append(("alpha", exc))
@@ -1131,7 +1375,7 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
                 _post_reset_overrides["alpha"] = hermes_constants.get_hermes_home_override()
                 _post_reset_skill_dirs["alpha"] = skills_tool.SKILLS_DIR
                 _post_reset_skill_homes["alpha"] = getattr(skills_tool, "HERMES_HOME", None)
-                _post_reset_manager_skill_dirs["alpha"] = skill_manager_tool.SKILLS_DIR
+                _post_reset_manager_skill_dirs["alpha"] = getattr(skill_manager_tool, "SKILLS_DIR", _missing)
                 _post_reset_manager_skill_homes["alpha"] = getattr(skill_manager_tool, "HERMES_HOME", None)
 
     def _worker_beta() -> None:
@@ -1151,6 +1395,7 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
                 names = _parse_skills(skills_tool.skills_list())
                 with _lock:
                     _results["beta"] = names
+                    _manager_skill_dirs["beta"] = Path(skill_manager_tool._skills_dir())
                     _beta_scope_snapshots["beta"] = {
                         "pre": pre_scope,
                         "during": (
@@ -1166,7 +1411,7 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
                 _post_reset_overrides["beta"] = hermes_constants.get_hermes_home_override()
                 _post_reset_skill_dirs["beta"] = skills_tool.SKILLS_DIR
                 _post_reset_skill_homes["beta"] = getattr(skills_tool, "HERMES_HOME", None)
-                _post_reset_manager_skill_dirs["beta"] = skill_manager_tool.SKILLS_DIR
+                _post_reset_manager_skill_dirs["beta"] = getattr(skill_manager_tool, "SKILLS_DIR", _missing)
                 _post_reset_manager_skill_homes["beta"] = getattr(skill_manager_tool, "HERMES_HOME", None)
 
     _thread_alpha = threading.Thread(target=_worker_alpha)
@@ -1192,6 +1437,7 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
         assert beta_name not in alpha_names
         assert beta_name in beta_names
         assert alpha_name not in beta_names
+        assert _manager_skill_dirs == {"alpha": _home_alpha / "skills", "beta": _home_beta / "skills"}
 
         assert _post_reset_overrides["alpha"] == _baseline_override
         assert _post_reset_overrides["beta"] == _baseline_override
@@ -1217,6 +1463,7 @@ def test_run_agent_streaming_override_helpers_with_concurrent_skills_list_worker
         skills_tool.SKILLS_DIR = _baseline_skill_dir
         if _baseline_skill_home is not None:
             skills_tool.HERMES_HOME = _baseline_skill_home
-        skill_manager_tool.SKILLS_DIR = _baseline_manager_skill_dir
+        if _baseline_manager_skill_dir is not _missing:
+            skill_manager_tool.SKILLS_DIR = _baseline_manager_skill_dir
         if _baseline_manager_skill_home is not None:
             skill_manager_tool.HERMES_HOME = _baseline_manager_skill_home
