@@ -58,7 +58,7 @@ def _helper_body() -> str:
 
 def test_helper_has_new_signature_and_guards():
     body = _helper_body()
-    assert "function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, goalContinuationId)" in body
+    assert "function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, goalContinuationId, forcedSkill)" in body
     # No-op when there is nothing to restore (no text AND no staged files).
     assert "if(!restore&&!files.length) return false;" in body
     # Session-aware: never mutate a different session's visible composer.
@@ -97,7 +97,7 @@ def test_error_branch_restores_original_snapshot_not_mutated_payload():
     assert start != -1, "the /api/chat/start error branch must still push an Error turn"
     window = MESSAGES_JS[start:start + 1100]
     assert (
-        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId);"
+        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId, _sentSkillPayload);"
         in window
     ), ("the send-error path must restore the ORIGINAL captured snapshot (not `text`) "
         "together with the invocation-bound continuation ID (#7855 round 6)")
@@ -163,7 +163,7 @@ def test_restore_persist_chains_after_the_clear_promise():
     assert "let _composerDraftClearPromise=null;" in MESSAGES_JS
     call = (
         "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, "
-        "_failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId);"
+        "_failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId, _sentSkillPayload);"
     )
     assert call in MESSAGES_JS, "send() must pass the clear promise into the restore helper"
 

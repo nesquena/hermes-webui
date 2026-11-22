@@ -119,6 +119,24 @@ function _peekRestoredGoalContinuationDraft(){
   }catch(_){ return null; }
 }
 
+// #9237: a /use skill that a failed send already consumed is kept with the
+// draft restored for it, keyed by that draft's session and bound to its exact
+// text. send() takes it (one-shot) at its forced-skill step: only that chat's
+// send of exactly that text gets it back; any other send there drops it. Kept
+// in memory on S, like a pending /use, so it does not survive a reload.
+function _setRestoredForcedSkillDraft(sid,text,payload){
+  if(!sid||!payload) return;
+  const kept=S.restoredForcedSkills||(S.restoredForcedSkills={});
+  kept[sid]={text:String(text||'').trim(),payload};
+}
+function _takeRestoredForcedSkillDraft(sid,text){
+  const kept=S.restoredForcedSkills;
+  const entry=sid&&kept?kept[sid]:null;
+  if(!entry) return null;
+  delete kept[sid];
+  return String(text||'').trim()===entry.text?entry.payload:null;
+}
+
 function _bgTaskCompleteRingBufferAdd(sid, evt_id) {
   // Missing key → treat as "seen/skip" (return true). The sole caller already
   // guards with `if (!evt_id) return;` before invoking this, so this branch is
@@ -1420,10 +1438,28 @@ async function _recoverCompressedSend(error,sid,draftText,filesSnapshot,clearPro
   }catch(_){ return false; }
 }
 
-function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, goalContinuationId){
+// #9237: how an off-screen send notice names the chat that issued it: the
+// title in the locale's quotes, cut at 40 characters, or a generic phrase for
+// a chat that has no title of its own yet.
+function _sendOwnerLabel(title){
+  if(_sessionTitleLooksDefaultOrProvisional(title)) return t('send_offscreen_chat_fallback');
+  const chars=Array.from(String(title).replace(/\s+/g,' ').trim());
+  return t('send_offscreen_chat_title',chars.length>40?chars.slice(0,40).join('').trimEnd()+'\u2026':chars.join(''));
+}
+
+// #9237: a chat with a default title and no messages before this send is not
+// in the chat list (server and sidebar both hide it), so a notice must not
+// point the user to a draft saved there.
+function _sendOwnerIsNewChat(title, hadMessages){
+  return !hadMessages&&_sessionTitleLooksDefaultOrProvisional(title);
+}
+
+function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, goalContinuationId, forcedSkill){
   const restore=String(draftText||'');
   const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
   if(!restore&&!files.length) return false;
+  // #9237: the /use skill this send consumed comes back with its draft too.
+  if(typeof _setRestoredForcedSkillDraft==='function') _setRestoredForcedSkillDraft(sid,restore,forcedSkill);
   // #7855 (round 6): the draft's continuation ID is restored TOGETHER with the
   // text. A failed POST never admitted the turn, so the token is still valid;
   // restoring the text without it made the retry post an empty ID and the goal
@@ -1767,7 +1803,11 @@ async function send(){
   // captured before the metadata awaits in the intercept below. Composer
   // writes after those awaits go through
   // _setComposerAfterCliOnlyExplainer(value,_slashOwner).
-  const _slashOwner={sid:S.session&&S.session.session_id||null,text};
+  const _slashOwner={sid:S.session&&S.session.session_id||null,text,title:S.session&&S.session.title||'',
+    // Loaded rows, or the session's own counts: switching to a listed chat sets
+    // S.session before its rows load, so S.messages alone can read empty.
+    hadMessages:!!((S.messages&&S.messages.length)||Number(S.session&&S.session.message_count)>0
+      ||Number(S.session&&S.session.visible_message_count)>0)};
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -2010,10 +2050,31 @@ async function send(){
       }
     }
   }
+  // #9237: the slash lookups above can await. If the user left the issuing
+  // chat meanwhile, the switch saved this text as that chat's draft; do not
+  // send it into the chat now on screen.
+  if(_slashOwner.sid&&(!S.session||S.session.session_id!==_slashOwner.sid)){
+    if(_sendOwnerIsNewChat(_slashOwner.title,_slashOwner.hadMessages)){
+      showToast(t('send_offscreen_new_chat'),null,'error');
+      return;
+    }
+    showToast(t('send_offscreen_slash_left',_sendOwnerLabel(_slashOwner.title)),8000,'warning');
+    return;
+  }
   if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
+  // #9237: the uploads and forced-skill directive below can await while the
+  // user switches chats. Keep the issuing chat's transcript and payload
+  // context so its turn neither lands in nor borrows from the chat on screen.
+  const _ownerMessages=Array.isArray(S.messages)?S.messages:[];
+  const _ownerModelState=_chatPayloadModelState();
+  const _ownerWorkspace=S.session.workspace;
+  const _ownerTitle=S.session.title;
+  const _ownerHadMessages=!!(_ownerMessages.length||Number(S.session.message_count)>0
+    ||Number(S.session.visible_message_count)>0);
+  const _ownerProfile=S.activeProfile||S.session.profile||'default';
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
   // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()
@@ -2061,27 +2122,34 @@ async function send(){
   let msgText=text;
   if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
+  // #9237: a /use resolved for this chat wins; otherwise a skill kept with a
+  // failed send's restored draft applies once, to a send of exactly that text.
+  const _restoredSkillPayload=(typeof _takeRestoredForcedSkillDraft==='function')?_takeRestoredForcedSkillDraft(activeSid,_failedSendDraftText):null;
+  let _sentSkillPayload=null;
   if(_forcedSkillDirectivePending){
     const _pending=_forcedSkillDirectivePending;
     if(!_pending.sessionId||_pending.sessionId===activeSid){
       const _directivePayload = await _pending.promise;
       if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
-      if(_directivePayload){
-        const _directive = typeof _directivePayload==='string'
-          ? _directivePayload
-          : String(_directivePayload.directive||'').trim();
-        const _forcedSkillName = typeof _directivePayload==='string'
-          ? ''
-          : String(_directivePayload.name||'').trim();
-        const _forcedSkillContent = typeof _directivePayload==='string'
-          ? ''
-          : String(_directivePayload.content||'').trim();
-        const _forcedSkillBlock = _forcedSkillName&&_forcedSkillContent
-          ? `[FORCED SKILL CONTEXT: ${_forcedSkillName}]\n${_forcedSkillContent}\n[/FORCED SKILL CONTEXT]`
-          : '';
-        msgText=`${_directive}${_forcedSkillBlock?`\n\n${_forcedSkillBlock}`:''}\n\n${msgText||''}`.trim();
-      }
+      _sentSkillPayload=_directivePayload||null;
     }
+  }
+  if(!_sentSkillPayload) _sentSkillPayload=_restoredSkillPayload;
+  if(_sentSkillPayload){
+    const _directivePayload=_sentSkillPayload;
+    const _directive = typeof _directivePayload==='string'
+      ? _directivePayload
+      : String(_directivePayload.directive||'').trim();
+    const _forcedSkillName = typeof _directivePayload==='string'
+      ? ''
+      : String(_directivePayload.name||'').trim();
+    const _forcedSkillContent = typeof _directivePayload==='string'
+      ? ''
+      : String(_directivePayload.content||'').trim();
+    const _forcedSkillBlock = _forcedSkillName&&_forcedSkillContent
+      ? `[FORCED SKILL CONTEXT: ${_forcedSkillName}]\n${_forcedSkillContent}\n[/FORCED SKILL CONTEXT]`
+      : '';
+    msgText=`${_directive}${_forcedSkillBlock?`\n\n${_forcedSkillBlock}`:''}\n\n${msgText||''}`.trim();
   }
   if(!msgText){setComposerStatus('Nothing to send');return;}
   // Composer textarea + persisted draft were already captured and cleared
@@ -2097,10 +2165,16 @@ async function send(){
   // bump is exactly the rows this send added (idempotent across the updater's
   // multiple passes, and correct when only a paginated tail is loaded). Same
   // hidden-row rule as the updater in sessions.js.
-  const _localVisibleBeforePush=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
+  let _localVisibleBeforePush=null;
+  let optimisticMessages;
+  // #9237: only the issuing chat may show its optimistic turn. If the user
+  // switched chats during the awaits above, the else branch below keeps the
+  // turn in that chat's INFLIGHT state and leaves the pane alone.
+  const _ownerOnScreenBeforeStart=_isSessionCurrentPane(activeSid);
+  if(_ownerOnScreenBeforeStart){
+  _localVisibleBeforePush=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
-  let optimisticMessages;
   try{
     S.messages.push(userMsg);renderMessages();setBusy(true);
     if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
@@ -2168,6 +2242,14 @@ async function send(){
     S.activeStreamId=null;
     if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
   }
+  }else{
+    // Off screen: loadSession() shows this turn from INFLIGHT on return.
+    optimisticMessages=[..._ownerMessages,userMsg];
+    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+    _runOptionalPreStartUiStep('saveInflightState.offscreen', ()=>{
+      if(typeof saveInflightState==='function') saveInflightState(activeSid,{streamId:null,messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]});
+    });
+  }
 
   // Start the agent via POST, get a stream_id back
   let streamId;
@@ -2175,7 +2257,7 @@ async function send(){
   let modelStateForPostStart;
   let explicitPickForPostStart;
   try{
-    const _modelState=_chatPayloadModelState();
+    const _modelState=_ownerOnScreenBeforeStart?_chatPayloadModelState():_ownerModelState;
     modelStateForPostStart=_modelState;
     const _pendingPick=(typeof _readPendingSessionModel==='function')
       ? _readPendingSessionModel(activeSid)
@@ -2209,9 +2291,9 @@ async function send(){
       session_id:activeSid,message:msgText,
       // S.session.model remains authoritative; the helper only resolves a
       // matching provider fallback for the same outgoing model.
-      model:_modelState.model,workspace:S.session.workspace,
+      model:_modelState.model,workspace:_ownerOnScreenBeforeStart?S.session.workspace:_ownerWorkspace,
       model_provider:_modelState.model_provider,
-      profile:S.activeProfile||S.session.profile||'default',
+      profile:_ownerOnScreenBeforeStart?(S.activeProfile||S.session.profile||'default'):_ownerProfile,
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
       moa_config:_pendingMoaConfig?true:undefined,
@@ -2232,6 +2314,31 @@ async function send(){
     postStartData = startData;
   }catch(e){
     const errMsg=String((e&&e.message)||'');
+    // #9237: the user switched chats while /api/chat/start was in flight. The
+    // failure belongs to activeSid: settle its optimistic state by id and keep
+    // the text as its draft (the continuation's after a compression rotation,
+    // none for a deleted chat). Never clear, navigate or annotate the chat now
+    // on screen, and never queue or reload a conflicting send from here.
+    if(!_isSessionCurrentPane(activeSid)){
+      delete INFLIGHT[activeSid];
+      if(typeof clearInflightState==='function') clearInflightState(activeSid);
+      if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
+      const deleted=!!(e&&e.status===404);
+      const busy=/session already has an active stream/i.test(errMsg);
+      let draftSid=activeSid;
+      try{
+        const body=e&&e.status===409?JSON.parse(e.body||'{}'):null;
+        if(body&&body.code==='session_rotated'&&typeof body.continuation_session_id==='string'&&body.continuation_session_id) draftSid=body.continuation_session_id;
+      }catch(_){ }
+      if(!deleted) _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, draftSid, _composerDraftClearPromise, _goalContinuationId, _sentSkillPayload);
+      const owner=_sendOwnerLabel(_ownerTitle);
+      if(_sendOwnerIsNewChat(_ownerTitle,_ownerHadMessages)) showToast(t('send_offscreen_new_chat'),null,'error');
+      else if(busy) showToast(t('send_offscreen_busy',owner),8000,'warning');
+      else showToast(deleted?t('send_offscreen_deleted',owner)
+        :t('send_offscreen_failed',owner,(errMsg||'request failed').replace(/[\s.]+$/,'')),null,'error');
+      if(typeof renderSessionList==='function') void renderSessionList();
+      return;
+    }
     // If /api/chat/start returns 404, the session was deleted server-side
     // (its sidecar is gone) while GET kept returning a CLI stub (#2782). Strip
     // the stale /session/<id> URL and clear localStorage so a reload does not
@@ -2311,7 +2418,7 @@ async function send(){
     // draft's continuation ID must come back with its text. Restoring only the
     // text made the retry post an empty ID and the continuation became an
     // ordinary turn.
-    _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId);
+    _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId, _sentSkillPayload);
     if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
     // Reconcile with server truth after immediately clearing the optimistic spinner.
     if(typeof renderSessionList==='function') void renderSessionList();
@@ -2320,7 +2427,10 @@ async function send(){
 
   const startData = postStartData || {};
   streamId = postStartData ? postStartData.stream_id : null;
-  S.activeStreamId = streamId;
+  // #9237: pane writes only while the issuing chat is still on screen. The
+  // title, INFLIGHT and session-list bookkeeping below stay keyed by activeSid.
+  const _ownerOnScreenAfterStart=_isSessionCurrentPane(activeSid);
+  if(_ownerOnScreenAfterStart) S.activeStreamId = streamId;
   // setBusy(true) already ran with activeStreamId=null; refresh now that we
   // have a stream id so the primary button can switch to Stop (see
   // getComposerPrimaryAction).
@@ -2330,6 +2440,7 @@ async function send(){
     const _explicitPick=explicitPickForPostStart;
     if(startData&&startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
 
+    if(_ownerOnScreenAfterStart){
     if(startData&&startData.effective_model && S.session){
       const _sentModel=_modelState&&_modelState.model;
       if(_explicitPick && _sentModel && startData.effective_model!==_sentModel && typeof showToast==='function'){
@@ -2372,6 +2483,7 @@ async function send(){
       // against real active-stream metadata before the background refresh lands.
       upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now(),localVisibleBeforePush:_localVisibleBeforePush});
     }
+    }
     if(!INFLIGHT[activeSid]){
       INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
     }
@@ -2387,8 +2499,12 @@ async function send(){
     }
   });
 
-  // Open SSE stream and render tokens live
-  attachLiveStream(activeSid, streamId, uploadedNames);
+  // Open SSE stream and render tokens live. #9237: only for the chat on
+  // screen; attachLiveStream() closes every other live stream (#2313), so an
+  // off-screen sender would cut the viewed chat's SSE. Mark it instead so
+  // loadSession() reattaches when the user returns.
+  if(_ownerOnScreenAfterStart) attachLiveStream(activeSid, streamId, uploadedNames);
+  else if(INFLIGHT[activeSid]){ INFLIGHT[activeSid].streamId=streamId; INFLIGHT[activeSid].reattach=true; }
 
   }finally{ _sendInProgress=false; _sendInProgressSid=null; }
 }

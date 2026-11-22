@@ -1,0 +1,737 @@
+"""send() keeps a pending turn on the chat that issued it (#9237).
+
+send() captures the issuing session id and then awaits attachment uploads, a
+forced-skill directive and POST /api/chat/start. If the user switches to
+another chat (or New Chat) during one of those awaits, every later write must
+stay with the issuing chat: the chat now on screen must not receive the
+optimistic turn, the stream id, the effective model, the live SSE attach or
+the start-error handling.
+
+These tests run the real send() from static/messages.js in node with
+recording stubs and switch the visible chat inside the awaited stub, the same
+way the browser interleaves a click during the await.
+"""
+
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
+
+pytestmark = pytest.mark.skipif(NODE is None, reason="node not available")
+
+
+def _cut(start_marker: str, end_marker: str) -> str:
+    start = MESSAGES_JS.index(start_marker)
+    end = MESSAGES_JS.index(end_marker, start)
+    return MESSAGES_JS[start:end]
+
+
+SEND_SRC = _cut("async function send(){", "\nasync function startRegeneration(")
+CURRENT_PANE_SRC = _cut("function _isSessionCurrentPane(sid) {", "\nfunction _isSessionActivelyViewed(")
+RECOVER_COMPRESSED_SRC = _cut(
+    "async function _recoverCompressedSend(", "\nfunction _restoreComposerDraftAfterFailedSend("
+)
+DEFAULT_TITLE_SRC = _cut(
+    "function _sessionTitleLooksDefaultOrProvisional(", "\nfunction _firstUserMessageTitleCandidate("
+)
+
+# The real t() and the real en send_offscreen_* strings, so the toasts below
+# are asserted as rendered (the whole en block is too long for `node -e`).
+I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+_EN_START = I18N_JS.index("  en: {")
+_EN_BLOCK = I18N_JS[_EN_START:I18N_JS.index("\n  it: {", _EN_START)]
+EN_LOCALE_SRC = (
+    "const LOCALES = {en: {\n"
+    + "\n".join(line for line in _EN_BLOCK.splitlines() if line.startswith("    send_offscreen_"))
+    + "\n}};"
+)
+_T_START = I18N_JS.index("function t(key, ...args) {")
+T_SRC = I18N_JS[_T_START:I18N_JS.index("\n}\n", _T_START)] + "\n}"
+
+
+HARNESS = r"""
+const SC = __SCENARIO__;
+const calls = [];
+let phase = 'before';
+const plain = value => JSON.parse(JSON.stringify(value, (k, v) => v === undefined ? null : v));
+const rec = (name, ...args) => calls.push({phase, name, args: plain(args)});
+const input = {value: SC.text};
+const A_SESSION = {session_id:'A', workspace:'/a', profile:'pa', model:'model-a', model_provider:'prov-a',
+                   title:'Chat A'};
+if('ownerTitle' in SC){
+  if(SC.ownerTitle === null) delete A_SESSION.title;
+  else A_SESSION.title = SC.ownerTitle;
+}
+if(SC.ownerCounts) Object.assign(A_SESSION, SC.ownerCounts);
+const B_SESSION = {session_id:'B', workspace:'/b', profile:'pb', model:'model-b', model_provider:'prov-b',
+                   title:'Chat B'};
+const C_SESSION = {session_id:'C', workspace:'/c', profile:'pc', model:'model-c', model_provider:'prov-c',
+                   title:'Chat C'};
+const S = {
+  session: SC.startWithoutSession ? null : A_SESSION,
+  messages: SC.startWithoutSession ? [] : ('ownerMessages' in SC ? SC.ownerMessages : [{role:'user', content:'a-row'}]),
+  pendingFiles: SC.files ? [{name:'f.txt'}] : [],
+  toolCalls: [], activeProfile: null, busy: false, activeStreamId: null,
+};
+const INFLIGHT = {};
+const LIVE = {};
+const _pendingSelections = [];
+let _loadingSessionId = null;
+let _sendInProgress = false;
+let _sendInProgressSid = null;
+let _queueDrainSid = null;
+let _approvalSessionId = null;
+let _clarifySessionId = null;
+let _projectPickerOpenEpoch = 0;
+const COMMANDS = [];
+const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set();
+const localStorage = {
+  setItem(k, v){ rec('localStorage.setItem', k, v); },
+  removeItem(k){ rec('localStorage.removeItem', k); },
+};
+const history = {replaceState(...a){ rec('history.replaceState', ...a); }};
+const window = {_defaultModel:'model-a', _activeProvider:'prov-a', location:{pathname:'/session/A', search:''}};
+const document = {querySelector(){ return null; }};
+const $ = id => id === 'msg' ? input : null;
+
+function doSwitch(){
+  phase = 'after';
+  if(SC.switchKind === 'cleared'){
+    // The issuing chat was left for an empty pane with no session yet.
+    input.value = '';
+    S.session = null;
+    S.messages = [];
+    return;
+  }
+  if(SC.switchKind === 'loading'){
+    // loadSession(B) has started: S.session still points at A until B's
+    // metadata arrives.
+    _loadingSessionId = 'B';
+    return;
+  }
+  // The switch saved A's composer as A's draft and loaded B's.
+  input.value = 'b-draft';
+  S.session = B_SESSION;
+  S.messages = [{role:'user', content:'b-row'}];
+  S.activeStreamId = null;
+  S.busy = false;
+  if(SC.switchKind === 'chain'){
+    // ...and then the user moved on again, from B to C.
+    input.value = 'c-draft';
+    S.session = C_SESSION;
+    S.messages = [{role:'user', content:'c-row'}];
+  }
+}
+function maybeSwitch(at){ if(SC.switchAt === at) doSwitch(); }
+
+function _normalizeGoalContinuationId(id){ return String(id||'').trim(); }
+function _takeRestoredDraftGoalContinuationId(){ return ''; }
+function _composerTextWithPendingSelections(){ return input.value; }
+function _chatPayloadModelState(){ return {model:S.session.model, model_provider:S.session.model_provider}; }
+function _flushSelectionBlocksToComposer(){}
+function shouldInterceptCompressionRecoveryContinuation(){ return false; }
+function _dismissHandoffHint(){}
+function _clearStaleBusyStateBeforeSend(){}
+function parseCommand(text){ const m = /^\/(\S+)\s*(.*)$/.exec(text); return m ? {name:m[1], args:m[2]} : null; }
+async function getAgentCommandMetadata(name){ rec('getAgentCommandMetadata', name); maybeSwitch('slash'); return null; }
+async function getBundleCommandMetadata(){ return null; }
+function hideCmdDropdown(){}
+function renderTray(){}
+function autoResize(){}
+function _clearComposerDraft(sid, text){ rec('_clearComposerDraft', sid, text); return Promise.resolve(); }
+function setComposerStatus(text){ rec('setComposerStatus', text); }
+function clearLiveToolCards(){ rec('clearLiveToolCards'); }
+function renderMessages(){ rec('renderMessages'); }
+function setBusy(value){ rec('setBusy', value); S.busy = value; }
+function ensureLiveWorklogShell(){ rec('ensureLiveWorklogShell'); }
+function appendThinking(){ rec('appendThinking'); }
+function _runOptionalPreStartUiStep(_label, fn){ if(fn) fn(); }
+function _runOptionalPostStartUiStep(_label, fn){ if(fn) fn(); }
+function upsertActiveSessionForLocalTurn(opts){ rec('upsertActiveSessionForLocalTurn', opts && opts.title); }
+function renderSessionListFromCache(){ rec('renderSessionListFromCache'); }
+function startApprovalPolling(sid){ rec('startApprovalPolling', sid); }
+function startClarifyPolling(sid){ rec('startClarifyPolling', sid); }
+function _fetchYoloState(sid){ rec('_fetchYoloState', sid); }
+function updateSendBtn(){ rec('updateSendBtn'); }
+function applySessionTitleUpdate(sid, title){ rec('applySessionTitleUpdate', sid, title); }
+function _readPendingSessionModel(){ return null; }
+function _clearPendingSessionModel(){}
+function _writePersistedModelState(model){ rec('_writePersistedModelState', model); }
+function _applyModelToDropdown(model){ rec('_applyModelToDropdown', model); }
+function syncTopbar(){ rec('syncTopbar'); }
+function syncModelChip(){}
+function showLiveRunStatus(sid){ rec('showLiveRunStatus', sid); }
+function stopApprovalPolling(){ rec('stopApprovalPolling'); }
+function stopClarifyPolling(){ rec('stopClarifyPolling'); }
+function hideApprovalCard(){ rec('hideApprovalCard'); }
+function hideClarifyCard(){ rec('hideClarifyCard'); }
+function removeThinking(){ rec('removeThinking'); }
+function clearOptimisticSessionStreaming(sid){ rec('clearOptimisticSessionStreaming', sid); }
+function renderSessionList(){ rec('renderSessionList'); }
+function markInflight(sid, streamId){ rec('markInflight', sid, streamId); }
+function saveInflightState(sid, state){
+  rec('saveInflightState', sid, state && state.streamId, (state && state.messages || []).map(m => m.content));
+}
+function clearInflightState(sid){ rec('clearInflightState', sid); }
+function queueSessionMessage(sid, payload){ rec('queueSessionMessage', sid, payload && payload.text); }
+function _clearComposerAfterQueuedSelectionSend(){}
+function updateQueueBadge(){}
+function showToast(msg, ms, type){
+  rec('showToast', String(msg), ms === undefined ? '<undefined>' : ms, type === undefined ? '<undefined>' : type);
+}
+function _hydrateTodosFromSession(){ rec('_hydrateTodosFromSession'); }
+function _syncProviderQuotaForActiveContext(){}
+function _restoreComposerDraftAfterFailedSend(text, files, sid){
+  rec('_restoreComposerDraftAfterFailedSend', text, sid);
+}
+function attachLiveStream(sid, streamId){ rec('attachLiveStream', sid, streamId); LIVE[sid] = streamId; }
+async function loadSession(sid){ rec('loadSession', sid); }
+async function newSession(){
+  rec('newSession');
+  S.session = {session_id:'N', workspace:'/n', profile:'pn', model:'model-n', model_provider:'prov-n',
+               title:'Untitled'};
+  S.messages = [];
+}
+async function uploadPendingFiles(opts){
+  rec('uploadPendingFiles', opts && opts.sessionId);
+  maybeSwitch('upload');
+  return (opts && opts.files || []).map(f => ({name:f.name, path:'/ws/' + f.name}));
+}
+let _forcedSkillDirectivePending = SC.directive ? {
+  sessionId:'A',
+  promise:{then(resolve){
+    maybeSwitch('directive');
+    resolve({directive:'/use writer', name:'writer', content:'guide'});
+  }},
+} : null;
+let startBody = null;
+async function api(url, opts){
+  if(url !== '/api/chat/start') throw new Error('unexpected api ' + url);
+  startBody = JSON.parse(opts.body);
+  rec('api.start', startBody.session_id);
+  maybeSwitch('start');
+  const r = SC.start || 'ok';
+  if(r === 'ok') return {stream_id:'stream-a', title:'A title', effective_model:'model-eff',
+                         effective_model_provider:'prov-eff', pending_started_at:123};
+  const message = SC.startMessage
+    || {'409-conflict':'Session already has an active stream', '404':'Session not found'}[r] || 'boom';
+  const err = new Error(message);
+  if(r === '404') err.status = 404;
+  if(r === '409-conflict') err.status = 409;
+  if(r === '500') err.status = 500;
+  if(r === '409-rotated'){
+    err.status = 409;
+    err.body = JSON.stringify({code:'session_rotated', continuation_session_id:'A2'});
+  }
+  throw err;
+}
+
+__EN_LOCALE__
+const _locale = LOCALES.en;
+__T__
+__DEFAULT_TITLE__
+__CURRENT_PANE__
+__RECOVER_COMPRESSED__
+__SEND__
+
+(async () => {
+  await send();
+  console.log(JSON.stringify({
+    calls, startBody, composer: input.value, inflight: INFLIGHT, live: LIVE,
+    session: S.session, messages: S.messages, activeStreamId: S.activeStreamId,
+    busy: S.busy, sendInProgress: _sendInProgress,
+  }));
+})().catch(error => { console.error(error && error.stack || error); process.exit(1); });
+"""
+
+
+def _run(**scenario):
+    scenario.setdefault("text", "hello")
+    script = (
+        HARNESS.replace("__SCENARIO__", json.dumps(scenario))
+        .replace("__EN_LOCALE__", EN_LOCALE_SRC)
+        .replace("__T__", T_SRC)
+        .replace("__DEFAULT_TITLE__", DEFAULT_TITLE_SRC)
+        .replace("__CURRENT_PANE__", CURRENT_PANE_SRC)
+        .replace("__RECOVER_COMPRESSED__", RECOVER_COMPRESSED_SRC)
+        .replace("__SEND__", SEND_SRC)
+    )
+    proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _after(result, *names):
+    return [c for c in result["calls"] if c["phase"] == "after" and (not names or c["name"] in names)]
+
+
+def _named(result, name):
+    return [c["args"] for c in result["calls"] if c["name"] == name]
+
+
+PANE_WRITES = (
+    "setBusy",
+    "renderMessages",
+    "clearLiveToolCards",
+    "ensureLiveWorklogShell",
+    "appendThinking",
+    "upsertActiveSessionForLocalTurn",
+    "renderSessionListFromCache",
+    "startApprovalPolling",
+    "startClarifyPolling",
+    "_fetchYoloState",
+    "showLiveRunStatus",
+    "syncTopbar",
+    "_applyModelToDropdown",
+    "_writePersistedModelState",
+    "localStorage.setItem",
+    "localStorage.removeItem",
+    "history.replaceState",
+    "_hydrateTodosFromSession",
+    "removeThinking",
+    "hideApprovalCard",
+    "hideClarifyCard",
+    "stopApprovalPolling",
+    "stopClarifyPolling",
+)
+
+
+def _assert_b_untouched(result):
+    assert result["session"]["session_id"] == "B"
+    assert result["session"]["model"] == "model-b"
+    assert "active_stream_id" not in result["session"]
+    assert "pending_started_at" not in result["session"]
+    assert result["messages"] == [{"role": "user", "content": "b-row"}]
+    assert result["activeStreamId"] is None
+    assert result["busy"] is False
+    assert result["composer"] == "b-draft"
+    assert _after(result, *PANE_WRITES) == []
+    # Clearing A's own "Uploading…" status is fine; writing a status is not.
+    assert [c for c in _after(result, "setComposerStatus") if c["args"] != [""]] == []
+    assert "B" not in result["inflight"]
+
+
+# ── the optimistic block after the upload / directive awaits ────────────────
+
+
+@pytest.mark.parametrize("switch_at", ["upload", "directive"])
+def test_switch_before_start_keeps_the_optimistic_turn_off_the_new_pane(switch_at):
+    result = _run(files=True, directive=True, switchAt=switch_at)
+    _assert_b_untouched(result)
+    # The turn still belongs to A, with A's transcript and the new user row.
+    a = result["inflight"]["A"]
+    assert [m["content"] for m in a["messages"]] == ["a-row", "hello"]
+    assert a["messages"][-1]["attachments"] == ["f.txt"]
+    saved = _named(result, "saveInflightState")
+    assert saved and {args[0] for args in saved} == {"A"}
+    # Persisted before /api/chat/start so a reload during the request keeps it.
+    assert saved[0] == ["A", None, ["a-row", "hello"]]
+    start_index = next(i for i, c in enumerate(result["calls"]) if c["name"] == "api.start")
+    assert any(c["name"] == "saveInflightState" for c in result["calls"][:start_index])
+
+
+@pytest.mark.parametrize("switch_at", ["upload", "directive"])
+def test_switch_before_start_posts_the_owner_model_workspace_and_profile(switch_at):
+    result = _run(files=True, directive=True, switchAt=switch_at)
+    body = result["startBody"]
+    assert body["session_id"] == "A"
+    assert body["model"] == "model-a"
+    assert body["model_provider"] == "prov-a"
+    assert body["workspace"] == "/a"
+    assert body["profile"] == "pa"
+    assert body["attachments"] == [{"name": "f.txt", "path": "/ws/f.txt"}]
+    assert body["message"].startswith("/use writer")
+
+
+# ── /api/chat/start succeeded after the switch ──────────────────────────────
+
+
+def test_switch_during_start_success_keeps_stream_and_model_off_the_new_pane():
+    result = _run(switchAt="start")
+    _assert_b_untouched(result)
+    # A's bookkeeping is still recorded by id.
+    assert _named(result, "markInflight") == [["A", "stream-a"]]
+    assert ["A", "A title"] in _named(result, "applySessionTitleUpdate")
+    assert [args[:2] for args in _named(result, "saveInflightState")][-1] == ["A", "stream-a"]
+    assert _after(result, "renderSessionList")
+
+
+def test_switch_during_start_success_marks_the_owner_for_reattach_instead_of_attaching():
+    result = _run(switchAt="start")
+    assert _named(result, "attachLiveStream") == []
+    assert result["inflight"]["A"]["streamId"] == "stream-a"
+    assert result["inflight"]["A"]["reattach"] is True
+
+
+def test_switch_still_loading_counts_as_off_screen_for_the_started_turn():
+    # loadSession(B) is in flight: S.session is still A, but A is leaving.
+    result = _run(switchAt="start", switchKind="loading")
+    assert result["session"]["session_id"] == "A"
+    assert result["activeStreamId"] is None
+    assert result["session"]["model"] == "model-a"
+    assert "active_stream_id" not in result["session"]
+    assert _named(result, "attachLiveStream") == []
+    assert _after(result, "ensureLiveWorklogShell", "upsertActiveSessionForLocalTurn", "showLiveRunStatus") == []
+    assert result["inflight"]["A"]["reattach"] is True
+
+
+# ── /api/chat/start failed after the switch ─────────────────────────────────
+
+
+def _assert_owner_settled(result):
+    assert "A" not in result["inflight"]
+    assert ["A"] in _named(result, "clearInflightState")
+    assert ["A"] in _named(result, "clearOptimisticSessionStreaming")
+    assert _named(result, "queueSessionMessage") == []
+    assert _named(result, "loadSession") == []
+    assert _named(result, "attachLiveStream") == []
+    assert _named(result, "showToast")
+
+
+def test_start_404_after_switch_does_not_clear_or_navigate_the_new_pane():
+    result = _run(switchAt="start", start="404")
+    _assert_b_untouched(result)
+    _assert_owner_settled(result)
+    # A was deleted server-side: there is no chat to keep a draft for.
+    assert _named(result, "_restoreComposerDraftAfterFailedSend") == []
+
+
+def test_start_conflict_after_switch_keeps_the_text_as_the_owner_draft():
+    result = _run(switchAt="start", start="409-conflict")
+    _assert_b_untouched(result)
+    _assert_owner_settled(result)
+    assert _named(result, "_restoreComposerDraftAfterFailedSend") == [["hello", "A"]]
+
+
+def test_start_error_after_switch_does_not_add_an_error_bubble_to_the_new_pane():
+    result = _run(switchAt="start", start="500")
+    _assert_b_untouched(result)
+    _assert_owner_settled(result)
+    assert _named(result, "_restoreComposerDraftAfterFailedSend") == [["hello", "A"]]
+
+
+def test_start_session_rotated_after_switch_keeps_the_draft_on_the_continuation():
+    result = _run(switchAt="start", start="409-rotated")
+    _assert_b_untouched(result)
+    _assert_owner_settled(result)
+    assert _named(result, "_restoreComposerDraftAfterFailedSend") == [["hello", "A2"]]
+
+
+# ── slash-command awaits before the owner is captured ──────────────────────
+
+
+def test_switch_during_slash_metadata_lookup_does_not_send_into_the_new_pane():
+    result = _run(text="/custom do it", switchAt="slash")
+    assert result["startBody"] is None
+    assert _named(result, "_clearComposerDraft") == []
+    assert _named(result, "uploadPendingFiles") == []
+    _assert_b_untouched(result)
+    assert _named(result, "showToast")
+    assert result["sendInProgress"] is False
+
+
+def test_switch_to_an_empty_pane_during_slash_lookup_does_not_create_a_chat_for_it():
+    result = _run(text="/custom do it", switchAt="slash", switchKind="cleared")
+    assert result["startBody"] is None
+    assert _named(result, "newSession") == []
+    assert result["session"] is None
+    assert result["messages"] == []
+    assert _named(result, "showToast")
+
+
+# ── controls: no switch keeps today's behaviour ────────────────────────────
+
+
+def test_control_no_switch_start_success_updates_the_pane_and_attaches():
+    result = _run(files=True)
+    assert result["session"]["session_id"] == "A"
+    assert result["activeStreamId"] == "stream-a"
+    assert result["session"]["model"] == "model-eff"
+    assert result["session"]["active_stream_id"] == "stream-a"
+    assert [m["content"] for m in result["messages"]] == ["a-row", "hello"]
+    assert ["A", "stream-a"] in _named(result, "attachLiveStream")
+    assert ["A"] in _named(result, "startApprovalPolling")
+    assert ["hermes-webui-model", "model-eff"] in _named(result, "localStorage.setItem")
+    assert result["startBody"]["model"] == "model-a"
+    assert result["startBody"]["workspace"] == "/a"
+    assert "reattach" not in result["inflight"]["A"]
+
+
+def test_control_no_switch_start_404_resets_the_deleted_chat():
+    result = _run(start="404")
+    assert result["session"] is None
+    assert _named(result, "history.replaceState")
+    assert ["hermes-webui-session"] in _named(result, "localStorage.removeItem")
+
+
+def test_control_no_switch_start_conflict_queues_and_reloads_the_owner():
+    result = _run(start="409-conflict")
+    assert _named(result, "queueSessionMessage") == [["A", "hello"]]
+    assert _named(result, "loadSession") == [["A"]]
+
+
+def test_control_no_switch_start_error_adds_the_error_bubble():
+    result = _run(start="500")
+    assert result["messages"][-1] == {"role": "assistant", "content": "**Error:** boom"}
+    assert _named(result, "_restoreComposerDraftAfterFailedSend") == [["hello", "A"]]
+
+
+def test_control_no_switch_session_rotated_moves_to_the_continuation():
+    result = _run(start="409-rotated")
+    assert _named(result, "loadSession") == [["A2"]]
+
+
+def test_control_slash_text_without_a_switch_is_sent_to_the_owner():
+    result = _run(text="/custom do it")
+    assert result["startBody"]["session_id"] == "A"
+    assert result["startBody"]["message"] == "/custom do it"
+
+
+def test_control_send_without_a_session_creates_one_and_sends_there():
+    result = _run(text="/custom do it", startWithoutSession=True)
+    assert _named(result, "newSession") == [[]]
+    assert result["startBody"]["session_id"] == "N"
+    assert result["activeStreamId"] == "stream-a"
+
+
+# ── the off-screen notices name the chat and stay visible (UX review) ───────
+#
+# Every case asserts the rendered en string, the toast type and the duration
+# argument: an error toast passes null so showToast gives it the 20 s error
+# default (hover pause, Dismiss); a warning passes an explicit 8000.
+
+SAVED = "Your text is saved there as a draft."
+
+
+def _toasts(result):
+    return _named(result, "showToast")
+
+
+def _slash_left(label):
+    return f"Message not sent: you left {label} before its command finished loading. {SAVED}"
+
+
+def _busy(label):
+    return f"Message not sent: {label} is still running. {SAVED}"
+
+
+def _failed(label, reason):
+    return f"Message not sent in {label}: {reason}. {SAVED}"
+
+
+def _deleted(label):
+    return f"Message not sent: {label} no longer exists, so your text was not saved."
+
+
+@pytest.mark.parametrize("switch_kind", [None, "chain", "cleared"])
+def test_slash_lookup_left_names_the_issuing_chat_as_a_warning(switch_kind):
+    scenario = {"text": "/custom do it", "switchAt": "slash"}
+    if switch_kind:
+        scenario["switchKind"] = switch_kind
+    result = _run(**scenario)
+    assert result["startBody"] is None
+    if switch_kind == "chain":
+        assert result["session"]["session_id"] == "C"
+    assert _toasts(result) == [[_slash_left("\u201cChat A\u201d"), 8000, "warning"]]
+
+
+def test_start_conflict_after_switch_says_the_chat_is_still_running():
+    result = _run(switchAt="start", start="409-conflict")
+    # The raw server sentence ("Session already has an active stream") is not shown.
+    assert _toasts(result) == [[_busy("\u201cChat A\u201d"), 8000, "warning"]]
+
+
+def test_start_error_after_switch_names_the_chat_and_the_reason():
+    result = _run(switchAt="start", start="500")
+    assert _toasts(result) == [[_failed("\u201cChat A\u201d", "boom"), None, "error"]]
+
+
+def test_start_error_reason_loses_its_trailing_full_stops():
+    result = _run(switchAt="start", start="500", startMessage="Provider quota exceeded.")
+    assert _toasts(result) == [[_failed("\u201cChat A\u201d", "Provider quota exceeded"), None, "error"]]
+    result = _run(switchAt="start", start="500", startMessage="Upstream refused...")
+    assert _toasts(result) == [[_failed("\u201cChat A\u201d", "Upstream refused"), None, "error"]]
+
+
+def test_start_session_rotated_after_switch_uses_the_generic_failure_notice():
+    result = _run(switchAt="start", start="409-rotated")
+    assert _toasts(result) == [[_failed("\u201cChat A\u201d", "boom"), None, "error"]]
+
+
+def test_start_404_after_switch_says_the_text_was_not_saved():
+    result = _run(switchAt="start", start="404")
+    assert _toasts(result) == [[_deleted("\u201cChat A\u201d"), None, "error"]]
+
+
+@pytest.mark.parametrize(
+    "start, expected",
+    [
+        ("409-conflict", [_busy("\u201cChat A\u201d"), 8000, "warning"]),
+        ("500", [_failed("\u201cChat A\u201d", "boom"), None, "error"]),
+        ("404", [_deleted("\u201cChat A\u201d"), None, "error"]),
+    ],
+)
+def test_start_failure_after_two_switches_names_the_issuing_chat_not_the_one_on_screen(start, expected):
+    result = _run(switchAt="start", switchKind="chain", start=start)
+    assert result["session"]["session_id"] == "C"
+    assert result["composer"] == "c-draft"
+    assert _toasts(result) == [expected]
+
+
+LONG_TITLE = "Planning the migration of billing exports to the new warehouse"
+FORTY = "Forty characters exactly in this title!!"
+EMOJI_TITLE = "x" * 39 + "\U0001f642" + " and more after the emoji"
+TRIM_TITLE = "Status of the release checklist for the mobile app"
+
+
+@pytest.mark.parametrize(
+    "owner_title, label",
+    [
+        (LONG_TITLE, "\u201cPlanning the migration of billing export\u2026\u201d"),
+        (FORTY, "\u201cForty characters exactly in this title!!\u201d"),
+        (EMOJI_TITLE, "\u201c" + "x" * 39 + "\U0001f642\u2026\u201d"),
+        # A title made from a first message can carry its line breaks.
+        ("  Weekly\nsync   notes ", "\u201cWeekly sync notes\u201d"),
+        # A cut that lands on a space does not leave "word \u2026".
+        (TRIM_TITLE, "\u201cStatus of the release checklist for the\u2026\u201d"),
+        # A has a message, so a default title only swaps in the generic phrase.
+        ("", "an untitled chat"),
+        (None, "an untitled chat"),
+        ("Untitled", "an untitled chat"),
+        ("New Chat", "an untitled chat"),
+    ],
+)
+def test_offscreen_notices_quote_cut_or_replace_the_owner_title(owner_title, label):
+    assert len(FORTY) == 40
+    assert TRIM_TITLE[39] == " "
+    result = _run(switchAt="start", start="500", ownerTitle=owner_title)
+    assert _toasts(result) == [[_failed(label, "boom"), None, "error"]]
+    result = _run(text="/custom do it", switchAt="slash", ownerTitle=owner_title)
+    assert _toasts(result) == [[_slash_left(label), 8000, "warning"]]
+
+
+# ── UX review round 2: "an untitled chat", and a chat that never started ────
+#
+# A chat with a default title and no messages before this send is not in the
+# chat list (the server and the sidebar both hide it), so a notice cannot send
+# the user there for a draft. It says so as an error, like the 404 notice.
+
+UNTITLED = "an untitled chat"
+NEW_CHAT = (
+    "Message not sent: the new chat you left never started, so it is not in your chat list. "
+    "Please type it again."
+)
+DEFAULT_TITLES = ["Untitled", "New Chat", "", None]
+SLASH = {"text": "/custom do it", "switchAt": "slash"}
+
+
+@pytest.mark.parametrize(
+    "scenario, expected",
+    [
+        (SLASH, [_slash_left(UNTITLED), 8000, "warning"]),
+        ({"switchAt": "start", "start": "409-conflict"}, [_busy(UNTITLED), 8000, "warning"]),
+        ({"switchAt": "start", "start": "500"}, [_failed(UNTITLED, "boom"), None, "error"]),
+        ({"switchAt": "start", "start": "404"}, [_deleted(UNTITLED), None, "error"]),
+    ],
+)
+def test_an_untitled_chat_with_messages_reads_an_untitled_chat_in_every_notice(scenario, expected):
+    result = _run(ownerTitle="Untitled", **scenario)
+    assert _toasts(result) == [expected]
+
+
+def test_the_untitled_phrase_reads_as_a_sentence():
+    result = _run(ownerTitle="Untitled", **SLASH)
+    assert _toasts(result)[0][0].startswith(
+        "Message not sent: you left an untitled chat before its command finished loading."
+    )
+
+
+@pytest.mark.parametrize("switch_kind", [None, "chain", "cleared"])
+@pytest.mark.parametrize("owner_title", DEFAULT_TITLES)
+def test_a_never_started_chat_left_during_slash_lookup_says_it_is_not_in_the_list(owner_title, switch_kind):
+    scenario = dict(SLASH, ownerTitle=owner_title, ownerMessages=[])
+    if switch_kind:
+        scenario["switchKind"] = switch_kind
+    result = _run(**scenario)
+    assert result["startBody"] is None
+    assert _toasts(result) == [[NEW_CHAT, None, "error"]]
+
+
+@pytest.mark.parametrize("start", ["409-conflict", "500", "404", "409-rotated"])
+@pytest.mark.parametrize("owner_title", DEFAULT_TITLES)
+def test_a_never_started_chat_start_failure_says_it_is_not_in_the_list(owner_title, start):
+    # A was on screen when its user row was pushed, then the user left during
+    # /api/chat/start: "no messages" means before this send, not at the toast.
+    result = _run(switchAt="start", start=start, ownerTitle=owner_title, ownerMessages=[])
+    _assert_b_untouched(result)
+    _assert_owner_settled(result)
+    assert _toasts(result) == [[NEW_CHAT, None, "error"]]
+    # What is persisted does not change.
+    restored = {"404": [], "409-rotated": [["hello", "A2"]]}.get(start, [["hello", "A"]])
+    assert _named(result, "_restoreComposerDraftAfterFailedSend") == restored
+
+
+@pytest.mark.parametrize("counts", [{"message_count": 4}, {"visible_message_count": 4}])
+@pytest.mark.parametrize(
+    "scenario, expected",
+    [
+        (SLASH, [_slash_left(UNTITLED), 8000, "warning"]),
+        ({"switchAt": "start", "start": "409-conflict"}, [_busy(UNTITLED), 8000, "warning"]),
+        ({"switchAt": "start", "start": "500"}, [_failed(UNTITLED, "boom"), None, "error"]),
+    ],
+)
+def test_an_untitled_chat_whose_rows_are_still_loading_is_not_called_new(scenario, expected, counts):
+    # Switching to a listed Untitled chat sets S.session before its rows load,
+    # so S.messages can be empty while the session already counts messages.
+    result = _run(ownerTitle="Untitled", ownerMessages=[], ownerCounts=counts, **scenario)
+    assert _toasts(result) == [expected]
+
+
+@pytest.mark.parametrize("counts", [{"message_count": 0}, {"visible_message_count": 0}, {}])
+def test_control_zero_counts_still_mean_a_new_chat(counts):
+    result = _run(switchAt="start", start="500", ownerTitle="Untitled", ownerMessages=[], ownerCounts=counts)
+    assert _toasts(result) == [[NEW_CHAT, None, "error"]]
+
+
+@pytest.mark.parametrize("start", ["409-conflict", "500", "404"])
+def test_a_never_started_chat_left_before_the_start_gets_the_new_chat_notice(start):
+    result = _run(files=True, switchAt="upload", start=start, ownerTitle="Untitled", ownerMessages=[])
+    _assert_b_untouched(result)
+    assert _toasts(result) == [[NEW_CHAT, None, "error"]]
+
+
+@pytest.mark.parametrize(
+    "scenario, expected",
+    [
+        (SLASH, [_slash_left("\u201cChat A\u201d"), 8000, "warning"]),
+        ({"switchAt": "start", "start": "409-conflict"}, [_busy("\u201cChat A\u201d"), 8000, "warning"]),
+        ({"switchAt": "start", "start": "500"}, [_failed("\u201cChat A\u201d", "boom"), None, "error"]),
+        ({"switchAt": "start", "start": "404"}, [_deleted("\u201cChat A\u201d"), None, "error"]),
+    ],
+)
+def test_control_a_titled_chat_without_messages_keeps_the_titled_notices(scenario, expected):
+    result = _run(ownerMessages=[], **scenario)
+    assert _toasts(result) == [expected]
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        SLASH,
+        {"switchAt": "start", "start": "409-conflict"},
+        {"switchAt": "start", "start": "500"},
+        {"switchAt": "start", "start": "404"},
+    ],
+)
+def test_a_never_started_chat_left_for_b_then_c_gets_the_new_chat_notice(scenario):
+    result = _run(switchKind="chain", ownerTitle="Untitled", ownerMessages=[], **scenario)
+    assert result["session"]["session_id"] == "C"
+    assert result["composer"] == "c-draft"
+    assert _toasts(result) == [[NEW_CHAT, None, "error"]]
