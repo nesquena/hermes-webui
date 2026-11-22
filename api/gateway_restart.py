@@ -255,8 +255,18 @@ def restart_active_profile_gateway(
                     except Exception:
                         logger.exception("Unexpected error while waiting for gateway restart process.")
                 finally:
-                    with _ACTIVE_RESTART_LOCK:
-                        _ACTIVE_RESTART_PROCS.discard(proc)
+                    # Retire the process from the active restart registry only if its
+                    # exit code is known or poll() confirms completion. If liveness is
+                    # still unknown (poll() returns None or raises), keep the Popen
+                    # registered so a later reap_stray_restart_processes() tick can collect it.
+                    reaped = False
+                    try:
+                        reaped = proc.returncode is not None or proc.poll() is not None
+                    except Exception:
+                        reaped = False
+                    if reaped:
+                        with _ACTIVE_RESTART_LOCK:
+                            _ACTIVE_RESTART_PROCS.discard(proc)
                     _release_lock()
 
             threading.Thread(target=_wait_and_release, daemon=True).start()
