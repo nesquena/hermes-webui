@@ -29,8 +29,6 @@
 
 ### Security
 
-- **The text-to-speech throttle can no longer be dodged with a forged forwarded header (#8637, closes #8610).** With `HERMES_WEBUI_TRUST_FORWARDED_FOR=1` set, the TTS endpoint's one-request-per-2-seconds throttle trusted forwarded headers from any client, so a client could pick a fresh bucket on every request. It now identifies the client exactly as the login limiter does: forwarded headers count only with `HERMES_WEBUI_LOGIN_RATE_LIMIT_PER_CLIENT=1` and the proxy listed in `HERMES_WEBUI_TRUSTED_PROXY_CIDRS`. A WebUI with no password behind a proxy that set only `HERMES_WEBUI_TRUST_FORWARDED_FOR=1` now gives its users one shared TTS bucket until the other two settings are added; signed-in sessions keep their own. Default installs are unchanged. Docs updated in `docs/remote-access.md` and `.env.example`.
-
 - **A malformed passkey response is refused with 400/401, never a server error.** Registering or signing in with a
   crafted passkey response, for example one whose declared credential ID is longer than the real one, could make the
   CBOR reader raise an unexpected error and answer `500 Internal server error`. Every malformed registration or login
@@ -39,19 +37,17 @@
 
 ### Fixed
 
+- **Memory and skill changes can no longer land in the wrong profile after a switch in another tab (#9216, part of #9077).** The active profile is shared across tabs, so an open Memory editor or skill list could still show one profile's data after another tab switched profile, and saving or toggling then wrote into the profile now active. The server now refuses such a write with a clear message, nothing is saved, and the Memory editor keeps your text so you can copy it. Skill toggles show an error and reload the list for the active profile.
+
+- **A reused conversation recovers when its context compressor fails to reconnect to session storage (#9215).** When WebUI keeps an agent cached between turns and hands it a new session-storage handle, it reconnects the context compressor to that handle. If that failed once, it stayed failed for as long as the agent stayed cached, and only a debug line recorded it. The next turn now retries, the first failure logs one warning, and a store that has already been released is replaced instead of reused. The check for whether a hook accepts a keyword argument now matches the Hermes Agent's own rule, and the reconnect is still called once per turn, as the Agent's reset path does.
+
 - **The gateway-sync reset test runs on newer Hermes Agent versions too (#9261, closes #9258).** Both cases of the test that checks a reset conversation stays separate from its reopened parent failed against current Agents, because their fixture used storage calls newer Agents no longer have. The fixture now writes rows with `append_message`, ends the parent session through whichever reset call the installed Agent provides, and checks that the reset took effect.
 
 - **On a server launched under a named profile, values from that profile's `.env` are recognised however the line is written (#9212).** WebUI now compares launch values with the profile's `.env` as WebUI, the launcher and the Agent each read it, so a value loaded from that file is never taken for the operator's own launch setting. The Gateway settings check uses the same comparison. Servers launched as root are unchanged.
 
 - **Login and read-aloud rate limits ignore a forwarded client address that carries an IPv6 zone (#9211).** Behind a trusted proxy, a forwarded IPv6 client address with a scope ID now falls back to the connecting peer, as other unusable forwarded values already did. Unscoped addresses and deployments without a trusted proxy are unchanged.
 
-- **Deleting a Gateway-backed session works again on Hermes Agent v0.23.3 and later (#9218, closes #9213).** Since the Agent moved its session-retirement step in v0.23.3, deleting a session that had Gateway runs failed with "runtime ledger unavailable". WebUI now finds the step in its new place and passes the profile's attachment folder it needs. Sessions with work still running are still refused, and older Agents behave as before.
-
-- **A forced Agent update now says that it stops Gateway runs too, and only restarts the Gateway you confirmed (#8746, closes #8667).** Thanks @webtecnica. Since #8662 an Agent update counts active Gateway runs, so "Update anyway" also ends them when the Gateway restarts, but the refusal text, the confirmation dialog, the server log and `docs/supervisor.md` still described only WebUI runs. The wording now depends on the update target and on whether this profile's Gateway can be restarted, so it names the runs that will be interrupted and the Gateway runs that keep running. A WebUI update is unchanged.
-
   - Maintainer folds: when nothing is interrupted (only Gateway runs on a Gateway the WebUI can't restart), the update gets a neutral "Update the Agent now?" confirmation instead of an "Interrupt active runs?" warning that counted zero runs, and "2 Gateway run keep running" is fixed. A managed Gateway with no WebUI run gets its own confirmation copy in all 15 locales. The forced update carries what you confirmed (whether the Gateway is restarted, which profile and endpoint, how many runs it interrupts). The server re-checks it just before restarting the Gateway, so if the Gateway changed in the meantime, for example after a profile switch in another tab, it asks again instead of restarting a Gateway the dialog said would keep running.
-
-- **The transcript's Today and Yesterday day separators follow the interface language (#8627).** They were always in English. They now use the same words the sidebar already shows for those days, so every language gets them with no new strings; English is unchanged. Thanks @solarmaster961.
 
   - **Reload recovery:** reloading a compressed conversation that lands on its archived part didn't find the continuation.
 
@@ -298,6 +294,8 @@
 
 ### Changed
 
+- **German reads as one consistent translation (#8787, @goetterbote2342).** The German interface now uses informal "du" throughout, uses the same word for the same thing everywhere (for example "Anbieter" for providers), and restores several messages whose meaning had drifted from the English. The quota-chip settings that were still in English are translated too.
+
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Internal
@@ -319,6 +317,22 @@
 - **Test suite reads static assets as UTF-8 so it runs on Windows.** 34 test files that opened `static/` assets without an explicit encoding now pass `encoding="utf-8"`, so the suite no longer fails under a non-UTF-8 default locale (Windows `cp1252`). Two method signatures over-matched by the encoding sweep were reverted. Assertions are unchanged. Thanks @mo7al876any. (#5537)
 
 - **Added regression coverage for messaging clear-watermark semantics.** New test locks the watermark behavior so a future change can't silently regress it. Thanks @rodboev. (#5589, #5572)
+
+## [v0.52.727] — 2026-11-22
+
+### Fixed
+
+- **Deleting a Gateway-backed session works again on Hermes Agent v0.23.3 and later (#9218, closes #9213).** Since the Agent moved its session-retirement step in v0.23.3, deleting a session that had Gateway runs failed with "runtime ledger unavailable". WebUI now finds the step in its new place and passes the profile's attachment folder it needs. Sessions with work still running are still refused, and older Agents behave as before.
+
+- **A forced Agent update now says that it stops Gateway runs too, and only restarts the Gateway you confirmed (#8746, closes #8667).** Thanks @webtecnica. Since #8662 an Agent update counts active Gateway runs, so "Update anyway" also ends them when the Gateway restarts, but the refusal text, the confirmation dialog, the server log and `docs/supervisor.md` still described only WebUI runs. The wording now depends on the update target and on whether this profile's Gateway can be restarted, so it names the runs that will be interrupted and the Gateway runs that keep running. A WebUI update is unchanged.
+
+- **The transcript's Today and Yesterday day separators follow the interface language (#8627).** They were always in English. They now use the same words the sidebar already shows for those days, so every language gets them with no new strings; English is unchanged. Thanks @solarmaster961.
+
+## [v0.52.724] — 2026-11-21
+
+### Security
+
+- **The text-to-speech throttle can no longer be dodged with a forged forwarded header (#8637, closes #8610).** With `HERMES_WEBUI_TRUST_FORWARDED_FOR=1` set, the TTS endpoint's one-request-per-2-seconds throttle trusted forwarded headers from any client, so a client could pick a fresh bucket on every request. It now identifies the client exactly as the login limiter does: forwarded headers count only with `HERMES_WEBUI_LOGIN_RATE_LIMIT_PER_CLIENT=1` and the proxy listed in `HERMES_WEBUI_TRUSTED_PROXY_CIDRS`. A WebUI with no password behind a proxy that set only `HERMES_WEBUI_TRUST_FORWARDED_FOR=1` now gives its users one shared TTS bucket until the other two settings are added; signed-in sessions keep their own. Default installs are unchanged. Docs updated in `docs/remote-access.md` and `.env.example`.
 
 ## [v0.52.723] — 2026-11-21
 
