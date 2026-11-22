@@ -161,4 +161,77 @@ def test_real_start_releases_swapped_sidecar_without_warning(env, tmp_path, monk
         assert gdw.poll_once(0) == 0
     assert not [r for r in caplog.records if r.name == gdw.logger.name]
     assert FakeDB.rows
-    assert all(not r.get("reservation_token") and not r["consumed"] for r in FakeDB.rows.values())
+    # The lease must not survive the poll: the rows stay deliverable.
+    assert all(r["lease"] is None and not r["consumed"] for r in FakeDB.rows.values())
+
+
+def test_real_start_swapped_between_the_first_read_and_the_locked_one(env, tmp_path, monkeypatch, caplog):  # noqa: F811 - shared pytest fixture
+    """The real ``start_session_turn`` reports an unreadable owner as such.
+
+    The sidecar is swapped AFTER the function's first ``get_session`` succeeds
+    and BEFORE the one it takes under the session lock, so the locked read is
+    the one that sees another session's body. That read must be reported as
+    ``session_owner_unknown``: the delegation poller reads that reason and
+    retries quietly, instead of logging a WARNING on every sweep.
+
+    The real ``start_session_turn`` is used as-is -- the point of the test is
+    the path the production code actually takes, so it may not be replaced.
+    """
+    from api import routes
+
+    monkeypatch.setattr(routes, "run_admission_closed_response", lambda: None)
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_: None)
+    # The shared fixture installs a fake start; the point of this test is the
+    # path the production code actually takes, so the real one is restored.
+    monkeypatch.setattr(routes, "start_session_turn", _REAL_START_SESSION_TURN)
+    real_get_session = routes.get_session
+    reads = {"n": 0}
+
+    def get_session_then_swap(sid, *args, **kwargs):
+        # The first read must succeed (so the function reaches the locked one).
+        reads["n"] += 1
+        session = real_get_session(sid, *args, **kwargs)
+        if reads["n"] == 1:
+            _swap_body_to_another_session(tmp_path / "sessions", sid, "victim-9041-locked")
+        return session
+
+    monkeypatch.setattr(routes, "get_session", get_session_then_swap)
+    FakeDB.add("sid1", "deleg_swap_under_lock")
+
+    with caplog.at_level(logging.WARNING, logger=gdw.logger.name):
+        assert gdw.poll_once(0) == 0
+
+    assert reads["n"] >= 2, "the locked read must be the one that sees the swap"
+    assert not [r for r in caplog.records if r.name == gdw.logger.name], \
+        [r.getMessage() for r in caplog.records if r.name == gdw.logger.name]
+    # The lease must not survive the poll: the rows stay deliverable.
+    assert FakeDB.rows
+    assert all(r["lease"] is None and not r["consumed"] for r in FakeDB.rows.values())
+
+
+def test_real_start_reports_the_swapped_owner_as_unknown(env, tmp_path, monkeypatch):  # noqa: F811 - shared pytest fixture
+    """The locked read of a swapped sidecar answers ``session_owner_unknown``.
+
+    A plain 404 is indistinguishable from a missing session, so the poller
+    logs it as a failed wake on every sweep.
+    """
+    from api import routes
+
+    monkeypatch.setattr(routes, "run_admission_closed_response", lambda: None)
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_: None)
+    real_get_session = routes.get_session
+    reads = {"n": 0}
+
+    def get_session_then_swap(sid, *args, **kwargs):
+        reads["n"] += 1
+        session = real_get_session(sid, *args, **kwargs)
+        if reads["n"] == 1:
+            _swap_body_to_another_session(tmp_path / "sessions", sid, "victim-9041-locked")
+        return session
+
+    monkeypatch.setattr(routes, "get_session", get_session_then_swap)
+    response = _REAL_START_SESSION_TURN("sid1", "wake prompt", source="process_wakeup")
+
+    assert reads["n"] >= 2
+    assert response.get("_status") == 404, response
+    assert response.get("reason") == "session_owner_unknown", response

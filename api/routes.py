@@ -31668,6 +31668,14 @@ def start_session_turn(
     with _get_session_agent_lock(s.session_id):
         try:
             s = get_session(session_id)
+        except SessionFileNamesOtherSession:
+            # #9041: the sidecar was swapped for another session's body between
+            # the first read and this locked one, so the owner cannot be
+            # verified. Report it the same way the first read does (the
+            # ``reason`` tells the caller this is an unreadable owner, not a
+            # missing session); a plain 404 would be logged as a failed wake.
+            return {"error": "Session not found", "_status": 404,
+                    "reason": "session_owner_unknown"}
         except KeyError:
             return {"error": "Session not found", "_status": 404}
         if clear_process_wakeup_pause_if_model_changed(
