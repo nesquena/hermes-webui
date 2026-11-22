@@ -13281,6 +13281,13 @@ _session_projection_cache: "OrderedDict[tuple, dict]" = OrderedDict()
 _session_projection_cache_lock = threading.Lock()
 
 
+# Marker for "this load path memoizes no display merge" (a full load merges on
+# the fly). Distinct from None, which means the path does memoize one and no
+# entry is in force: that load has no generation to validate against, so it must
+# not use the projection cache at all.
+_PROJ_DISPLAY_GENERATION_UNSET = object()
+
+
 def _display_merge_generation(sid):
     """Generation stamp of the display-merge entry in force for *sid*, or None.
 
@@ -13321,7 +13328,7 @@ def _session_projection_cache_key(
     pending_started_at,
     redact_enabled,
     redaction_policy,
-    display_generation=None,
+    display_generation=_PROJ_DISPLAY_GENERATION_UNSET,
 ):
     """Return the validity key for one projected payload, or None to skip caching.
 
@@ -13345,6 +13352,10 @@ def _session_projection_cache_key(
     if not sid or sidecar_sig is None or state_db_sig is None or redact_enabled is None:
         return None
     if redaction_policy is None:
+        return None
+    if display_generation is None:
+        # This load memoizes the merged transcript, and no entry is in force:
+        # the rows have no generation to validate against.
         return None
     if _sidecar_stat_signature(sidecar_path) != sidecar_sig:
         return None
@@ -18142,7 +18153,9 @@ def _handle_session_get(handler, parsed) -> bool:
                 redact_enabled=_proj_redact_enabled,
                 redaction_policy=_proj_redaction_policy,
                 display_generation=(
-                    _display_merge_generation(sid) if _proj_cache_allowed else None
+                    _display_merge_generation(sid)
+                    if _proj_cache_allowed and msg_limit is not None
+                    else _PROJ_DISPLAY_GENERATION_UNSET
                 ),
             )
         _proj_payload = _session_projection_cache_get(_proj_key)
@@ -18161,6 +18174,10 @@ def _handle_session_get(handler, parsed) -> bool:
                     redact[_volatile_key] = raw[_volatile_key]
                 else:
                     redact.pop(_volatile_key, None)
+            if isinstance(redact.get("todo_state"), (dict, list)):
+                # The caller owns this structure (the browser mutates it), so a
+                # hit must not hand out the one the cached entry holds.
+                redact["todo_state"] = copy.deepcopy(redact["todo_state"])
         else:
             redact = public_session_projection(raw)
             if not any(_key in redact for _key in _SESSION_PROJECTION_UNCACHEABLE_KEYS):

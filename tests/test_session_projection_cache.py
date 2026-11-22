@@ -665,17 +665,18 @@ def test_display_merge_generation_moves_the_projection_key(env):
     def _entry(stored_at):
         return {"key": ("gen", 1), "messages": [], "summary": {}, "stored_at": stored_at}
 
+    query = "&msg_limit=30"
     with routes._display_merge_cache_lock:
         routes._display_merge_cache["proj_gen"] = _entry(1.0)
     try:
-        env.get("proj_gen")
+        env.get("proj_gen", extra=query)
         assert env.projection_calls == 1
-        env.get("proj_gen")
+        env.get("proj_gen", extra=query)
         assert env.projection_calls == 1, "an unchanged merge generation must still reuse"
 
         with routes._display_merge_cache_lock:
             routes._display_merge_cache["proj_gen"] = _entry(2.0)
-        env.get("proj_gen")
+        env.get("proj_gen", extra=query)
         assert env.projection_calls == 2, (
             "a rebuilt display-merge entry must not be served the projection "
             "built from the old one"
@@ -683,9 +684,10 @@ def test_display_merge_generation_moves_the_projection_key(env):
 
         with routes._display_merge_cache_lock:
             routes._display_merge_cache.pop("proj_gen", None)
-        env.get("proj_gen")
+        env.get("proj_gen", extra=query)
         assert env.projection_calls == 3, (
-            "a cleared display-merge entry is a different generation, not the last one"
+            "no display-merge entry in force means no generation to validate: "
+            "the load must not use the projection cache"
         )
     finally:
         with routes._display_merge_cache_lock:
