@@ -2028,10 +2028,21 @@ def test_model_and_reasoning_controls_live_in_mobile_overflow_panel():
         "reasoning dropdown positioning/click handling must know the mobile reasoning action"
 
     mobile_css = _composer_phone_media_block()
-    assert ".composer-left > .composer-model-wrap" in mobile_css, \
-        "phone width must hide the footer model chip behind overflow"
-    assert ".composer-left > .composer-reasoning-wrap" in mobile_css, \
-        "phone width must hide the footer reasoning chip behind overflow"
+    flat_css = mobile_css.replace(" ", "")
+    assert _rule_body(mobile_css, ".composer-left > .composer-toolsets-wrap").strip() == "display:none!important;", \
+        "phone width must still fold the toolsets into the overflow panel"
+    assert ".composer-model-wrap{display:none" not in flat_css, \
+        "phone width must keep the model chip in the composer"
+    for selector in (
+        ".composer-footer.cf-burger .composer-left > .composer-model-wrap",
+        ".composer-footer.cf-burger .composer-left > .composer-reasoning-wrap.is-available",
+    ):
+        assert _rule_body(mobile_css, selector).strip() == "display:inline-flex!important;", \
+            f"phone width must show {selector} as an icon-only control"
+    assert ".composer-reasoning-wrap.is-available" in flat_css, \
+        "the phone reasoning chip must key on the model's own capability class"
+    assert "is-available" in ui_js, \
+        "ui.js must set the capability class the phone reasoning chip keys on"
     assert ".composer-mobile-config-action" in mobile_css, \
         "mobile overflow panel must size the model/reasoning actions"
 

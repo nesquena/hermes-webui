@@ -3484,9 +3484,31 @@
     .composer-workspace-group{box-sizing:border-box;flex:0 0 44px;width:44px;min-width:44px;max-width:44px;min-height:44px;overflow:hidden;border:none;background:transparent;border-radius:8px;}
     .composer-workspace-files-btn{box-sizing:border-box;width:44px;min-width:44px;max-width:44px;padding:0;border-radius:8px;}
     .composer-workspace-chip{display:none!important;}
-    .composer-left > .composer-model-wrap,
-    .composer-left > .composer-reasoning-wrap,
+    /* Phone width keeps the two steering controls in the composer instead of
+       folding them into the mobile config panel: the model chip and the
+       reasoning chip render as icon-only 44px buttons (their labels and
+       chevrons are already hidden above) because switching model or thinking
+       is the thing a live conversation is steered by, and it should not sit
+       behind a tap. Only toolsets — the least reached of the three — still
+       fold. The reasoning chip follows `.is-available`, which ui.js sets from
+       the model's own capabilities, so a model without a thinking toggle
+       never grows a dead button here. */
     .composer-left > .composer-toolsets-wrap{display:none!important;}
+    /* The inline quota pill moves into the same panel it already duplicates here:
+       with the model and reasoning chips back in the row, keeping all three inline
+       pushed the left cluster past its box at 390px (measured 368px of content in a
+       302px cluster, so the leading controls scrolled out of sight). */
+    .composer-left > .provider-quota-chip{display:none!important;}
+    /* ...and so does the workspace switch, which the mobile panel carries as its own
+       action. Seven 44px controls plus their gaps need 368px and the phone cluster is
+       302px, so the row can only hold six: the two chips the user asked for stay, the
+       two that already have a panel twin go. */
+    .composer-left > .composer-ws-wrap{display:none!important;}
+    .composer-left{gap:4px;}
+    .composer-footer .composer-left > .composer-model-wrap,
+    .composer-footer.cf-burger .composer-left > .composer-model-wrap{display:inline-flex!important;}
+    .composer-footer .composer-left > .composer-reasoning-wrap.is-available,
+    .composer-footer.cf-burger .composer-left > .composer-reasoning-wrap.is-available{display:inline-flex!important;}
     /* Saved prompts is a desktop-only composer affordance — too much for the
        narrow mobile composer (Nathan 2026-06-09). Hide the button + popup. */
     #btnSavedPrompts,.saved-prompts-popup{display:none!important;}
