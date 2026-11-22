@@ -158,6 +158,22 @@ def _patch_profile_config(monkeypatch, cfg):
         ("C'est la configuration.", ""),
         ("Qu'il a déjà la connexion.", ""),
         ("Le marché est fermé.", ""),
+        # A French elision (s'il, qu'il, lorsqu'il, d'un...) leaves weak Italian
+        # tokens; two of them must not win the final vote on their own.
+        *[(text, "") for text in [
+            "S'il accepte, dites-lui qu'il peut commencer.",
+            "S’il accepte, dites-lui qu’il peut commencer.",
+            "Qu'il vienne s'il peut.",
+            "Lorsqu'il arrive, dites-lui qu'il attende.",
+            "D'accord, s'il le faut, qu'il le fasse.",
+            "Je pense qu'il faut le redémarrer s'il bloque.",
+            "Puisqu'il le dit, qu'il le fasse.",
+            "L'erreur n'apparaît que s'il redémarre.",
+        ]],
+        # Italian elisions still vote.
+        ("L'errore è stato corretto.", "it"),
+        ("Dell'errore ho già parlato.", "it"),
+        ("Nell'ultima build l'errore non c'è.", "it"),
         ("", ""),
     ],
 )
@@ -405,6 +421,35 @@ _FRENCH_NON_REPLIES = [
     "Non, la connexion fonctionne.",
     "Non, la compilation fonctionne.",
 ]
+
+
+_FRENCH_ELISION_REPLIES = [
+    "S'il accepte, dites-lui qu'il peut commencer.",
+    "D'accord, s'il le faut, qu'il le fasse.",
+    "Lorsqu'il arrive, dites-lui qu'il attende.",
+]
+
+
+@pytest.mark.parametrize("text", _FRENCH_ELISION_REPLIES)
+@pytest.mark.parametrize(
+    "cfg, expected",
+    [
+        ({}, "en-US-AvaMultilingualNeural"),
+        ({"tts": {"edge": {"voice": "en-US-GuyNeural"}}}, "en-US-GuyNeural"),
+        (
+            {"tts": {"edge": {"voice": "en-US-GuyNeural", "voices": {"it": "it-IT-IsabellaNeural"}}}},
+            "en-US-GuyNeural",
+        ),
+    ],
+)
+def test_french_elision_reply_does_not_select_an_italian_voice(monkeypatch, text, cfg, expected):
+    _patch_profile_config(monkeypatch, cfg)
+    captured = {}
+    _stub_edge_tts(monkeypatch, captured)
+    h = _post({"text": text}, client="10.42.1.9")
+    routes._handle_tts(h, None)
+    assert h.status == 200, h.payload()
+    assert captured["voice"] == expected
 
 
 @pytest.mark.parametrize("text", _FRENCH_NON_REPLIES)

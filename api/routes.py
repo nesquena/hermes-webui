@@ -26382,7 +26382,12 @@ def _detect_text_lang(text: str) -> str:
     # whole words instead of splitting into fragments that match nothing.
     # An apostrophe splits: Italian c'è/dov'è/com'è then count the stopword
     # "è", and French c'est/qu'il leave "est"/"il" as they would standing alone.
-    words = re.findall(r"[a-zà-öø-ÿ]+", (text or "").lower())
+    lowered = (text or "").lower()
+    tokens = [
+        (m.group(), m.start() > 0 and lowered[m.start() - 1] in "'’")
+        for m in re.finditer(r"[a-zà-öø-ÿ]+", lowered)
+    ]
+    words = [w for w, _ in tokens]
     if len(words) < 3:
         return ""
     # No articles or prepositions Italian shares with French and Spanish
@@ -26420,6 +26425,16 @@ def _detect_text_lang(text: str) -> str:
         "have", "what", "when", "there", "from", "would", "should", "about",
         "can", "will", "your", "but", "just", "very",
     }
+    # Italian words that are also French or Spanish (see strong_it_votes).
+    weak_it_words = {"il", "lo", "di", "ma", "come", "cosa"}
+    # Italian never elides into these weak or shared words, French does
+    # (s'il, qu'il, lorsqu'il, d'un): after an apostrophe they cast no vote
+    # at all, since two weak tokens can win the final vote on their own.
+    # Italian elisions keep voting (c'è, l'errore, dell'ultima).
+    words = [
+        w for w, elided in tokens
+        if not (elided and (w in weak_it_words or w in shared_words))
+    ]
     it_votes = sum(1 for w in words if w in it_words)
     en_votes = sum(1 for w in words if w in en_words)
     # é/è are as common in French, Spanish and Portuguese; the word "è" is
@@ -26446,7 +26461,6 @@ def _detect_text_lang(text: str) -> str:
     # interjection "non" cannot anchor shared-word backup votes; otherwise
     # it is Italian pre-verbal negation ("La build non passa.", "Non la trovo.")
     # and acts as a strong vote.
-    weak_it_words = {"il", "lo", "di", "ma", "come", "cosa"}
     if re.search(r"\bnon\s*[,;:!?]", text or "", re.IGNORECASE):
         weak_it_words.add("non")
     strong_it_votes = it_votes - sum(1 for w in words if w in weak_it_words)
