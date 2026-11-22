@@ -15670,14 +15670,28 @@ def _run_agent_streaming(
                     _unbound_reasoning_idx[0] = None
                 reasoning_echo = _strip_reasoning_output_echo(visible)
                 already_streamed = bool(cb_kwargs.get('already_streamed', False)) or _is_visible_output_echo(visible)
+                # #8901: the boundary frame re-sends the segment text, so
+                # it obeys the same redaction contract as the deltas that
+                # streamed it (and stays consistent with them) — including
+                # the api_redact_enabled opt-out, whose snapshot the owning
+                # redactor carries.
+                boundary_text = redact_stream_boundary_text(
+                    visible, enabled=_delta_redactor.enabled
+                )
                 payload = {
-                    # #8901: the boundary frame re-sends the segment text, so
-                    # it obeys the same redaction contract as the deltas that
-                    # streamed it (and stays consistent with them).
-                    'text': redact_stream_boundary_text(visible),
+                    'text': boundary_text,
                     'already_streamed': already_streamed,
                 }
-                if reasoning_echo:
+                if reasoning_echo and boundary_text == visible:
+                    # The client strips the echoed paragraph out of the live
+                    # Thinking card by matching this payload's text against
+                    # the reasoning it rendered (journal replay repeats the
+                    # search). When redaction changed the text that match is
+                    # guaranteed to fail, so the flag would only send the
+                    # client on a search that cannot succeed — withhold it
+                    # instead. The server-side echo strip above already ran
+                    # on the raw text, so the reasoning buffers stay correct
+                    # either way.
                     payload['reasoning_echo'] = True
                 put('interim_assistant', payload)
 
@@ -15730,6 +15744,13 @@ def _run_agent_streaming(
 
             def on_tool(*cb_args, **cb_kwargs):
                 nonlocal _reasoning_segments, _current_reasoning_idx, _tool_boundary_advanced
+                # #8901: the delta redactor's held tail belongs to the prose
+                # that produced it, and a tool frame opens a new activity
+                # group — release it BEFORE the tool frame, the same boundary
+                # rule as interim_assistant. Without it a held character run
+                # lands after the tool row (or is dropped at the terminal),
+                # and the live snapshot no longer matches the settled one.
+                flush_stream_delta_tail(_delta_redactor, put)
                 # #4729: a tool boundary closes/reorders the live reasoning stream — flush
                 # any buffered reasoning tail first so it isn't stranded behind the tool event.
                 _flush_reasoning_buffer()
