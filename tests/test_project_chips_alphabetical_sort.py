@@ -42,24 +42,69 @@ def _run_node(script: str) -> dict:
     return json.loads(proc.stdout.strip())
 
 
+FORBIDDEN_PROJECT_ITERATION = (
+    "for(const p of _allProjects)",
+    "for(const p of(_allProjects||[]))",
+    "_allProjects.forEach(",
+    "_allProjects.map(",
+    "_allProjects.sort(",
+)
+
+
+def _project_loop_sources(body: str) -> list[str]:
+    """Every `for(const p of X)` source expression found in a function body."""
+    sources = []
+    needle = "for(const p of "
+    idx = 0
+    while True:
+        start = body.find(needle, idx)
+        if start == -1:
+            return sources
+        pos = start + len(needle)
+        depth = 0
+        end = pos
+        while end < len(body):
+            ch = body[end]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            end += 1
+        sources.append(body[pos:end].strip())
+        idx = end
+
+
+CONSUMERS = (
+    "_showBatchProjectPicker",
+    "renderSessionListFromCache",
+    "_showProjectPicker",
+)
+
+
 def test_consumer_functions_bound_to_projects_sorted_by_name():
     src = _read_sessions_js()
-    consumer_names = [
-        "_showBatchProjectPicker",
-        "renderSessionListFromCache",
-        "_showProjectPicker",
-    ]
-    for name in consumer_names:
+    for name in CONSUMERS:
         body = extract_function(src, name)
-        assert "for(const p of _projectsSortedByName())" in body, (
-            f"{name} does not call _projectsSortedByName() in its loop"
+
+        # Bound, not generic: the loop that renders project rows must iterate the
+        # helper *inside this function*, and there must be exactly one such loop —
+        # a second, helper-less loop is how two consumers regress silently.
+        sources = _project_loop_sources(body)
+        assert sources, f"{name} no longer iterates projects at all"
+        assert len(sources) == 1, (
+            f"{name} iterates projects {len(sources)} times ({sources}); "
+            "every project row must come from a single _projectsSortedByName() loop"
         )
-        assert "for(const p of _allProjects)" not in body, (
-            f"{name} still references raw _allProjects in loop"
+        assert sources[0].startswith("_projectsSortedByName("), (
+            f"{name} iterates projects via {sources[0]!r}, expected _projectsSortedByName()"
         )
-        assert "for(const p of(_allProjects||[]))" not in body, (
-            f"{name} still references fallback _allProjects loop"
-        )
+
+        for pattern in FORBIDDEN_PROJECT_ITERATION:
+            assert pattern not in body, (
+                f"{name} iterates the raw cache via {pattern!r}, bypassing _projectsSortedByName()"
+            )
 
     # Refresh path inside _showProjectPicker recomputes visibleProjects
     show_picker_body = extract_function(src, "_showProjectPicker")
