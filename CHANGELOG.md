@@ -47,13 +47,7 @@
 
 - **Login and read-aloud rate limits ignore a forwarded client address that carries an IPv6 zone (#9211).** Behind a trusted proxy, a forwarded IPv6 client address with a scope ID now falls back to the connecting peer, as other unusable forwarded values already did. Unscoped addresses and deployments without a trusted proxy are unchanged.
 
-- **Deleting a Gateway-backed session works again on Hermes Agent v0.23.3 and later (#9218, closes #9213).** Since the Agent moved its session-retirement step in v0.23.3, deleting a session that had Gateway runs failed with "runtime ledger unavailable". WebUI now finds the step in its new place and passes the profile's attachment folder it needs. Sessions with work still running are still refused, and older Agents behave as before.
-
-- **A forced Agent update now says that it stops Gateway runs too, and only restarts the Gateway you confirmed (#8746, closes #8667).** Thanks @webtecnica. Since #8662 an Agent update counts active Gateway runs, so "Update anyway" also ends them when the Gateway restarts, but the refusal text, the confirmation dialog, the server log and `docs/supervisor.md` still described only WebUI runs. The wording now depends on the update target and on whether this profile's Gateway can be restarted, so it names the runs that will be interrupted and the Gateway runs that keep running. A WebUI update is unchanged.
-
   - Maintainer folds: when nothing is interrupted (only Gateway runs on a Gateway the WebUI can't restart), the update gets a neutral "Update the Agent now?" confirmation instead of an "Interrupt active runs?" warning that counted zero runs, and "2 Gateway run keep running" is fixed. A managed Gateway with no WebUI run gets its own confirmation copy in all 15 locales. The forced update carries what you confirmed (whether the Gateway is restarted, which profile and endpoint, how many runs it interrupts). The server re-checks it just before restarting the Gateway, so if the Gateway changed in the meantime, for example after a profile switch in another tab, it asks again instead of restarting a Gateway the dialog said would keep running.
-
-- **The transcript's Today and Yesterday day separators follow the interface language (#8627).** They were always in English. They now use the same words the sidebar already shows for those days, so every language gets them with no new strings; English is unchanged. Thanks @solarmaster961.
 
   - **Reload recovery:** reloading a compressed conversation that lands on its archived part didn't find the continuation.
 
@@ -323,6 +317,16 @@
 - **Test suite reads static assets as UTF-8 so it runs on Windows.** 34 test files that opened `static/` assets without an explicit encoding now pass `encoding="utf-8"`, so the suite no longer fails under a non-UTF-8 default locale (Windows `cp1252`). Two method signatures over-matched by the encoding sweep were reverted. Assertions are unchanged. Thanks @mo7al876any. (#5537)
 
 - **Added regression coverage for messaging clear-watermark semantics.** New test locks the watermark behavior so a future change can't silently regress it. Thanks @rodboev. (#5589, #5572)
+
+## [v0.52.727] — 2026-11-22
+
+### Fixed
+
+- **Deleting a Gateway-backed session works again on Hermes Agent v0.23.3 and later (#9218, closes #9213).** Since the Agent moved its session-retirement step in v0.23.3, deleting a session that had Gateway runs failed with "runtime ledger unavailable". WebUI now finds the step in its new place and passes the profile's attachment folder it needs. Sessions with work still running are still refused, and older Agents behave as before.
+
+- **A forced Agent update now says that it stops Gateway runs too, and only restarts the Gateway you confirmed (#8746, closes #8667).** Thanks @webtecnica. Since #8662 an Agent update counts active Gateway runs, so "Update anyway" also ends them when the Gateway restarts, but the refusal text, the confirmation dialog, the server log and `docs/supervisor.md` still described only WebUI runs. The wording now depends on the update target and on whether this profile's Gateway can be restarted, so it names the runs that will be interrupted and the Gateway runs that keep running. A WebUI update is unchanged.
+
+- **The transcript's Today and Yesterday day separators follow the interface language (#8627).** They were always in English. They now use the same words the sidebar already shows for those days, so every language gets them with no new strings; English is unchanged. Thanks @solarmaster961.
 
 ## [v0.52.724] — 2026-11-21
 
