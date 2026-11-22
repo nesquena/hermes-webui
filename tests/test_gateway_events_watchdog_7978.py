@@ -1131,6 +1131,181 @@ def test_r4_status_waiting_for_approval_surfaces_approval_card_once():
     assert harness["status"].calls == 2
 
 
+def test_r4_status_card_survives_without_capability_when_payload_carries_generation():
+    """A generation-fenced gateway never advertises ``approval_identity_v1``.
+
+    Its approval payload still carries an exact per-prompt id and the
+    ``execution_generation`` the respond endpoint validates, which is a
+    stronger identity than the capability flag. The status-card recovery must
+    ride that generation, otherwise a reattach after a restart drops the card
+    and the parked run can never be answered.
+    """
+    import api.config as api_config
+    from api import route_approvals as ra
+
+    # The harness reuses one session key; another test's parked card would
+    # otherwise be the queue head and be the payload surfaced here.
+    with ra._lock:
+        ra._pending.pop("sess-watchdog-harness", None)
+
+    clock = FakeClock()
+    approval_payload = {
+        "prompt_id": "prompt-r4-gen",
+        "execution_generation": 3,
+        "tool": "shell",
+        "command": "ls -la /tmp",
+        "description": "list files",
+        "risk_level": "high",
+        "choices": ["once", "deny"],
+    }
+    harness = run_turn(
+        clock=clock,
+        urlopen_script=[
+            FakeSseResponse(keepalive() * 4, end="eof", clock=clock, advance_per_line=60.0),
+            FakeSseResponse(keepalive() * 4, end="eof", clock=clock, advance_per_line=60.0),
+            FakeSseResponse(
+                sse_frame(0, {"event": "run.completed", "output": "after approval"}),
+                end="eof",
+            ),
+        ],
+        status_script=[
+            {"status": "waiting_for_approval", "approval": dict(approval_payload)},
+            {"status": "waiting_for_approval", "approval": dict(approval_payload)},
+        ],
+        extra_patches=[
+            (api_config, "gateway_supports_approval_identity_v1", lambda *a, **k: False),
+        ],
+    )
+    result = harness["result"]
+    assert result[0] == "after approval", (
+        f"run must finalize after the approval lane, got {result!r}")
+    approvals = [payload for name, payload in harness["events"] if name == "approval"]
+    assert len(approvals) == 1, (
+        f"exactly one approval card expected from the durable status, got {len(approvals)}: "
+        f"{approvals!r}")
+    assert approvals[0]["approval_id"] == "prompt-r4-gen", approvals[0]
+    # Review must-fix 6: the entry pop alone leaked a parked card into the next
+    # test on this shared session key; pop on the way out too.
+    with ra._lock:
+        ra._pending.pop("sess-watchdog-harness", None)
+
+
+def test_r4_status_card_reads_the_canonical_pending_controls_projection():
+    """Review must-fix 5: the authority projection carries no ``approval`` key.
+
+    ``GET /v1/runs/{id}`` on a generation-fenced gateway answers
+    ``pending_controls``, whose ``prompt_id`` + ``execution_generation`` are the
+    identity the rebuilt card must answer with. The older r4 test used the
+    legacy in-memory ``approval`` shape, so it passed without ever reading the
+    real projection.
+    """
+    import api.config as api_config
+    from api import route_approvals as ra
+
+    with ra._lock:
+        ra._pending.pop("sess-watchdog-harness", None)
+
+    clock = FakeClock()
+    projection = {
+        "status": "waiting_for_approval",
+        "pending_controls": [
+            {
+                "kind": "approval",
+                "prompt_id": "prompt-canonical",
+                "execution_generation": 5,
+                "tool": "shell",
+                "command": "ls -la /tmp",
+                "description": "list files",
+                "risk_level": "high",
+                "choices": ["once", "deny"],
+            }
+        ],
+    }
+    harness = run_turn(
+        clock=clock,
+        urlopen_script=[
+            FakeSseResponse(keepalive() * 4, end="eof", clock=clock, advance_per_line=60.0),
+            FakeSseResponse(keepalive() * 4, end="eof", clock=clock, advance_per_line=60.0),
+            FakeSseResponse(
+                sse_frame(0, {"event": "run.completed", "output": "after approval"}),
+                end="eof",
+            ),
+        ],
+        status_script=[projection, projection],
+        extra_patches=[
+            (api_config, "gateway_supports_approval_identity_v1", lambda *a, **k: False),
+        ],
+    )
+    result = harness["result"]
+    assert result[0] == "after approval", (
+        f"run must finalize after the approval lane, got {result!r}")
+    approvals = [payload for name, payload in harness["events"] if name == "approval"]
+    assert len(approvals) == 1, (
+        f"exactly one card expected from the canonical projection, got {approvals!r}")
+    assert approvals[0]["approval_id"] == "prompt-canonical", approvals[0]
+    assert approvals[0]["_gateway_execution_generation"] == 5, approvals[0]
+    with ra._lock:
+        ra._pending.pop("sess-watchdog-harness", None)
+
+
+def test_r8_republished_generation_is_relayed_again():
+    """Review row 4 at the replay layer: same prompt id, newer generation.
+
+    Generation-blind dedupe suppressed the second ``approval.request`` and left
+    the mirror on the dead generation, so the user's retry replayed a prompt the
+    gateway would refuse forever. Both events must reach the UI.
+    """
+    import api.config as api_config
+    from api import route_approvals as ra
+
+    with ra._lock:
+        ra._pending.pop("sess-watchdog-harness", None)
+
+    def fake_settle(*args, **kwargs):
+        return False, None, 1
+
+    clock = FakeClock()
+    harness = run_turn(
+        clock=clock,
+        urlopen_script=[
+            FakeSseResponse(
+                _generation_fenced_approval_frame(1, "prompt-repub", 7, "echo first")
+                + _generation_fenced_approval_frame(2, "prompt-repub", 8, "echo second"),
+                end="eof",
+            ),
+            FakeSseResponse(
+                sse_frame(0, {"event": "run.completed", "output": "done"}),
+                end="eof",
+            ),
+        ],
+        status_script=[],
+        extra_patches=[
+            (api_config, "gateway_supports_approval_identity_v1", lambda *a, **k: False),
+            (gc, "_settle_gateway_run_approval", fake_settle),
+        ],
+    )
+    assert harness["result"][0] == "done", harness["result"]
+    surfaced = [payload for name, payload in harness["events"] if name == "approval"]
+    assert [payload.get("_gateway_execution_generation") for payload in surfaced] == [7, 8], (
+        f"both generations must be relayed, got {surfaced!r}")
+    assert [payload["approval_id"] for payload in surfaced] == ["prompt-repub", "prompt-repub"]
+    with ra._lock:
+        ra._pending.pop("sess-watchdog-harness", None)
+
+
+def _generation_fenced_approval_frame(seq, prompt_id, generation, command):
+    return sse_frame(seq, {
+        "event": "approval.request",
+        "prompt_id": prompt_id,
+        "execution_generation": generation,
+        "tool": "shell",
+        "command": command,
+        "description": f"run {command}",
+        "choices": ["once", "deny"],
+        "risk_level": "high",
+    })
+
+
 def _approval_request_frame(seq, appr_id, command):
     return sse_frame(seq, {
         "event": "approval.request",

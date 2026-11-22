@@ -14,6 +14,12 @@ from api.workspace_git import _classify_git_error
         ),
         ("fatal: unable to get password from user", "auth_failed"),
         ("fatal: UNABLE TO GET PASSWORD FROM USER", "auth_failed"),
+        (
+            "fatal: Cannot prompt because user interactivity has been disabled.\n"
+            "   at GitCredentialManager.Authentication.AuthenticationBase"
+            ".ThrowIfUserInteractionDisabled()",
+            "auth_failed",
+        ),
         ("fatal: Authentication failed for 'https://example.invalid/repo.git'", "auth_failed"),
         ("git@example.invalid: Permission denied (publickey).", "auth_failed"),
         ("fatal: unable to access 'https://example.invalid': connection refused", "git_failed"),

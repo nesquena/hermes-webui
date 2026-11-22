@@ -28,7 +28,8 @@ def test_real_slow_healthy_endpoint_is_listed_and_cached(
     import socket
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    # Restore real DNS/socket behavior: the shared fixture disables DNS for fakes.
+    # Undo the shared fixture's DNS stub (back to the conftest-level getaddrinfo, which still resolves
+    # IP literals and localhost; this test only uses 127.0.0.1).
     monkeypatch.setattr(socket, "getaddrinfo", _REAL_GETADDRINFO)
     requests = []
 

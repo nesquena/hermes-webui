@@ -572,13 +572,29 @@ class TestRuntimeRouteInjection(unittest.TestCase):
                 self.assertEqual(len(result["payloads"]), 1)
                 self.assertEqual(result["payloads"][0]["timeout_seconds"], 0)
 
+    @staticmethod
+    def _agent_clarify_timeout(config):
+        """What the installed Agent's canonical resolver returns for ``config``.
+
+        WebUI delegates to ``tools.clarify_gateway.resolve_clarify_timeout``
+        whenever it is importable, so for absent or invalid values the expected
+        result is the Agent's own (3600 on older Agents, 90 since Agent
+        177dbc1bcbf1). Without the Agent package WebUI's inline mirror answers
+        3600. (#8942)
+        """
+        try:
+            from tools.clarify_gateway import resolve_clarify_timeout
+        except Exception:
+            return 3600
+        return int(resolve_clarify_timeout(config))
+
     def test_clarify_timeout_falls_back_to_agent_clarify_timeout(self):
         """Without the legacy clarify.timeout key, agent.clarify_timeout governs (canonical order)."""
         import api.streaming as streaming
         with mock.patch.object(streaming, "get_config", return_value={"agent": {"clarify_timeout": 45}}):
             self.assertEqual(streaming._clarify_timeout_seconds(), 45)
         with mock.patch.object(streaming, "get_config", return_value={}):
-            self.assertEqual(streaming._clarify_timeout_seconds(), 3600)
+            self.assertEqual(streaming._clarify_timeout_seconds(), self._agent_clarify_timeout({}))
 
     def test_clarify_session_profile_beats_ambient(self):
         """A non-default session's profile config must win over the ambient
@@ -597,16 +613,20 @@ class TestRuntimeRouteInjection(unittest.TestCase):
 
     def test_clarify_timeout_resolution_matrix(self):
         """The resolver must match the Agent core's canonical resolution order:
-        legacy clarify.timeout wins, else agent.clarify_timeout, else 3600;
-        non-positive values stay unlimited, invalid values fall back to 3600."""
+        legacy clarify.timeout wins, else agent.clarify_timeout, else the
+        Agent's default; non-positive values stay unlimited. Absent and invalid
+        values must equal the installed Agent's own answer (#8942)."""
         import api.streaming as streaming
+        absent = {}
+        invalid_canonical = {"agent": {"clarify_timeout": "abc"}}
+        invalid_legacy = {"clarify": {"timeout": "abc"}}
         cases = [
             ({"clarify": {"timeout": 120}}, 120),                          # legacy wins
             ({"clarify": {"timeout": 120}, "agent": {"clarify_timeout": 0}}, 120),  # legacy beats canonical
             ({"agent": {"clarify_timeout": 45}}, 45),                      # canonical fallback
-            ({}, 3600),                                                    # absent → 3600
-            ({"agent": {"clarify_timeout": "abc"}}, 3600),                 # invalid → 3600
-            ({"clarify": {"timeout": "abc"}}, 3600),                       # invalid legacy → 3600
+            (absent, self._agent_clarify_timeout(absent)),                 # absent → Agent default
+            (invalid_canonical, self._agent_clarify_timeout(invalid_canonical)),  # invalid → Agent default
+            (invalid_legacy, self._agent_clarify_timeout(invalid_legacy)),        # invalid legacy → Agent default
             ({"agent": {"clarify_timeout": 0}}, 0),                        # unlimited
             ({"agent": {"clarify_timeout": -5}}, -5),                      # negative → unlimited
             ({"clarify": {"timeout": -1}}, -1),                            # legacy negative → unlimited
@@ -614,6 +634,23 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         for cfg, expected in cases:
             with self.subTest(config=cfg):
                 self.assertEqual(streaming._clarify_timeout_seconds(cfg), expected)
+
+    def test_clarify_timeout_inline_fallback_without_agent(self):
+        """With the Agent package unimportable, WebUI's inline mirror keeps the
+        canonical order and answers 3600 for absent or invalid values (#8942)."""
+        import api.streaming as streaming
+        cases = [
+            ({"clarify": {"timeout": 120}, "agent": {"clarify_timeout": 0}}, 120),  # legacy beats canonical
+            ({"agent": {"clarify_timeout": 45}}, 45),                      # canonical fallback
+            ({}, 3600),                                                    # absent → 3600
+            ({"agent": {"clarify_timeout": "abc"}}, 3600),                 # invalid → 3600
+            ({"clarify": {"timeout": "abc"}}, 3600),                       # invalid legacy → 3600
+            ({"agent": {"clarify_timeout": 0}}, 0),                        # unlimited
+        ]
+        with mock.patch.dict(sys.modules, {"tools.clarify_gateway": None}):
+            for cfg, expected in cases:
+                with self.subTest(config=cfg):
+                    self.assertEqual(streaming._clarify_timeout_seconds(cfg), expected)
 
     def test_await_clarify_unlimited_resolves_later(self):
         """An unlimited (timeout<=0) prompt keeps waiting until the user answers."""
@@ -1021,7 +1058,9 @@ def test_streaming_restores_prior_reasoning_metadata_after_followup():
     src = (REPO / 'api' / 'streaming.py').read_text(encoding="utf-8")
     assert "def _restore_reasoning_metadata(" in src, \
         "streaming.py must define a helper to restore prior reasoning metadata"
-    assert "next_context_messages" in src and "_deduplicate_context_messages(next_context_messages)" in src, \
+    assert "next_context_messages" in src and re.search(
+        r"_deduplicate_context_messages\(\s*next_context_messages\b", src
+    ), \
         "streaming.py must restore prior reasoning metadata into model context"
     assert "session.messages = _merge_display_messages_after_agent_result(" in src, \
         "streaming.py must merge restored result messages into the visible transcript"

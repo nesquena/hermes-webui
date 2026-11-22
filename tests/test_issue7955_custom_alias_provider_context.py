@@ -381,6 +381,10 @@ def _install_config(monkeypatch, tmp_path, default):
     (tmp_path / "config.yaml").write_text(text, encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_BASE_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(tmp_path / "config.yaml"))
+    # Catalog reloads update this source marker. Restore it even when the
+    # real-runtime check exits through importorskip or an assertion fails.
+    monkeypatch.setattr(config, "_cfg_path", config._cfg_path)
     for name in list(__import__("os").environ):
         if name.endswith("_API_KEY"):
             monkeypatch.delenv(name)
@@ -415,8 +419,11 @@ def test_a_provider_named_custom_configured_keeps_its_endpoint_and_key(
     old = _install_config(monkeypatch, tmp_path, default)
     try:
         groups = config.get_available_models()["groups"]
-        group = next(g for g in groups if g.get("provider_id") == "custom-configured")
+        # Native mapping keys are advertised in the named-custom namespace,
+        # not as a text sentinel for the configured bare-Custom lane.
+        group = next(g for g in groups if g.get("provider_id") == "custom:custom-configured")
         (option,) = [m["id"] for m in group["models"] if m["id"].endswith(model_id)]
+        assert option == f"@custom:custom-configured:{model_id}"
         # The session the UI stores for that pick: the option id and its group.
         route = _route(option, group["provider_id"])
     finally:
@@ -424,7 +431,7 @@ def test_a_provider_named_custom_configured_keeps_its_endpoint_and_key(
         config.invalidate_models_cache()
     assert route == (
         model_id,
-        "custom-configured",
+        "custom:custom-configured",
         NAMED_BASE_URL,
         NAMED_BASE_URL,
         "review-fake-named-key",
