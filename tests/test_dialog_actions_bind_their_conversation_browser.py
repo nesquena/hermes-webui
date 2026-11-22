@@ -605,6 +605,30 @@ def test_share_link_is_copied_when_the_clipboard_permission_is_denied(browser, s
         ctx.close()
 
 
+def test_clipboard_copy_rejects_when_the_fallback_copy_also_fails(browser, shares):
+    """Clipboard permission denied and execCommand('copy') returning false: the copy must reject, so
+    callers show the link instead of claiming it was copied."""
+    ctx = browser.new_context(viewport={"width": 1400, "height": 900}, base_url=shares["base"])
+    try:
+        page = ctx.new_page()
+        _open_a_after_b(page, shares)
+        ctx.clear_permissions()
+        cdp = page.context.new_cdp_session(page)
+        context_id = cdp.send("Target.getTargetInfo")["targetInfo"]["browserContextId"]
+        cdp.send("Browser.setPermission", {
+            "permission": {"name": "clipboard-write", "allowWithoutSanitization": False},
+            "setting": "denied", "origin": shares["base"], "browserContextId": context_id,
+        })
+        outcome = page.evaluate("""async () => {
+            document.execCommand = () => false;
+            try { await _copyTextToClipboard('x'); return 'resolved'; } catch (_) { return 'rejected'; }
+        }""")
+        assert outcome == "rejected"
+        assert page.evaluate("() => document.querySelectorAll('textarea[style*=\"-9999px\"]').length") == 0
+    finally:
+        ctx.close()
+
+
 # ── a dialog opened while a switch is still in flight ────────────────────────
 
 @pytest.mark.parametrize("action", ["clear", "file-delete"])

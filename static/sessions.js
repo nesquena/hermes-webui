@@ -6694,7 +6694,11 @@ async function _copyTextToClipboard(text){
   document.body.appendChild(ta);
   ta.focus({preventScroll:true});
   ta.select();
-  try{return document.execCommand('copy');}
+  // execCommand reports failure by returning false: surface it so callers show the link instead.
+  try{
+    if(!document.execCommand('copy')) throw new Error('copy failed');
+    return true;
+  }
   finally{ta.remove();}
 }
 
