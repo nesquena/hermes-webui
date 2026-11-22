@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -24,8 +25,12 @@ from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlparse
 
-from api.agent_health import get_active_profile_gateway_running_pid
-from api.gateway_restart import restart_active_profile_gateway
+from api.agent_health import (
+    GATEWAY_EXTERNALLY_MANAGED_MESSAGE,
+    gateway_lifecycle_capability,
+    get_active_profile_gateway_running_pid,
+)
+from api.gateway_restart import monitored_gateway_endpoint, restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT
 # Restart safety now reads run state through api.run_drain (#7293); these names
@@ -36,6 +41,7 @@ from api.subprocess_utils import (
     noninteractive_git_env,
     noninteractive_git_argv,
     repository_git_proxy_blocks,
+    run_network_command_windows,
     sanitize_git_diagnostic,
     trusted_git_credential_config,
     windows_hide_flags,
@@ -59,6 +65,7 @@ CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _FORCE_DIRTY_PROBE_TIMEOUT = 5
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
+_GIT_NETWORK_TIMEOUT = 60
 
 _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'could not resolve host',
@@ -72,10 +79,9 @@ _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'tls connection was non-properly terminated',
     'ssl certificate problem',
 )
-# `_run_git` reports a command it cancelled at its own timeout as
-# "git <args> timed out after <n>s". That line is our deadline, not a network
-# symptom: the apply fetch runs with a 15 s budget, so classify the marker as
-# a timeout with its bound. libcurl's real "Operation timed out after <n>
+# `_run_git` reports a cancelled command as "git <args> timed out after <n>s";
+# classify that marker as the updater deadline, not a network symptom. libcurl's
+# real "Operation timed out after <n>
 # milliseconds" stalls are not `git `-prefixed and keep network guidance.
 _FETCH_DEADLINE_TIMEOUT_RE = re.compile(
     r'^git (?P<operation>.+?) timed out after (?P<bound>\d+(?:\.\d+)?)s$',
@@ -174,6 +180,24 @@ def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
     return f'fetch failed: {detail}'
 
 
+def _blocker_snapshot_from_runs(runs: list[dict], *, include_identities: bool = False) -> dict:
+    stream_ids = [r['stream_id'] for r in runs if r.get('registered_stream')]
+    run_ids = [r['stream_id'] for r in runs]
+    snapshot = {
+        'active_streams': len(stream_ids),
+        'active_runs': len(run_ids),
+        'blocking_stream_ids': stream_ids[:10],
+        'blocking_run_ids': run_ids[:10],
+        'restart_blocked': bool(run_ids),
+    }
+    if include_identities:
+        snapshot['_blocking_run_identities'] = [
+            {'stream_id': r.get('stream_id'), 'backend': r.get('backend')}
+            for r in runs
+        ]
+    return snapshot
+
+
 def _restart_blocker_snapshot() -> dict:
     """Return the WebUI-owned chat work that should block a self-restart.
 
@@ -181,19 +205,11 @@ def _restart_blocker_snapshot() -> dict:
     (#7293): it runs inside the Hermes Gateway, survives a WebUI restart and is
     reattached afterwards. Legacy Gateway relays and Gateway launches still
     awaiting that handoff are counted (see run_drain.webui_owned_active_runs).
+    An update of the Agent counts those runs too (``_update_blocker_snapshot``).
     """
     from api import run_drain
 
-    runs = run_drain.webui_owned_active_runs()
-    stream_ids = [r['stream_id'] for r in runs if r.get('registered_stream')]
-    run_ids = [r['stream_id'] for r in runs]
-    return {
-        'active_streams': len(stream_ids),
-        'active_runs': len(run_ids),
-        'blocking_stream_ids': stream_ids[:10],
-        'blocking_run_ids': run_ids[:10],
-        'restart_blocked': bool(run_ids),
-    }
+    return _blocker_snapshot_from_runs(run_drain.webui_owned_active_runs())
 
 
 def _active_stream_count() -> int:
@@ -205,7 +221,165 @@ def _active_stream_count() -> int:
     return int(_restart_blocker_snapshot().get('active_streams') or 0)
 
 
-def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict:
+def _update_blocker_snapshot(target: str) -> dict:
+    """Return the chat work that should block an update of ``target`` (#8660).
+
+    ``_restart_blocker_snapshot`` leaves out Gateway runs whose resumable run
+    identity is saved, because they survive a WebUI restart. An Agent update
+    also cycles the Gateway that executes them
+    (``_ensure_gateway_restart_for_agent_update``), which ends them, so for
+    ``target == 'agent'`` every live run blocks, as every active run did
+    before #7293. That is one pass over the registries with no durability
+    check (``run_drain.all_active_runs``), classifying runs into WebUI-owned
+    runs and resumable Gateway runs. A WebUI-only update keeps the
+    #7293 exemption.
+    """
+    if target != 'agent':
+        return _restart_blocker_snapshot()
+    from api import run_drain
+
+    return _blocker_snapshot_from_runs(run_drain.all_active_runs(), include_identities=True)
+
+
+def _gateway_run_split(blocker_snapshot: dict | None, total: int) -> tuple[int, int]:
+    """Return ``(gateway_runs, webui_owned_runs)`` clamped to ``total``.
+
+    #8746: the refusal copy names both kinds of run, so it needs the split the
+    blocking census deliberately does not compute — #8660 requires
+    ``_update_blocker_snapshot`` to stay one pass over the registries with no
+    durability read, because a mark that moves between two reads can drop or
+    double a run.
+
+    The split is derived from the run identity set already counted in
+    ``blocker_snapshot`` via ``classify_run_identities``, never a second
+    registry read, so a run registering later cannot take over a counted slot.
+    Missing identities or a failed classification reports no Gateway runs rather
+    than inventing them.
+    """
+    from api import run_drain
+
+    identities = blocker_snapshot.get('_blocking_run_identities') if isinstance(blocker_snapshot, dict) else None
+    if not isinstance(identities, list):
+        return 0, total
+
+    try:
+        classified = run_drain.classify_run_identities(identities)
+        gateway_rows = classified.get('gateway') or []
+        gateway = min(len(gateway_rows), total)
+    except Exception:
+        logger.debug('Failed to split the active-run identities', exc_info=True)
+        gateway = 0
+    return gateway, max(0, total - gateway)
+
+
+def _agent_run_counts(blocker_snapshot: dict) -> tuple[int, int, int]:
+    """``(active_runs, gateway_runs, webui_owned_runs)`` as the Agent refusal counts them."""
+    if 'webui_owned_runs' in blocker_snapshot or 'gateway_runs' in blocker_snapshot:
+        gateway_runs = int(blocker_snapshot.get('gateway_runs') or 0)
+        webui_owned_runs = int(blocker_snapshot.get('webui_owned_runs') or 0)
+        return webui_owned_runs + gateway_runs, gateway_runs, webui_owned_runs
+    n = int(blocker_snapshot.get('active_runs') or 0) or int(blocker_snapshot.get('active_streams') or 0)
+    gateway_runs, webui_owned_runs = _gateway_run_split(blocker_snapshot, n)
+    return n, gateway_runs, webui_owned_runs
+
+
+def _gateway_lifecycle_capability_info() -> tuple[bool, str]:
+    """Return (managed, reason) for the active profile's Gateway safely.
+
+    Calls ``gateway_lifecycle_capability()`` without caching. Returns
+    (False, reason) on unmanaged, default 'local_gateway_unproven' on exception
+    or unrecognized capability.
+    """
+    try:
+        capability = gateway_lifecycle_capability()
+        if isinstance(capability, dict) and capability.get('managed') is True:
+            return True, str(capability.get('reason') or 'local_gateway')
+        reason = str(capability.get('reason') or '') if isinstance(capability, dict) else ''
+        if reason not in ('external_gateway', 'local_gateway_unproven'):
+            reason = 'local_gateway_unproven'
+        return False, reason
+    except Exception:
+        logger.debug('Failed to resolve Gateway lifecycle capability', exc_info=True)
+        return False, 'local_gateway_unproven'
+
+
+# #8746: what a forced Agent update does to the Gateway is part of what the user
+# confirms. The refusal carries it, the client echoes it back with the forced
+# request, and the server refuses again if it changed in between.
+_GATEWAY_CONFIRMATION_FIELDS = ('gateway_restart_managed', 'gateway_profile', 'gateway_endpoint')
+_forced_update_state = threading.local()
+_GATEWAY_CONFIRMATION_STALE_MESSAGE = (
+    'The Gateway this profile uses changed since you confirmed. Try the update again.'
+)
+_GATEWAY_LEFT_RUNNING_MESSAGE = (
+    'The Agent checkout was updated, but the Gateway this profile uses changed after you '
+    'confirmed, so the WebUI left the Gateway and itself running. Restart the WebUI and the '
+    'Gateway when it suits you to finish the update.'
+)
+# A first restart already ran and failed before the change blocked the retry.
+_GATEWAY_RETRY_BLOCKED_MESSAGE = (
+    'The Agent checkout was updated and a Gateway restart was attempted, but it failed. The '
+    'Gateway this profile uses then changed after you confirmed, so the WebUI did not retry '
+    'the restart and left itself running. Restart the WebUI and the Gateway when it suits '
+    'you to finish the update.'
+)
+
+
+def _gateway_restart_profile() -> str:
+    """The profile ``hermes --profile <name> gateway restart`` targets."""
+    return str(get_active_profile_name() or 'default').strip() or 'default'
+
+
+def _gateway_restart_impact() -> dict:
+    """The Gateway restart impact of an Agent update, read once.
+
+    The refusal copy and every re-check of a forced request use this one read.
+    ``gateway_endpoint`` is the monitored URL normalised like the ownership
+    proof (no userinfo, query or fragment); ``''`` means no remote URL.
+    """
+    profile = _gateway_restart_profile()
+    managed, reason = _gateway_lifecycle_capability_info()
+    return {
+        'gateway_restart_managed': managed,
+        'gateway_profile': profile,
+        'gateway_endpoint': monitored_gateway_endpoint(),
+        '_reason': reason,
+    }
+
+
+def confirmed_gateway_impact(body) -> dict | None:
+    """What a forced request was confirmed for: the Gateway impact and, from
+    current clients, ``interrupted_runs``. None if it carries no confirmation;
+    ValueError for a confirmation field of the wrong type."""
+    if not isinstance(body, dict) or 'gateway_restart_managed' not in body:
+        return None
+    count = body.get('interrupted_runs')
+    if not isinstance(body['gateway_restart_managed'], bool) or (
+        'interrupted_runs' in body and (type(count) is not int or count < 0)
+    ):
+        raise ValueError('gateway_restart_managed must be a boolean, interrupted_runs a count')
+    return {**{field: body.get(field) for field in _GATEWAY_CONFIRMATION_FIELDS}, 'interrupted_runs': count}
+
+
+def _gateway_impact_changed(confirmed: dict | None, impact: dict) -> bool:
+    return confirmed is not None and any(
+        confirmed.get(field) != impact.get(field) for field in _GATEWAY_CONFIRMATION_FIELDS
+    )
+
+
+def _gateway_confirmation_stale(confirmed: dict, impact: dict, blocker_snapshot: dict) -> bool:
+    """The Gateway impact changed, or the update now interrupts more runs than confirmed."""
+    if _gateway_impact_changed(confirmed, impact):
+        return True
+    if confirmed.get('interrupted_runs') is None or not blocker_snapshot.get('restart_blocked'):
+        return False
+    n, _g, w = _agent_run_counts(blocker_snapshot)
+    return (n if impact['gateway_restart_managed'] else w) > confirmed['interrupted_runs']
+
+
+def _restart_blocked_response(
+    target: str, blocker_snapshot: dict | int, impact: dict | None = None
+) -> dict:
     if isinstance(blocker_snapshot, int):
         blocker_snapshot = {
             'active_streams': blocker_snapshot,
@@ -215,14 +389,98 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
             'restart_blocked': bool(blocker_snapshot),
         }
     active_streams = int(blocker_snapshot.get('active_streams') or 0)
-    active_runs = int(blocker_snapshot.get('active_runs') or 0) or active_streams
-    detail = f"{active_runs} WebUI agent run{'s are' if active_runs != 1 else ' is'} active"
+    raw_active_runs = int(blocker_snapshot.get('active_runs') or 0) or active_streams
+
+    payload_extra: dict = {}
+    if target == 'agent':
+        if impact is None:
+            impact = _gateway_restart_impact()
+        gateway_managed, gateway_reason = impact['gateway_restart_managed'], impact['_reason']
+        payload_extra.update({field: impact[field] for field in _GATEWAY_CONFIRMATION_FIELDS})
+        n, gateway_runs, webui_owned_runs = _agent_run_counts(blocker_snapshot)
+
+        payload_extra['webui_owned_runs'] = webui_owned_runs
+        payload_extra['gateway_runs'] = gateway_runs
+        active_runs = n
+
+        plural_n = n != 1
+        w = webui_owned_runs
+        g = gateway_runs
+
+        if g > 0:
+            if w > 0:
+                detail = f"{n} agent runs are active ({w} WebUI, {g} Gateway)"
+            else:
+                detail = f"{g} Gateway run{'s are' if g != 1 else ' is'} active"
+            if gateway_managed:
+                gateway_note = (
+                    ' Updating the Agent also restarts the Gateway this profile uses and '
+                    'stops every run that Gateway is executing, including runs started '
+                    'from other profiles that use the same Gateway endpoint'
+                    + ('; only the WebUI runs are saved as interrupted.' if w > 0 else '.')
+                )
+            elif gateway_reason == 'external_gateway':
+                gateway_note = (
+                    ' The Gateway this profile uses is managed outside the WebUI, '
+                    'so updating the Agent does not restart it and its Gateway runs keep running.'
+                )
+            else:
+                gateway_note = (
+                    ' The WebUI cannot prove it owns the Gateway behind this profile\'s '
+                    'endpoint, so it will not restart it and its Gateway runs keep running.'
+                )
+        else:
+            detail = f"{n} agent run{'s are' if plural_n else ' is'} active"
+            gateway_note = ''
+
+        plural_w = w != 1
+        w_suffix = 's' if plural_w else ''
+
+        if gateway_managed:
+            if w > 0:
+                force_sentence = (
+                    'Wait for the response to finish and retry, or force the update '
+                    f'to interrupt the {w} WebUI run{w_suffix} and restart the '
+                    'Gateway this profile uses.'
+                )
+            else:
+                force_sentence = (
+                    'Wait for the response to finish and retry, or force the update '
+                    'to restart the Gateway this profile uses and stop the '
+                    'Gateway runs it is executing.'
+                )
+        else:
+            if w > 0 and g > 0:
+                force_sentence = (
+                    'Wait for the response to finish and retry, or force the update '
+                    f'to interrupt the {w} WebUI run{w_suffix}; the Gateway runs '
+                    'keep running.'
+                )
+            elif w > 0 and g == 0:
+                force_sentence = (
+                    'Wait for the response to finish and retry, or force the update '
+                    f'to interrupt the {w} WebUI run{w_suffix}.'
+                )
+            else:
+                force_sentence = (
+                    'Wait for the Gateway runs to finish and retry; forcing the '
+                    'update will not stop them.'
+                )
+    else:
+        active_runs = raw_active_runs
+        plural = active_runs != 1
+        detail = f"{active_runs} WebUI agent run{'s are' if plural else ' is'} active"
+        gateway_note = ''
+        force_sentence = (
+            'Wait for the response to finish and retry, or force the update '
+            'to interrupt the active run' + ('s' if plural else '') + '.'
+        )
     return {
         'ok': False,
         'message': (
-            f'Cannot update {target} while {detail}. '
-            'Wait for the response to finish and retry, or force the update '
-            'to interrupt the active run' + ('s' if active_runs != 1 else '') + '.'
+            f'Cannot update {target} while {detail}.'
+            f'{gateway_note} '
+            f'{force_sentence}'
         ),
         'target': target,
         'restart_blocked': True,
@@ -234,6 +492,7 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
         'active_runs': active_runs,
         'blocking_stream_ids': blocker_snapshot.get('blocking_stream_ids') or [],
         'blocking_run_ids': blocker_snapshot.get('blocking_run_ids') or [],
+        **payload_extra,
     }
 
 
@@ -273,6 +532,42 @@ def _wait_until_restart_safe(poll_seconds: float = 2.0, max_wait_seconds: float 
     return snapshot
 
 
+def _run_network_git(argv, *, cwd, env, timeout):
+    """Keep network helpers in an owned process group until completion.
+
+    Windows delegates to the shared Job Object runner: a job keeps owning the
+    tree even after its direct child exits, where taskkill /T could not find
+    the descendants anymore. POSIX process-group semantics are unchanged.
+    """
+    if os.name == 'nt':
+        return run_network_command_windows(argv, cwd=cwd, env=env, timeout=timeout)
+    process = subprocess.Popen(
+        argv, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding='utf-8', errors='replace',
+        creationflags=windows_hide_flags(), start_new_session=(os.name != 'nt'),
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except BaseException as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # A grandchild that escaped the group can keep the pipes open;
+            # drop our ends and reap the direct child.
+            process.stdout.close()
+            process.stderr.close()
+            process.wait(timeout=5)
+            raise exc from None
+        if isinstance(exc, subprocess.TimeoutExpired):
+            raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr) from exc
+        raise
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
 def _run_git(args, cwd, timeout=10):
     """Run a git command and return (useful output, ok).
 
@@ -300,21 +595,27 @@ def _run_git(args, cwd, timeout=10):
         )
         env = noninteractive_git_env(cwd, env, executable=git_executable, args=args)
     try:
-        r = subprocess.run(
-            noninteractive_git_argv(
+        if is_network_command:
+            argv = noninteractive_git_argv(
                 args,
                 executable=git_executable,
                 credential_config=credential_config,
-            ) if is_network_command else [git_executable] + args,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            encoding='utf-8',
-            errors='replace',
-            env=env,
-            creationflags=windows_hide_flags(),
-        )
+            )
+            # Maintenance can lazy-fetch historical objects and detach past our deadline.
+            argv[1:1] = ['-c', 'maintenance.auto=false', '-c', 'gc.auto=0']
+            r = _run_network_git(argv, cwd=cwd, env=env, timeout=timeout)
+        else:
+            r = subprocess.run(
+                [git_executable] + args,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                encoding='utf-8',
+                errors='replace',
+                env=env,
+                creationflags=windows_hide_flags(),
+            )
         # On non-UTF-8 locales (e.g. Chinese Windows GBK), a binary git
         # output that fails to decode used to leave r.stdout = None and crash
         # the whole import with AttributeError. Guard against None defensively.
@@ -351,7 +652,10 @@ def _run_git(args, cwd, timeout=10):
         # out, so run it through the same credential scrub the fetch path uses.
         # limit=sys.maxsize: never truncate. Redaction can lengthen the text, so len(raw) would cut its tail.
         detail = _sanitize_git_diagnostic(raw, limit=sys.maxsize)
-        return detail or f"git {' '.join(args)} timed out after {timeout}s", False
+        deadline = _sanitize_git_diagnostic(
+            f"git {' '.join(args)} timed out after {timeout}s", limit=sys.maxsize,
+        )
+        return f'{deadline}\n{detail}' if detail else deadline, False
     except FileNotFoundError:
         return 'git executable not found', False
     except OSError as exc:
@@ -411,7 +715,9 @@ def _inventory_locks(path: Path) -> dict:
     return out
 
 
-def apply_clear_lock(target: str, *, force_active_runs: bool = False) -> dict:
+def apply_clear_lock(
+    target: str, *, force_active_runs: bool = False, confirmed_gateway: dict | None = None
+) -> dict:
     """Manual-instruction lock recovery for ``target``.
 
     v2.2: NEVER removes a lock file. Strategy:
@@ -431,7 +737,8 @@ def apply_clear_lock(target: str, *, force_active_runs: bool = False) -> dict:
         re-run the normal apply.
     """
     return _run_fenced_update(
-        target, force_active_runs, lambda: _apply_clear_lock_inner(target)
+        target, force_active_runs, lambda: _apply_clear_lock_inner(target),
+        confirmed_gateway=confirmed_gateway,
     )
 
 
@@ -488,7 +795,9 @@ def _apply_clear_lock_inner(target: str) -> dict:
     }
 
 
-def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
+def _run_fenced_update(
+    target: str, force_active_runs: bool, run, confirmed_gateway: dict | None = None
+) -> dict:
     """Refuse / fence / re-check wrapper shared by every update entry point (#7293).
 
     1. Refuse by default while WebUI-owned runs are active (``force_available``
@@ -500,28 +809,83 @@ def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
     4. Release the hold on the way out. A scheduled restart keeps admission
        closed on its own (``run_drain.mark_restart_pending``) until the process
        is replaced; a failed update reopens it.
+
+    A forced Agent update that carries ``confirmed_gateway`` (what the user
+    confirmed) refuses again, before any side effect, when the Gateway impact
+    changed or more runs would be interrupted than confirmed, even with no run
+    left in the census; the Gateway restart then follows the confirmation
+    (#8746, ``_ensure_gateway_restart_for_agent_update``).
     """
     from api import run_drain
 
-    blocker_snapshot = _restart_blocker_snapshot()
+    blocker_snapshot = _update_blocker_snapshot(target)
     if blocker_snapshot.get('restart_blocked') and not force_active_runs:
         return _restart_blocked_response(target, blocker_snapshot)
+    if not (force_active_runs and target == 'agent'):
+        confirmed_gateway = None
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
     try:
         token = run_drain.hold_run_admission(f'update:{target}', force=bool(force_active_runs))
         try:
-            blocker_snapshot = _restart_blocker_snapshot()
-            if blocker_snapshot.get('restart_blocked'):
-                if not force_active_runs:
-                    return _restart_blocked_response(target, blocker_snapshot)
-                logger.warning(
-                    "Forced %s update with %s active WebUI run(s); they will be "
-                    "settled as interrupted before the restart",
-                    target, blocker_snapshot.get('active_runs'),
-                )
-            return run()
+            blocker_snapshot = _update_blocker_snapshot(target)
+            blocked = bool(blocker_snapshot.get('restart_blocked'))
+            if blocked and not force_active_runs:
+                return _restart_blocked_response(target, blocker_snapshot)
+            confirmed = confirmed_gateway is not None
+            impact = _gateway_restart_impact() if target == 'agent' and (blocked or confirmed) else None
+            if confirmed and _gateway_confirmation_stale(confirmed_gateway, impact, blocker_snapshot):
+                if blocked:
+                    return _restart_blocked_response(target, blocker_snapshot, impact)
+                return {
+                    'ok': False,
+                    'message': _GATEWAY_CONFIRMATION_STALE_MESSAGE,
+                    'target': target,
+                    'update_confirmation_stale': True,
+                }
+            if blocked:
+                if target == 'agent':
+                    # #8667/#8746: name the real case. The WebUI saves its own
+                    # runs as interrupted; the Gateway runs end with a managed
+                    # Gateway restart (settled afterwards by the worker
+                    # teardown/watchdog) and keep running otherwise.
+                    n, g, w = _agent_run_counts(blocker_snapshot)
+                    if impact['gateway_restart_managed']:
+                        fate = (
+                            "the Gateway this profile uses is restarted, which stops "
+                            "every run it is executing, including runs started from "
+                            "other profiles that use the same Gateway endpoint"
+                        )
+                    elif impact['_reason'] == 'external_gateway':
+                        fate = (
+                            "the Gateway this profile uses is managed outside the WebUI "
+                            "and is not restarted, so its runs keep running"
+                        )
+                    else:
+                        fate = (
+                            "the WebUI could not prove it owns the Gateway this profile "
+                            "uses (unproven, or the capability read failed) and does not "
+                            "restart it, so its runs keep running"
+                        )
+                    logger.warning(
+                        "Forced %s update with %s active run(s) (%s WebUI, %s Gateway); %s%s",
+                        target, n, w, g,
+                        "the WebUI runs are saved as interrupted before the restart, and "
+                        if w > 0 else "",
+                        fate,
+                    )
+                else:
+                    logger.warning(
+                        "Forced %s update with %s active WebUI run(s); they will "
+                        "be settled as interrupted before the restart",
+                        target, blocker_snapshot.get('active_runs'),
+                    )
+            _forced_update_state.confirmed_gateway = confirmed_gateway
+            try:
+                return run()
+            finally:
+                _forced_update_state.confirmed_gateway = None
         finally:
             run_drain.release_run_admission_hold(token)
     finally:
@@ -925,13 +1289,61 @@ def _channel_tag_glob(channel) -> str:
 _STABLE_DESCRIBE_EXCLUDES = ('--exclude', 'v*+*', '--exclude', 'v*-*')
 
 
-def _channel_describe_filter(channel) -> list:
+def _channel_describe_filter(channel, *, stable_filter: bool = True) -> list:
     """``--match``/``--exclude`` arguments that limit ``git describe`` to the
-    channel's release tags (the tags ``_release_tags`` can list)."""
+    channel's release tags (the tags ``_release_tags`` can list).
+
+    On the stable channel the prerelease excludes apply only under the stable
+    filter policy (``_stable_filter_for_tags``, #8684)."""
     args = ['--match', _channel_tag_glob(channel)]
-    if _normalize_channel(channel) == 'stable':
+    if _normalize_channel(channel) == 'stable' and stable_filter:
         args.extend(_STABLE_DESCRIBE_EXCLUDES)
     return args
+
+
+def _stable_filter_for_tags(tags) -> bool:
+    """The stable filter policy implied by one ``_release_tags`` snapshot.
+
+    ``_release_tags`` lists only stable releases when the repo has one, and
+    only prereleases when it has none, so the snapshot itself says which
+    policy produced it. Every later describe/count/past-tag call in the same
+    check or apply must use this policy rather than re-reading the refs: a
+    concurrent fetch that publishes the first stable release mid-operation
+    would otherwise switch the excludes on between calls, lose the installed
+    canary, and send the apply to the branch tip (#8684 gate). An empty
+    snapshot keeps the #8147 filter.
+    """
+    return not tags or any(_STABLE_RELEASE_TAG_RE.match(t) for t in tags)
+
+
+def _describe_filter_for(path, channel, stable_filter=None) -> list:
+    """Describe filter for ``path``; ``stable_filter=None`` reads the policy from the repo."""
+    if _normalize_channel(channel) != 'stable':
+        return _channel_describe_filter(channel)
+    if stable_filter is None:
+        stable_filter = _repo_has_stable_release(path)
+    return _channel_describe_filter(channel, stable_filter=stable_filter)
+
+
+def _repo_has_stable_release(path) -> bool:
+    """Return True when ``path`` has at least one stable release tag (``v0.52.1``).
+
+    The stable channel leaves prerelease tags (``v0.22.5+canary.1``, ``-rc.1``)
+    out of its release list, its ``describe`` and its ahead-count, so that a
+    canary never outranks the release it precedes (#8147). That filter only
+    makes sense when a stable release exists to fall back on. In a checkout
+    whose tags are ALL prereleases (a mirror or fork that publishes only
+    canaries), filtering leaves no release at all; the check then fell through
+    to the branch comparison and the apply moved the install to the untagged
+    branch tip (#8684). Without a stable release, the stable channel therefore
+    keeps v0.52.544's unfiltered behaviour: the channel's tags in version order,
+    so the installed canary stays current and a newer published canary is
+    still offered. A git failure keeps the filter (the #8147 behaviour).
+    """
+    out, ok = _run_git(['tag', '--list', _channel_tag_glob('stable'), '--sort=-creatordate'], path)
+    if not ok:
+        return True
+    return any(_STABLE_RELEASE_TAG_RE.match(line.strip()) for line in (out or '').splitlines())
 
 
 def _read_update_channel() -> str:
@@ -1020,11 +1432,22 @@ def _release_tags(path, channel=DEFAULT_UPDATE_CHANNEL):
     if not (ok and out):
         return []
     tags = [line.strip() for line in out.splitlines() if line.strip()]
-    tags = [t for t in tags if _STABLE_RELEASE_TAG_RE.match(t)]
-    return _order_stable_tags(tags)
+    releases = [t for t in tags if _STABLE_RELEASE_TAG_RE.match(t)]
+    if not releases:
+        # No stable release at all, only prereleases (#8684): keep v0.52.544's
+        # unfiltered version-order list rather than an empty one, which would
+        # send the check and the apply to the untagged branch tip. Order the
+        # SAME tag set the first read saw: a stable release fetched between the
+        # two reads must not join a prerelease-policy snapshot.
+        seen = set(tags)
+        out, ok = _run_git(['tag', '--list', glob, '--sort=-v:refname'], path)
+        if not (ok and out):
+            return []
+        return [t for t in (line.strip() for line in out.splitlines()) if t and t in seen]
+    return _order_stable_tags(releases)
 
 
-def _current_release_tag(path, channel=DEFAULT_UPDATE_CHANNEL):
+def _current_release_tag(path, channel=DEFAULT_UPDATE_CHANNEL, *, stable_filter=None):
     """Return the latest channel release tag reachable from HEAD, if one exists.
 
     MUST filter by the channel glob (``--match``): a commit tagged BOTH
@@ -1033,7 +1456,7 @@ def _current_release_tag(path, channel=DEFAULT_UPDATE_CHANNEL):
     math resolve to the experimental tag and fall through to the branch firehose.
     """
     out, ok = _run_git(
-        ['describe', '--tags', '--abbrev=0', *_channel_describe_filter(channel)],
+        ['describe', '--tags', '--abbrev=0', *_describe_filter_for(path, channel, stable_filter)],
         path,
     )
     return out if ok and out else None
@@ -1048,7 +1471,7 @@ def _release_gap(tags, current, latest):
     return 1
 
 
-def _count_channel_tags_ahead(path, channel=DEFAULT_UPDATE_CHANNEL):
+def _count_channel_tags_ahead(path, channel=DEFAULT_UPDATE_CHANNEL, *, stable_filter=None):
     """Count channel release tags strictly ahead of HEAD (fast-forwardable).
 
     Used only when NO channel tag is reachable behind HEAD — the channel-scoped
@@ -1066,8 +1489,11 @@ def _count_channel_tags_ahead(path, channel=DEFAULT_UPDATE_CHANNEL):
     if not (ok and out):
         return 0
     tags = [line.strip() for line in out.splitlines() if line.strip()]
-    if _normalize_channel(channel) == 'stable':
-        # Count releases, not the prerelease tags _release_tags drops.
+    if _normalize_channel(channel) == 'stable' and (
+        stable_filter if stable_filter is not None else _repo_has_stable_release(path)
+    ):
+        # Count releases, not the prerelease tags _release_tags drops. With no
+        # stable release at all, _release_tags lists the prereleases (#8684).
         tags = [t for t in tags if _STABLE_RELEASE_TAG_RE.match(t)]
     return len(tags)
 
@@ -1246,7 +1672,7 @@ def _check_webui_published_release_update(channel=DEFAULT_UPDATE_CHANNEL):
     }
 
 
-def _head_is_past_latest_tag(path, current_tag, channel=DEFAULT_UPDATE_CHANNEL):
+def _head_is_past_latest_tag(path, current_tag, channel=DEFAULT_UPDATE_CHANNEL, *, stable_filter=None):
     """Return True when HEAD has moved past the latest reachable channel tag.
 
     `git describe --tags --always --match <glob>` returns the bare tag name
@@ -1262,7 +1688,7 @@ def _head_is_past_latest_tag(path, current_tag, channel=DEFAULT_UPDATE_CHANNEL):
     if not current_tag:
         return False
     full_desc, ok = _run_git(
-        ['describe', '--tags', '--always', *_channel_describe_filter(channel)],
+        ['describe', '--tags', '--always', *_describe_filter_for(path, channel, stable_filter)],
         path,
     )
     return bool(ok and full_desc and full_desc != current_tag)
@@ -1321,7 +1747,9 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
     tags = _release_tags(path, channel)
     if tags:
         latest_tag = tags[0]
-        current_tag = _current_release_tag(path, channel)
+        # One filter policy for the whole selection, taken from this snapshot (#8684 gate).
+        stable_filter = _stable_filter_for_tags(tags)
+        current_tag = _current_release_tag(path, channel, stable_filter=stable_filter)
         behind = _release_gap(tags, current_tag, latest_tag)
         # Mirror the check side exactly: fall through to the branch comparison
         # whenever the checkout has already moved past the release tag that the
@@ -1332,7 +1760,7 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
         # or fail fast-forward; branch comparison is the truthful update path.
         # Short-circuit `or` preserves the original minimal git-call pattern.
         if (
-            (behind == 0 and _head_is_past_latest_tag(path, current_tag, channel))
+            (behind == 0 and _head_is_past_latest_tag(path, current_tag, channel, stable_filter=stable_filter))
             or (behind > 0 and _head_contains_ref(path, latest_tag))
             or (behind > 0 and not _can_fast_forward_to(path, latest_tag))
         ):
@@ -1390,7 +1818,9 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
         return None
 
     latest_tag = tags[0]
-    current_tag = _current_release_tag(path, channel)
+    # One filter policy for the whole check, taken from this snapshot (#8684 gate).
+    stable_filter = _stable_filter_for_tags(tags)
+    current_tag = _current_release_tag(path, channel, stable_filter=stable_filter)
     behind = _release_gap(tags, current_tag, latest_tag)
 
     # When NO channel tag is reachable behind HEAD, _current_release_tag returns
@@ -1407,7 +1837,7 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # tag; may be refined below in the no-channel-tag-behind-HEAD fallback).
     current_sha_ref = current_tag
     if current_tag is None:
-        ahead = _count_channel_tags_ahead(path, channel)
+        ahead = _count_channel_tags_ahead(path, channel, stable_filter=stable_filter)
         if ahead > 0:
             behind = ahead
         # Scope the installed-version fallback to the WebUI repo only.
@@ -1456,7 +1886,7 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # origin/master (the firehose). Report up-to-date. The AGENT repo and the
     # experimental channel keep the historical fall-through.
     suppress_stable_fallthrough = (channel == 'stable' and name == 'webui')
-    if behind == 0 and _head_is_past_latest_tag(path, current_tag, channel):
+    if behind == 0 and _head_is_past_latest_tag(path, current_tag, channel, stable_filter=stable_filter):
         if suppress_stable_fallthrough:
             return _channel_up_to_date_info(path, name, channel, current_tag, latest_tag)
         return None
@@ -1509,7 +1939,7 @@ def _check_repo_branch(path, name, *, fetch=True):
 
     # Fetch latest from origin (network call, cached by TTL)
     if fetch:
-        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
+        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=_GIT_NETWORK_TIMEOUT)
         if not fetch_ok:
             return {'name': name, 'behind': 0, 'error': 'fetch failed'}
 
@@ -1739,7 +2169,7 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # after a squash-merge that re-points a release tag at a new SHA) jams
     # the update path indefinitely with "would clobber existing tag" errors.
     # See #2756.
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=15)
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=_GIT_NETWORK_TIMEOUT)
     if not fetch_ok:
         release_info = _check_repo_release(path, name, channel)
         message = 'fetch failed'
@@ -1776,7 +2206,7 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     _tag_info = None
     if _tags:
         _latest = _tags[0]
-        _current = _current_release_tag(path, channel)
+        _current = _current_release_tag(path, channel, stable_filter=_stable_filter_for_tags(_tags))
         _tag_info = {'latest_tag': _latest, 'current_tag': _current}
 
     branch_info = _check_repo_branch(path, name, fetch=False)
@@ -2357,9 +2787,26 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
         - ok is False when restart did not complete and callers must abort success.
         - restart_payload contains helper status fields for response shaping.
     """
-    target_profile = str(get_active_profile_name() or "default").strip() or "default"
+    target_profile = _gateway_restart_profile()
+    confirmed = getattr(_forced_update_state, 'confirmed_gateway', None)
+    if confirmed is not None and confirmed['gateway_restart_managed'] is False:
+        # #8746: the user confirmed a forced update that does not restart this
+        # Gateway, so it is never restarted, whatever ownership reads now. If
+        # the Gateway changed (e.g. became restartable), say it was left running.
+        impact = _gateway_restart_impact()
+        if _gateway_impact_changed(confirmed, impact):
+            return False, {
+                'status': 'restart_blocked',
+                'message': _GATEWAY_LEFT_RUNNING_MESSAGE,
+                **{field: impact[field] for field in _GATEWAY_CONFIRMATION_FIELDS},
+            }
+        logger.info("Agent updated; gateway restart skipped as confirmed (%s)", impact['_reason'])
+        return True, {'status': 'external', 'message': GATEWAY_EXTERNALLY_MANAGED_MESSAGE}
+    # #8746: a confirmed-managed force restarts only the confirmed Gateway; the
+    # helper compares it with its own read before every launch, retry included.
+    expected = {} if confirmed is None else {'expected_impact': confirmed}
     gateway_pid_before_restart = get_active_profile_gateway_running_pid(profile=target_profile)
-    restart_result = restart_active_profile_gateway(profile=target_profile)
+    restart_result = restart_active_profile_gateway(profile=target_profile, **expected)
     status = str(restart_result.get("status") or "")
     if status in {"completed", "in_progress"}:
         return True, restart_result
@@ -2382,7 +2829,7 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
     # bounded delay so an already-applied Agent update is not reported as a
     # complete failure because of that transient process handoff.
     time.sleep(_AGENT_GATEWAY_RESTART_RETRY_DELAY_S)
-    retry_result = restart_active_profile_gateway(profile=target_profile)
+    retry_result = restart_active_profile_gateway(profile=target_profile, **expected)
     retry_status = str(retry_result.get("status") or "")
     if retry_status in {"completed", "in_progress"}:
         return True, {
@@ -2427,6 +2874,10 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
 
 
 def _agent_gateway_restart_failure_message(target: str, restart_result: dict) -> str:
+    if restart_result.get("status") == "restart_blocked":  # #8746
+        if restart_result.get("retry_attempted"):
+            return _GATEWAY_RETRY_BLOCKED_MESSAGE
+        return _GATEWAY_LEFT_RUNNING_MESSAGE
     if restart_result.get("message"):
         return (
             f'{target} updated, but gateway restart did not complete: '
@@ -2463,7 +2914,10 @@ def _discard_local_changes(path: Path, reset_ref: str) -> bool:
     return ok
 
 
-def apply_force_update(target: str, channel=None, *, force_active_runs: bool = False) -> dict:
+def apply_force_update(
+    target: str, channel=None, *, force_active_runs: bool = False,
+    confirmed_gateway: dict | None = None,
+) -> dict:
     """Discard local changes for the requested update target.
 
     Unlike apply_update() which requires a clean working tree and refuses
@@ -2485,7 +2939,8 @@ def apply_force_update(target: str, channel=None, *, force_active_runs: bool = F
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
     return _run_fenced_update(
-        target, force_active_runs, lambda: _apply_force_update_inner(target, channel)
+        target, force_active_runs, lambda: _apply_force_update_inner(target, channel),
+        confirmed_gateway=confirmed_gateway,
     )
 
 
@@ -2515,7 +2970,7 @@ def _apply_force_update_inner(target: str, channel) -> dict:
     # --force so a remote re-tag (e.g. squash-merge that re-points an
     # existing release tag) doesn't jam the apply path with "would clobber
     # existing tag". See #2756.
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=_GIT_NETWORK_TIMEOUT)
     if not fetch_ok:
         return {
             'ok': False,
@@ -2593,7 +3048,9 @@ def _apply_force_update_inner(target: str, channel) -> dict:
     return response
 
 
-def apply_update(target, channel=None, *, force_active_runs: bool = False):
+def apply_update(
+    target, channel=None, *, force_active_runs: bool = False, confirmed_gateway: dict | None = None
+):
     """Stash, pull --ff-only, pop for the given target repo.
 
     Refuses while WebUI-owned runs are active unless ``force_active_runs``
@@ -2603,7 +3060,8 @@ def apply_update(target, channel=None, *, force_active_runs: bool = False):
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
     return _run_fenced_update(
-        target, force_active_runs, lambda: _apply_update_inner(target, channel)
+        target, force_active_runs, lambda: _apply_update_inner(target, channel),
+        confirmed_gateway=confirmed_gateway,
     )
 
 
@@ -2660,7 +3118,7 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
 
     # Fetch before attempting pull, so the remote ref is current.
     # --force so a remote re-tag doesn't block the update path (see #2756).
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=_GIT_NETWORK_TIMEOUT)
     if not fetch_ok:
         if _is_git_lock_error(fetch_out):
             return {
@@ -2732,7 +3190,7 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
         pull_args.extend([remote, branch])
     else:
         pull_args.extend(['origin', compare_ref])
-    pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
+    pull_out, pull_ok = _run_git(pull_args, path, timeout=_GIT_NETWORK_TIMEOUT)
     if not pull_ok:
         # Every pull-failure message below interpolates git's own output, and
         # git echoes the remote URL (token included) when a pull dies. Scrub

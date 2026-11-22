@@ -308,6 +308,23 @@ def webui_owned_active_runs() -> list[dict]:
     block updates and are drained/settled like any WebUI run. The decision does
     not depend on the order in which a launch publishes its ownership markers.
     """
+    return _collect_active_runs(include_resumable_gateway=False)
+
+
+def all_active_runs() -> list[dict]:
+    """Return every live agent run, including resumable Gateway runs (#8660).
+
+    The same single pass as ``webui_owned_active_runs`` without its one
+    exclusion. An Agent update also cycles the Hermes Gateway, which ends the
+    resumable Gateway runs that survive a WebUI-only restart, so an Agent
+    update counts every run, as every update did before #7293. No durability
+    check is made, so a run whose durable mark is set or released mid-read is
+    still counted exactly once while its row or stream is registered.
+    """
+    return _collect_active_runs(include_resumable_gateway=True)
+
+
+def _collect_active_runs(*, include_resumable_gateway: bool) -> list[dict]:
     with _config.STREAMS_LOCK:
         stream_ids = [str(k) for k in _config.STREAMS.keys()]
         claimed = {str(k) for k in _config.PRE_ADMISSION_CLAIMS.keys()}
@@ -321,7 +338,7 @@ def webui_owned_active_runs() -> list[dict]:
     runs: list[dict] = []
     for sid, row in run_rows.items():
         backend = str(row.get("backend") or "") or "legacy"
-        if backend == "gateway" and _gateway_run_durably_resumable(sid):
+        if not include_resumable_gateway and backend == "gateway" and _gateway_run_durably_resumable(sid):
             continue
         runs.append({
             "stream_id": sid,
@@ -343,6 +360,52 @@ def webui_owned_active_runs() -> list[dict]:
             "registered_stream": True,
         })
     return runs
+
+
+def classify_run_identities(identities: list[dict]) -> dict:
+    """Split an ALREADY COUNTED run identity set into gateway and WebUI-owned rows.
+
+    Does not touch ``STREAMS`` or ``ACTIVE_RUNS`` (no registry read): a refusal
+    must classify the identity set it already counted, never a second registry
+    read (#8746). For each row, a run is Gateway-owned only when backend == 'gateway'
+    and ``_gateway_run_durably_resumable(stream_id)`` is true; every other row
+    (legacy, non-gateway, missing/blank ``stream_id``, durability read raising)
+    is WebUI-owned.
+    """
+    webui_owned: list[dict] = []
+    gateway: list[dict] = []
+    for row in identities or []:
+        sid = str(row.get("stream_id") or "") if isinstance(row, dict) else ""
+        backend = str(row.get("backend") or "") if isinstance(row, dict) else ""
+        is_gw = False
+        if backend == "gateway" and sid:
+            try:
+                is_gw = bool(_gateway_run_durably_resumable(sid))
+            except Exception:
+                is_gw = False
+        if is_gw:
+            gateway.append(row)
+        else:
+            webui_owned.append(row)
+    return {"webui_owned": webui_owned, "gateway": gateway}
+
+
+def active_run_census() -> dict:
+    """Split every live run into WebUI-owned and Gateway-owned in one pass.
+
+    ``webui_owned`` is what ``webui_owned_active_runs`` returns (the runs a
+    WebUI-side settle reaches) and ``gateway`` is the resumable Gateway work it
+    does not; the two lists are disjoint and their union is every live run
+    (#8746). The durability mark is read once per Gateway row inside this pass.
+
+    This split is for describing a fresh census snapshot, never for deciding
+    or splitting an update refusal: a refusal must classify the identity set it
+    already counted, never a second registry read (#8746).
+    """
+    runs = _collect_active_runs(include_resumable_gateway=True)
+    census = classify_run_identities(runs)
+    census["all"] = runs
+    return census
 
 
 # ── Settlement ──────────────────────────────────────────────────────────────

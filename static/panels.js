@@ -103,7 +103,7 @@ function syncAppTitlebar() {
       if (sourceLabel) {
         const badge = document.createElement('span');
         badge.className = 'topbar-source-badge';
-        badge.textContent = sourceLabel + (S.session && S.session.read_only ? ' · read-only' : '');
+        badge.textContent = sourceLabel + (S.session && (S.session.read_only || S.session.chat_read_only_reason) ? ' · read-only' : '');
         subEl.appendChild(document.createTextNode(' '));
         subEl.appendChild(badge);
       }
@@ -1061,6 +1061,240 @@ async function loadCronGatewayNotice() {
   }
 }
 
+// #2316: Scripts subtab -- list and read-only view of the profile's
+// ~/.hermes/scripts/ directory. Read-only is the first slice.
+//
+// #7685 finding 3: the pane is PROFILE-OWNED. Every reply is published only
+// if the request was issued for the profile and generation that are still
+// current (the same discipline switchProfile() applies to the conversation
+// list and workspace tree), and an accepted profile switch clears the rows
+// immediately so a newer profile never shows an earlier profile's scripts.
+let _scriptsOwnerProfile='';
+let _scriptsRequestSeq=0;
+let _scriptsLastDir=null;
+// ── #7685 finding 4/5: a transition GENERATION the switch paths bump. A
+// reply's owner key can still equal the current active profile while the
+// switch is in flight (the caller flips S.activeProfile optimistically), so
+// publication must also match this generation. Both switch paths share
+// _invalidateScriptsForProfileSwitch()/_refreshScriptsAfterProfileSwitch()
+// and no path may duplicate the clear/refresh logic below.
+let _scriptsInvalidateSeq=0;
+// Set by the invalidate helper when the Scripts pane was the visible subtab,
+// so the accepted switch can refresh it for the new owner instead of leaving
+// it empty.
+let _scriptsSwitchNeedsRefresh=false;
+
+function _scriptsOwnerKey(){
+  // The server resolves the list against the active profile, so the client's
+  // notion of "who is active" is what ownership means here.
+  return (typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+}
+
+function clearScriptsList(){
+  // Used by the profile-switch path: drop the previous owner's rows without
+  // issuing a fetch that would race the switch.
+  const box=$('scriptsList');
+  if(box) box.innerHTML='';
+  _scriptsOwnerProfile='';
+  _scriptsLastDir=null;
+}
+
+// Shared invalidate: called at the START of EVERY switch path (canonical
+// switchToProfile and the alternate session-load switch). It empties the
+// pane immediately and bumps the generation so a reply still on the wire
+// (success OR error) is refused at publication, so the old profile's rows
+// can neither stay up nor overwrite the new owner's.
+function _invalidateScriptsForProfileSwitch(){
+  _scriptsSwitchNeedsRefresh = _currentTasksSubtab === 'scripts';
+  ++_scriptsInvalidateSeq;
+  clearScriptsList();
+}
+
+// Shared refresh: called when a switch is ACCEPTED (new owner is now the
+// current profile) AND when a switch is REFUSED (we are still on the old
+// profile — restoring beats leaving the pane blank, #7685 finding 5).
+//
+// #7685 finding 1 (MUST-FIX): the refresh decision is made HERE, from the
+// subtab's visibility AT THIS MOMENT, not from a flag captured at switch
+// start. Opening Scripts while a switch is still pending used to leave the
+// flag false, so nothing repainted the pane for the new owner.
+//
+// The load is silent-on-error ONLY when the pane is not visible: a background
+// switch refresh must not paint a banner over a pane we are deliberately
+// repopulating, but a VISIBLE pane that fails to reload must keep showing
+// "Could not load scripts." instead of going blank (#7685 finding 2).
+function _refreshScriptsAfterProfileSwitch(){
+  if (_currentTasksSubtab !== 'scripts') return;
+  _scriptsSwitchNeedsRefresh = false;
+  if (typeof loadScriptsList !== 'function') return;
+  // `silent` is false for a visible pane so a failed reload keeps its error
+  // state; the pane is dimmed while the load is in flight.
+  loadScriptsList(false, false);
+}
+
+// The publication gate every Scripts reply must pass. A reply is current
+// only if the owner it was issued for is STILL the active profile AND no
+// switch has invalidated the pane since AND no newer request superseded it.
+function _scriptsReplyIsCurrent(owner, gen, seq){
+  return owner===_scriptsOwnerKey() && gen===_scriptsInvalidateSeq && seq===_scriptsRequestSeq;
+}
+
+async function loadScriptsList(animate, silent){
+  const box=$('scriptsList');
+  if(!box) return;
+  const owner=_scriptsOwnerKey();
+  const gen=_scriptsInvalidateSeq;
+  const seq=++_scriptsRequestSeq;
+  // The dim belongs to the NEWEST request, whichever one that is. Setting it
+  // only on the animate arm let a superseded request's late reply clear a
+  // newer request's dim (or leave a held request stuck at half opacity when
+  // the newer refresh never animated). A stale reply must return without
+  // touching opacity — the newest request owns it (#7685 opacity fix).
+  if(box) box.style.opacity=animate?'0.5':'';
+  let data;
+  try{
+    data=await api('/api/scripts/list');
+  }catch(_e){
+    // Late reply for a superseded owner/generation, or a silent background
+    // refresh: do not paint either way.
+    if(!_scriptsReplyIsCurrent(owner,gen,seq)){ return; }
+    if(animate) box.style.opacity='';
+    if(!silent){
+      box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_load_failed')||'Could not load scripts.')}</div>`;
+    }
+    return;
+  }
+  // Stale-owner guard: a profile switch (or a newer request) superseded this
+  // one while it was in flight. Publishing would overwrite the current
+  // owner's result with the previous profile's scripts (or an error).
+  if(!_scriptsReplyIsCurrent(owner,gen,seq)){ return; }
+  if(animate) box.style.opacity='';
+  // The main column's Scripts copy says the panel lists this profile's
+  // scripts. On a capability refusal it has to agree with the panel instead
+  // of promising a listing (#7685 release review). Only while the Scripts
+  // tab is showing: the Jobs tab owns that copy otherwise.
+  const mainSub=$('taskDetailEmptySub');
+  const scriptsPane=$('scriptsList');
+  if(mainSub&&scriptsPane&&!scriptsPane.hidden){
+    const subKey=data.unavailable?'scripts_unavailable':'scripts_detail_empty_sub';
+    mainSub.setAttribute('data-i18n',subKey);
+    mainSub.textContent=t(subKey)||(data.unavailable
+      ?'Scripts are unavailable on this platform.'
+      :'This panel lists the scripts in this profile. To view or edit one, open the file on the server.');
+  }
+  const dirCaption=data.directory?`<div class="scripts-dir-caption">${esc(data.directory)}</div>`:'';
+  // A capability refusal is NOT an empty profile: the platform could not
+  // serve the listing at all. Say so instead of showing the empty state.
+  if(data.unavailable){
+    box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_unavailable')||'Scripts are unavailable on this platform.')}</div>`;
+    _scriptsLastDir=null;
+    return;
+  }
+  if(!data.exists){
+    box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_no_directory')||'No scripts directory yet.')}</div>`;
+    _scriptsLastDir=null;
+    return;
+  }
+  if(!data.scripts.length){
+    box.innerHTML=dirCaption+`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_empty')||'No scripts in this profile yet.')}</div>`;
+    _scriptsLastDir=data.directory||null;
+    return;
+  }
+  _scriptsLastDir=data.directory||null;
+  box.innerHTML=dirCaption+data.scripts.map(s=>_renderScriptItem(s)).join('');
+}
+
+function _renderScriptItem(s){
+  const name=esc(s.name||'');
+  const desc=s.description?`<div class="scripts-item-desc">${esc(s.description)}</div>`:'';
+  const size=s.size!=null?`<span class="scripts-item-size">${_formatScriptSize(s.size)}</span>`:'';
+  return `<div class="scripts-item" data-script-name="${name}">
+    <div class="scripts-item-head">
+      <span class="scripts-item-name" title="${name}">${name}</span>
+      ${size}
+    </div>
+    ${desc}
+  </div>`;
+}
+
+function _formatScriptSize(bytes){
+  if(bytes==null) return '';
+  if(bytes<1024) return `${bytes} B`;
+  if(bytes<1024*1024) return `${Math.round(bytes/1024)} KB`;
+  return `${(bytes/1024/1024).toFixed(1)} MB`;
+}
+
+let _currentTasksSubtab='jobs';
+function switchTasksSubtab(name){
+  if(name!=='jobs'&&name!=='scripts') return;
+  _currentTasksSubtab=name;
+  // Attribute gate for the jobs-only gateway notice: the notice sets an
+  // inline `display`, so CSS hides it on the Scripts tab via the attribute
+  // selector (#7685 UX review).
+  const panel=$('panelTasks');
+  if(panel) panel.dataset.tasksSubtab=name;
+  const titleEl=$('tasksPanelTitle');
+  if(titleEl){
+    const titleKey=name==='scripts'?'cron_tab_scripts':'scheduled_jobs';
+    titleEl.setAttribute('data-i18n',titleKey);
+    titleEl.textContent=t(titleKey)||(name==='scripts'?'Scripts':'Scheduled jobs');
+  }
+  // The shared Refresh button reloads the active tab (refreshTasksPanel), so
+  // its tooltip and accessible name follow the tab too (#7685 UX review).
+  const refreshBtn=$('cronRefreshBtn');
+  if(refreshBtn){
+    const refreshLabel=name==='scripts'?'Refresh script list':'Refresh job list';
+    refreshBtn.setAttribute('data-tooltip',refreshLabel);
+    refreshBtn.setAttribute('aria-label',refreshLabel);
+  }
+  const jobsBtn=$('tasksTabJobs');
+  const scriptsBtn=$('tasksTabScripts');
+  if(jobsBtn) jobsBtn.classList.toggle('active',name==='jobs');
+  if(scriptsBtn) scriptsBtn.classList.toggle('active',name==='scripts');
+  if(jobsBtn) jobsBtn.setAttribute('aria-selected',String(name==='jobs'));
+  if(scriptsBtn) scriptsBtn.setAttribute('aria-selected',String(name==='scripts'));
+  const cronList=$('cronList');
+  const scriptsList=$('scriptsList');
+  if(cronList) cronList.hidden=(name!=='jobs');
+  if(scriptsList) scriptsList.hidden=(name!=='scripts');
+  // The Scripts tab is a read-only browse of the profile's scripts
+  // directory: there is no "create" action there, so the shared "New job"
+  // button would offer a job action that has nothing to do with the tab
+  // (#7685 open item). Hide it for the whole Scripts tab rather than
+  // relabelling it -- a "New script" button would be a lie, because the
+  // panel cannot create a script either.
+  const newJobBtn=$('cronNewJobBtn');
+  if(newJobBtn) newJobBtn.hidden=(name==='scripts');
+  // The main column's empty state belongs to the Jobs tab: it names a
+  // scheduled job and points at the job detail. On the Scripts tab the
+  // list itself IS the content (a script row is not selectable -- there is
+  // no script detail view yet), so the empty state has to say what the
+  // panel actually offers instead of promising a selection that cannot
+  // happen.
+  const emptyTitle=$('taskDetailEmptyTitle');
+  const emptySub=$('taskDetailEmptySub');
+  if(emptyTitle){
+    const key=name==='scripts'?'scripts_detail_empty_title':'tasks_empty_title';
+    emptyTitle.setAttribute('data-i18n',key);
+    emptyTitle.textContent=t(key)||(name==='scripts'?'Scripts':'Select a scheduled job');
+  }
+  if(emptySub){
+    const key=name==='scripts'?'scripts_detail_empty_sub':'tasks_empty_sub';
+    emptySub.setAttribute('data-i18n',key);
+    emptySub.textContent=t(key)||(name==='scripts'
+      ?'This panel lists the scripts in this profile. To view or edit one, open the file on the server.'
+      :'Pick a job from the sidebar to view its details and runs, or create a new one.');
+  }
+  if(name==='scripts') loadScriptsList(true);
+}
+
+// The panel Refresh button reloads whatever subtab is active (#7685 UX
+// review must-fix 3): Scripts refreshes the script list, Jobs the cron list.
+function refreshTasksPanel(){
+  if(_currentTasksSubtab==='scripts') loadScriptsList(true);
+  else loadCrons(true);
+}
+
 let _cronLoadGeneration = 0;  // monotonically bumped per loadCrons() entry; stale loads bail
 let _cronAcceptedLoadGeneration = 0;  // latest load that published _cronList
 let _cronLatestLoadSettled = Promise.resolve();  // lets save completion await a superseding reader
@@ -1714,7 +1948,6 @@ let _cronIsDuplicate = false;
 let _cronSkillsCache=null;
 let _cronSkillsCacheIncomplete=false;
 let _cronProfilesCache=null;
-let _cronDeliveryOptionsCache=null;
 
 function _loadCronSkills(force=false){
   const generation=_skillListsGeneration;
@@ -1862,7 +2095,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
         <div class="detail-form-row">
           <label for="cronFormDeliver">${esc(t('cron_deliver_label') || 'Deliver output to')}</label>
           <select id="cronFormDeliver">
-            <option value="" disabled>loading...</option>
+            <option value="${esc(deliver || 'local')}" selected>loading...</option>
           </select>
         </div>
         <div class="detail-form-row">
@@ -1912,29 +2145,35 @@ async function _populateCronDeliverOptions(selectedValue, isEdit) {
   var sel = $('cronFormDeliver');
   if (!sel) return;
   sel.disabled = true;
+  // #9058: the list depends on the active profile's enabled platform plugins, so it is
+  // fetched for every form instead of cached for the page (a profile switch does not reload).
+  var requestedProfile = S.activeProfile || 'default';
   try {
-    if (!_cronDeliveryOptionsCache) {
-      var res = await api('/api/crons/delivery-options');
-      _cronDeliveryOptionsCache = res && res.platforms ? res.platforms : [];
+    var res = await api('/api/crons/delivery-options');
+    if ($('cronFormDeliver') !== sel) return;  // this form was replaced; its successor fills itself
+    if ((S.activeProfile || 'default') !== requestedProfile) {
+      // The profile changed while the request was in flight: refill for the current one.
+      return _populateCronDeliverOptions(selectedValue, isEdit);
     }
+    var options = res && res.platforms ? res.platforms : [];
     sel.innerHTML = '';
-    for (var i = 0; i < _cronDeliveryOptionsCache.length; i++) {
-      var p = _cronDeliveryOptionsCache[i];
+    for (var i = 0; i < options.length; i++) {
+      var p = options[i];
       var opt = document.createElement('option');
       opt.value = p.value;
       opt.textContent = p.label;
       if (p.value === selectedValue) opt.selected = true;
       sel.appendChild(opt);
     }
-    if (selectedValue && !sel.querySelector('option[value="' + CSS.escape(selectedValue) + '"]')) {
-      var opt = document.createElement('option');
-      opt.value = selectedValue;
-      opt.textContent = selectedValue + ' *';
-      opt.selected = true;
-      sel.prepend(opt);
-    }
   } catch (e) {
     sel.innerHTML = '<option value="local">Local (save output only)</option>';
+  }
+  if (selectedValue && !sel.querySelector('option[value="' + CSS.escape(selectedValue) + '"]')) {
+    var opt = document.createElement('option');
+    opt.value = selectedValue;
+    opt.textContent = selectedValue + ' *';
+    opt.selected = true;
+    sel.prepend(opt);
   }
   sel.disabled = false;
 }
@@ -3248,8 +3487,11 @@ async function bulkUpdateKanban(){
   const status = $('kanbanBulkStatus') ? $('kanbanBulkStatus').value : '';
   if (!ids.length || !status) return;
   try {
-    await api('/api/kanban/tasks/bulk' + _kanbanBoardQuery(), {method: 'POST', body: JSON.stringify({ids, status})});
-    showToast(t('kanban_bulk_action'));
+    const res = await api('/api/kanban/tasks/bulk' + _kanbanBoardQuery(), {method: 'POST', body: JSON.stringify({ids, status})});
+    // The endpoint answers 200 with a per-card result; a refused card must not read as success.
+    const refused = (res && Array.isArray(res.results)) ? res.results.filter(r => r && r.ok === false) : [];
+    if (refused.length) showToast(t('kanban_bulk_refused', refused.length, ids.length, refused[0].error || ''), 'error');
+    else showToast(t('kanban_bulk_action'));
     await loadKanban(true);
   } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
 }
@@ -4025,7 +4267,10 @@ function _kanbanRenderTaskDetail(data){
   // touch/tablet user can move a task INTO the Scheduled column. It reuses
   // _kanbanColumnLabel + the same PATCH path, which the bridge routes through
   // the Agent's schedule_task() verb.
-  const statusButtons = ['triage', 'todo', 'scheduled', 'ready', 'blocked', 'done', 'archived'].map(status =>
+  // 'review' is the touch path INTO the Review column for the same reason;
+  // the bridge routes it through request_review() so the reviewer handoff
+  // keeps its provenance instead of becoming a raw status write.
+  const statusButtons = ['triage', 'todo', 'scheduled', 'ready', 'blocked', 'review', 'done', 'archived'].map(status =>
     `<button class="btn secondary" onclick="updateKanbanTask(${jsArg(task.id)},{status:'${status}'})">${esc(_kanbanColumnLabel(status))}</button>`
   ).join('') + `<button class="btn secondary" onclick="blockKanbanTask(${jsArg(task.id)})">${esc(t('kanban_block'))}</button><button class="btn secondary" onclick="unblockKanbanTask(${jsArg(task.id)})">${esc(t('kanban_unblock'))}</button>`;
   return `<div class="kanban-task-preview-header">
@@ -5274,6 +5519,7 @@ async function loadSkills() {
     const data = await api('/api/skills', {timeoutToast: false, retries: 0});
     if (generation !== _skillListsGeneration || request !== _skillsLoadRequest || profile !== S.activeProfile) return;
     const skills = data.skills || [];
+    skills.profile = data.profile;  // #9077: owner the writes echo back
     // Keep local skills usable while external roots are withheld, including for
     // toggle/search actions, but retry on the next panel load until the profile
     // scope is confirmed.
@@ -5322,6 +5568,10 @@ function renderSkills(skills) {
     cats[cat].push(s);
   }
   const box = $('skillsList');
+  // #9077: these rows belong to the profile this list was served for. The
+  // toggles carry that owner, so a click on rows still shown while the cached
+  // list is cleared (profile switch, reload after a refusal) can't send none.
+  const owner = skills ? skills.profile : undefined;
   box.innerHTML = '';
   if (!filtered.length) { box.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('skills_no_match'))}</div>`; return; }
   for (const [cat, items] of Object.entries(cats).sort()) {
@@ -5344,7 +5594,7 @@ function renderSkills(skills) {
       toggle.title = isDisabled ? t('skill_disabled') : t('skill_enabled');
       toggle.addEventListener('click', (ev) => {
         ev.stopPropagation();
-        toggleSkill(skill.name, !isDisabled);
+        toggleSkill(skill.name, !isDisabled, owner);
       });
       const nameEl = document.createElement('span');
       nameEl.className = 'skill-name';
@@ -5365,7 +5615,7 @@ function filterSkills() {
 }
 
 
-async function toggleSkill(name, currentlyEnabled) {
+async function toggleSkill(name, currentlyEnabled, owner) {
   const profile = S.activeProfile;
   const generation = _skillDetailGeneration;
   const request = (_skillToggleRequests.get(name) || 0) + 1;
@@ -5376,7 +5626,7 @@ async function toggleSkill(name, currentlyEnabled) {
   try {
     const result = await api('/api/skills/toggle', {
       method: 'POST', timeoutToast: false, retries: 0,
-      body: JSON.stringify({ name, enabled: newEnabled })
+      body: JSON.stringify({ name, enabled: newEnabled, expected_profile: owner })
     });
     if (result && result.ok && _ownsSkillProfile({profile, generation}) && !owns()) {
       // Superseded but applied: the local working set can't be patched safely, so refetch.
@@ -5397,7 +5647,9 @@ async function toggleSkill(name, currentlyEnabled) {
       setStatus((result && result.error) || t('skill_toggle_failed'));
     }
   } catch(e) {
-    if (owns()) setStatus(t('skill_toggle_failed') + e.message);
+    if (!owns()) return;
+    showToast(t('skill_toggle_failed') + e.message, 'error');
+    if (e && e.status === 409) { _skillsData = null; await loadSkills(); }  // #9077: reload the stale list
   }
 }
 
@@ -5989,9 +6241,9 @@ function _renderMemoryEdit(section) {
       <form class="detail-form" onsubmit="event.preventDefault(); submitMemorySave();">
         <div class="detail-form-row">
           <label for="memEditContent">${esc(t('memory_notes_label'))}</label>
-          <textarea id="memEditContent" rows="20" spellcheck="false">${esc(content)}</textarea>
+          <textarea id="memEditContent" rows="20" spellcheck="false" data-profile="${esc((_memoryData && _memoryData.profile) || '')}">${esc(content)}</textarea>
         </div>
-        <div id="memEditError" class="detail-form-error" style="display:none"></div>
+        <div id="memEditError" class="detail-form-error" role="alert" style="display:none"></div>
       </form>
     </div>`;
   body.style.display = '';
@@ -6096,12 +6348,19 @@ async function submitMemorySave() {
   if (!ta) return;
   if (errEl) errEl.style.display = 'none';
   try {
-    await api('/api/memory/write', {method:'POST', body: JSON.stringify({section: _currentMemorySection, content: ta.value})});
+    // #9077: expected_profile = the profile this editor's content was loaded for.
+    await api('/api/memory/write', {method:'POST', body: JSON.stringify({section: _currentMemorySection, content: ta.value,
+      expected_profile: (ta.dataset && ta.dataset.profile) || undefined})});
     showToast(t('memory_saved'));
     await loadMemory(true);
     _renderMemoryDetail(_currentMemorySection);
   } catch(e) {
-    if (errEl) { errEl.textContent = t('error_prefix') + e.message; errEl.style.display = ''; }
+    if (errEl) {
+      errEl.textContent = t('error_prefix') + e.message; errEl.style.display = '';
+      // Phones: keep the error in view above the soft keyboard (#9077).
+      if (typeof errEl.scrollIntoView === 'function') errEl.scrollIntoView({block: 'nearest'});
+    }
+    if (e && e.status === 409) await loadMemory(true);  // refresh; the open editor keeps the typed text
   }
 }
 
@@ -6890,7 +7149,7 @@ async function promptWorkspacePath(){
       // System-minted session (#6022): worktree:false is explicit so a config
       // worktree default can't leak a worktree from a workspace prompt.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
     if(!S.session)return;
   }
@@ -6960,7 +7219,7 @@ async function switchToWorkspace(path,name){
       // System-minted session (#6022): explicit worktree:false — a workspace
       // switch from a blank page is not deliberate New Chat intent.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
     if(!S.session)return;
   }
@@ -7132,6 +7391,27 @@ function _openProfileDropdownShell(){
 }
 
 async function _profileSwitchPanelLoad(){
+  _resetProfileScopedPanelState();
+  if (_currentPanel === 'skills') await loadSkills();
+  if (_currentPanel === 'memory') await loadMemory();
+  if (_currentPanel === 'tasks') await loadCrons();
+  if (_currentPanel === 'kanban') await loadKanban();
+  if (_currentPanel === 'profiles') await loadProfilesPanel();
+  if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
+}
+
+// Synchronous half of the profile-switch panel reset: drops the previous
+// profile's Tasks state (detail, edit id, pre-form snapshot, duplicate flag,
+// cross-profile view, cached list and rendered rows, cron skill cache) without
+// any network. Shared by the canonical switch
+// (through _profileSwitchPanelLoad) and the session-load switch in
+// sessions.js (#9069), which must not leave a Duplicate/Edit form that would
+// write the previous profile's job under the new profile's cookie.
+function _resetProfileScopedPanelState(){
+  // Retire any loadCrons() still in flight for the previous profile (#6767
+  // latest-wins). With Tasks hidden no newer load supersedes it, and its reply
+  // would otherwise publish that profile's writable rows under this one.
+  ++_cronLoadGeneration;
   // Cross-profile cron visibility is an active-profile opt-in; never carry it
   // into the next profile when the Tasks panel wasn't the visible panel.
   _showAllCronProfiles = false;
@@ -7140,12 +7420,18 @@ async function _profileSwitchPanelLoad(){
   _editingCronId = null;
   _cronIsDuplicate = false;
   _clearCronDetail();
-  if (_currentPanel === 'skills') await loadSkills();
-  if (_currentPanel === 'memory') await loadMemory();
-  if (_currentPanel === 'tasks') await loadCrons();
-  if (_currentPanel === 'kanban') await loadKanban();
-  if (_currentPanel === 'profiles') await loadProfilesPanel();
-  if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
+  // #9080: the previous profile's rows stayed rendered (and clickable, their
+  // handlers holding that profile's jobs) until the new /api/crons reply
+  // landed, so Duplicate + Save on one created it in this profile. Drop the
+  // cached list (an empty array: its readers call .find on it) and the rows.
+  _cronList = [];
+  // typeof-tolerant like the counter ops in switchToProfile: frontend test
+  // harnesses eval this helper in isolation, without ui.js's $().
+  const cronListBox = typeof $ === 'function' ? $('cronList') : null;
+  if (cronListBox) cronListBox.innerHTML = '';
+  // The cron form's skill autocomplete cache is per profile too; the next
+  // Duplicate/Edit form open refetches /api/skills for this profile.
+  _cronSkillsCache = null;
 }
 
 // ── Tab-visibility reconciliation guard ────────────────────────────────────
@@ -7639,6 +7925,15 @@ async function switchToProfile(name) {
   // context change where dismissing those transient affordances is correct.
   if (typeof _renamingSid !== 'undefined' && _renamingSid) _renamingSid = null;
   if (typeof closeSessionActionMenu === 'function') closeSessionActionMenu();
+  // #7685 finding 3/4/5: drop the previous profile's Scripts rows now.
+  // Without this the next profile kept showing the earlier profile's scripts
+  // until the user clicked the subtab, and a late reply from the old owner
+  // could then overwrite the new one's list. The shared invalidate helper
+  // bumps the pane's transition generation so requests already in flight are
+  // refused at publication, and marks the visible pane for refresh.
+  if (typeof _invalidateScriptsForProfileSwitch === 'function') {
+    _invalidateScriptsForProfileSwitch();
+  }
   // Determine whether the current session must be replaced instead of being
   // retagged in place. A session with messages/active runtime belongs to the
   // current profile. After the profile-switch POST returns, we also treat an
@@ -7718,6 +8013,33 @@ async function switchToProfile(name) {
     if (typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending++;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
+    }
+    // #9080: the server serves the new profile from here on, so drop the previous
+    // profile's Tasks rows/list/detail/form state NOW, as the session-load switch
+    // does at accept. Waiting for _profileSwitchPanelLoad() at the end left the
+    // old rows clickable across the awaited session-list render below, and a
+    // Duplicate + Save in that window created the old profile's job in this one.
+    // The later call there is idempotent (and retires any Tasks load started
+    // in between before reloading a visible panel).
+    if (typeof _resetProfileScopedPanelState === 'function') _resetProfileScopedPanelState();
+    // #7685 finding 3/4/5: the switch is accepted, so the Scripts pane's
+    // owner is now this profile. If it was the visible subtab, refresh it for
+    // the new owner (its rows were cleared at switch start). The load's own
+    // owner/generation gate drops any still-in-flight reply from the old
+    // owner.
+    //
+    // #7685 finding 1 (MUST-FIX): invalidate AGAIN here, at accept. The
+    // canonical switch does not change S.activeProfile until its POST
+    // returns, so a list load issued while the switch was PENDING captured
+    // the OLD owner key and passed its gate — it repainted the previous
+    // profile's rows under the new profile. Bumping the generation at accept
+    // retires that in-flight reply, and the refresh below repopulates the
+    // pane for the owner that is now current.
+    if (typeof _invalidateScriptsForProfileSwitch === 'function') {
+      _invalidateScriptsForProfileSwitch();
+    }
+    if (typeof _refreshScriptsAfterProfileSwitch === 'function') {
+      _refreshScriptsAfterProfileSwitch();
     }
     // #7509: the slash-skill caches hold the previous profile's disabled-filtered
     // /api/skills payload, so drop them once the switch has actually succeeded —
@@ -7933,9 +8255,16 @@ async function switchToProfile(name) {
         loadDir('.');
       } else if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') {
         // No workspace to restore on the (still-current) previous profile —
-        // clear the up-front workspace skeleton so it doesn't strand on a switch
+        // clear the up-front workspace skeleton so it can't strand on a switch
         // failure, mirroring the success-path no-workspace handling (#4662).
         clearWorkspaceTreeSkeleton();
+      }
+      // #7685 finding 5: the Scripts pane was cleared at switch start but the
+      // switch never took effect, so the old profile is still active. Restore
+      // it for that profile instead of leaving the pane blank. The refresh is
+      // silent-on-error so a failed restore cannot paint a spurious banner.
+      if (typeof _refreshScriptsAfterProfileSwitch === 'function') {
+        _refreshScriptsAfterProfileSwitch();
       }
     }
     return false;
@@ -9466,14 +9795,29 @@ const _SETTINGS_SPEECH_STORAGE_KEYS={
   voice_silence_ms:'hermes-voice-silence-ms',
   raw_audio_mode:'hermes-raw-audio-mode',
 };
+const _SETTINGS_SPEECH_CONTROL_IDS={
+  raw_audio_mode:'settingsRawAudio',
+  tts_enabled:'settingsTtsEnabled',
+  tts_auto_read:'settingsTtsAutoRead',
+  voice_mode_button:'settingsVoiceModeEnabled',
+  tts_engine:'settingsTtsEngine',
+  tts_voice:'settingsTtsVoice',
+  tts_rate:'settingsTtsRate',
+  tts_pitch:'settingsTtsPitch',
+};
 let _settingsSpeechPersistedKeys=new Set();
 let _settingsSpeechLocalStorageKeys=new Set();
 let _settingsSpeechChangedKeys=new Set();
+let _settingsSpeechDesiredValues={};
+let _settingsSpeechRefusedKeys=new Set();
+let _unappliedSpeechServerValues={};
 
 function _captureSpeechPreferenceOwnership(settings){
   _settingsSpeechPersistedKeys=new Set(Array.isArray(settings&&settings.persisted_speech_keys)?settings.persisted_speech_keys:[]);
   _settingsSpeechLocalStorageKeys=new Set();
   _settingsSpeechChangedKeys=new Set();
+  _settingsSpeechDesiredValues={};
+  _settingsSpeechRefusedKeys=new Set();
   Object.entries(_SETTINGS_SPEECH_STORAGE_KEYS).forEach(([settingKey,storageKey])=>{
     try{if(localStorage.getItem(storageKey)!==null) _settingsSpeechLocalStorageKeys.add(settingKey);}catch(_){}
   });
@@ -9483,18 +9827,143 @@ function _speechPreferenceIsOwned(settingKey){
   return _settingsSpeechPersistedKeys.has(settingKey)||_settingsSpeechLocalStorageKeys.has(settingKey)||_settingsSpeechChangedKeys.has(settingKey);
 }
 
-function _markSpeechPreferenceChanged(settingKey){
+function _markSpeechPreferenceChanged(settingKey,desiredValue,writeRefused){
   _settingsSpeechChangedKeys.add(settingKey);
+  if(desiredValue!==undefined){
+    _settingsSpeechDesiredValues[settingKey]=desiredValue;
+  }else{
+    try{
+      const controlId=_SETTINGS_SPEECH_CONTROL_IDS[settingKey];
+      const el=(typeof $==='function'&&controlId)?$(controlId):null;
+      if(el){
+        if(settingKey==='raw_audio_mode'||settingKey==='tts_enabled'||settingKey==='tts_auto_read'||settingKey==='voice_mode_button'||settingKey==='voice_continuous') _settingsSpeechDesiredValues[settingKey]=!!el.checked;
+        else if(el.value!==undefined) _settingsSpeechDesiredValues[settingKey]=(settingKey==='tts_rate'||settingKey==='tts_pitch')?parseFloat(el.value):el.value;
+      }
+    }catch(_){}
+  }
+  if(writeRefused!==undefined){
+    if(writeRefused) _settingsSpeechRefusedKeys.add(settingKey);
+    else _settingsSpeechRefusedKeys.delete(settingKey);
+  }else{
+    if(_settingsLastStorageWriteRefused) _settingsSpeechRefusedKeys.add(settingKey);
+    else _settingsSpeechRefusedKeys.delete(settingKey);
+  }
+}
+
+// #8708: every Settings localStorage write is a best-effort mirror of the
+// server-authoritative value. `/api/settings` stays the durable source, so a
+// refused write (quota exceeded, storage disabled in some private-mode
+// browsers) must never abort hydration nor the rest of a control's onchange
+// handler. Catch it here, report the first refusal once, and keep going.
+// #8749: return whether the mirror actually landed. Hydration needs that
+// outcome to decide between the server value and the cache value the runtime
+// consumers in boot.js actually read.
+let _settingsStorageWriteRefusedWarned=false;
+let _settingsLastStorageWriteRefused=false;
+function _writeSettingsStorageMirror(storageKey,value){
+  try{
+    localStorage.setItem(storageKey,String(value));
+    _settingsLastStorageWriteRefused=false;
+    return true;
+  }catch(e){
+    _settingsLastStorageWriteRefused=true;
+    if(!_settingsStorageWriteRefusedWarned){
+      _settingsStorageWriteRefusedWarned=true;
+      console.warn('[settings] localStorage write refused; server value not applied to this browser cache',storageKey,e);
+    }
+    return false;
+  }
 }
 
 function _syncSpeechPreferenceCache(settingKey,value){
   if(!_speechPreferenceIsOwned(settingKey)) return;
   const storageKey=_SETTINGS_SPEECH_STORAGE_KEYS[settingKey];
-  if(storageKey) localStorage.setItem(storageKey,String(value));
+  if(storageKey) return _writeSettingsStorageMirror(storageKey,value);
+}
+
+// The note is its own line under the control's whole .settings-field row:
+// inside the control's flex parent it squeezed a slider track or a checkbox label.
+function _unappliedNoteHost(controlEl){
+  const row=typeof controlEl.closest==='function'?controlEl.closest('.settings-field'):null;
+  return (row&&row!==controlEl&&typeof row.appendChild==='function')?row:controlEl.parentElement;
+}
+
+function _findUnappliedSpeechNote(controlEl){
+  if(!controlEl) return null;
+  const host=_unappliedNoteHost(controlEl);
+  if(host && typeof host.querySelector==='function'){
+    const found=host.querySelector('.settings-unapplied-note');
+    if(found) return found;
+  }
+  // `children` is an HTMLCollection in the browser, so avoid Array#find.
+  if(controlEl.children && controlEl.children.length){
+    for(let i=0;i<controlEl.children.length;i++){
+      const child=controlEl.children[i];
+      if(child&&child.className==='settings-unapplied-note') return child;
+    }
+  }
+  return null;
+}
+
+function _setControlUnappliedNote(controlEl,isUnapplied){
+  if(!controlEl || typeof controlEl !== 'object') return;
+  const noteText=typeof t==='function'?t('settings_unapplied_note'):'settings_unapplied_note';
+  if(isUnapplied){
+    controlEl.title=noteText;
+    if(controlEl.dataset) controlEl.dataset.unapplied='true';
+    let note=_findUnappliedSpeechNote(controlEl);
+    const host=_unappliedNoteHost(controlEl);
+    if(!note && host && typeof host.appendChild==='function'){
+      note=document.createElement('span');
+      note.className='settings-unapplied-note';
+      note.style.fontSize='11px';
+      note.style.color='var(--muted)';
+      note.style.marginTop='4px';
+      host.appendChild(note);
+    }
+    if(!note && typeof controlEl.appendChild==='function'){
+      // Inputs cannot take children; keep the title/dataset note if the row is
+      // not in the DOM yet instead of letting the insertion abort hydration.
+      try{
+        note=document.createElement('span');
+        note.className='settings-unapplied-note';
+        controlEl.appendChild(note);
+      }catch(_){note=null;}
+    }
+    if(note){
+      note.textContent='('+noteText+')';
+      if(note.dataset) note.dataset.unapplied='true';
+      if(note.style) note.style.display='block';
+    }
+    controlEl.unappliedNote=note;
+  }else{
+    if(controlEl.title===noteText) controlEl.title='';
+    if(controlEl.dataset) delete controlEl.dataset.unapplied;
+    const note=controlEl.unappliedNote||_findUnappliedSpeechNote(controlEl);
+    if(note){
+      if(typeof note.remove==='function') note.remove();
+      else if(note.style) note.style.display='none';
+    }
+    delete controlEl.unappliedNote;
+  }
+}
+
+function _speechValuesEqual(a,b){
+  const hasNumber=typeof a==='number'||typeof b==='number';
+  if(hasNumber&&Number.isFinite(Number(a))&&Number.isFinite(Number(b))) return Number(a)===Number(b);
+  return String(a)===String(b);
 }
 
 function _setOwnedSpeechPayload(payload,settingKey,value){
-  if(_speechPreferenceIsOwned(settingKey)) payload[settingKey]=value;
+  if(!_speechPreferenceIsOwned(settingKey)) return;
+  if(!_settingsSpeechChangedKeys.has(settingKey) && Object.prototype.hasOwnProperty.call(_unappliedSpeechServerValues,settingKey)){
+    // #8749: the mirror write was refused, so the UI value is the stale cache
+    // (or the runtime fallback), not the durable server value. Omit the key
+    // from unrelated saves; the server keeps what it already has. Only an
+    // explicit user edit (_settingsSpeechChangedKeys) may replace it.
+    return;
+  }
+  payload[settingKey]=value;
 }
 
 function _preferencesPayloadFromUi(){
@@ -9507,6 +9976,8 @@ function _preferencesPayloadFromUi(){
   if(showUsageCb) payload.show_token_usage=showUsageCb.checked;
   const showQuotaChipCb=$('settingsShowQuotaChip');
   if(showQuotaChipCb) payload.show_quota_chip=showQuotaChipCb.checked;
+  const quotaChipWindowSel=$('settingsQuotaChipWindow');
+  if(quotaChipWindowSel) payload.quota_chip_window=_normalizeQuotaChipWindow(quotaChipWindowSel.value);
   const showConversationOutlineCb=$('settingsShowConversationOutline');
   if(showConversationOutlineCb) payload.show_conversation_outline=showConversationOutlineCb.checked;
   const hideSuggestionsCb=$('settingsHideSuggestions');
@@ -9661,8 +10132,10 @@ function _setPreferencesAutosaveStatus(state,owner){
 
 function _rememberPreferencesSaved(payload){
   if(!payload) return;
-  if(payload.send_key!==undefined) localStorage.setItem('hermes-pref-send_key',payload.send_key);
-  if(payload.language!==undefined) localStorage.setItem('hermes-pref-language',payload.language);
+  // #8749: these run before the autosave timer is armed. A refused write must
+  // not throw here, or the Settings change never reaches the server.
+  if(payload.send_key!==undefined) _writeSettingsStorageMirror('hermes-pref-send_key',payload.send_key);
+  if(payload.language!==undefined) _writeSettingsStorageMirror('hermes-pref-language',payload.language);
 }
 
 function _applyWorkspaceTodosTabVisibility(){
@@ -9933,7 +10406,7 @@ async function loadSettingsPanel(){
     if(skinSel) skinSel.value=skinVal;
     if(typeof _buildSkinPicker==='function') _buildSkinPicker(skinVal);
     const fontSizeVal=settings.font_size||localStorage.getItem('hermes-font-size')||'default';
-    localStorage.setItem('hermes-font-size',fontSizeVal);
+    _writeSettingsStorageMirror('hermes-font-size',fontSizeVal);
     if(typeof _applyFontSize==='function') _applyFontSize(fontSizeVal);
     const fontSizeSel=$('settingsFontSize');
     if(fontSizeSel) fontSizeSel.value=fontSizeVal;
@@ -10247,6 +10720,19 @@ async function loadSettingsPanel(){
         _schedulePreferencesAutosave();
       },{once:false});
     }
+    const quotaChipWindowSel=$('settingsQuotaChipWindow');
+    if(quotaChipWindowSel){
+      quotaChipWindowSel.value=_normalizeQuotaChipWindow(settings.quota_chip_window);
+      window._quotaChipWindow=quotaChipWindowSel.value;
+      // Only meaningful while the chip is shown; the saved choice is kept either way.
+      quotaChipWindowSel.disabled=showQuotaChipCb?!showQuotaChipCb.checked:false;
+      if(showQuotaChipCb){showQuotaChipCb.addEventListener('change',function(){quotaChipWindowSel.disabled=!showQuotaChipCb.checked;},{once:false});}
+      quotaChipWindowSel.addEventListener('change',()=>{
+        window._quotaChipWindow=_normalizeQuotaChipWindow(quotaChipWindowSel.value);
+        if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator(typeof _currentQuotaProvider==='function'?_currentQuotaProvider():undefined);
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
     const hideSuggestionsCb=$('settingsHideSuggestions');
     if(hideSuggestionsCb){
       hideSuggestionsCb.checked=settings.hide_empty_state_suggestions===true;
@@ -10411,13 +10897,72 @@ async function loadSettingsPanel(){
         : []
     );
     _captureSpeechPreferenceOwnership(settings);
-    const _speechSetting=function(key,storageKey,fallback,kind){
+    const _SETTINGS_SPEECH_CONTROL_IDS={
+      raw_audio_mode:'settingsRawAudio',
+      tts_enabled:'settingsTtsEnabled',
+      tts_auto_read:'settingsTtsAutoRead',
+      voice_mode_button:'settingsVoiceModeEnabled',
+      tts_engine:'settingsTtsEngine',
+      tts_voice:'settingsTtsVoice',
+      tts_rate:'settingsTtsRate',
+      tts_pitch:'settingsTtsPitch',
+    };
+    // boot.js applies these directly from the server payload before/while the
+    // panel hydrates, so their effective runtime value is the server value even
+    // when the localStorage mirror is refused. Everything else is read back from
+    // localStorage by the boot consumers.
+    const _SETTINGS_SPEECH_SERVER_APPLIED_KEYS=new Set(['raw_audio_mode']);
+    _unappliedSpeechServerValues={};
+    const _speechSetting=function(key,storageKey,fallback,controlEl){
+      const el=(controlEl&&typeof controlEl==='object')?controlEl:(typeof $==='function'&&_SETTINGS_SPEECH_CONTROL_IDS[key]?$(_SETTINGS_SPEECH_CONTROL_IDS[key]):null);
       const stored=localStorage.getItem(storageKey);
-      if(settings&&persistedSpeechKeys.has(key)) return settings[key];
+      if(_settingsSpeechChangedKeys.has(key)){
+        // A later re-population (for example `voiceschanged` re-running
+        // `_populateTtsVoices`) must not resurrect the unapplied state or
+        // overwrite the user's explicit choice with the stale server value.
+        const hasDesired=Object.prototype.hasOwnProperty.call(_settingsSpeechDesiredValues,key);
+        const desired=hasDesired?_settingsSpeechDesiredValues[key]:(stored===null?fallback:stored);
+        const isRefused=_settingsSpeechRefusedKeys.has(key);
+        if(el) _setControlUnappliedNote(el,isRefused);
+        return desired;
+      }
+      if(settings&&persistedSpeechKeys.has(key)){
+        // #5435 contract: if(settings&&persistedSpeechKeys.has(key)) return settings[key];
+        // #8749 extends it: that return is now gated on whether the mirror
+        // write landed. When the browser refuses the write, the runtime
+        // consumers in boot.js keep reading the old cache entry, so the
+        // control must show that effective value (and carry a note) instead of
+        // pretending the server value applied. The server value is kept out of
+        // unrelated saves until the user edits the control.
+        const serverVal=settings[key];
+        const mirrorOk=_writeSettingsStorageMirror(storageKey,serverVal);
+        if(mirrorOk){
+          if(el) _setControlUnappliedNote(el,false);
+          return serverVal;
+        }
+        if(_SETTINGS_SPEECH_SERVER_APPLIED_KEYS.has(key)&&serverVal!==undefined){
+          // boot.js already applied this value in memory (raw audio), so the
+          // refused cache write did not leave the control divergent and an
+          // unrelated save may still send it.
+          if(el) _setControlUnappliedNote(el,false);
+          return serverVal;
+        }
+        // The server value did not reach this browser's runtime; remember it so
+        // unrelated saves omit the key instead of persisting the stale cache.
+        _unappliedSpeechServerValues[key]=serverVal;
+        const effective=stored===null?fallback:stored;
+        const effectiveMatchesServer=_speechValuesEqual(effective,serverVal);
+        if(el) _setControlUnappliedNote(el,!effectiveMatchesServer);
+        // The runtime consumers read localStorage (or their fallback when no
+        // cache entry exists), so `effective` is what the control must show
+        // while the refused write leaves the server value unapplied here.
+        return effective;
+      }
+      if(el) _setControlUnappliedNote(el,false);
       return stored===null?fallback:stored;
     };
-    const _speechBool=function(key,storageKey,fallback){
-      const value=_speechSetting(key,storageKey,fallback,'bool');
+    const _speechBool=function(key,storageKey,fallback,controlEl){
+      const value=_speechSetting(key,storageKey,fallback,controlEl);
       return value===true||value==='true';
     };
     const rawAudioCb=$('settingsRawAudio');
@@ -10425,8 +10970,10 @@ async function loadSettingsPanel(){
       rawAudioCb.checked=_speechBool('raw_audio_mode','hermes-raw-audio-mode',false);
       rawAudioCb.onchange=function(){
         _markSpeechPreferenceChanged('raw_audio_mode');
+        delete _unappliedSpeechServerValues['raw_audio_mode'];
+        _setControlUnappliedNote(this,false);
         if(typeof window._applyRawAudioModePreference==='function') window._applyRawAudioModePreference(this.checked);
-        else localStorage.setItem('hermes-raw-audio-mode',this.checked?'true':'false');
+        else _writeSettingsStorageMirror('hermes-raw-audio-mode',this.checked?'true':'false');
         _schedulePreferencesAutosave();
       };
     }
@@ -10436,9 +10983,28 @@ async function loadSettingsPanel(){
     _syncSpeechPreferenceCache('voice_silence_ms',Number.isFinite(voiceSilence)&&voiceSilence>=200?String(voiceSilence):'1800');
     // TTS settings use /api/settings as the durable source and localStorage as the runtime cache.
     const ttsEnabledCb=$('settingsTtsEnabled');
-    if(ttsEnabledCb){ttsEnabledCb.checked=_speechBool('tts_enabled','hermes-tts-enabled',false);ttsEnabledCb.onchange=function(){_markSpeechPreferenceChanged('tts_enabled');localStorage.setItem('hermes-tts-enabled',this.checked?'true':'false');_applyTtsEnabled(this.checked);_schedulePreferencesAutosave();};}
+    if(ttsEnabledCb){
+      ttsEnabledCb.checked=_speechBool('tts_enabled','hermes-tts-enabled',false);
+      ttsEnabledCb.onchange=function(){
+        _markSpeechPreferenceChanged('tts_enabled');
+        delete _unappliedSpeechServerValues['tts_enabled'];
+        _setControlUnappliedNote(this,false);
+        _writeSettingsStorageMirror('hermes-tts-enabled',this.checked?'true':'false');
+        _applyTtsEnabled(this.checked);
+        _schedulePreferencesAutosave();
+      };
+    }
     const ttsAutoReadCb=$('settingsTtsAutoRead');
-    if(ttsAutoReadCb){ttsAutoReadCb.checked=_speechBool('tts_auto_read','hermes-tts-auto-read',false);ttsAutoReadCb.onchange=function(){_markSpeechPreferenceChanged('tts_auto_read');localStorage.setItem('hermes-tts-auto-read',this.checked?'true':'false');_schedulePreferencesAutosave();};}
+    if(ttsAutoReadCb){
+      ttsAutoReadCb.checked=_speechBool('tts_auto_read','hermes-tts-auto-read',false);
+      ttsAutoReadCb.onchange=function(){
+        const mirrorOk=_writeSettingsStorageMirror('hermes-tts-auto-read',this.checked?'true':'false');
+        _markSpeechPreferenceChanged('tts_auto_read');
+        delete _unappliedSpeechServerValues['tts_auto_read'];
+        _setControlUnappliedNote(this,!mirrorOk);
+        _schedulePreferencesAutosave();
+      };
+    }
     // Voice-mode button visibility (#1488).
     // Toggling re-applies immediately via the boot.js helper so the user sees
     // the audio-waveform button appear/disappear without a reload.
@@ -10449,8 +11015,10 @@ async function loadSettingsPanel(){
     if(voiceModeCb){
       voiceModeCb.checked=_speechBool('voice_mode_button','hermes-voice-mode-button',false);
       voiceModeCb.onchange=function(){
+        const mirrorOk=_writeSettingsStorageMirror('hermes-voice-mode-button',this.checked?'true':'false');
         _markSpeechPreferenceChanged('voice_mode_button');
-        localStorage.setItem('hermes-voice-mode-button',this.checked?'true':'false');
+        delete _unappliedSpeechServerValues['voice_mode_button'];
+        _setControlUnappliedNote(this,!mirrorOk);
         if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
         if(typeof window._applyComposerFooterVisibilitySettings==='function') window._applyComposerFooterVisibilitySettings();
         _schedulePreferencesAutosave();
@@ -10480,8 +11048,10 @@ async function loadSettingsPanel(){
       ttsEngineSel.value=saved;
       _syncSpeechPreferenceCache('tts_engine',saved);
       ttsEngineSel.onchange=function(){
+        const mirrorOk=_writeSettingsStorageMirror('hermes-tts-engine',this.value);
         _markSpeechPreferenceChanged('tts_engine');
-        localStorage.setItem('hermes-tts-engine',this.value);
+        delete _unappliedSpeechServerValues['tts_engine'];
+        _setControlUnappliedNote(this,!mirrorOk);
         window._populateTtsVoices();
         _schedulePreferencesAutosave();
       };
@@ -10558,6 +11128,9 @@ async function loadSettingsPanel(){
           ttsVoiceSel.appendChild(opt);
         });
       }
+      // Sync only to an offered voice: a value with no option blanks the native
+      // select (selectedIndex -1) instead of keeping its labelled default.
+      if(Array.from(ttsVoiceSel.options||[]).some(o=>o.value===current)) ttsVoiceSel.value=current;
     };
     if(ttsVoiceSel&&'speechSynthesis' in window){
       window._populateTtsVoices();
@@ -10565,7 +11138,13 @@ async function loadSettingsPanel(){
         const engine=localStorage.getItem('hermes-tts-engine')||'browser';
         if(engine==='browser') window._populateTtsVoices();
       },{once:false});
-      ttsVoiceSel.onchange=function(){_markSpeechPreferenceChanged('tts_voice');localStorage.setItem('hermes-tts-voice',this.value);_schedulePreferencesAutosave();};
+      ttsVoiceSel.onchange=function(){
+        const mirrorOk=_writeSettingsStorageMirror('hermes-tts-voice',this.value);
+        _markSpeechPreferenceChanged('tts_voice');
+        delete _unappliedSpeechServerValues['tts_voice'];
+        _setControlUnappliedNote(this,!mirrorOk);
+        _schedulePreferencesAutosave();
+      };
     }
     // TTS rate/pitch sliders
     const ttsRateSlider=$('settingsTtsRate');
@@ -10575,7 +11154,14 @@ async function loadSettingsPanel(){
       ttsRateSlider.value=(savedRate===null||savedRate===undefined)?'1':String(savedRate);
       if(ttsRateValue) ttsRateValue.textContent=parseFloat(ttsRateSlider.value).toFixed(1)+'x';
       _syncSpeechPreferenceCache('tts_rate',ttsRateSlider.value);
-      ttsRateSlider.oninput=function(){_markSpeechPreferenceChanged('tts_rate');if(ttsRateValue)ttsRateValue.textContent=parseFloat(this.value).toFixed(1)+'x';localStorage.setItem('hermes-tts-rate',this.value);_schedulePreferencesAutosave();};
+      ttsRateSlider.oninput=function(){
+        const mirrorOk=_writeSettingsStorageMirror('hermes-tts-rate',this.value);
+        _markSpeechPreferenceChanged('tts_rate');
+        delete _unappliedSpeechServerValues['tts_rate'];
+        _setControlUnappliedNote(this,!mirrorOk);
+        if(ttsRateValue)ttsRateValue.textContent=parseFloat(this.value).toFixed(1)+'x';
+        _schedulePreferencesAutosave();
+      };
     }
     const ttsPitchSlider=$('settingsTtsPitch');
     const ttsPitchValue=$('settingsTtsPitchValue');
@@ -10584,7 +11170,14 @@ async function loadSettingsPanel(){
       ttsPitchSlider.value=(savedPitch===null||savedPitch===undefined)?'1':String(savedPitch);
       if(ttsPitchValue) ttsPitchValue.textContent=parseFloat(ttsPitchSlider.value).toFixed(1);
       _syncSpeechPreferenceCache('tts_pitch',ttsPitchSlider.value);
-      ttsPitchSlider.oninput=function(){_markSpeechPreferenceChanged('tts_pitch');if(ttsPitchValue)ttsPitchValue.textContent=parseFloat(this.value).toFixed(1);localStorage.setItem('hermes-tts-pitch',this.value);_schedulePreferencesAutosave();};
+      ttsPitchSlider.oninput=function(){
+        const mirrorOk=_writeSettingsStorageMirror('hermes-tts-pitch',this.value);
+        _markSpeechPreferenceChanged('tts_pitch');
+        delete _unappliedSpeechServerValues['tts_pitch'];
+        _setControlUnappliedNote(this,!mirrorOk);
+        if(ttsPitchValue)ttsPitchValue.textContent=parseFloat(this.value).toFixed(1);
+        _schedulePreferencesAutosave();
+      };
     }
     const notifCb=$('settingsNotificationsEnabled');
     if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
@@ -13155,7 +13748,7 @@ async function checkUpdatesNow(channelOverride){
       const parts=[];
       const formatUpdatePart=(typeof _formatUpdateTargetStatus==='function')
         ? _formatUpdateTargetStatus
-        : ((label,info)=>info&&info.behind>0?label+': '+info.behind:null);
+        : ((label,info)=>info&&info.behind>0?label+': '+info.behind+' update'+(info.behind>1?'s':''):null);
       const webuiPart=formatUpdatePart('WebUI',data.webui);
       const agentPart=formatUpdatePart('Agent',data.agent);
       if(webuiPart) parts.push(webuiPart);
@@ -13180,7 +13773,9 @@ async function checkUpdatesNow(channelOverride){
       // The target whose tag is shown. Its own release arrow may already name the tag (#6859 Fable r1).
       const tagOwner=(data.webui&&data.webui.latest_tag)?data.webui:data.agent;
       if(parts.length){
-        let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
+        // Each part already carries its own count and unit ("WebUI: 2 releases"), so the
+        // template only wraps the list and must not add another unit (#8283).
+        let txt=t('settings_updates_available_targets',parts.join(', '));
         if(manualInstruction) txt+=' · '+manualInstruction;
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(tagInfo&&!_updateTargetArrowNamesTag(tagOwner,tagInfo)) txt += ' ' + t('settings_latest_tag_suffix').replace('{0}', tagInfo);
@@ -13771,6 +14366,7 @@ async function saveSettings(andClose){
     }
   }
   body.show_quota_chip=showQuotaChip===true;
+  body.quota_chip_window=_normalizeQuotaChipWindow(($('settingsQuotaChipWindow')||{}).value);
   body.show_conversation_outline=showConversationOutline===true;
   body.show_busy_placeholder_hint=showBusyPlaceholderHint===true;
   body.show_tps=showTps;
@@ -14478,7 +15074,16 @@ function _renderGatewayStatus(r){
       return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-bg);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
     }).join(' ');
   }
-  const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">${esc(t('gateway_last_active'))}: ${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
+  // #8621: the card shows one separator, and it is the one the translator
+  // chose. A label that already ends in a colon keeps it -- a full-width "：",
+  // or a French " : " -- and only a label with no colon gets the template's
+  // ": ". An ASCII colon is followed by a space, a full-width one is not.
+  const _laLabel=t('gateway_last_active');
+  const _laSep=/([：:])\s*$/u.exec(_laLabel);
+  const _laText=_laSep
+    ? _laLabel.slice(0,_laSep.index)+_laSep[1]+(_laSep[1]===':'?' ':'')
+    : _laLabel+': ';
+  const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">${esc(_laText)}${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
   const sessionInfo=r.session_count?`<span style="font-size:11px;color:var(--muted)">${r.session_count} ${esc(r.session_count!==1?t('gateway_sessions'):t('gateway_session'))}</span>`:'';
   card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">${esc(t('gateway_running'))}</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>${_gatewayActionControls(r)}`;
 }

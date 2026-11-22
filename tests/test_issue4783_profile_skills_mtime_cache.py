@@ -90,6 +90,13 @@ def _make_profiles_module():
 def _clear_cache():
     """Clear the module-level cache and restore sys.modules after each test."""
     saved = {k: v for k, v in sys.modules.items() if k == "api" or k.startswith("api.")}
+    # The stubs _make_profiles_module() installs with sys.modules.setdefault()
+    # (flask, yaml, agent, agent.skill_utils) must not outlive the test: a
+    # later test that imports api.profiles afresh would otherwise read
+    # config.yaml through the stub ``yaml.safe_load`` (returns None) and see a
+    # fake agent.skill_utils. Snapshot their pre-test state and restore it.
+    _STUBBED = ("flask", "yaml", "agent", "agent.skill_utils")
+    saved_stubbed = {k: sys.modules[k] for k in _STUBBED if k in sys.modules}
     try:
         mod = sys.modules.get("api.profiles")
         if mod and hasattr(mod, "_SKILLS_STATS_CACHE"):
@@ -110,6 +117,11 @@ def _clear_cache():
     for k in [k for k in sys.modules if k == "api" or k.startswith("api.")]:
         if k in saved:
             sys.modules[k] = saved[k]
+        else:
+            sys.modules.pop(k, None)
+    for k in _STUBBED:
+        if k in saved_stubbed:
+            sys.modules[k] = saved_stubbed[k]
         else:
             sys.modules.pop(k, None)
 
