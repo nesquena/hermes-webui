@@ -1711,6 +1711,24 @@ def _custom_provider_slug_from_name(name: object) -> str:
     return "custom:" + slug
 
 
+def _legacy_custom_provider_slug_from_name(name: object) -> str:
+    """Pre-#9209 ASCII-only fold, retained as a fallback alias for saved IDs (#9209 round 2)."""
+    raw = str(name or "").strip().lower()
+    if not raw:
+        return ""
+    if raw.startswith("custom:"):
+        return raw
+    slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)
+    return ("custom:" + slug) if slug else ""
+
+
+def _legacy_custom_provider_slug_key(value: object) -> str:
+    """Legacy bare slug for custom-provider fallback resolution (#9209 round 2)."""
+    produced = _legacy_custom_provider_slug_from_name(value)
+    return produced.split(":", 1)[1] if produced.startswith("custom:") else produced
+
+
 def _is_native_custom_provider_key(key: object) -> bool:
     """Separate custom mapping keys from built-in/plugin provider settings."""
     if not isinstance(key, str) or not key.strip():
@@ -3513,7 +3531,8 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
     """
     if not slug_key or not isinstance(custom_providers, list):
         return None
-    matches: list[dict] = []
+    canonical_matches: list[dict] = []
+    legacy_matches: list[dict] = []
     for entry in custom_providers:
         if not isinstance(entry, dict):
             continue
@@ -3521,15 +3540,29 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
         if not name:
             continue
         if _custom_provider_slug_key(name) == slug_key:
-            matches.append(entry)
-    if len(matches) >= 2:
-        names = [str(e.get("name") or "").strip() for e in matches]
+            canonical_matches.append(entry)
+        elif _legacy_custom_provider_slug_key(name) == slug_key:
+            # #9209 round 2: fallback alias for previously saved WebUI IDs
+            legacy_matches.append(entry)
+    if len(canonical_matches) >= 2:
+        names = [str(e.get("name") or "").strip() for e in canonical_matches]
         raise AmbiguousCustomProviderError(
             f"Custom providers {names!r} all normalize to the same provider slug "
             f"{slug_key!r}; an endpoint and API key could be resolved from "
             f"different entries. Rename one so each custom provider has a unique slug."
         )
-    return matches[0] if matches else None
+    if canonical_matches:
+        return canonical_matches[0]
+    # #9209 round 2: consult legacy fallback only after canonical identity matched nothing.
+    # Ambiguous aliases fail closed rather than borrowing another provider's endpoint/key.
+    if len(legacy_matches) >= 2:
+        names = [str(e.get("name") or "").strip() for e in legacy_matches]
+        raise AmbiguousCustomProviderError(
+            f"Custom providers {names!r} all normalize to the same provider slug "
+            f"{slug_key!r}; an endpoint and API key could be resolved from "
+            f"different entries. Rename one so each custom provider has a unique slug."
+        )
+    return legacy_matches[0] if legacy_matches else None
 
 
 def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
@@ -4255,6 +4288,9 @@ def _custom_record_claims_slug(record: object, slug: str, *, allow_name: bool = 
             continue
         if _custom_provider_slug_key(value) == slug:
             return True
+        # #9209 round 2: fallback alias for previously saved WebUI IDs
+        if _legacy_custom_provider_slug_key(value) == slug:
+            return True
     return False
 
 
@@ -4364,6 +4400,15 @@ def _custom_record_names_identity(display_name: object, provider_key: object, pi
         return True
     return any(
         _custom_provider_slug_key(value) == slug
+        for value in (display_name, provider_key)
+        if str(value or "").strip()
+    )
+
+
+def _custom_record_names_legacy_identity(display_name: object, provider_key: object, pid: str, slug: str) -> bool:
+    """True when a record's name/key folds to ``slug`` under the pre-#9209 ASCII fold (#9209 round 2)."""
+    return any(
+        _legacy_custom_provider_slug_key(value) == slug
         for value in (display_name, provider_key)
         if str(value or "").strip()
     )
@@ -4722,7 +4767,8 @@ def _unique_raw_provider_record(providers_cfg: object, pid: str, slug: str) -> d
     """
     if not isinstance(providers_cfg, dict):
         return None
-    owning: list[tuple[str, dict]] = []
+    canonical_owning: list[tuple[str, dict]] = []
+    legacy_owning: list[tuple[str, dict]] = []
     for ep_name, record in providers_cfg.items():
         key = str(ep_name or "").strip()
         if not key or key.lower() in {pid, "custom"}:
@@ -4731,19 +4777,34 @@ def _unique_raw_provider_record(providers_cfg: object, pid: str, slug: str) -> d
             continue
         if not _raw_provider_record_enabled(record):
             continue
-        if not _custom_record_names_identity(record.get("name") or key, key, pid, slug):
-            continue
         normalized = _normalized_raw_provider_record(record, key)
-        if _custom_record_owns_connection(normalized, pid):
-            owning.append((key, normalized))
-    if len(owning) >= 2:
-        keys = [key for key, _record in owning]
+        if not _custom_record_owns_connection(normalized, pid):
+            continue
+        name_val = record.get("name") or key
+        if _custom_record_names_identity(name_val, key, pid, slug):
+            canonical_owning.append((key, normalized))
+        elif _custom_record_names_legacy_identity(name_val, key, pid, slug):
+            # #9209 round 2: fallback alias for previously saved WebUI IDs
+            legacy_owning.append((key, normalized))
+    if len(canonical_owning) >= 2:
+        keys = [key for key, _record in canonical_owning]
         raise AmbiguousCustomProviderError(
             f"Custom provider records {keys!r} under providers: all name the provider "
             f"slug {slug!r}; an endpoint and API key could be resolved from different "
             f"records. Rename one so each custom provider has a unique slug."
         )
-    return owning[0][1] if owning else None
+    if canonical_owning:
+        return canonical_owning[0][1]
+    # #9209 round 2: consult legacy fallback only when no canonical record matched.
+    # Ambiguous legacy aliases fail closed rather than borrowing another provider's endpoint/key.
+    if len(legacy_owning) >= 2:
+        keys = [key for key, _record in legacy_owning]
+        raise AmbiguousCustomProviderError(
+            f"Custom provider records {keys!r} under providers: all name the provider "
+            f"slug {slug!r}; an endpoint and API key could be resolved from different "
+            f"records. Rename one so each custom provider has a unique slug."
+        )
+    return legacy_owning[0][1] if legacy_owning else None
 
 
 def _native_custom_provider_record(providers_cfg: object, pid: str, slug: str) -> tuple[dict | None, bool]:
@@ -4770,7 +4831,10 @@ def _native_custom_provider_record(providers_cfg: object, pid: str, slug: str) -
         _is_native_custom_provider_key(key)
         and isinstance(candidate, dict) and bool(candidate)
         and not _raw_provider_record_enabled(candidate)
-        and _custom_record_names_identity(candidate.get("name") or key, key, pid, slug)
+        and (
+            _custom_record_names_identity(candidate.get("name") or key, key, pid, slug)
+            or _custom_record_names_legacy_identity(candidate.get("name") or key, key, pid, slug)
+        )
         for key, candidate in providers_cfg.items()
     )
     if disabled:
@@ -4785,7 +4849,18 @@ def _native_custom_provider_record(providers_cfg: object, pid: str, slug: str) -
         if _is_native_custom_provider_key(key) and isinstance(candidate, dict) and candidate
         and _raw_provider_record_enabled(candidate) and _custom_provider_slug_key(key) == slug
     ]
-    return (metadata[0] if len(metadata) == 1 else None), False
+    if len(metadata) == 1:
+        return metadata[0], False
+    if not metadata:
+        legacy_metadata = [
+            _normalized_raw_provider_record(candidate, key)
+            for key, candidate in providers_cfg.items()
+            if _is_native_custom_provider_key(key) and isinstance(candidate, dict) and candidate
+            and _raw_provider_record_enabled(candidate) and _legacy_custom_provider_slug_key(key) == slug
+        ]
+        if len(legacy_metadata) == 1:
+            return legacy_metadata[0], False
+    return None, False
 
 
 def _custom_provider_identity_disabled(provider_id: str, cfg_data: dict) -> bool:

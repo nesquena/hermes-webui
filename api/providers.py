@@ -43,6 +43,7 @@ from api.config import (
     _configured_model_ids,
     _custom_provider_entries,
     _custom_provider_slug_from_name,
+    _legacy_custom_provider_slug_from_name,
     _is_native_custom_provider_key,
     _resolve_configured_provider_id,
     _resolve_custom_record_key,
@@ -83,6 +84,10 @@ def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
     candidates = {raw_name, f"custom:{raw_name}"}
     if slug:
         candidates.add(slug)
+    # #9209 round 2: fallback alias for previously saved WebUI IDs
+    legacy_slug = _legacy_custom_provider_slug_from_name(raw_name)
+    if legacy_slug:
+        candidates.add(legacy_slug)
     return pid in candidates
 
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
