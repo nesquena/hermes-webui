@@ -284,6 +284,18 @@ def _expanded_scene(width, *, detailed=False, running=True, nested="children",
         if detailed
         else ""
     )
+    # sessions.js folds `_child_session_streaming` into `isStreaming` and marks
+    # the row's timestamp `is-hidden` (emptying it) on `isStreaming ||
+    # hasUnread || attention`. A parent whose CHILD is running therefore keeps
+    # no visible timestamp and carries no `.streaming` class (that one is for
+    # the row's own run), so no class rule reserves its 40px action lane: the
+    # lane has to come from the timestamp's own hidden state. Emitting a visible
+    # `5m` here measured a row the user never sees and left the lane untested.
+    parent_time = (
+        '<span class="session-time is-hidden"></span>'
+        if running
+        else '<span class="session-time">5m</span>'
+    )
     if nested == "children":
         kids = (
             '<button type="button" class="session-child-session" id="plain-child">'
@@ -311,7 +323,7 @@ def _expanded_scene(width, *, detailed=False, running=True, nested="children",
           </div>
           <span class="session-project-dot" style="background:#4a9"></span>
           <span class="session-child-count">2 children</span>
-          <span class="session-time">5m</span>
+          {parent_time}
         </div>
         {meta}
         <div class="{kids_class}" id="kids">
@@ -331,15 +343,20 @@ def _expanded_scene(width, *, detailed=False, running=True, nested="children",
 # reach the FORK. The badge/title rects are sampled with the nested list
 # visible and hidden, to prove expanding moves nothing.
 EXPANDED_MEASURE = """() => {
-  window.__clicks = [];
-  for (const b of document.querySelectorAll(
-      '.session-actions-trigger, .session-child-session-main, .session-lineage-segment')) {
-    b.addEventListener('click', () => {
-      const fork = b.closest('.session-child-session-fork');
-      if (fork && b.classList.contains('session-actions-trigger')) { window.__clicks.push(fork.id); return; }
-      if (b.id) { window.__clicks.push(b.id); return; }
-      window.__clicks.push(b.className);
-    });
+  // Attach the listener once: the function is evaluated at rest and again on
+  // hover, and a second pass must not log every click twice.
+  if (!window.__clickProbe) {
+    window.__clickProbe = true;
+    window.__clicks = [];
+    for (const b of document.querySelectorAll(
+        '.session-actions-trigger, .session-child-session-main, .session-lineage-segment')) {
+      b.addEventListener('click', () => {
+        const fork = b.closest('.session-child-session-fork');
+        if (fork && b.classList.contains('session-actions-trigger')) { window.__clicks.push(fork.id); return; }
+        if (b.id) { window.__clicks.push(b.id); return; }
+        window.__clicks.push(b.className);
+      });
+    }
   }
   const rect = (el) => { const b = el ? el.getBoundingClientRect() : {left:0,right:0,top:0,bottom:0,width:0,height:0};
     return {left: b.left, right: b.right, top: b.top, bottom: b.bottom, width: b.width, height: b.height}; };
@@ -371,9 +388,22 @@ EXPANDED_MEASURE = """() => {
   kids.style.display = 'none';
   const collapsed = {badge: rect(badge), titleGroup: rect(titleGroup)};
   kids.style.display = '';
+  const parentRow = document.getElementById('parent');
+  const parentStyle = getComputedStyle(parentRow);
+  const parentTime = document.querySelector('#parent .session-title-row > .session-time');
   const main = document.getElementById('fork1-main');
   const mainStyle = main && getComputedStyle(main);
   return {
+    // The row the user actually sees: the parent's timestamp is replaced by a
+    // state indicator when its child runs, so the fixture must show it hidden
+    // (and the row must carry no `.streaming` class, which would reserve the
+    // lane for the wrong reason).
+    parentRowClasses: parentRow.className,
+    parentTimeHidden: Boolean(parentTime && parentTime.classList.contains('is-hidden')),
+    parentTimeDisplay: parentTime ? getComputedStyle(parentTime).display : null,
+    // The action button's lane, measured on the row: 40px (26px button at
+    // right:6px) must be reserved whether the pointer is in the row or not.
+    parentPaddingRight: parseFloat(parentStyle.paddingRight),
     parentActions: pa,
     parentActionsDisplay: getComputedStyle(actions).display,
     parentActionsCentre: (pa.top + pa.bottom) / 2,
@@ -449,12 +479,17 @@ def _measure_expanded(width=280, *, detailed=False, running=True, nested="childr
                 measured = page.evaluate(TOUCH_MEASURE)
                 context.close()
                 return measured
+            # The same measurement with the pointer elsewhere: the lane and the
+            # fork's content width must not depend on hover, and the "would it
+            # regress" check is that rest == hover.
+            at_rest = page.evaluate(EXPANDED_MEASURE)
             # The pointer enters the first nested row, which also means it is
             # inside the parent: this is the state in which both triggers used
             # to sit on the same spot.
             page.hover("#fork1" if nested == "children" else "#segment1")
             page.wait_for_timeout(80)
             measured = page.evaluate(EXPANDED_MEASURE)
+            measured["rest"] = at_rest
             if click:
                 page.mouse.click(
                     measured["fork1Centre"]["x"], measured["fork1Centre"]["y"]
@@ -545,6 +580,36 @@ def test_the_anchored_trigger_holds_at_the_detailed_density():
     detailed = _measure_expanded(280, detailed=True)
 
     for label, m in (("compact", compact), ("detailed", detailed)):
+        # The fixture, then the lane it must reserve, then the mechanism that
+        # produces it, then the hit test — measurement before CSS.
+        assert m["parentTimeHidden"], (
+            f"{label}: the fixture is not the row the user sees — a parent whose "
+            "child runs has its timestamp `is-hidden` (and empty), not a visible "
+            f"stamp: {m['parentRowClasses']!r}"
+        )
+        assert m["parentTimeDisplay"] == "none", (
+            f"{label}: the hidden timestamp still occupies its box "
+            f"(display {m['parentTimeDisplay']!r}), so it cannot hold the lane"
+        )
+        assert m["parentPaddingRight"] == pytest.approx(40, abs=0.5), (
+            f"{label}: the parent's row reserves {m['parentPaddingRight']}px for "
+            "the action button, not the 40px its 26px button at right:6px needs"
+        )
+        assert m["parentPaddingRight"] == pytest.approx(
+            m["rest"]["parentPaddingRight"], abs=0.01
+        ), (
+            f"{label}: the row's lane changes when the pointer enters it "
+            f"({m['rest']['parentPaddingRight']}px -> {m['parentPaddingRight']}px): "
+            "that is the reflow this fix removes"
+        )
+        assert m["fork1MainContent"] == pytest.approx(m["rest"]["fork1MainContent"], abs=0.5), (
+            f"{label}: the fork's content width changes on hover "
+            f"({m['rest']['fork1MainContent']}px -> {m['fork1MainContent']}px)"
+        )
+        assert m["nestedPaddingRight"] == pytest.approx(0, abs=0.05), (
+            f"{label}: the nested list reserves {m['nestedPaddingRight']}px for "
+            "the parent's button, which comes out of the fork's label"
+        )
         assert m["parentActionsCentre"] == pytest.approx(m["titleRowCentre"], abs=0.6), (
             f"{label}: the button is not centred on its title row "
             f"({m['parentActionsCentre']} vs {m['titleRowCentre']})"
@@ -561,17 +626,48 @@ def test_minimum_sidebar_width_keeps_the_fork_label_readable():
     # 180px is the sidebar's supported minimum (boot.js resize floor). With a
     # running child the parent's hidden timestamp reserves 40px, and the fork
     # row adds its own indentation, state slot and trigger: the label must
-    # still get room.
+    # still get room. Order matters — the fixture, then the lane on the row,
+    # then the fork's rendered content width, and only then the CSS mechanism
+    # that is supposed to produce those numbers.
     for detailed in (False, True):
         m = _measure_expanded(180, detailed=detailed, running=True)
         label = "detailed" if detailed else "compact"
-        assert m["nestedPaddingRight"] == pytest.approx(0, abs=0.05), (
-            f"{label}: the nested list still reserves {m['nestedPaddingRight']}px"
+        assert m["parentTimeHidden"], (
+            f"{label}: the fixture is not the row the user sees — a parent whose "
+            "child runs keeps no visible timestamp, so the fixture must emit "
+            f"`session-time is-hidden`: {m['parentRowClasses']!r}"
+        )
+        assert m["parentTimeDisplay"] == "none", (
+            f"{label}: the hidden timestamp still occupies its box "
+            f"(display {m['parentTimeDisplay']!r})"
+        )
+        assert "streaming" not in m["parentRowClasses"].split(), (
+            f"{label}: the fixture row carries a class that reserves the lane on "
+            f"its own ({m['parentRowClasses']!r}) — the lane then comes from the "
+            "class rule and the hidden-timestamp rule is never exercised"
+        )
+        assert m["parentPaddingRight"] == pytest.approx(40, abs=0.5), (
+            f"{label}: at 180px the parent's row reserves "
+            f"{m['parentPaddingRight']}px, not the 40px its action button needs — "
+            "the button sits on the child badge without it"
+        )
+        assert m["parentPaddingRight"] == pytest.approx(
+            m["rest"]["parentPaddingRight"], abs=0.01
+        ), (
+            f"{label}: the 40px lane is re-taken on hover "
+            f"({m['rest']['parentPaddingRight']}px -> {m['parentPaddingRight']}px)"
         )
         assert m["fork1MainContent"] > 16, (
             f"{label}: at the 180px minimum the fork's title is left with "
             f"{m['fork1MainContent']}px of content width (button "
             f"{m['fork1MainWidth']}px): its label is unreadable"
+        )
+        assert m["fork1MainContent"] == pytest.approx(m["rest"]["fork1MainContent"], abs=0.5), (
+            f"{label}: the fork's content width is not stable across the hover "
+            f"({m['rest']['fork1MainContent']}px -> {m['fork1MainContent']}px)"
+        )
+        assert m["nestedPaddingRight"] == pytest.approx(0, abs=0.05), (
+            f"{label}: the nested list still reserves {m['nestedPaddingRight']}px"
         )
         assert not m["parentTriggerOverFork"], (
             f"{label}: at 180px the parent's trigger reaches the fork's kebab: "
