@@ -37263,21 +37263,10 @@ def _is_terminal_assistant_message(msg: dict) -> bool:
 
     if is_context_compression_marker(msg):
         return False
-    raw_content = msg.get("content")
-    if isinstance(raw_content, str):
-        text = raw_content.strip()
-    elif isinstance(raw_content, list):
-        if any(isinstance(part, dict) and part.get("type") == "tool_use" for part in raw_content):
-            return False
-        text_parts = [
-            str(part.get("text") or part.get("content") or "")
-            for part in raw_content
-            if isinstance(part, dict) and part.get("type") in ("", "text", "input_text", "output_text", None)
-        ]
-        text = "".join(text_parts).strip()
-    else:
-        text = ""
-    return bool(text)
+
+    from api.streaming import _assistant_message_has_final_visible_text
+
+    return _assistant_message_has_final_visible_text(msg)
 
 
 def _extract_latest_completed_exchange(messages: list) -> tuple:
@@ -37318,28 +37307,52 @@ def _extract_latest_completed_exchange(messages: list) -> tuple:
     if not _is_terminal_assistant_message(last_assistant):
         return None, None
 
+    from api.streaming import _assistant_content_part_is_tool_use
+
     declared_tool_ids = set()
     for msg in turn_messages[:-1]:
         if msg.get("role") == "assistant":
             for tc in (msg.get("tool_calls") or []):
-                if isinstance(tc, dict) and tc.get("id"):
-                    declared_tool_ids.add(str(tc["id"]).strip())
+                if isinstance(tc, dict):
+                    tid = (
+                        tc.get("id")
+                        or tc.get("tid")
+                        or tc.get("tool_call_id")
+                        or tc.get("tool_use_id")
+                        or tc.get("call_id")
+                    )
+                    if tid:
+                        declared_tool_ids.add(str(tid).strip())
             content = msg.get("content")
             if isinstance(content, list):
                 for part in content:
-                    if isinstance(part, dict) and part.get("type") == "tool_use" and part.get("id"):
-                        declared_tool_ids.add(str(part["id"]).strip())
+                    if isinstance(part, dict) and _assistant_content_part_is_tool_use(part):
+                        tid = (
+                            part.get("id")
+                            or part.get("tid")
+                            or part.get("tool_call_id")
+                            or part.get("tool_use_id")
+                            or part.get("call_id")
+                        )
+                        if tid:
+                            declared_tool_ids.add(str(tid).strip())
 
     resolved_tool_ids = set()
     for msg in turn_messages[:-1]:
-        if msg.get("role") == "tool" and msg.get("tool_call_id"):
-            resolved_tool_ids.add(str(msg["tool_call_id"]).strip())
+        if msg.get("role") == "tool":
+            tid = msg.get("tool_call_id") or msg.get("tool_use_id") or msg.get("id")
+            if tid:
+                resolved_tool_ids.add(str(tid).strip())
         content = msg.get("content")
         if isinstance(content, list):
             for part in content:
-                if isinstance(part, dict) and part.get("type") == "tool_result":
-                    res_id = part.get("tool_use_id") or part.get("tool_call_id")
-                    if res_id:
+                if isinstance(part, dict):
+                    if part.get("type") in ("tool_result", "tool_response"):
+                        res_id = part.get("tool_use_id") or part.get("tool_call_id") or part.get("id")
+                        if res_id:
+                            resolved_tool_ids.add(str(res_id).strip())
+                    elif part.get("tool_call_id") or part.get("tool_use_id"):
+                        res_id = part.get("tool_call_id") or part.get("tool_use_id")
                         resolved_tool_ids.add(str(res_id).strip())
 
     if not declared_tool_ids.issubset(resolved_tool_ids):
@@ -37356,10 +37369,33 @@ def _canonical_tool_calls(tool_calls: list | None) -> list:
     for tc in tool_calls:
         if not isinstance(tc, dict):
             continue
-        tc_id = tc.get("id") or tc.get("tool_call_id") or ""
+        tc_id = (
+            tc.get("id")
+            or tc.get("tid")
+            or tc.get("tool_call_id")
+            or tc.get("tool_use_id")
+            or tc.get("call_id")
+            or ""
+        )
         fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
-        fn_name = fn.get("name") or tc.get("name") or ""
-        fn_args = fn.get("arguments") or tc.get("arguments") or tc.get("input") or ""
+        fn_name = tc.get("name") or tc.get("tool_name") or fn.get("name") or ""
+        fn_args = None
+        for k in ("args", "input", "arguments"):
+            if k in tc and tc[k] is not None:
+                fn_args = tc[k]
+                break
+        if fn_args is None and isinstance(fn, dict):
+            for k in ("arguments", "args"):
+                if k in fn and fn[k] is not None:
+                    fn_args = fn[k]
+                    break
+        if isinstance(fn_args, str):
+            try:
+                parsed = json.loads(fn_args)
+                if isinstance(parsed, dict):
+                    fn_args = parsed
+            except Exception:
+                pass
         if isinstance(fn_args, dict):
             fn_args_str = json.dumps(fn_args, sort_keys=True)
         else:
@@ -37386,13 +37422,26 @@ def _canonical_message_content(content) -> list:
         text = str(content or "").strip()
         return [("text", text)] if text else []
 
+    from api.streaming import _assistant_content_part_is_tool_use
+
+    pure_text_keys = {"type", "text", "content", "input_text", "output_text"}
     has_non_text = False
     for part in content:
         if isinstance(part, str):
             continue
         if isinstance(part, dict):
+            if _assistant_content_part_is_tool_use(part):
+                has_non_text = True
+                break
             ptype = str(part.get("type") or "text").lower()
             if ptype not in ("", "text", "input_text", "output_text"):
+                has_non_text = True
+                break
+            extra_keys = {
+                k for k in part.keys()
+                if not k.startswith("_") and k not in pure_text_keys
+            }
+            if extra_keys:
                 has_non_text = True
                 break
         else:
@@ -37405,7 +37454,9 @@ def _canonical_message_content(content) -> list:
             if isinstance(part, str):
                 text_parts.append(part)
             elif isinstance(part, dict):
-                text_parts.append(str(part.get("text") or part.get("content") or part.get("input_text") or part.get("output_text") or ""))
+                text_parts.append(
+                    str(part.get("text") or part.get("content") or part.get("input_text") or part.get("output_text") or "")
+                )
         combined = "".join(text_parts).strip()
         return [("text", combined)] if combined else []
 
@@ -37414,19 +37465,52 @@ def _canonical_message_content(content) -> list:
         if isinstance(part, str):
             canonical_parts.append(("text", part.strip()))
         elif isinstance(part, dict):
+            if _assistant_content_part_is_tool_use(part):
+                fn = part.get("function") if isinstance(part.get("function"), dict) else {}
+                t_id = (
+                    part.get("id")
+                    or part.get("tid")
+                    or part.get("tool_call_id")
+                    or part.get("tool_use_id")
+                    or part.get("call_id")
+                    or ""
+                )
+                t_name = part.get("name") or part.get("tool_name") or fn.get("name") or ""
+                t_args = None
+                for k in ("args", "input", "arguments"):
+                    if k in part and part[k] is not None:
+                        t_args = part[k]
+                        break
+                if t_args is None and isinstance(fn, dict):
+                    for k in ("arguments", "args"):
+                        if k in fn and fn[k] is not None:
+                            t_args = fn[k]
+                            break
+                if isinstance(t_args, str):
+                    try:
+                        parsed = json.loads(t_args)
+                        if isinstance(parsed, dict):
+                            t_args = parsed
+                    except Exception:
+                        pass
+                if isinstance(t_args, dict):
+                    t_args_str = json.dumps(t_args, sort_keys=True)
+                else:
+                    t_args_str = str(t_args or "").strip()
+                canonical_parts.append(("tool_use", str(t_id).strip(), str(t_name).strip(), t_args_str))
+                continue
+
             ptype = str(part.get("type") or "text").lower()
             if ptype in ("", "text", "input_text", "output_text"):
                 txt = str(part.get("text") or part.get("content") or part.get("input_text") or part.get("output_text") or "").strip()
-                canonical_parts.append(("text", txt))
-            elif ptype == "tool_use":
-                t_id = str(part.get("id") or "").strip()
-                t_name = str(part.get("name") or "").strip()
-                t_input = part.get("input") or part.get("arguments") or ""
-                if isinstance(t_input, dict):
-                    t_input_str = json.dumps(t_input, sort_keys=True)
+                extra_dict = {
+                    k: v for k, v in part.items()
+                    if not k.startswith("_") and k not in pure_text_keys
+                }
+                if extra_dict:
+                    canonical_parts.append(("text", txt, json.dumps(extra_dict, sort_keys=True)))
                 else:
-                    t_input_str = str(t_input or "").strip()
-                canonical_parts.append(("tool_use", t_id, t_name, t_input_str))
+                    canonical_parts.append(("text", txt))
             elif ptype in ("image_url", "image"):
                 img = part.get("image_url") or part.get("image") or part.get("source") or ""
                 if isinstance(img, dict):
