@@ -2041,6 +2041,13 @@ def test_model_and_reasoning_controls_live_in_mobile_overflow_panel():
             f"phone width must show {selector} as an icon-only control"
     assert ".composer-reasoning-wrap.is-available" in flat_css, \
         "the phone reasoning chip must key on the model's own capability class"
+    # What folded to make room: the two controls that are advanced or duplicated.
+    for selector in ("#profileChipWrap", ".composer-left > .provider-quota-chip"):
+        assert _rule_body(mobile_css, selector).strip() == "display:none!important;", \
+            f"phone width must fold {selector} to fit the steering chips"
+    assert ".composer-ws-wrap{display:none" not in flat_css, \
+        ("the workspace switch must stay focusable at phone width: the drawer's close "
+         "hands focus back to #btnWorkspacePanelToggle, and a hidden invoker strands it")
     assert "is-available" in ui_js, \
         "ui.js must set the capability class the phone reasoning chip keys on"
     assert ".composer-mobile-config-action" in mobile_css, \

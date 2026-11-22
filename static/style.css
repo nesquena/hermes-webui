@@ -3499,11 +3499,14 @@
        pushed the left cluster past its box at 390px (measured 368px of content in a
        302px cluster, so the leading controls scrolled out of sight). */
     .composer-left > .provider-quota-chip{display:none!important;}
-    /* ...and so does the workspace switch, which the mobile panel carries as its own
-       action. Seven 44px controls plus their gaps need 368px and the phone cluster is
-       302px, so the row can only hold six: the two chips the user asked for stay, the
-       two that already have a panel twin go. */
-    .composer-left > .composer-ws-wrap{display:none!important;}
+    /* The profile switcher folds too. Seven 44px controls plus their gaps
+       need 368px and the phone cluster is 302px, so the row can only hold six:
+       the two chips a live conversation is steered by stay, the inline quota pill
+       folds (it has a panel action), and so does this one — an advanced,
+       per-session setting. The workspace switch deliberately does NOT fold: the
+       drawer it opens owns an a11y contract (its close returns focus to
+       #btnWorkspacePanelToggle), and a hidden invoker strands focus on <body>. */
+    #profileChipWrap{display:none!important;}
     .composer-left{gap:4px;}
     .composer-footer .composer-left > .composer-model-wrap,
     .composer-footer.cf-burger .composer-left > .composer-model-wrap{display:inline-flex!important;}

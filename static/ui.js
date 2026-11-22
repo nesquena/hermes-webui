@@ -8213,14 +8213,14 @@ function _applyReasoningChip(eff){
   const supports=hasEffortLadder||toggleSupported;
   if(!supports){
     wrap.style.display='none';
-    wrap.classList.remove('is-available');
+    if(wrap.classList&&typeof wrap.classList.remove==='function') wrap.classList.remove('is-available');
     if(mobileAction) mobileAction.style.display='none';
     return;
   }
   wrap.style.display='';
   // Phone width shows this wrap inline (the mobile media block keys on it), so the
   // capability that gates the inline style must be readable from CSS too.
-  wrap.classList.add('is-available');
+  if(wrap.classList&&typeof wrap.classList.add==='function') wrap.classList.add('is-available');
   if(mobileAction) mobileAction.style.display='';
   if(typeof _applyReasoningOptions==='function') _applyReasoningOptions(supportedEfforts);
   const text=_formatReasoningEffortLabel(effort);
