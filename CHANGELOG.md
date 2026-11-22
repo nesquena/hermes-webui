@@ -37,6 +37,8 @@
 
 ### Fixed
 
+- **A public share page no longer hides part of a message (#9214).** Some messages contained text the page left out without any sign: an HTML comment, an attribute value the renderer drops, or angle-bracket text such as `git checkout <branch-name>` or a traceback's `File "<stdin>", line 1, in <module>`. Anyone reading the published snapshot's source could still see it. When the rendered message would leave out any of its words, the share page now shows that message as plain text, with a short note, so every word is visible. Messages the page shows in full render as before. A few formatting-only shapes also fall back to plain text although nothing in them is hidden; they're listed in the PR and tracked in #9267.
+
 - **The gateway-sync reset test runs on newer Hermes Agent versions too (#9261, closes #9258).** Both cases of the test that checks a reset conversation stays separate from its reopened parent failed against current Agents, because their fixture used storage calls newer Agents no longer have. The fixture now writes rows with `append_message`, ends the parent session through whichever reset call the installed Agent provides, and checks that the reset took effect.
 
 - **On a server launched under a named profile, values from that profile's `.env` are recognised however the line is written (#9212).** WebUI now compares launch values with the profile's `.env` as WebUI, the launcher and the Agent each read it, so a value loaded from that file is never taken for the operator's own launch setting. The Gateway settings check uses the same comparison. Servers launched as root are unchanged.
