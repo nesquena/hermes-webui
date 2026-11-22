@@ -11967,10 +11967,23 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             if _pool:
                                 _entry = _pool.select()
                                 if _entry:
-                                    if not _cp_api_key:
-                                        _cp_api_key = getattr(_entry, "runtime_api_key", "") or ""
-                                    if not _cp_base_url:
-                                        _cp_base_url = str(getattr(_entry, "base_url", "") or "").strip()
+                                    # The pool owns BOTH halves of the pair. When
+                                    # the endpoint would come from the pool (the
+                                    # record declared no base_url), the credential
+                                    # must come from that same pool entry: pairing
+                                    # the record's key with the pool's URL sends a
+                                    # key the record declared for ANOTHER
+                                    # authority's endpoint. The compatibility
+                                    # ``api_key_env`` spelling (#8959) made that
+                                    # path newly reachable, so the pairing is
+                                    # enforced here (#9225).
+                                    _pool_key = getattr(_entry, "runtime_api_key", "") or ""
+                                    _pool_url = str(getattr(_entry, "base_url", "") or "").strip()
+                                    if not _cp_base_url and _pool_url:
+                                        _cp_base_url = _pool_url
+                                        _cp_api_key = _pool_key
+                                    elif not _cp_api_key:
+                                        _cp_api_key = _pool_key
                     except ImportError:
                         pass
 
