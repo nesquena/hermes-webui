@@ -6930,6 +6930,22 @@ def _session_scene_updated_at(session) -> float:
     return _anchor_scene_records_updated_at(session)
 
 
+def _drop_pending_shrink_generation(cached, generation, message_count) -> None:
+    """Clear the #9029 pending-shrink marker only if it is still this shrink.
+
+    The freshness check observes the marker outside LOCK, so by the time it
+    decides the window is over a newer shrink (or a concurrent append) may have
+    replaced it. Re-check the generation token and the message count under LOCK
+    before clearing so an older observation can never drop a newer marker.
+    """
+    with LOCK:
+        if getattr(cached, 'intentional_shrink_generation', None) != generation:
+            return
+        if len(getattr(cached, 'messages', None) or []) != message_count:
+            return
+        cached._intentional_shrink_pending_count = None
+
+
 def _cached_session_lags_disk(cached) -> bool:
     """Return True when a cached full session is older than its sidecar.
 
@@ -6955,33 +6971,42 @@ def _cached_session_lags_disk(cached) -> bool:
     sid = getattr(cached, 'session_id', None)
     if not sid:
         return False
-    cached_count = len(getattr(cached, 'messages', None) or [])
-    # Fast path: prefix read of just the metadata header.
-    disk_count = _persisted_message_count(sid)
-    if disk_count is not None:
-        # #9029: retry/undo (and the truncate route) shrink the cached
-        # transcript under LOCK, release it, and save afterwards. In that window
-        # the cache is deliberately SHORTER than its sidecar, which otherwise
-        # looks exactly like a cache that lags the disk: the old file was
-        # reloaded into SESSIONS and the removed reply came back. The in-memory
-        # pending count records the pre-shrink snapshot the cache branched
-        # from. While disk still holds that snapshot (or anything older), the
-        # shorter cache is the newer state and must win.
+    # #9029: retry/undo (and the truncate route) shrink the cached transcript
+    # under LOCK, release it, and save afterwards. In that window the cache is
+    # deliberately SHORTER than its sidecar, which otherwise looks exactly like
+    # a cache that lags the disk: the old file was reloaded into SESSIONS and
+    # the removed reply came back. The in-memory pending count records the
+    # pre-shrink snapshot the cache branched from. While disk still holds that
+    # snapshot (or anything older), the shorter cache is the newer state and
+    # must win.
+    #
+    # Read the count and the marker TOGETHER under LOCK. Shrinks also mutate
+    # under LOCK, so a lock-free read can pair a pre-shrink count with a
+    # post-shrink marker; disk at the old count would then look like the
+    # shrink's save landed and the marker would be dropped before the save
+    # (Greptile P1 on PR #9273). The generation is the token that lets a clear
+    # prove it still refers to the shrink this snapshot observed.
+    with LOCK:
+        cached_count = len(getattr(cached, 'messages', None) or [])
         pending_shrink = _parse_nonnegative_int(
             getattr(cached, '_intentional_shrink_pending_count', None)
         )
+        pending_generation = getattr(cached, 'intentional_shrink_generation', None)
+    # Fast path: prefix read of just the metadata header.
+    disk_count = _persisted_message_count(sid)
+    if disk_count is not None:
         if pending_shrink is not None:
             if disk_count == cached_count:
                 # The shrink's save landed (or disk otherwise reached parity):
                 # the window is over, drop the marker so it cannot outlive it.
-                cached._intentional_shrink_pending_count = None
+                _drop_pending_shrink_generation(cached, pending_generation, cached_count)
             elif disk_count <= pending_shrink:
                 return False
             else:
                 # A real writer moved the sidecar past the snapshot this shrink
                 # branched from (e.g. a stream checkpoint appended a message).
                 # Disk is genuinely ahead; let the normal check below decide.
-                cached._intentional_shrink_pending_count = None
+                _drop_pending_shrink_generation(cached, pending_generation, cached_count)
         if disk_count > cached_count:
             return True
         # Disk is at most as far as cache. Even when counts match, anchor scene

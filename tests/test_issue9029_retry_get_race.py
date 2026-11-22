@@ -165,6 +165,98 @@ def test_get_between_truncation_and_save_cannot_restore_removed_reply(
     assert [row["content"] for row in _load_disk(session_dir, sid)] == SHRUNK
 
 
+@pytest.mark.parametrize("operation", [retry_last, undo_last], ids=["retry", "undo"])
+def test_get_parked_after_count_snapshot_does_not_drop_new_marker(
+    tmp_path, monkeypatch, operation
+):
+    """Greptile P1 on #9273: the count snapshot must not be lock-free.
+
+    A GET that read ``cached_count`` BEFORE the shrink and then reads the marker
+    AFTER it sees ``disk_count == cached_count`` (the stale count) and clears
+    the fresh marker as if the shrink's save had landed. A second GET then
+    reloads the pre-truncation file and the removed reply comes back.
+    Snapshotting the count and marker under LOCK, and clearing only the
+    generation the snapshot observed, keeps the new marker alive.
+    """
+    session_dir = tmp_path / "sessions"
+    sid = f"issue9029-stale-count-{operation.__name__}"
+    _seed_and_cache(session_dir, sid)
+
+    parked = threading.Event()
+    resume = threading.Event()
+    inside_freshness = {"value": False}
+    real_lags = models._cached_session_lags_disk
+    real_count = models._persisted_message_count
+
+    def lags(cached):
+        inside_freshness["value"] = True
+        try:
+            return real_lags(cached)
+        finally:
+            inside_freshness["value"] = False
+
+    def count(session_id):
+        # Park ONLY the freshness check's disk-count read, after it has taken
+        # its count snapshot and before it compares the marker.
+        if session_id == sid and inside_freshness["value"] and not parked.is_set():
+            parked.set()
+            assert resume.wait(WAIT), "the parked GET was never resumed"
+        return real_count(session_id)
+
+    monkeypatch.setattr(models, "_cached_session_lags_disk", lags)
+    monkeypatch.setattr(models, "_persisted_message_count", count)
+
+    first = {}
+
+    def _first_get():
+        try:
+            first["session"] = models.get_session(sid)
+        except BaseException as exc:  # surfaced on the main thread below
+            first["error"] = exc
+
+    getter = threading.Thread(target=_first_get, name="get-9029-parked", daemon=True)
+    getter.start()
+    assert parked.wait(WAIT), "the GET never reached the disk-count read"
+
+    # The GET holds its pre-shrink snapshot (5 messages, no marker) and is
+    # parked before reading the count. Run the real retry/undo: its save hook
+    # resumes the GET in the truncated-not-yet-saved window, then lands a
+    # second full GET before the save itself.
+    real_save = Session.save
+    state = {"armed": True, "second": None}
+
+    def save(self, *args, **kwargs):
+        if state["armed"] and self.session_id == sid:
+            state["armed"] = False
+            resume.set()
+            getter.join(WAIT)
+            assert not getter.is_alive(), "the interleaved GET never returned"
+            assert "error" not in first, first.get("error")
+            state["second"] = models.get_session(sid)
+        return real_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "save", save)
+    try:
+        operation(sid)
+    finally:
+        state["armed"] = False
+        resume.set()
+        getter.join(WAIT)
+
+    # The parked GET resumed after the in-memory shrink and must not have
+    # resurrected the old transcript for itself...
+    assert [row["content"] for row in first["session"].messages] == SHRUNK
+    # ...nor for the second GET that landed before the save.
+    second = state["second"]
+    assert second is not None
+    assert [row["content"] for row in second.messages] == SHRUNK
+
+    after = models.get_session(sid)
+    assert [row["content"] for row in after.messages] == SHRUNK
+    after.save()
+    assert [row["content"] for row in _load_disk(session_dir, sid)] == SHRUNK
+
+
 def test_checkpointed_disk_ahead_of_cache_still_reloads(tmp_path, monkeypatch):
     """Guard: a genuinely newer sidecar must still replace the cache.
 
