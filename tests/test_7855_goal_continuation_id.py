@@ -492,14 +492,14 @@ class TestFrontendWiring:
         # non-admitted failure and compression-recovery paths.
         src = self._messages()
         assert (
-            "function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, goalContinuationId, forcedSkill)"
+            "function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, goalContinuationId)"
             in src
         ), "the failed-send restore helper must accept the draft's continuation ID"
         assert "_setRestoredGoalContinuationDraft(_restoreContId,restore)" in src, (
             "a restored continuation draft must be re-marked so a retry still carries the ID"
         )
         assert (
-            "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId, _sentSkillPayload)"
+            "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId)"
             in src
         ), "the send-error path must pass the invocation-bound continuation ID to the restore"
         # The compression-recovery path restores into a rotated session; it must

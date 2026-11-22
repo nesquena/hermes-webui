@@ -1,11 +1,19 @@
-"""A forced skill stays with the draft restored after a failed send (#9237).
+"""A pending /use skill on a failed send reaches the retry as on master (#9237).
 
 send() consumes a pending /use directive before POST /api/chat/start and
-prepends the directive and the skill content to the message it posts. When
-that start fails and send() puts the typed text back as the chat's draft, the
-skill must come back with it: the next send of exactly that text in that chat
-carries the same forced-skill block once, an edited or abandoned draft drops
-it, and a successful retry uses it up.
+prepends the directive and the skill content to the message it posts. What
+master did with that skill when the start failed, and what this branch does:
+
+| start failure                          | master                         | here                           |
+|----------------------------------------|--------------------------------|--------------------------------|
+| off screen, 409 "active stream"        | queued copy carries the skill  | draft; skill re-armed as that  |
+|                                        | (and pulled the user back)     | chat's pending /use; the retry |
+|                                        |                                | is queued, not steered         |
+| off screen, 500                        | draft, skill dropped           | draft, skill dropped           |
+| off screen, 404                        | no draft, skill dropped        | no draft, skill dropped        |
+| off screen, 409 session_rotated        | skill dropped                  | skill dropped                  |
+| on screen, 409 "active stream"         | queued copy carries the skill  | unchanged                      |
+| on screen, 500 / rotated               | draft, skill dropped           | unchanged                      |
 
 These tests run the real send(), _restoreComposerDraftAfterFailedSend() and
 the restored-draft helpers from static/messages.js in node, switch chats
@@ -36,7 +44,7 @@ def _cut(start_marker: str, end_marker: str) -> str:
 
 SEND_SRC = _cut("async function send(){", "\nasync function startRegeneration(")
 CURRENT_PANE_SRC = _cut("function _isSessionCurrentPane(sid) {", "\nfunction _isSessionActivelyViewed(")
-# The restored-draft helpers (goal continuation id and forced skill).
+# The restored-draft helpers (goal continuation id).
 DRAFT_HELPERS_SRC = _cut("function _normalizeGoalContinuationId(", "\nfunction _bgTaskCompleteRingBufferAdd(")
 RECOVER_AND_RESTORE_SRC = _cut(
     "async function _recoverCompressedSend(", "\nfunction _setComposerAfterCliOnlyExplainer("
@@ -61,6 +69,7 @@ EDITOR_BLOCK = "[FORCED SKILL CONTEXT: editor]"
 
 HARNESS = r"""
 const STEPS = __STEPS__;
+const EDITOR_SKILL = __EDITOR__;
 const calls = [];
 const starts = [];
 const plain = value => JSON.parse(JSON.stringify(value, (k, v) => v === undefined ? null : v));
@@ -181,6 +190,8 @@ async function api(url, opts){
   starts.push({session_id: body.session_id, message: body.message, goal: body.goal_continuation_id});
   const step = plan.shift() || {};
   if(step.switchTo) openChat(step.switchTo);
+  // The user runs /use in the chat they opened while this start is held.
+  if(step.useDuring) _forcedSkillDirectivePending = {sessionId: step.useDuring, promise: Promise.resolve(EDITOR_SKILL)};
   // loadSession() of another chat has started; S.session is still this one.
   if(step.loadingTo) _loadingSessionId = step.loadingTo;
   const r = step.start || 'ok';
@@ -194,6 +205,11 @@ async function api(url, opts){
     const err = new Error('session rotated');
     err.status = 409;
     err.body = JSON.stringify({code:'session_rotated', continuation_session_id:'A2'});
+    throw err;
+  }
+  if(r === '404'){
+    const err = new Error('Session not found');
+    err.status = 404;
     throw err;
   }
   const err = new Error('boom');
@@ -253,6 +269,7 @@ __SEND__
 def _run(*steps):
     script = (
         HARNESS.replace("__STEPS__", json.dumps(list(steps)))
+        .replace("__EDITOR__", json.dumps(EDITOR))
         .replace("__DEFAULT_TITLE__", DEFAULT_TITLE_SRC)
         .replace("__CURRENT_PANE__", CURRENT_PANE_SRC)
         .replace("__DRAFT_HELPERS__", DRAFT_HELPERS_SRC)
@@ -272,8 +289,10 @@ def _type(text):
     return {"type": text}
 
 
-def _send(start="ok", switch_to=None, loading_to=None, cont=None):
+def _send(start="ok", switch_to=None, loading_to=None, cont=None, use_during=None):
     step = {"send": True, "start": start}
+    if use_during:
+        step["useDuring"] = use_during
     if switch_to:
         step["switchTo"] = switch_to
     if loading_to:
@@ -296,68 +315,39 @@ def _skill_count(message, block=WRITER_BLOCK):
     return message.count(block)
 
 
-# ── the finding: off-screen start failure, then the user returns and resends ──
+def _calls(result, name):
+    return [c["args"] for c in result["calls"] if c["name"] == name]
 
 
-@pytest.mark.parametrize("start", ["409-conflict", "500"])
-def test_off_screen_failure_keeps_the_skill_for_the_restored_draft(start):
-    result = _run(*_fail_off_screen(start), _open("A"), _send())
+# ── off-screen 409 "active stream": master's queued copy kept the skill ─────
+
+
+def test_off_screen_conflict_retry_carries_the_skill_as_master_queued_copy_did():
+    result = _run(*_fail_off_screen(), _open("A"), _send())
     first, retry = result["starts"]
     assert _skill_count(first["message"]) == 1
     # The user is back on A with the restored text in the composer.
     assert first["session_id"] == retry["session_id"] == "A"
-    assert retry["message"].endswith("hello")
-    # The retry is the same forced-skill message a fresh /use send posts.
-    assert _skill_count(retry["message"]) == 1
     assert retry["message"] == first["message"]
 
 
-def test_rotated_off_screen_failure_keeps_the_skill_on_the_continuation_draft():
-    result = _run(*_fail_off_screen("409-rotated"), _open("A2"), _send())
-    first, retry = result["starts"]
-    assert retry["session_id"] == "A2"
-    assert _skill_count(retry["message"]) == 1
-    assert retry["message"] == first["message"]
+def test_off_screen_conflict_retry_while_the_chat_still_runs_is_queued_and_drains_with_the_skill():
+    result = _run(*_fail_off_screen(), _open("A"), {"busy": "stream-a"}, _send(), {"drain": True})
+    assert _calls(result, "_trySteer") == []
+    assert _calls(result, "queueSessionMessage") == [["A", "hello"]]
+    first, drained = result["starts"]
+    assert drained["session_id"] == "A"
+    assert drained["message"] == first["message"]
 
 
-# ── on-screen start failure (pre-existing on master) ─────────────────────────
-
-
-def test_on_screen_start_error_keeps_the_skill_for_the_restored_draft():
-    result = _run(_use(WRITER), _type("hello"), _send(start="500"), _send())
-    first, retry = result["starts"]
-    assert result["session"] == "A"
-    assert retry["session_id"] == "A"
-    assert _skill_count(retry["message"]) == 1
-    assert retry["message"] == first["message"]
-
-
-# ── controls ────────────────────────────────────────────────────────────────
-
-
-def test_control_an_edited_draft_drops_the_skill_for_good():
-    result = _run(
-        *_fail_off_screen(),
-        _open("A"),
-        _type("hello, reworded"),
-        _send(),
-        # Typing the old text again later is a new message, not the restored draft.
-        _type("hello"),
-        _send(),
-    )
-    _first, edited, later = result["starts"]
-    assert edited["message"] == "hello, reworded"
-    assert later["message"] == "hello"
-
-
-def test_control_a_successful_retry_uses_the_skill_up():
+def test_the_re_armed_skill_is_used_once():
     result = _run(*_fail_off_screen(), _open("A"), _send(), _type("hello"), _send())
     _first, retry, again = result["starts"]
     assert _skill_count(retry["message"]) == 1
     assert again["message"] == "hello"
 
 
-def test_control_the_same_text_in_another_chat_does_not_take_the_skill():
+def test_the_re_armed_skill_stays_with_its_chat_like_a_pending_use():
     result = _run(*_fail_off_screen(), _type("hello"), _send(), _open("A"), _send())
     _first, in_b, retry_in_a = result["starts"]
     assert in_b["session_id"] == "B"
@@ -366,11 +356,29 @@ def test_control_the_same_text_in_another_chat_does_not_take_the_skill():
     assert _skill_count(retry_in_a["message"]) == 1
 
 
-def test_control_a_newer_use_for_the_chat_wins_over_the_restored_skill():
+def test_an_edited_retry_gets_the_re_armed_skill_once_like_a_pending_use():
+    result = _run(*_fail_off_screen(), _open("A"), _type("hello, reworded"), _send(), _type("hello"), _send())
+    _first, edited, later = result["starts"]
+    assert _skill_count(edited["message"]) == 1
+    assert edited["message"].endswith("hello, reworded")
+    assert later["message"] == "hello"
+
+
+def test_control_a_newer_use_for_the_chat_wins_over_the_re_armed_skill():
     result = _run(*_fail_off_screen(), _open("A"), _use(EDITOR), _send())
     _first, retry = result["starts"]
     assert _skill_count(retry["message"], EDITOR_BLOCK) == 1
     assert _skill_count(retry["message"]) == 0
+
+
+def test_control_a_use_run_in_the_other_chat_meanwhile_is_not_replaced():
+    # Only one /use can be pending (master's model): the one the user just ran
+    # in B stays B's; A's retry then goes without its skill.
+    result = _run(_use(WRITER), _type("hello"), _send(start="409-conflict", switch_to="B", use_during="B"),
+                  _type("in b"), _send())
+    _first, in_b = result["starts"]
+    assert in_b["session_id"] == "B"
+    assert _skill_count(in_b["message"], EDITOR_BLOCK) == 1
 
 
 def test_control_a_failed_send_without_a_skill_restores_plain_text():
@@ -379,15 +387,37 @@ def test_control_a_failed_send_without_a_skill_restores_plain_text():
     assert retry["message"] == "hello"
 
 
+# ── the other start failures drop the skill, as on master ───────────────────
+
+
+@pytest.mark.parametrize("start", ["500", "409-rotated"])
+def test_off_screen_failure_restores_the_text_without_the_skill_as_master(start):
+    target = "A2" if start == "409-rotated" else "A"
+    result = _run(*_fail_off_screen(start), _open(target), _send())
+    _first, retry = result["starts"]
+    assert retry["session_id"] == target
+    assert retry["message"] == "hello"
+
+
+def test_off_screen_404_keeps_no_draft_and_no_skill_as_master():
+    result = _run(*_fail_off_screen("404"), _open("A"), _type("next"), _send())
+    _first, later = result["starts"]
+    assert _calls(result, "_saveComposerDraftNow") == []
+    assert later["message"] == "next"
+
+
+def test_on_screen_start_error_restores_the_text_without_the_skill_as_master():
+    result = _run(_use(WRITER), _type("hello"), _send(start="500"), _send())
+    _first, retry = result["starts"]
+    assert result["session"] == "A"
+    assert retry["message"] == "hello"
+
+
 def test_control_on_screen_conflict_still_queues_the_skill_message():
     result = _run(_use(WRITER), _type("hello"), _send(start="409-conflict"))
-    queued = [c["args"] for c in result["calls"] if c["name"] == "queueSessionMessage"]
+    queued = _calls(result, "queueSessionMessage")
     assert len(queued) == 1 and queued[0][0] == "A"
     assert _skill_count(queued[0][1]) == 1
-
-
-def _calls(result, name):
-    return [c["args"] for c in result["calls"] if c["name"] == name]
 
 
 # ── the on-screen restore is unchanged ──────────────────────────────────────
@@ -401,24 +431,10 @@ def test_control_on_screen_failure_still_restores_the_composer_and_token():
     assert result["drafts"]["A"]["contId"] == "goal-1"
 
 
-# ── steer mode: the resend of a restored draft that kept a skill ────────────
-#
-# After an off-screen 409 the chat may still be running. Steering the resend
-# returns before the forced-skill step, so the skill would be lost; it is
-# queued instead and gets the skill once when the queue drains.
+# ── steer mode keeps master's routing for everything else ───────────────────
 
 
-def test_steer_mode_queues_a_restored_skill_draft_and_the_drain_applies_the_skill_once():
-    result = _run(*_fail_off_screen(), _open("A"), {"busy": "stream-a"}, _send(), {"drain": True})
-    assert _calls(result, "_trySteer") == []
-    assert _calls(result, "queueSessionMessage") == [["A", "hello"]]
-    first, drained = result["starts"]
-    assert drained["session_id"] == "A"
-    assert _skill_count(drained["message"]) == 1
-    assert drained["message"] == first["message"]
-
-
-def test_control_steer_mode_still_steers_without_a_restored_skill():
+def test_control_steer_mode_still_steers_without_a_re_armed_skill():
     result = _run(
         _type("hello"), _send(start="409-conflict", switch_to="B"), _open("A"), {"busy": "stream-a"}, _send()
     )
@@ -426,7 +442,15 @@ def test_control_steer_mode_still_steers_without_a_restored_skill():
     assert _calls(result, "queueSessionMessage") == []
 
 
-def test_control_steer_mode_still_steers_an_edited_draft():
-    result = _run(*_fail_off_screen(), _open("A"), _type("hello, reworded"), {"busy": "stream-a"}, _send())
-    assert _calls(result, "_trySteer") == [["hello, reworded"]]
+def test_control_steer_mode_still_steers_with_an_ordinary_pending_use():
+    # A /use typed while the chat runs waits for the next started turn (master).
+    result = _run(_use(WRITER), _type("hello"), {"busy": "stream-a"}, _send())
+    assert _calls(result, "_trySteer") == [["hello"]]
+    assert _calls(result, "queueSessionMessage") == []
+
+
+def test_control_steer_mode_in_the_other_running_chat_still_steers():
+    # The skill re-armed for A does not change how a send in B is routed.
+    result = _run(*_fail_off_screen(), {"busy": "stream-b"}, _type("in b"), _send())
+    assert _calls(result, "_trySteer") == [["in b"]]
     assert _calls(result, "queueSessionMessage") == []

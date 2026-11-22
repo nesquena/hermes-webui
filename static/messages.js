@@ -119,29 +119,6 @@ function _peekRestoredGoalContinuationDraft(){
   }catch(_){ return null; }
 }
 
-// #9237: a /use skill that a failed send already consumed is kept with the
-// draft restored for it, keyed by that draft's session and bound to its exact
-// text. send() takes it (one-shot) at its forced-skill step: only that chat's
-// send of exactly that text gets it back; any other send there drops it. Kept
-// in memory on S, like a pending /use, so it does not survive a reload.
-function _setRestoredForcedSkillDraft(sid,text,payload){
-  if(!sid||!payload) return;
-  const kept=S.restoredForcedSkills||(S.restoredForcedSkills={});
-  kept[sid]={text:String(text||'').trim(),payload};
-}
-function _takeRestoredForcedSkillDraft(sid,text){
-  const kept=S.restoredForcedSkills;
-  const entry=sid&&kept?kept[sid]:null;
-  if(!entry) return null;
-  delete kept[sid];
-  return String(text||'').trim()===entry.text?entry.payload:null;
-}
-// Non-consuming check: send() asks before steering, which skips that step.
-function _peekRestoredForcedSkillDraft(sid,text){
-  const entry=sid&&S.restoredForcedSkills?S.restoredForcedSkills[sid]:null;
-  return !!entry&&String(text||'').trim()===entry.text;
-}
-
 function _bgTaskCompleteRingBufferAdd(sid, evt_id) {
   // Missing key → treat as "seen/skip" (return true). The sole caller already
   // guards with `if (!evt_id) return;` before invoking this, so this branch is
@@ -1459,12 +1436,10 @@ function _sendOwnerIsNewChat(title, hadMessages){
   return !hadMessages&&_sessionTitleLooksDefaultOrProvisional(title);
 }
 
-function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, goalContinuationId, forcedSkill){
+function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, goalContinuationId){
   const restore=String(draftText||'');
   const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
   if(!restore&&!files.length) return false;
-  // #9237: the /use skill this send consumed comes back with its draft too.
-  if(typeof _setRestoredForcedSkillDraft==='function') _setRestoredForcedSkillDraft(sid,restore,forcedSkill);
   // #7855 (round 6): the draft's continuation ID is restored TOGETHER with the
   // text. A failed POST never admitted the turn, so the token is still valid;
   // restoring the text without it made the retry post an empty ID and the goal
@@ -1743,10 +1718,10 @@ async function send(){
         }
       }
     const defaultMessageMode=window._defaultMessageMode||'steer';
-      // #9237: a resend of a restored draft that kept a /use skill is queued
-      // too, so it reaches the forced-skill step that steering skips.
-      const _restoredSkillWaits=typeof _peekRestoredForcedSkillDraft==='function'&&_peekRestoredForcedSkillDraft(S.session&&S.session.session_id,text);
-      if(defaultMessageMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'&&!_goalContinuationId&&!_restoredSkillWaits){
+      // #9237: a /use re-armed after an off-screen 409 rides with the retry, as
+      // master's queued copy did, so that send is queued rather than steered.
+      const _rearmedSkill=typeof _forcedSkillRearmedFor==='function'&&_forcedSkillRearmedFor(S.session&&S.session.session_id);
+      if(defaultMessageMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'&&!_goalContinuationId&&!_rearmedSkill){
         // Real steer: clear the input first so the user gets immediate
         // feedback, then ship the steer payload via /api/chat/steer.
         // _trySteer captures the owner session/files before awaiting uploads,
@@ -1811,12 +1786,7 @@ async function send(){
   // captured before the metadata awaits in the intercept below. Composer
   // writes after those awaits go through
   // _setComposerAfterCliOnlyExplainer(value,_slashOwner).
-  const _slashOwner={sid:S.session&&S.session.session_id||null,hadSession:!!S.session,text,title:S.session&&S.session.title||'',
-    loading:typeof _loadingSessionId!=='undefined'?_loadingSessionId:null,
-    // Loaded rows, or the session's own counts: switching to a listed chat sets
-    // S.session before its rows load, so S.messages alone can read empty.
-    hadMessages:!!((S.messages&&S.messages.length)||Number(S.session&&S.session.message_count)>0
-      ||Number(S.session&&S.session.visible_message_count)>0)};
+  const _slashOwner={sid:S.session&&S.session.session_id||null,text};
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -1829,7 +1799,7 @@ async function send(){
     if(_cmd){
       let _pushedUser=false;
       if(!_cmd.noEcho){
-        if(!S.session){await newSession();_slashOwner.sid=S.session&&S.session.session_id||null;}
+        if(!S.session){await newSession();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         _pushedUser=true;
         renderMessages();
@@ -1973,7 +1943,7 @@ async function send(){
       }
       if(_agentCmdName==='moa'){
         const _moaArgs=(text.split(/\s+/).slice(1).join(' ')||'').trim();
-        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});if(!_slashOwner.sid)_slashOwner.sid=S.session&&S.session.session_id||null;}
+        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
         if(!_moaArgs){
           let _moaUsage='/moa <prompt>';
           try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
@@ -2059,21 +2029,6 @@ async function send(){
       }
     }
   }
-  // #9237: the slash lookups above can await. If the user left the issuing
-  // chat meanwhile (a switch begun meanwhile counts while it still loads), the
-  // switch saved this text as that chat's draft; do not send it into the chat
-  // now on screen. A send from the empty pane owns only a chat it created
-  // itself (sid set above).
-  const _slashLoadMoved=typeof _loadingSessionId!=='undefined'&&_loadingSessionId!==_slashOwner.loading;
-  if(_slashOwner.sid?(!S.session||S.session.session_id!==_slashOwner.sid||(_slashLoadMoved&&!_isSessionCurrentPane(_slashOwner.sid)))
-    :(!_slashOwner.hadSession&&(S.session||_slashLoadMoved))){
-    if(_sendOwnerIsNewChat(_slashOwner.title,_slashOwner.hadMessages)){
-      showToast(t('send_offscreen_new_chat'),null,'error');
-      return;
-    }
-    showToast(t('send_offscreen_slash_left',_sendOwnerLabel(_slashOwner.title)),8000,'warning');
-    return;
-  }
   if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
 
   const activeSid=S.session.session_id;
@@ -2135,34 +2090,31 @@ async function send(){
   let msgText=text;
   if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
-  // #9237: a /use resolved for this chat wins; otherwise a skill kept with a
-  // failed send's restored draft applies once, to a send of exactly that text.
-  const _restoredSkillPayload=(typeof _takeRestoredForcedSkillDraft==='function')?_takeRestoredForcedSkillDraft(activeSid,_failedSendDraftText):null;
+  // #9237: the /use payload this send consumed, re-armed for its chat if an
+  // off-screen start is refused because that chat is still running.
   let _sentSkillPayload=null;
   if(_forcedSkillDirectivePending){
     const _pending=_forcedSkillDirectivePending;
     if(!_pending.sessionId||_pending.sessionId===activeSid){
       const _directivePayload = await _pending.promise;
       if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
-      _sentSkillPayload=_directivePayload||null;
+      if(_directivePayload){
+        _sentSkillPayload=_directivePayload;
+        const _directive = typeof _directivePayload==='string'
+          ? _directivePayload
+          : String(_directivePayload.directive||'').trim();
+        const _forcedSkillName = typeof _directivePayload==='string'
+          ? ''
+          : String(_directivePayload.name||'').trim();
+        const _forcedSkillContent = typeof _directivePayload==='string'
+          ? ''
+          : String(_directivePayload.content||'').trim();
+        const _forcedSkillBlock = _forcedSkillName&&_forcedSkillContent
+          ? `[FORCED SKILL CONTEXT: ${_forcedSkillName}]\n${_forcedSkillContent}\n[/FORCED SKILL CONTEXT]`
+          : '';
+        msgText=`${_directive}${_forcedSkillBlock?`\n\n${_forcedSkillBlock}`:''}\n\n${msgText||''}`.trim();
+      }
     }
-  }
-  if(!_sentSkillPayload) _sentSkillPayload=_restoredSkillPayload;
-  if(_sentSkillPayload){
-    const _directivePayload=_sentSkillPayload;
-    const _directive = typeof _directivePayload==='string'
-      ? _directivePayload
-      : String(_directivePayload.directive||'').trim();
-    const _forcedSkillName = typeof _directivePayload==='string'
-      ? ''
-      : String(_directivePayload.name||'').trim();
-    const _forcedSkillContent = typeof _directivePayload==='string'
-      ? ''
-      : String(_directivePayload.content||'').trim();
-    const _forcedSkillBlock = _forcedSkillName&&_forcedSkillContent
-      ? `[FORCED SKILL CONTEXT: ${_forcedSkillName}]\n${_forcedSkillContent}\n[/FORCED SKILL CONTEXT]`
-      : '';
-    msgText=`${_directive}${_forcedSkillBlock?`\n\n${_forcedSkillBlock}`:''}\n\n${msgText||''}`.trim();
   }
   if(!msgText){setComposerStatus('Nothing to send');return;}
   // Composer textarea + persisted draft were already captured and cleared
@@ -2343,7 +2295,11 @@ async function send(){
         const body=e&&e.status===409?JSON.parse(e.body||'{}'):null;
         if(body&&body.code==='session_rotated'&&typeof body.continuation_session_id==='string'&&body.continuation_session_id) draftSid=body.continuation_session_id;
       }catch(_){ }
-      if(!deleted) _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, draftSid, _composerDraftClearPromise, _goalContinuationId, _sentSkillPayload);
+      if(!deleted) _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, draftSid, _composerDraftClearPromise, _goalContinuationId);
+      // Master queued a copy of this message, skill included, for the running
+      // chat. Re-arm the skill as that chat's pending /use instead, unless
+      // another /use is already pending.
+      if(busy&&_sentSkillPayload&&!_forcedSkillDirectivePending) _forcedSkillDirectivePending={sessionId:activeSid,promise:Promise.resolve(_sentSkillPayload),rearmed:activeSid};
       const owner=_sendOwnerLabel(_ownerTitle);
       if(_sendOwnerIsNewChat(_ownerTitle,_ownerHadMessages)) showToast(t('send_offscreen_new_chat'),null,'error');
       else if(busy) showToast(t('send_offscreen_busy',owner),8000,'warning');
@@ -2431,7 +2387,7 @@ async function send(){
     // draft's continuation ID must come back with its text. Restoring only the
     // text made the retry post an empty ID and the continuation became an
     // ordinary turn.
-    _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId, _sentSkillPayload);
+    _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId);
     if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
     // Reconcile with server truth after immediately clearing the optimistic spinner.
     if(typeof renderSessionList==='function') void renderSessionList();
@@ -2520,6 +2476,11 @@ async function send(){
   else if(INFLIGHT[activeSid]){ INFLIGHT[activeSid].streamId=streamId; INFLIGHT[activeSid].reattach=true; }
 
   }finally{ _sendInProgress=false; _sendInProgressSid=null; }
+}
+
+// #9237: whether the pending /use is the one send() re-armed for sid.
+function _forcedSkillRearmedFor(sid){
+  return !!sid&&typeof _forcedSkillDirectivePending!=='undefined'&&!!_forcedSkillDirectivePending&&_forcedSkillDirectivePending.rearmed===sid;
 }
 
 async function startRegeneration(sessionId, regenerationRevision){
