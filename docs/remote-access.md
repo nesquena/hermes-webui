@@ -148,6 +148,13 @@ HERMES_WEBUI_LOGIN_RATE_LIMIT_PER_CLIENT=1 HERMES_WEBUI_TRUST_FORWARDED_FOR=1 \
 Experimental builds from v0.52.546 to this change gave per-client buckets with
 only the last two settings. If you relied on that, add the first one.
 
+The text-to-speech request throttle (one request per 2 seconds) uses the same
+client identity and the same three settings. Without them, a WebUI with no
+password behind a proxy gives all its users one TTS bucket; with a password set,
+each signed-in session keeps its own. Earlier builds trusted forwarded headers for TTS with
+only `HERMES_WEBUI_TRUST_FORWARDED_FOR=1`, which let a client choose its own
+bucket.
+
 With only loopback listed, WebUI prints a startup warning that
 `HERMES_WEBUI_TRUSTED_PROXY_CIDRS` lists no proxy outside this host. For this
 setup that is expected, as the warning itself says. If WebUI listens on IPv6
