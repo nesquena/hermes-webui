@@ -37,6 +37,8 @@
 
 ### Fixed
 
+- **A reused conversation recovers when its context compressor fails to reconnect to session storage (#9215).** When WebUI keeps an agent cached between turns and hands it a new session-storage handle, it reconnects the context compressor to that handle. If that failed once, it stayed failed for as long as the agent stayed cached, and only a debug line recorded it. The next turn now retries, the first failure logs one warning, and a store that has already been released is replaced instead of reused. The check for whether a hook accepts a keyword argument now matches the Hermes Agent's own rule, and the reconnect is still called once per turn, as the Agent's reset path does.
+
 - **The gateway-sync reset test runs on newer Hermes Agent versions too (#9261, closes #9258).** Both cases of the test that checks a reset conversation stays separate from its reopened parent failed against current Agents, because their fixture used storage calls newer Agents no longer have. The fixture now writes rows with `append_message`, ends the parent session through whichever reset call the installed Agent provides, and checks that the reset took effect.
 
 - **On a server launched under a named profile, values from that profile's `.env` are recognised however the line is written (#9212).** WebUI now compares launch values with the profile's `.env` as WebUI, the launcher and the Agent each read it, so a value loaded from that file is never taken for the operator's own launch setting. The Gateway settings check uses the same comparison. Servers launched as root are unchanged.
