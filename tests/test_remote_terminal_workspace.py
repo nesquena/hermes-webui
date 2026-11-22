@@ -108,6 +108,11 @@ def test_remote_terminal_workspace_paths_with_parent_escape_still_reject(monkeyp
 
 @pytest.mark.parametrize("workspace_path", ["/etc", "/etc/ssh"])
 def test_remote_terminal_workspace_system_roots_still_reject(monkeypatch, workspace_path):
+    if not Path(workspace_path).is_dir():
+        # Both validators resolve and access-check the path before the system-root
+        # list (so symlinked homes such as /var/home stay allowed), so a system
+        # path that does not exist on this host is refused as missing instead.
+        pytest.skip(f"{workspace_path} is not a directory on this host")
     monkeypatch.setattr(api_config, "get_config", lambda: _remote_config(terminal={"backend": "ssh", "cwd": "/etc"}))
 
     with pytest.raises(ValueError, match="Path points to a system directory"):

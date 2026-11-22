@@ -39,6 +39,7 @@ import pytest
 # (api.config._AGENT_DIR), which is what makes `tools.approval` importable.
 # Import order matters: tools.* will not resolve until api.config has run.
 from api import routes
+from api import route_approvals as _ra  # WebUI owns the pending projection (#9119)
 from api import models
 from api.gateway_chat import _STREAM_RUN_IDS
 
@@ -108,7 +109,7 @@ def _seed_local_pending_approval(sid: str):
     """
     with ta._lock:
         ta._gateway_queues.pop(sid, None)
-        ta._pending.pop(sid, None)
+        _ra._pending.pop(sid, None)
     entry = ta._ApprovalEntry({
         "command": "rm -rf /tmp/x",
         "description": "Dangerous command",
@@ -119,7 +120,7 @@ def _seed_local_pending_approval(sid: str):
         ta._gateway_queues.setdefault(sid, []).append(entry)
     ra.submit_gateway_pending_mirror(sid, entry.data)
     with ta._lock:
-        q = ta._pending.get(sid)
+        q = _ra._pending.get(sid)
     head = q[0] if isinstance(q, list) and q else q
     assert isinstance(head, dict)
     # Sanity: the mirror is tagged exactly as the regression requires.
@@ -130,7 +131,7 @@ def _seed_local_pending_approval(sid: str):
 def _cleanup(sid: str):
     with ta._lock:
         ta._gateway_queues.pop(sid, None)
-        ta._pending.pop(sid, None)
+        _ra._pending.pop(sid, None)
     with models.LOCK:
         models.SESSIONS.pop(sid, None)
 
@@ -190,7 +191,7 @@ def test_local_mirrored_approval_with_gwrun_prefix_still_resolves():
     try:
         entry, _approval_id = _seed_local_pending_approval(sid)
         with ta._lock:
-            head = ta._pending[sid][0]
+            head = _ra._pending[sid][0]
             head["approval_id"] = "gwrun:local-test"
         handler = _FakeHandler()
         with patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=False):
@@ -215,9 +216,9 @@ def test_local_live_head_does_not_inherit_stale_remote_run():
     try:
         entry, approval_id = _seed_local_pending_approval(sid)
         with ta._lock:
-            local_queue = ta._pending.get(sid)
+            local_queue = _ra._pending.get(sid)
             local_entries = list(local_queue) if isinstance(local_queue, list) else [local_queue]
-            ta._pending[sid] = [{
+            _ra._pending[sid] = [{
                 ra._GATEWAY_MIRROR_FLAG: True,
                 "run_id": "remote-run",
                 "approval_id": approval_id,
@@ -251,9 +252,9 @@ def test_local_live_head_beats_active_remote_candidate_run():
     try:
         entry, approval_id = _seed_local_pending_approval(sid)
         with ta._lock:
-            local_queue = ta._pending.get(sid)
+            local_queue = _ra._pending.get(sid)
             local_entries = list(local_queue) if isinstance(local_queue, list) else [local_queue]
-            ta._pending[sid] = [{
+            _ra._pending[sid] = [{
                 ra._GATEWAY_MIRROR_FLAG: True,
                 "run_id": "remote-run",
                 "approval_id": approval_id,
@@ -286,7 +287,7 @@ def test_local_plain_pending_exact_id_beats_remote_mirror():
     _STREAM_RUN_IDS[stream_id] = "remote-run"
     try:
         with ta._lock:
-            ta._pending[sid] = [
+            _ra._pending[sid] = [
                 {"approval_id": "shared-id", "command": "local"},
                 {
                     ra._GATEWAY_MIRROR_FLAG: True,
@@ -322,7 +323,7 @@ def test_local_plain_pending_exact_id_beats_remote_first_queue_order():
     _STREAM_RUN_IDS[stream_id] = "remote-run"
     try:
         with ta._lock:
-            ta._pending[sid] = [
+            _ra._pending[sid] = [
                 {
                     ra._GATEWAY_MIRROR_FLAG: True,
                     "run_id": "remote-run",
@@ -344,7 +345,7 @@ def test_local_plain_pending_exact_id_beats_remote_first_queue_order():
         assert resp.get("relayed") is not True
         respond_approval.assert_not_called()
         with ta._lock:
-            queue = ta._pending.get(sid) or []
+            queue = _ra._pending.get(sid) or []
             assert len(queue) == 1
             assert queue[0].get("command") == "remote"
             assert queue[0].get(ra._GATEWAY_MIRROR_FLAG) is True
@@ -361,7 +362,7 @@ def test_local_plain_pending_without_id_beats_active_remote_candidate_run():
     _STREAM_RUN_IDS[stream_id] = "remote-run"
     try:
         with ta._lock:
-            ta._pending[sid] = [{"command": "local"}]
+            _ra._pending[sid] = [{"command": "local"}]
         handler = _FakeHandler()
         with patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=False), \
              patch("api.runner_client.HttpRunnerClient.respond_approval") as respond_approval, \
@@ -399,7 +400,7 @@ def test_gateway_mirrored_approval_without_run_retires_locally():
         assert entry.event.is_set()
         assert entry.result == "once"
         with ta._lock:
-            assert sid not in ta._pending
+            assert sid not in _ra._pending
             assert sid not in ta._gateway_queues
     finally:
         _cleanup(sid)

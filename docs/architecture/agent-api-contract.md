@@ -45,6 +45,34 @@ helpers are genuinely shared code.
 | `runtime_gateway_provider` | `api/streaming.py` and `api/routes.py` import `hermes_cli.runtime_provider`; adapter helpers such as `agent.anthropic_adapter` are also imported for gateway normalization. | Provider resolution, runtime routing, and gateway invocation should be hermes-agent API calls. WebUI can keep request validation and display formatting, but it should not import runtime provider internals from the agent checkout. |
 | `webui_local_or_client_package` | WebUI imports `hermes_cli.auth`, `hermes_cli.config`, `hermes_cli.plugins`, `hermes_cli.profiles`, `hermes_cli.goals`, `agent.skill_utils`, `agent.credential_pool`, and `hermes_constants`. | Pure schemas, constants, and parsing helpers can move into a small versioned client/shared package. Privileged data such as credential pools, auth status, profile mutation, plugin discovery, and goal persistence need hermes-agent endpoints. UI-only formatting can remain in WebUI. |
 
+## Cached in-process Agent storage lifetime
+
+`api/streaming.py` retains a live cached Agent's SessionDB and closes only the
+unused per-request handle. This preserves the interface borrowed by the Agent,
+its context compressor and background consumers. The compatibility check covers
+legacy SQLite `_conn`, the newer SessionDB shim's `_closed`/`_store`, and the
+assembly Persistence handle's retained `_release` callback. These are lifecycle
+checks only: do not probe `ready` or open a lazy backend to determine liveness.
+The current Agent interfaces expose no public is-open flag; this private-field
+compatibility boundary should disappear with the session/state API migration.
+
+When a missing or closed handle is actually replaced, update the Agent's
+borrowed `persistence` interface and rebind `bind_session_state` on the context
+engine, forwarding `persistence` only to hooks that accept it (the Agent's own
+`accepts_keyword_argument` rule). The rebind is best-effort: a hook that raises
+`Exception` is logged (once per Agent at WARNING, details at DEBUG) and the turn
+continues on the adopted handle; the hook is called once per rebind, positionally
+like the Agent's reset path, with no retry in another calling convention (a
+`TypeError` from inside a hook can follow a state change), and `KeyboardInterrupt`/`SystemExit` propagate. A
+failed rebind is remembered on the Agent and retried on the next cached turn,
+even when that turn keeps the still-open adopted handle. A SessionDB shim whose
+own store handle was released counts as closed. The credential
+self-heal path uses the same liveness check before constructing a replacement
+Agent, and its retained constructor kwargs follow the adopted handle rather
+than the unused per-request handle. A WebUI process restart clears
+already-poisoned cached Agents; this prevents the mismatch rather than
+repairing an arbitrary existing cache.
+
 ## state.db message content encoding
 
 `api/models.py` reads the agent's `messages` table with its own SQL, so it also
