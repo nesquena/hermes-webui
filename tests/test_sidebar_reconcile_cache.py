@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 
 import pytest
 
@@ -50,11 +51,13 @@ def store(tmp_path, monkeypatch):
     sessions = tmp_path / "sessions"
     sessions.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", sessions)
-    # The cache keys on the resolved store's stat signature. Point it at a real
-    # (harmless) file under tmp_path: the walk's state.db read is stubbed below,
-    # so only its generation -- the file's stat -- is under test.
+    # A REAL SQLite store, not a stand-in file. The store generation carries the
+    # revision SQLite itself reports (``PRAGMA data_version``), so a fixture that
+    # wrote text into a file called ``state.db`` would give the cache no
+    # provable generation at all and prove nothing about it. The walk's state.db
+    # read is still stubbed below; only the store's own revision is real.
     db = tmp_path / "state.db"
-    db.write_bytes(b"state-store-v1")
+    _open_store(db).close()
     monkeypatch.setattr(models, "_agent_state_db_path", lambda profile=None: db)
     yield sessions
     if clear is not None:
@@ -89,16 +92,31 @@ def _write_sidecar(sessions, messages, *, title="t"):
 
 
 def _commit_to_store(db, *, payload=b"state-store-v2"):
-    """Simulate a commit to the store without touching the message count.
+    """Commit to the store from another connection, the way a turn does.
 
     A row-addressed write (``set_message_api_content``) rewrites a row's payload
-    and nothing else: no append, no count change, no watermark. The store file
-    is what moves.
+    and nothing else: no append, no count change, no watermark. What moves is
+    the store's own revision -- the thing the cache generation must follow.
     """
-    with open(db, "wb") as handle:
-        handle.write(payload)
-    st = db.stat()
-    os.utime(db, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "INSERT INTO probe (payload) VALUES (?)",
+            (payload.decode("utf-8", "replace"),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _open_store(path):
+    """Open *path* as a real (empty) state store and create the probe table."""
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS probe (id INTEGER PRIMARY KEY, payload TEXT)"
+    )
+    conn.commit()
+    return conn
 
 
 def _row(role, text, ts):
@@ -121,14 +139,26 @@ def _install_state_db(monkeypatch, rows):
 
 
 def _count_loads(monkeypatch):
-    """Count full sidecar parses -- the expensive half the cache must skip."""
+    """Count full sidecar parses -- the expensive half the cache must skip.
+
+    Two doors reach the sidecar: ``Session.load`` (a save-capable load) and
+    ``_load_session_for_listing``, which is what every listing path uses since
+    #9007 (it keeps the in-memory collapse but never saves). Counting only the
+    first would read 0 on the production path and pass this file for the wrong
+    reason, so both are counted as the same expensive parse.
+    """
     counter = {"loads": 0, "metadata_loads": 0}
     real_load = models.Session.load.__func__
     real_metadata = models.Session.load_metadata_only.__func__
+    real_listing = models._load_session_for_listing
 
     def _load(cls, sid):
         counter["loads"] += 1
         return real_load(cls, sid)
+
+    def _listing(sid):
+        counter["loads"] += 1
+        return real_listing(sid)
 
     def _metadata(cls, sid, **kwargs):
         counter["metadata_loads"] += 1
@@ -136,6 +166,7 @@ def _count_loads(monkeypatch):
 
     monkeypatch.setattr(models.Session, "load", classmethod(_load))
     monkeypatch.setattr(models.Session, "load_metadata_only", classmethod(_metadata))
+    monkeypatch.setattr(models, "_load_session_for_listing", _listing)
     return counter
 
 
@@ -608,6 +639,168 @@ def test_an_unresolvable_store_path_caches_nothing(store, monkeypatch, tmp_path)
     loop.symlink_to(loop)
     monkeypatch.setattr(models, "_agent_state_db_path", lambda profile=None: loop)
     assert models._sidebar_reconcile_store_generation() is None
+
+
+# --- The revision is SQLite's commit counter, not the file's shape -----------
+#
+# A WAL commit lands at an offset in the ``-wal``, and after a checkpoint the
+# next commit can rewrite that file to the size and timestamp it already had; a
+# filesystem only promises its own timestamp resolution besides. So the file's
+# stat signature alone is not a commit watermark, and the generation carries
+# ``PRAGMA data_version`` from a long-lived reader as the authority. These tests
+# blind the stat to prove the revision no longer rests on it, and pin the
+# three-state rule for a reader that cannot answer.
+
+
+def test_a_commit_the_stat_signature_cannot_see_is_still_a_new_revision(
+    store, monkeypatch
+):
+    _write_sidecar(store, [_row("user", "hello", 1.0)])
+    state = _install_state_db(monkeypatch, _state_rows(3))
+    loads = _count_loads(monkeypatch)
+
+    db = _state_db(store)
+    real_signature = models._state_file_signature
+
+    def _blind(path):
+        # Exactly the shape a same-size commit after a checkpoint leaves: same
+        # inode, same size, same timestamps -- and a commit nobody can see.
+        if os.fspath(path) == os.fspath(db):
+            return ("frozen-shape",)
+        return real_signature(path)
+
+    monkeypatch.setattr(models, "_state_file_signature", _blind)
+
+    primed = _walk(count=3)
+    assert primed is not None
+    assert loads["loads"] == 1
+    assert _walk(count=3) == primed
+    assert loads["loads"] == 1, (
+        "control: with no commit, the blinded store must still hit the cache"
+    )
+
+    state["rows"] = _state_rows(5)
+    _commit_to_store(db)
+    grown = _walk(count=5)
+
+    assert loads["loads"] == 2, (
+        "a commit the stat signature cannot see was served from cache: the "
+        "revision still rests on the file's size and timestamps"
+    )
+    assert grown is not None and grown.visible > primed.visible, (
+        f"the walk must re-derive after the commit (before={primed}, after={grown})"
+    )
+
+
+def test_an_unanswerable_data_version_is_not_a_provable_generation(
+    store, monkeypatch
+):
+    # Third state, again: a reader SQLite never gives us is UNKNOWN, and an
+    # unknown revision must be re-read, never answered from cache.
+    _write_sidecar(store, [_row("user", "hello", 1.0)])
+    _install_state_db(monkeypatch, _state_rows(3))
+    loads = _count_loads(monkeypatch)
+
+    def _unopenable(path):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(models, "_state_store_reader", _unopenable)
+
+    assert models._sidebar_reconcile_store_generation() is None, (
+        "a store whose commit counter cannot be read produced a provable generation"
+    )
+    assert _walk(count=3) is not None
+    assert _walk(count=3) is not None
+    assert loads["loads"] == 2, "an unprovable store revision was cached anyway"
+
+
+def test_the_store_readers_are_bounded(store, monkeypatch, tmp_path):
+    # One long-lived reader per store is what makes data_version comparable, so
+    # the readers are a process-lifetime resource and must be bounded like the
+    # cache they serve.
+    monkeypatch.setattr(models, "_STATE_STORE_READERS_MAX", 2)
+    paths = [_state_db(store)]
+    for index in range(3):
+        extra = tmp_path / f"extra{index}.db"
+        _open_store(extra).close()
+        paths.append(extra)
+
+    for path in paths:
+        assert models._state_store_data_version(path) is not None
+
+    with models._STATE_STORE_READERS_LOCK:
+        assert len(models._STATE_STORE_READERS) == 2, (
+            "the readers grew without a bound: one connection per store per "
+            f"process ({sorted(models._STATE_STORE_READERS)})"
+        )
+
+
+def test_two_profiles_cannot_alias_one_stores_answer(store, monkeypatch, tmp_path):
+    _write_sidecar(store, [_row("user", "hello", 1.0)])
+    state = _install_state_db(monkeypatch, _state_rows(3))
+    loads = _count_loads(monkeypatch)
+
+    default_db = _state_db(store)
+    other_home = tmp_path / "profile-b"
+    other_home.mkdir()
+    other_db = other_home / "state.db"
+    _open_store(other_db).close()
+    monkeypatch.setattr(
+        models,
+        "_agent_state_db_path",
+        lambda profile=None: other_db if profile == "b" else default_db,
+    )
+
+    primed = models._reconciled_visible_count_for_sidebar(
+        SID, expected_state_count=3
+    )
+    assert primed is not None
+    assert loads["loads"] == 1
+
+    state["rows"] = _state_rows(5)
+    named = models._reconciled_visible_count_for_sidebar(
+        SID, expected_state_count=5, profile="b"
+    )
+
+    assert loads["loads"] == 2, (
+        "a named profile was answered from the default profile's store"
+    )
+    assert named is not None and named.visible > primed.visible
+
+
+def test_concurrent_polls_share_the_cache_without_corrupting_it(store, monkeypatch):
+    # The WebUI serves every poll from a pool thread, so both the LRU mutation
+    # and the reader's PRAGMA run concurrently by construction. Every poll must
+    # come back with the same answer and none may raise.
+    _write_sidecar(store, [_row("user", "hello", 1.0)])
+    _install_state_db(monkeypatch, _state_rows(3))
+
+    results = []
+    failures = []
+    lock = threading.Lock()
+
+    def _poll():
+        try:
+            answer = _walk(count=3)
+        except Exception as exc:  # pragma: no cover - the failure path
+            with lock:
+                failures.append(exc)
+            return
+        with lock:
+            results.append(answer)
+
+    threads = [threading.Thread(target=_poll) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not failures, f"a concurrent poll raised: {failures}"
+    assert len(results) == 8
+    assert all(answer == results[0] for answer in results), (
+        f"concurrent polls disagreed: {results}"
+    )
+    assert results[0] is not None
 
 
 @pytest.mark.parametrize("layout", ["plain", "file_symlink"])

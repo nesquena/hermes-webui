@@ -13786,12 +13786,15 @@ _SIDEBAR_RECONCILE_MEMO: contextvars.ContextVar[dict | None] = contextvars.Conte
 # (``set_message_api_content``, reached from the turn prologue) rewrites a
 # row's payload without changing either the total or the active count, and
 # that payload is part of the merge identity. So the key carries
-# :func:`_sidebar_reconcile_store_generation` instead of a count -- the stat
-# signature of the database file the reader opens (``state.db`` with any
-# symlink resolved) and of that file's ``-wal``/``-journal`` companions. Any
-# commit to the store goes through one of those files, so an append and a
-# same-count write both invalidate the entry, and switching the state dir or
-# the profile cannot alias one store's answer onto another's.
+# :func:`_sidebar_reconcile_store_generation` instead of a count. That
+# generation is the store's revision as SQLite itself reports it -- the
+# ``PRAGMA data_version`` of a long-lived read-only connection to the database
+# file the reader opens (``state.db`` with any symlink resolved), together with
+# that connection's identity -- plus the stat signature of the file and of its
+# ``-wal``/``-journal`` companions, which is what catches a store replaced
+# wholesale. An append, a same-count rewrite and a WAL commit that leaves the
+# companion the size it was all invalidate the entry, and switching the state
+# dir or the profile cannot alias one store's answer onto another's.
 #
 # The generation is store-wide, so unrelated writes to the same store invalidate
 # it too (a false miss, never a false hit): correctness first, and a settled
@@ -13839,7 +13842,123 @@ def _state_file_signature(path):
         int(getattr(st, 'st_ino', 0)),
         int(st.st_size),
         int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))),
+        int(getattr(st, 'st_ctime_ns', int(st.st_ctime * 1_000_000_000))),
     )
+
+
+# SQLite's own commit watermark for the store, read from a long-lived read-only
+# connection per store. The stat signature above is not one: a commit lands in
+# the ``-wal`` at an offset, and after a checkpoint the next commit can rewrite
+# the file to the SAME size, while a filesystem only promises a timestamp
+# resolution of its own. ``PRAGMA data_version`` is the count SQLite keeps of
+# commits made by OTHER connections, so it moves on every commit the reader did
+# not make -- which is every commit, because this reader never writes.
+#
+# It is per-connection: a fresh connection starts from a fresh baseline, so a
+# value only means something next to another value read from the SAME
+# connection. The reader's identity is therefore part of the generation, and
+# the readers are kept for the process lifetime (bounded LRU, closed on a
+# state-dir switch), never reopened per poll.
+_STATE_STORE_READERS_LOCK = threading.Lock()
+_STATE_STORE_READERS_MAX = 8
+_STATE_STORE_READERS: 'collections.OrderedDict[str, tuple[int, sqlite3.Connection]]' = (
+    collections.OrderedDict()
+)
+_STATE_STORE_READER_SEQ = 0
+
+
+def _close_state_store_readers() -> None:
+    """Close every long-lived store reader (tests, and a state-dir switch)."""
+    with _STATE_STORE_READERS_LOCK:
+        for _seq, conn in list(_STATE_STORE_READERS.values()):
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _STATE_STORE_READERS.clear()
+
+
+def _drop_state_store_reader(path, seq) -> None:
+    """Forget one reader so the next attempt opens a fresh connection."""
+    with _STATE_STORE_READERS_LOCK:
+        entry = _STATE_STORE_READERS.get(str(path))
+        if entry is None or entry[0] != seq:
+            return
+        _STATE_STORE_READERS.pop(str(path), None)
+        try:
+            entry[1].close()
+        except Exception:
+            pass
+
+
+def _state_store_reader(path):
+    """The long-lived read-only reader for *path*, as ``(seq, connection)``.
+
+    Creating it can raise: a path that is not a database, or one the process
+    may not open, has no revision at all -- the caller rejects rather than
+    tolerating it.
+    """
+    key = str(path)
+    with _STATE_STORE_READERS_LOCK:
+        entry = _STATE_STORE_READERS.get(key)
+        if entry is not None:
+            _STATE_STORE_READERS.move_to_end(key)
+            return entry
+    # Opened outside the lock: ``connect`` may block on an FS the writer is
+    # using, and it must not stall every other thread's lookup.
+    conn = sqlite3.connect(
+        f"{Path(path).as_uri()}?mode=ro", uri=True, timeout=1.0,
+        check_same_thread=False,
+    )
+    seq = 0
+    with _STATE_STORE_READERS_LOCK:
+        global _STATE_STORE_READER_SEQ
+        _STATE_STORE_READER_SEQ += 1
+        seq = _STATE_STORE_READER_SEQ
+        existing = _STATE_STORE_READERS.get(key)
+        if existing is not None:
+            # Another thread won the race; keep one reader per store.
+            _STATE_STORE_READERS.move_to_end(key)
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return existing
+        _STATE_STORE_READERS[key] = (seq, conn)
+        while len(_STATE_STORE_READERS) > _STATE_STORE_READERS_MAX:
+            _evicted_seq, evicted = _STATE_STORE_READERS.popitem(last=False)
+            try:
+                evicted.close()
+            except Exception:
+                pass
+        return seq, conn
+
+
+def _state_store_data_version(path):
+    """``(reader_seq, PRAGMA data_version)`` for *path*, or None.
+
+    ``None`` is an unprovable revision, never a stable one: no reader, or a
+    store SQLite refuses to answer for, must make the caller skip the cache
+    instead of filing an answer under a guess.
+    """
+    try:
+        seq, conn = _state_store_reader(path)
+    except Exception:
+        return None
+    try:
+        with _STATE_STORE_READERS_LOCK:
+            # fetchall, not fetchone: an exhausted statement ends its read
+            # transaction, so the reader holds no lock between polls.
+            rows = conn.execute('PRAGMA data_version').fetchall()
+    except Exception:
+        _drop_state_store_reader(path, seq)
+        return None
+    if not rows:
+        return None
+    try:
+        return (int(seq), int(rows[0][0]))
+    except Exception:
+        return None
 
 
 def _sidebar_reconcile_store_generation(*, profile=None):
@@ -13887,7 +14006,15 @@ def _sidebar_reconcile_store_generation(*, profile=None):
     # durable-stale defect the generation exists to prevent.
     if any(sig == _UNREADABLE_STATE_FILE for sig in companions):
         return None
-    return (str(db_path), main) + companions
+    # The stat signature catches a store that was replaced wholesale (a state
+    # dir switch, a restore from backup resolves to different bytes on a
+    # different inode); it cannot see a WAL commit that leaves the file the
+    # size and timestamp it had. SQLite's own commit counter does see that, and
+    # a store it cannot answer for is an unproved revision, not a stable one.
+    revision = _state_store_data_version(Path(db_path))
+    if revision is None:
+        return None
+    return (str(db_path), main) + companions + revision
 
 
 def _sidebar_reconcile_cache_get(sid: str, *, profile=None):
@@ -13951,6 +14078,10 @@ def _clear_sidebar_reconcile_cache() -> None:
     """Drop every cached reconciliation (tests, and a state-dir switch)."""
     with _SIDEBAR_RECONCILE_CACHE_LOCK:
         _SIDEBAR_RECONCILE_CACHE.clear()
+    # The store readers are part of the same evidence: their ``data_version``
+    # baselines belong to the store they opened, so a switch of state dir has
+    # to drop them with the entries that were keyed by them.
+    _close_state_store_readers()
 
 
 class _ReconciledSidebarVisible(NamedTuple):
