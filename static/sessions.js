@@ -1681,9 +1681,8 @@ function _scheduleActiveSessionIdleReload(sid) {
       // Avoid an unconditional same-session force reload the moment streaming
       // settles. On mobile PWA this produces a visible end-of-turn flash and can
       // briefly restore the pane with stale layout geometry. Reconcile against
-      // server metadata for the just-finished active turn first
-      // (ignoreStreamJustFinished bypasses only the post-stream cooldown; the
-      // reconcile still reloads ONLY when the message count actually changed).
+      // server metadata for the just-finished active turn first. Bypassing
+      // the cooldown does not bypass the evidence required for reloading.
       // The 'idle-reconcile' reason is non-'poll', so it coexists with the
       // #3916/#4195 poll-only external gate without bypassing it. Preserve the
       // original forced reload as a fallback when the probe request itself fails.
@@ -2984,9 +2983,8 @@ async function loadSession(sid){
     else _clearSameSessionForceReloadHint();
     // #5177: keep-stale-until-loaded path — defer the destructive
     // S.messages/toolCalls clear so the user does NOT see a transcript-wide
-    // blank gap during the metadata + messages round-trip. Only the
-    // visibility / focus recovery callers in refreshActiveSessionIfExternallyUpdated
-    // request this. The new transcript will be SWAPPED into S.messages by the
+    // blank gap during the metadata + messages round-trip. The new
+    // transcript will be SWAPPED into S.messages by the
     // forced _ensureMessagesLoaded(...{force:true}) call below, producing a
     // single render frame with old DOM directly replaced by new DOM rather
     // than the old → empty → new sequence the default branch produces.
@@ -8332,8 +8330,8 @@ function _drainSessionUpdatedPendingCount(){
 //
 // opts.ignoreStreamJustFinished — bypass the post-stream cooldown. Only the
 //   idle-reconcile path sets this: it runs once for the just-finished active
-//   turn and probes server metadata FIRST (reloading only on an actual count
-//   change), so it is safe to look even right after the "done" event without
+//   turn and probes server metadata FIRST (reloading on a count change or
+//   a stranded optimistic prompt), so it is safe to look right after "done" without
 //   the unconditional force reload that produced the mobile-PWA end-of-turn
 //   flash (#3976). This intentionally COEXISTS with the #3916/#4195 poll-only
 //   external gate below, which is untouched.
@@ -8367,7 +8365,7 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   // "done" event already delivered the final messages. Reloading here would
   // clear S.toolCalls and lose Activity. The idle-reconcile path may bypass
   // this guard (opts.ignoreStreamJustFinished) because it probes server
-  // metadata first and only reloads when the count actually changed (#3976).
+  // metadata first instead of unconditionally reloading (#3976).
   if(!opts.ignoreStreamJustFinished && typeof window !== 'undefined' && window._streamJustFinished) return 'skipped';
   if(typeof document !== 'undefined' && document.hidden) return 'skipped';
   const sid = S.session.session_id;
@@ -8381,6 +8379,12 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
     if(S.busy || S.activeStreamId) return 'skipped';
     const remoteCount = Number(data.session.message_count || 0);
     const remoteLast = Number(data.session.last_message_at || data.session.updated_at || 0);
+    // A disconnected regeneration can leave an optimistic prompt on screen
+    // without its answer. The retained session count still matches the new
+    // settled count, so it cannot tell us whether that answer is on screen.
+    const tail = Array.isArray(S.messages) ? S.messages[S.messages.length-1] : null;
+    const strandedPrompt = reason==='idle-reconcile' && tail?.role==='user' && tail._pending===true
+      && data.session.session_id===sid && _isServerIdleSessionRow(data.session);
     // Force-reload the whole transcript whenever the visible conversation's
     // message count CHANGED in either direction. A higher count means new
     // messages; a LOWER count means another tab/client truncated, undid,
@@ -8397,8 +8401,9 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
     // disappears and "reappears a moment later" with no new content. Skip the
     // destructive reload in that case and just refresh the lightweight sidebar
     // list metadata, advancing the local last-seen marker so the same metadata
-    // bump doesn't re-trigger on every subsequent poll.
-    if(remoteCount !== localCount){
+    // bump doesn't re-trigger on every subsequent poll. A stranded prompt is
+    // separate evidence that the visible transcript did not settle.
+    if(remoteCount !== localCount || strandedPrompt){
       // Hidden-tab return / visibility / focus recovery commonly trips
       // remoteCount !== localCount when the post-turn bg-review thread or a
       // sibling tab persisted messages while the tab was hidden. The default
@@ -8408,13 +8413,10 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
       // gap that #5061 (metadata-only) and #5122 (SSE 4-probe) DO NOT cover
       // (#5177). Pass keepStaleUntilLoaded so the destructive clear is
       // deferred to swap-in-place when the new transcript actually arrives.
-      // Restrict to the recovery reasons that produced the field repro; the
-      // post-stream idle reconcile and external/imported-session polls keep
-      // the original behaviour (no DOM is on-screen long enough for the gap
-      // to matter, and any change there would have to re-verify their own
-      // tradeoffs).
+      // A stranded optimistic prompt also needs an in-place replacement.
+      // Leave ordinary poll and count-based idle reload behavior alone.
       const _recoveryReasons = {visible:true, focus:true};
-      const _keepStaleUntilLoaded = !!_recoveryReasons[String(reason||'')];
+      const _keepStaleUntilLoaded = strandedPrompt || !!_recoveryReasons[String(reason||'')];
       // #5409: skip force-reload while a different session's loadSession()
       // is in flight — avoids overwriting _loadingSessionId and silently
       // cancelling an in-progress session switch. All four call paths

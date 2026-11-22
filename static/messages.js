@@ -7673,15 +7673,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // even though the backend was still producing tokens; the settled response
       // then reappeared later from sidecar/replay. Keep the live DOM/state intact
       // during this retry window and only surface an error after all probes fail.
+      // Sidebar settlement can retire this stream while a probe is in flight.
+      // Only the current stream may retry or change the visible composer.
+      const _ownsReconnect=()=>!_terminalStateReached&&!_streamFinalized&&
+        _isSessionCurrentPane(activeSid)&&S.activeStreamId===streamId;
+      const _reconnectRestoreOptions={preserveVisibleOnShorterTerminalSnapshot:true,isCurrent:_ownsReconnect};
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
         const _retryDelays=[1500,3000,5000,8000,12000,20000];
         setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`);
         const _probeReconnect=async(attempt=0)=>{
-          if(_terminalStateReached || _streamFinalized) return;
-          if(!_isSessionCurrentPane(activeSid)) return;
+          if(!_ownsReconnect()) return;
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+            if(!_ownsReconnect()) return;
             if(st&&st.active){
               setComposerStatus('Reconnected',1000);
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
@@ -7693,9 +7698,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               return;
             }
           }catch(_){
-            if(_deferStreamErrorIfOffline()) return;
+            if(!_ownsReconnect()||_deferStreamErrorIfOffline()) return;
           }
-          if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+          if(await _restoreSettledSession(source, _reconnectRestoreOptions)) return;
+          if(!_ownsReconnect()) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
           const nextDelay=_retryDelays[attempt+1];
@@ -7716,7 +7722,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             // the UI stuck on "Restoring session…" forever. Fall through to
             // _handleStreamError after 8s.
             _restoreTimedOut=true;
-            if(!_terminalStateReached&&!_streamFinalized){
+            if(_ownsReconnect()){
               if(_deferStreamErrorIfOffline()) return;
               if(_deferStreamErrorIfPageHidden(source)) return;
               _flushReasoningToAnchor();
@@ -7725,7 +7731,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             }
           },8000);
           try{
-            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})){
+            if(await _restoreSettledSession(source, _reconnectRestoreOptions)){
               if(_restoreTimedOut) return; // timer already fired _handleStreamError
               clearTimeout(_restoreTimer);
               return;
@@ -7737,7 +7743,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }
           if(_restoreTimedOut) return; // timer already fired _handleStreamError
           clearTimeout(_restoreTimer);
-          if(_terminalStateReached||_streamFinalized) return;
+          if(!_ownsReconnect()) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
           _flushReasoningToAnchor();
@@ -7747,7 +7753,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         setTimeout(()=>{void _probeReconnect(0);},_retryDelays[0]);
         return;
       }
-      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+      if(await _restoreSettledSession(source, _reconnectRestoreOptions)) return;
+      if(!_ownsReconnect()) return;
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden(source)) return;
       _flushReasoningToAnchor();

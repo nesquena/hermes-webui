@@ -186,15 +186,15 @@ def test_ensure_messages_loaded_supports_force_override():
 
 def test_refresh_visibility_path_requests_keep_stale_until_loaded():
     # The visibility-recovery callers must opt INTO keepStaleUntilLoaded; the
-    # post-stream idle reconcile and the poll path stay on the original
-    # destructive reload behaviour (per the design note in the patch comment).
+    # ordinary count-based idle reconcile and poll still use the old reload;
+    # a stranded optimistic prompt is gated separately.
     block = _refresh_block(_compact(SESSIONS_JS))
     # The recovery-reason map MUST include 'visible' and 'focus' and EXCLUDE
     # 'poll' / 'idle-reconcile'. Strip JS-side whitespace via _compact above.
     assert "const_recoveryReasons={visible:true,focus:true};" in block, (
         "expected the visibility/focus recovery-reason map"
     )
-    assert "const_keepStaleUntilLoaded=!!_recoveryReasons[String(reason||'')];" in block
+    assert "const_keepStaleUntilLoaded=strandedPrompt||!!_recoveryReasons[String(reason||'')];" in block
     # The reloaded-path loadSession call must forward the flag — there is
     # exactly one loadSession call in this block (the reloaded branch) and it
     # must pass keepStaleUntilLoaded.
@@ -204,7 +204,7 @@ def test_refresh_visibility_path_requests_keep_stale_until_loaded():
     )
 
 
-def test_poll_and_idle_reconcile_do_not_enable_keep_stale():
+def test_poll_and_ordinary_idle_reconcile_do_not_enable_keep_stale():
     # Belt-and-suspenders: the recovery-reason map must not list 'poll' or
     # 'idle-reconcile'. We assert on the LITERAL set definition so any
     # accidental widening is caught by the source lock.

@@ -173,6 +173,16 @@ def test_rejected_regeneration_restores_the_action_buttons(driver_result):
         assert f"OK  {line}" in result.stdout, line
 
 
+def test_disconnected_turn_recovers_message_actions_at_each_viewport(driver_result):
+    result = driver_result
+    assert result.returncode == 0, result.stdout + result.stderr
+    for name in ("desktop", "narrow", "phone"):
+        assert f"OK  {name} viewport — busy and recovered action bars" in result.stdout
+    assert "OK  disconnect recovery (stream-owned, one queue drain)" in result.stdout
+    assert "OK  phone touch — Regenerate starts and restored Edit opens the correct prompt" in result.stdout
+    assert "both text markers and idle actions survive" in result.stdout
+
+
 # ── render-vs-busy ordering, driven through the real startRegeneration() ────
 # The browser gate above proves the DOM outcome; this harness proves the
 # ORDERING with no browser involved, by running the production

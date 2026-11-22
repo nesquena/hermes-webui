@@ -79,39 +79,26 @@ def test_chromium_launch_errors_distinguish_missing_executable(monkeypatch, caps
         assert message in stderr and "GATE FAILED" in stderr
 
 
-def test_apperror_gate_requires_the_frame_and_the_previous_answer():
+@pytest.mark.parametrize(
+    ("row", "unexpected"), [("errorText", "wait expired"), ("previousAnswerText", "previous answer is gone")],
+)
+def test_apperror_gate_requires_the_text_in_each_owning_row(row, unexpected):
     driver = _load_driver()
-    base = {
-        "threw": None,
-        "renderBusy": [True, False],
-        "afterError": {
-            "text": "previous answer and error",
-            "copyCount": 1,
-            "busy": False,
-            "regenerate": [driver.APPERROR_ERROR_ASSISTANT_IDX],
-            "edit": [driver.APPERROR_PENDING_USER_IDX],
-        },
-        "busyRender": {},
-        "restored": {},
-        "errorFrameSeen": True,
-        "previousMarkerPresent": True,
+    state = {
+        "previousAnswerText": driver.APPERROR_PREVIOUS_ANSWER_PROSE,
+        "errorText": driver.APPERROR_FRAME["message"],
+        "copyCount": 2,
+        "busy": False,
+        "regenerate": [driver.APPERROR_ERROR_ASSISTANT_IDX],
+        "edit": [driver.APPERROR_PENDING_USER_IDX],
     }
-    assert not any(
-        "never appeared" in p or "previous answer is gone" in p
-        for p in driver._failures_apperror_terminal(dict(base))
-    )
-
-    missing_frame = dict(base, errorFrameSeen=False)
-    assert any(
-        "never appeared" in p
-        for p in driver._failures_apperror_terminal(missing_frame)
-    )
-
-    missing_answer = dict(base, previousMarkerPresent=False)
-    assert any(
-        "previous answer is gone" in p
-        for p in driver._failures_apperror_terminal(missing_answer)
-    )
+    result = {"renderBusy": [True, False], "afterError": state}
+    assert driver._failures_apperror_terminal(result) == []
+    # The wrong row is still nonempty and the controls (including Copy) are
+    # unchanged. A page-wide text or button-count check would not catch this.
+    state[row] = "Unrelated assistant prose"
+    problems = driver._failures_apperror_terminal(result)
+    assert len(problems) == 1 and unexpected in problems[0], problems
 
 
 def test_browser_suite_is_launched_once():

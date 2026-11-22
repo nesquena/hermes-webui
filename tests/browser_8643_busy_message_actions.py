@@ -46,9 +46,14 @@ WHAT THIS CHECKS
   SSE stream are controlled at the HTTP boundary only (a real native
   EventSource carries a real `apperror` frame), and the production sidebar
   reconciler is left in place. The settled transcript must paint the IDLE
-  action bar (Edit + Regenerate), the error text and the previous answer must
-  both survive, and — the other direction — a render that ran while the turn
-  was still live must paint no dead buttons at all.
+  action bar (Edit + Regenerate), and both text markers must survive in their
+  own assistant rows.
+
+  Finally, a native EventSource ends without a terminal frame. Both the
+  stream-owned snapshot recovery and the sidebar-first idle recovery must
+  restore the action bar immediately, even when regeneration keeps the same
+  session message count. Run the sidebar-first path at desktop, narrow and
+  touch-phone sizes; tap Regenerate and the restored Edit on the phone.
 
   Undo is pinned at the source instead (see
   tests/test_issue8643_busy_message_actions.py): the `undoBtn` const in
@@ -64,12 +69,12 @@ SCOPE
   same variable for its own server).
 
 USAGE
-  python tests/browser_8643_busy_message_actions.py
+  python tests/browser_8643_busy_message_actions.py [--screenshots DIR]
 
 EXIT CODES
   0 — every check passed
   1 — a check failed (regression)
-  2 — environment/setup failure (server didn't boot, playwright missing, etc.)
+  2 — Playwright or its Chromium executable is unavailable
 """
 from __future__ import annotations
 
@@ -78,6 +83,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -164,6 +170,13 @@ APPERROR_FRAME = {
 APPERROR_PREVIOUS_ASSISTANT_IDX = "1"
 APPERROR_PENDING_USER_IDX = "2"
 APPERROR_ERROR_ASSISTANT_IDX = "3"
+
+RECOVERED_TEXT = "Recovered final answer after the stream disconnected."
+RECOVERY_MESSAGES = [APPERROR_MESSAGES[0],
+                     {"role": "assistant", "content": APPERROR_PREVIOUS_ANSWER_PROSE},
+                     *APPERROR_MESSAGES[2:]]
+REGENERATE_BUTTON = '#msgInner button[onclick="regenerateResponse(this)"]'
+EDIT_BUTTON = '#msgInner button[onclick="editMessage(this)"]'
 
 
 IMPORT_AND_LOAD_JS = """async ({messages, finalText}) => {
@@ -324,82 +337,40 @@ FAILED_REGENERATION_JS = """async ({sid}) => {
 # end idle, and a background clear between the rejection and the restore
 # render would have papered over the very ordering bug under test.
 #
-# The assertions are deliberately TWO-sided, because the reviewer's own oracle
-# passed on the "revert the busy predicates" arm — a one-sided oracle that only
-# checks for the buttons' presence is satisfied by simply always painting them.
-# So this section also pins the opposite direction: while the turn is live,
-# the action bar must paint NO Edit/Regenerate at all.
-APPERROR_PROBE_JS = """() => {
-  const inner = document.querySelector('#msgInner') || {};
-  const text = inner.innerText || '';
-  const rowsWith = (selector, needle) => Array.from(document.querySelectorAll(selector))
-    .filter(row => row.querySelector('.msg-foot'))
-    .map(row => ({
-      idx: row.dataset.msgIdx,
-      has: !!row.querySelector(`button[onclick*="${needle}"]`),
-    }));
-  const assistant = rowsWith('.assistant-segment[data-msg-idx]', 'regenerateResponse(this)');
-  const users = rowsWith('.msg-row[data-role="user"]', 'editMessage(this)');
-  const copy = Array.from(document.querySelectorAll('.assistant-segment[data-msg-idx] .msg-foot'))
-    .filter(foot => foot.querySelector('button[onclick*="copyMsg(this)"]')).length;
-  return {
-    busy: !!S.busy,
-    regenerate: assistant.filter(row => row.has).map(row => row.idx),
-    assistantRows: assistant.map(row => row.idx),
-    edit: users.filter(row => row.has).map(row => row.idx),
-    userRows: users.map(row => row.idx),
-    copyCount: copy,
-    text,
-  };
-}"""
-
-
-APPERROR_SCENARIO_JS = """async ({sid, revision, frame, previousMarker}) => {
-  const probe = %s;
+# Inspect the exact message rows before any further render can disguise the
+# terminal result. The held-stream check separately verifies the busy side.
+APPERROR_SCENARIO_JS = """async ({sid, frame, previousIndex, errorIndex}) => {
+  const readActions = %s;
+  const bodyText = idx => document.querySelector(
+    `#msgInner .assistant-segment[data-msg-idx="${idx}"] .msg-body`
+  )?.innerText || '';
   const realRender = window.renderMessages;
   const renderBusy = [];
   window.renderMessages = function (...args) {
     renderBusy.push(!!S.busy);
     return realRender.apply(this, args);
   };
-  // Use the revision the real session load minted: the server rejects a
-  // synthetic one with 409 stale_regeneration_revision.
-  const liveRevision = (S.session && S.session.regeneration_revision) || revision;
-  S.session.regeneration_revision = liveRevision;
-  let threw = null;
   try {
-    await startRegeneration(sid, liveRevision);
-  } catch (error) {
-    threw = String((error && error.message) || error);
+    const revision = S.session.regeneration_revision;
+    if (!revision) throw new Error('loaded session has no regeneration revision');
+    await startRegeneration(sid, revision);
+    const deadline = Date.now() + 8000;
+    while (!bodyText(errorIndex).includes(frame.message) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    return {
+      renderBusy,
+      afterError: {
+        ...readActions(),
+        previousAnswerText: bodyText(previousIndex),
+        errorText: bodyText(errorIndex),
+      },
+    };
+  } finally {
+    window.renderMessages = realRender;
   }
-  // The apperror frame is delivered asynchronously, so wait for the error row
-  // it appends to land in the transcript before reading the action bar.
-  const deadline = Date.now() + 45000;
-  let afterError = probe();
-  let errorFrameSeen = false;
-  while (Date.now() < deadline) {
-    afterError = probe();
-    if (afterError.text.indexOf(frame.message) !== -1) { errorFrameSeen = true; break; }
-    await new Promise(resolve => setTimeout(resolve, 50));
-  }
-  // The other direction: paint the settled transcript again while the turn is
-  // marked busy. It must offer no Edit and no Regenerate — the same
-  // running-turn rule behaviour 1 pins. A one-sided "the buttons are there"
-  // oracle would not notice that difference; this one does.
-  S.busy = true;
-  renderMessages();
-  const busyRender = probe();
-  S.busy = false;
-  renderMessages();
-  const restored = probe();
-  window.renderMessages = realRender;
-  return {
-    threw, renderBusy, afterError, busyRender, restored,
-    errorFrameSeen,
-    previousMarkerPresent: afterError.text.indexOf(previousMarker) !== -1,
-  };
 }
-""" % APPERROR_PROBE_JS
+""" % ACTION_BUTTONS_JS
 
 
 def _failures_apperror_terminal(result):
@@ -412,35 +383,13 @@ def _failures_apperror_terminal(result):
     so the settled transcript kept the button-less footer.
     """
     problems = []
-    if result.get("threw"):
-        problems.append(
-            "the accepted regeneration threw instead of reaching the apperror"
-            f" terminal: {result.get('threw')!r}"
-        )
-    render_busy = result.get("renderBusy") or []
-    if not render_busy:
-        problems.append(
-            "the accepted regeneration never rendered — the apperror frame did"
-            " not reach the production handler (this section would pass"
-            " vacuously)"
-        )
-        return problems
-    after_error = result.get("afterError") or {}
-    # The settled transcript must actually carry the error row and the previous
-    # answer: otherwise the frame was swallowed and every button assertion
-    # below is meaningless.
-    if not result.get("errorFrameSeen"):
-        problems.append(
-            "the apperror frame never appeared in the settled transcript — the"
-            " error-message wait expired, so this section cannot speak"
-        )
-    if not result.get("previousMarkerPresent"):
-        problems.append(
-            "the previous answer is gone from the settled transcript — losing"
-            " it must fail the section, not pass silently"
-        )
-    if not after_error.get("text"):
-        problems.append("the settled transcript rendered no text at all")
+    if not result["renderBusy"] or result["renderBusy"][0] is not True:
+        problems.append("the accepted regeneration never painted its running turn")
+    after_error = result["afterError"]
+    if APPERROR_FRAME["message"] not in after_error["errorText"]:
+        problems.append("the apperror text never appeared in the error row before the wait expired")
+    if APPERROR_PREVIOUS_ANSWER_PROSE not in after_error["previousAnswerText"]:
+        problems.append("the previous answer is gone from its original assistant row")
     if not after_error.get("copyCount"):
         problems.append(
             "no Copy button rendered after the error — the transcript itself"
@@ -465,28 +414,6 @@ def _failures_apperror_terminal(result):
             f" {after_error.get('edit')}, expected the last user row"
             f" [{APPERROR_PENDING_USER_IDX}] — the terminal action-bar render"
             " still saw the running-turn state (the review's P2)"
-        )
-    # The other direction: the running-turn rule must still hold. Without this
-    # the section would also pass on the arm that simply always paints the
-    # buttons, which the reviewer's oracle could not distinguish.
-    busy_render = result.get("busyRender") or {}
-    for name in ("regenerate", "edit"):
-        if busy_render.get(name):
-            problems.append(
-                f"{name} button(s) still in the DOM on rows"
-                f" {busy_render.get(name)} while the turn is marked busy — a"
-                " running turn leaves dead buttons on screen"
-            )
-    restored = result.get("restored") or {}
-    if restored.get("regenerate") != [APPERROR_ERROR_ASSISTANT_IDX]:
-        problems.append(
-            "an idle re-render of the settled transcript lost Regenerate"
-            f" (rows {restored.get('regenerate')})"
-        )
-    if restored.get("edit") != [APPERROR_PENDING_USER_IDX]:
-        problems.append(
-            "an idle re-render of the settled transcript lost Edit"
-            f" (rows {restored.get('edit')})"
         )
     return problems
 
@@ -574,7 +501,296 @@ def _failures_rejected_regeneration(result):
     return problems
 
 
-def main() -> int:
+def _exercise_apperror(page, capture=None):
+    sid = page.evaluate(IMPORT_AND_LOAD_JS, {
+        "messages": APPERROR_MESSAGES, "finalText": APPERROR_SECOND_ANSWER_TEXT,
+    })
+    stream_id = "probe-apperror-stream"
+
+    listing = page.request.get("/api/sessions").json()
+
+    def boundary(route):
+        url = urlsplit(route.request.url)
+        if url.path == "/api/chat/start":
+            payload = route.request.post_data_json
+            assert payload["session_id"] == sid and payload["regenerate"] is True
+            route.fulfill(json={"stream_id": stream_id, "session_id": sid})
+        elif url.path == "/api/chat/stream" and parse_qs(url.query).get("stream_id") == [stream_id]:
+            route.fulfill(content_type="text/event-stream", body="event: apperror\ndata: "
+                          + json.dumps(dict(APPERROR_FRAME, session_id=sid)) + "\n\n")
+        else:
+            _session_list_for_probe(route, listing, sid, stream_id)
+
+    pattern = "**/api/{chat/start,chat/stream,sessions}*"
+    page.route(pattern, boundary)
+    try:
+        result = page.evaluate(APPERROR_SCENARIO_JS, {
+            "sid": sid, "frame": APPERROR_FRAME,
+            "previousIndex": APPERROR_PREVIOUS_ASSISTANT_IDX,
+            "errorIndex": APPERROR_ERROR_ASSISTANT_IDX,
+        })
+        problems = _failures_apperror_terminal(result)
+        if capture:
+            capture(page, "apperror")
+        if not problems:
+            print("OK  accepted regeneration that ends in apperror — both text markers and idle actions survive")
+        return problems
+    finally:
+        page.unroute(pattern, boundary)
+
+
+def _session_list_for_probe(route, listing, sid, stream_id):
+    if urlsplit(route.request.url).path != "/api/sessions":
+        route.fallback()
+        return
+    rows = [dict(row, active_stream_id=stream_id, is_streaming=bool(stream_id))
+            if row["session_id"] == sid else row for row in listing["sessions"]]
+    route.fulfill(json={**listing, "sessions": rows})
+
+
+def _exercise_disconnect_recovery(page, *, touch=False, sidebar_first=False, capture=None):
+    """Hold a native EventSource, then end it without a terminal frame."""
+    sid = page.evaluate(IMPORT_AND_LOAD_JS, {
+        "messages": RECOVERY_MESSAGES, "finalText": APPERROR_SECOND_ANSWER_TEXT,
+    })
+    stream_id = "probe-disconnect-stream"
+    settled = page.evaluate("() => S.session")
+    assert settled["message_count"] == len(RECOVERY_MESSAGES), "fixture must keep the durable count unchanged"
+    settled.update({
+        "active_stream_id": None,
+        "pending_user_message": None,
+        "pending_started_at": None,
+        "messages": [*RECOVERY_MESSAGES[:-1], {"role": "assistant", "content": RECOVERED_TEXT}],
+    })
+    listing = page.request.get("/api/sessions").json()
+    streams = []
+    status_requests = []
+    settled_reads = []
+    report_idle = False
+
+    def boundary(route):
+        url = urlsplit(route.request.url)
+        query = parse_qs(url.query)
+        if url.path == "/api/chat/start":
+            assert route.request.post_data_json["session_id"] == sid
+            assert route.request.post_data_json["regenerate"] is True
+            route.fulfill(json={"session_id": sid, "stream_id": stream_id})
+        elif url.path == "/api/chat/stream" and query.get("stream_id") == [stream_id]:
+            streams.append(route)
+        elif url.path == "/api/chat/stream/status" and query.get("stream_id") == [stream_id]:
+            status_requests.append(route)
+            if not sidebar_first:
+                route.fulfill(json={"active": False, "replay_available": False})
+        elif url.path == "/api/session" and query.get("session_id") == [sid] and report_idle:
+            if query.get("messages") == ["0"]:
+                metadata = {k: v for k, v in settled.items() if k not in {"messages", "regeneration_revision"}}
+                route.fulfill(json={"session": metadata})
+            else:
+                settled_reads.append(route.request.url)
+                route.fulfill(json={"session": settled})
+        elif (url.path == "/api/session" and query.get("session_id") == [sid]
+              and query.get("expand_renderable") == ["1"]):
+            settled_reads.append(route.request.url)
+            route.fulfill(json={"session": settled})
+        else:
+            _session_list_for_probe(route, listing, sid, None if report_idle else stream_id)
+
+    pattern = "**/api/{chat/start,chat/stream,chat/stream/status,session,sessions}*"
+    page.route(pattern, boundary)
+    try:
+        page.evaluate("""({sid, marker}) => {
+          const render = window.renderMessages;
+          const shift = window.shiftQueuedSessionMessage;
+          const api = window.api;
+          window.__recoveredActions = null;
+          window.__recoveryDrains = [];
+          window.__reconnectReplyHandled = false;
+          window.api = async function(path, ...args) {
+            const data = await api.call(this, path, ...args);
+            if (path.startsWith('/api/chat/stream/status?')) {
+              // After the suspended reconnect handler's promise continuations.
+              setTimeout(() => { window.__reconnectReplyHandled = true; }, 0);
+            }
+            return data;
+          };
+          window.shiftQueuedSessionMessage = function(owner) {
+            window.__recoveryDrains.push(owner);
+            return shift.apply(this, arguments);
+          };
+          window.renderMessages = function() {
+            const result = render.apply(this, arguments);
+            if (window.__recoveredActions === null && S.session?.session_id === sid
+                && document.querySelector('#msgInner').innerText.includes(marker)) {
+              window.__recoveredActions = (%s)();
+            }
+            return result;
+          };
+          window.__restoreRecoveryProbes = () => {
+            window.renderMessages = render;
+            window.shiftQueuedSessionMessage = shift;
+            window.api = api;
+          };
+        }""" % ACTION_BUTTONS_JS, {"sid": sid, "marker": RECOVERED_TEXT})
+        regenerate = page.locator(REGENERATE_BUTTON)
+        if not touch:
+            regenerate.locator("xpath=ancestor::div[@class='msg-foot'][1]").hover()
+        with page.expect_request(lambda request: urlsplit(request.url).path == "/api/chat/stream", timeout=10000):
+            (regenerate.tap if touch else regenerate.click)(timeout=10000)
+        page.wait_for_function("stream => S.busy && S.activeStreamId === stream", arg=stream_id)
+        assert len(streams) == 1 and not settled_reads, "did not reach the held EventSource"
+        busy = page.evaluate(ACTION_BUTTONS_JS)
+        pending_user = page.locator('#msgInner .msg-row[data-role="user"]').last
+        if capture:
+            pending_user.scroll_into_view_if_needed()
+            if not touch:
+                pending_user.hover()
+            capture(page, "busy")
+        if sidebar_first:
+            with page.expect_request(lambda request: urlsplit(request.url).path == "/api/chat/stream/status", timeout=5000):
+                streams[0].fulfill(content_type="text/event-stream", body=": connection closed\n\n")
+            report_idle = True
+            page.evaluate("() => renderSessionList()")
+            page.wait_for_function("() => !S.busy && !S.activeStreamId")
+            assert len(status_requests) == 1, "expected exactly one held reconnect probe"
+        else:
+            streams[0].fulfill(content_type="text/event-stream", body=": connection closed\n\n")
+
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        try:
+            page.wait_for_function("() => window.__recoveredActions !== null && !S.busy", timeout=8000)
+        except PlaywrightTimeoutError:
+            if capture:
+                pending_user.scroll_into_view_if_needed()
+                capture(page, "recovered")
+            state = page.evaluate(ACTION_BUTTONS_JS)
+            return [f"recovery never installed the settled answer ({len(settled_reads)} transcript reads): {state}"]
+        finally:
+            if sidebar_first:
+                # Let the sidebar path finish (or fail) without the reconnect
+                # attempt fetching the same transcript behind its back.
+                status_requests[0].fulfill(json={"active": False, "replay_available": False})
+        if sidebar_first:
+            page.wait_for_function("() => window.__reconnectReplyHandled", timeout=5000)
+        restored = page.evaluate("() => window.__recoveredActions")
+        assert len(settled_reads) == 1, "did not recover from exactly one settled snapshot"
+        problems = []
+        if sidebar_first:
+            status = page.locator('#composerStatus').text_content()
+            if status:
+                problems.append(f"stale reconnect reply changed the idle composer status: {status}")
+        # Direct settlement must drain once. The sidebar path may also finish
+        # the old stream's cleanup, but must never drain twice or for another pane.
+        drains = page.evaluate("() => window.__recoveryDrains")
+        if not (drains == [sid] or (sidebar_first and not drains)):
+            problems.append(f"unexpected queue drains: {drains}")
+        if capture:
+            final = page.locator(f'#msgInner .assistant-segment[data-msg-idx="{APPERROR_ERROR_ASSISTANT_IDX}"] .msg-foot')
+            final.scroll_into_view_if_needed()
+            if not touch:
+                final.hover()
+            capture(page, "recovered")
+        if busy["edit"] or busy["regenerate"] or not busy["copyCount"]:
+            problems.append(f"held running turn: unexpected action bar {busy}")
+        if restored["busy"] or restored["edit"] != [APPERROR_PENDING_USER_IDX] or restored["regenerate"] != [APPERROR_ERROR_ASSISTANT_IDX]:
+            problems.append(f"first recovered render: Edit/Regenerate missing or on wrong rows {restored}")
+        previous = page.locator(f'.assistant-segment[data-msg-idx="{APPERROR_PREVIOUS_ASSISTANT_IDX}"] .msg-body')
+        if APPERROR_PREVIOUS_ANSWER_PROSE not in previous.inner_text(timeout=5000):
+            problems.append("previous answer was not preserved during recovery")
+        if touch and not problems:
+            page.locator(EDIT_BUTTON).tap(timeout=10000)
+            editor = page.locator('#msgInner .msg-edit-area')
+            if editor.input_value(timeout=5000) != APPERROR_SECOND_USER_TEXT:
+                problems.append("touch Edit did not open the recovered prompt")
+            else:
+                if capture:
+                    capture(page, "editing")
+                page.locator('#msgInner .msg-edit-cancel').tap(timeout=5000)
+                print("OK  phone touch — Regenerate starts and restored Edit opens the correct prompt")
+        if not problems:
+            mechanism = "sidebar-first, same count" if sidebar_first else "stream-owned, one queue drain"
+            print(f"OK  disconnect recovery ({mechanism}) — the first recovered render offers Edit and Regenerate")
+        return problems
+    finally:
+        page.unroute(pattern, boundary)
+        page.evaluate("() => window.__restoreRecoveryProbes?.()")
+
+
+VIEWPORTS = (
+    ("desktop", 1440, 900, False),
+    ("narrow", 820, 900, False),
+    ("phone", 390, 844, True),
+)
+
+
+def _exercise_viewport(context, name, width, touch, screenshots):
+    page = context.new_page()
+    errors = _capture_page_errors(page)
+    page.goto("/", wait_until="domcontentloaded")
+    page.wait_for_selector("#msg", state="visible", timeout=15000)
+    page.wait_for_function("() => typeof window._autoScrollFollow === 'boolean'", timeout=15000)
+    assert page.evaluate("() => window.innerWidth") == width, "wrong layout viewport"
+    assert page.evaluate("() => matchMedia('(hover: none) and (pointer: coarse)').matches") is touch
+
+    def capture(page, state):
+        if screenshots is not None:
+            page.screenshot(path=screenshots / f"{name}-{state}.png", animations="disabled")
+
+    failures = []
+    if name == "desktop":
+        page.evaluate(IMPORT_AND_LOAD_JS, {"messages": MESSAGES, "finalText": FINAL_TEXT})
+        states = page.evaluate(THREE_STATES_JS)
+
+        idle_problems = _failures_idle(states["idle"], "idle")
+        failures += idle_problems
+        if not idle_problems:
+            print("OK  idle — Regenerate only on the turn's final assistant row,"
+                  " Edit on the last user row")
+
+        busy_problems = _failures_busy(states["busy"])
+        failures += busy_problems
+        if not busy_problems:
+            print("OK  busy — Regenerate and Edit are gone while the turn runs")
+
+        restored_problems = _failures_idle(states["restored"], "idle again")
+        failures += restored_problems
+        if not restored_problems:
+            print("OK  idle again — both buttons return once the turn is over")
+
+        # The turn-final rule must hold in every state, busy or not.
+        for label, state in states.items():
+            if INTERIM_ASSISTANT_IDX in state["regenerate"]:
+                failures.append(
+                    f"{label}: Regenerate is offered on the interim answer"
+                    f" (row {INTERIM_ASSISTANT_IDX})"
+                )
+
+        # Behaviour 2: the regeneration whose start is refused.
+        session_id = page.evaluate(
+            "() => (S.session && S.session.session_id) || ''"
+        )
+        rejected = page.evaluate(FAILED_REGENERATION_JS, {"sid": session_id})
+        rejected_problems = _failures_rejected_regeneration(rejected)
+        failures += rejected_problems
+        if not rejected_problems:
+            print("OK  rejected regeneration — Edit and Regenerate return once"
+                  " /api/chat/start refuses")
+            print("OK  cache restore after a refused regeneration keeps both buttons")
+            print("OK  a busy-written cache entry is never served to the idle transcript")
+            print("OK  the refused regeneration paints no buttons while the turn runs")
+        failures += _exercise_apperror(page, capture)
+        failures += _exercise_disconnect_recovery(page)
+
+    failures += _exercise_disconnect_recovery(
+        page, touch=touch, sidebar_first=True, capture=capture if screenshots is not None else None,
+    )
+    failures.extend(f"pageerror: {kind} {text}" for kind, text in errors)
+    if not failures:
+        print(f"OK  {name} viewport — busy and recovered action bars")
+    return failures
+
+
+def main(*, screenshots=None) -> int:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -602,6 +818,7 @@ def main() -> int:
     env["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
     env.update({
         "HERMES_WEBUI_HOST": "127.0.0.1",
+        "HERMES_WEBUI_TEST_NETWORK_BLOCK": "1",
         "HERMES_WEBUI_STATE_DIR": str(state_dir / "webui-state"),
         "HERMES_HOME": str(state_dir / "hermes-home"),
         "HERMES_BASE_HOME": str(state_dir / "hermes-home"),
@@ -636,164 +853,25 @@ def main() -> int:
                     )
                     return 2
                 raise
-            context = browser.new_context(base_url=base_url)
-            page = context.new_page()
-            errors = _capture_page_errors(page)
-            page.goto("/", wait_until="domcontentloaded")
-            page.wait_for_selector("#msg", state="visible", timeout=15000)
-            page.wait_for_function(
-                "() => typeof window._autoScrollFollow === 'boolean'", timeout=15000
-            )
-            page.evaluate(IMPORT_AND_LOAD_JS, {"messages": MESSAGES, "finalText": FINAL_TEXT})
-            states = page.evaluate(THREE_STATES_JS)
-
-            idle_problems = _failures_idle(states["idle"], "idle")
-            failures += idle_problems
-            if not idle_problems:
-                print("OK  idle — Regenerate only on the turn's final assistant row,"
-                      " Edit on the last user row")
-
-            busy_problems = _failures_busy(states["busy"])
-            failures += busy_problems
-            if not busy_problems:
-                print("OK  busy — Regenerate and Edit are gone while the turn runs")
-
-            restored_problems = _failures_idle(states["restored"], "idle again")
-            failures += restored_problems
-            if not restored_problems:
-                print("OK  idle again — both buttons return once the turn is over")
-
-            # The turn-final rule must hold in every state, busy or not.
-            for label, state in states.items():
-                if INTERIM_ASSISTANT_IDX in state["regenerate"]:
-                    failures.append(
-                        f"{label}: Regenerate is offered on the interim answer"
-                        f" (row {INTERIM_ASSISTANT_IDX})"
-                    )
-
-            # Behaviour 2: the regeneration whose start is refused.
-            session_id = page.evaluate(
-                "() => (S.session && S.session.session_id) || ''"
-            )
-            rejected = page.evaluate(FAILED_REGENERATION_JS, {"sid": session_id})
-            rejected_problems = _failures_rejected_regeneration(rejected)
-            failures += rejected_problems
-            if not rejected_problems:
-                print("OK  rejected regeneration — Edit and Regenerate return once"
-                      " /api/chat/start refuses")
-                print("OK  cache restore after a refused regeneration keeps both buttons")
-                print("OK  a busy-written cache entry is never served to the idle transcript")
-                print("OK  the refused regeneration paints no buttons while the turn runs")
-
-            # Behaviour 3: an ACCEPTED regeneration that dies in apperror.
-            #
-            # The HTTP boundary is controlled, not the api() adapter: the
-            # finding is about the ORDER inside the apperror handler, so the
-            # real EventSource must carry the real frame. Three surfaces are
-            # answered here — /api/chat/start (a successful start), the SSE
-            # stream (the server's own apperror payload), and /api/sessions
-            # (running metadata so the production reconciler does not race
-            # the terminal).
-            # The load marker must be text that SURVIVES markdown rendering:
-            # the previous answer carries a list, a table and a code block, and
-            # the rendered innerText does not reproduce those source markers
-            # verbatim. The first prose line is what the DOM keeps.
-            apperror_sid = page.evaluate(
-                IMPORT_AND_LOAD_JS,
-                {
-                    "messages": APPERROR_MESSAGES,
-                    "finalText": APPERROR_PREVIOUS_ANSWER_PROSE,
-                },
-            )
-
-            def _fulfill(route, **kwargs):
-                # Session-list refreshes fan out several concurrent requests;
-                # Playwright can hand the same route object to the handler
-                # twice and the second fulfill raises "already handled". That
-                # is a transport race, not a product failure.
+            for name, width, height, touch in VIEWPORTS:
+                context = browser.new_context(
+                    base_url=base_url, viewport={"width": width, "height": height},
+                    is_mobile=touch, has_touch=touch, locale="en-US",
+                    reduced_motion="reduce", service_workers="block",
+                )
+                context.add_init_script("if (window === window.top) sessionStorage.setItem('hermes-update-checked', '1')")
                 try:
-                    route.fulfill(**kwargs)
-                except Exception as error:  # noqa: BLE001
-                    if "already handled" not in str(error):
-                        raise
-
-            def _route_apperror_boundary(route):
-                url = route.request.url
-                if "/api/chat/start" in url:
-                    _fulfill(
-                        route,
-                        status=200,
-                        content_type="application/json",
-                        body=json.dumps({
-                            "stream_id": "probe-apperror-stream",
-                            "session_id": apperror_sid,
-                        }),
-                    )
-                    return
-                if "/api/chat/stream" in url:
-                    _fulfill(
-                        route,
-                        status=200,
-                        content_type="text/event-stream",
-                        body="event: apperror\ndata: "
-                        + json.dumps(dict(APPERROR_FRAME, session_id=apperror_sid))
-                        + "\n\n",
-                    )
-                    return
-                if "/api/sessions" in url:
-                    # Pass the real payload through and only stamp the running
-                    # metadata the reconciler reads, so the production
-                    # reconciler stays in place instead of being stubbed.
-                    response = route.fetch()
-                    try:
-                        payload = response.json()
-                    except Exception:
-                        _fulfill(route, response=response)
-                        return
-                    for row in (payload.get("sessions") or []):
-                        if str(row.get("session_id") or "") == str(apperror_sid):
-                            row["active_stream_id"] = "probe-apperror-stream"
-                            row["running"] = True
-                    _fulfill(
-                        route,
-                        status=response.status,
-                        headers={**response.headers, "content-type": "application/json"},
-                        body=json.dumps(payload),
-                    )
-                    return
-                route.fallback()
-
-            page.route("**/api/chat/start", _route_apperror_boundary)
-            page.route("**/api/chat/stream*", _route_apperror_boundary)
-            page.route("**/api/sessions*", _route_apperror_boundary)
-
-            apperror_result = page.evaluate(
-                APPERROR_SCENARIO_JS,
-                {
-                    "sid": apperror_sid,
-                    "revision": "probe-apperror-revision",
-                    "frame": APPERROR_FRAME,
-                    # The DOM keeps the rendered PROSE, not the markdown
-                    # source: this is the marker that survives rendering.
-                    "previousMarker": APPERROR_PREVIOUS_ANSWER_PROSE,
-                },
-            )
-            page.unroute("**/api/chat/start", _route_apperror_boundary)
-            page.unroute("**/api/chat/stream*", _route_apperror_boundary)
-            page.unroute("**/api/sessions*", _route_apperror_boundary)
-
-            apperror_problems = _failures_apperror_terminal(apperror_result)
-            failures += apperror_problems
-            if not apperror_problems:
-                print("OK  accepted regeneration that ends in apperror — the settled"
-                      " transcript offers Edit and Regenerate")
-                print("OK  while the turn runs, that same transcript offers neither")
-
-            failures += [f"pageerror: {kind} {text}" for kind, text in errors]
-            context.close()
+                    problems = _exercise_viewport(context, name, width, touch, screenshots)
+                    failures.extend(f"{name} ({width}×{height}): {problem}" for problem in problems)
+                finally:
+                    context.close()
             browser.close()
     except Exception as error:  # noqa: BLE001 — reported as a gate failure
         failures.append(f"driver error: {type(error).__name__}: {error}")
+        if isinstance(error, AssertionError):
+            import traceback
+
+            failures.append(traceback.format_exc())
         if log_path is not None and Path(log_path).exists():
             tail = Path(log_path).read_text(encoding="utf-8", errors="replace")[-2000:]
             failures.append("last server log tail:\n" + tail)
@@ -814,4 +892,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from argparse import ArgumentParser
+
+    parser = ArgumentParser(description=__doc__)
+    parser.add_argument("--screenshots", type=Path, help="save optional busy and recovered viewport evidence")
+    args = parser.parse_args()
+    if args.screenshots:
+        args.screenshots.mkdir(parents=True, exist_ok=True)
+    sys.exit(main(screenshots=args.screenshots))
