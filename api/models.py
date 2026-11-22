@@ -6933,10 +6933,11 @@ def _session_scene_updated_at(session) -> float:
 def _drop_pending_shrink_generation(cached, generation, message_count) -> None:
     """Clear the #9029 pending-shrink marker only if it is still this shrink.
 
-    The freshness check observes the marker outside LOCK, so by the time it
-    decides the window is over a newer shrink (or a concurrent append) may have
-    replaced it. Re-check the generation token and the message count under LOCK
-    before clearing so an older observation can never drop a newer marker.
+    The freshness check snapshots the marker under LOCK but decides to clear it
+    after the disk read, with LOCK released, so a newer shrink (or a concurrent
+    append) may have replaced it in between. Re-check the generation token and
+    the message count under LOCK before clearing so an older observation can
+    never drop a newer marker.
     """
     with LOCK:
         if getattr(cached, 'intentional_shrink_generation', None) != generation:
