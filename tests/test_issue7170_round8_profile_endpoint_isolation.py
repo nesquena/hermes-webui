@@ -372,18 +372,20 @@ def test_gateway_worker_failed_url_capture_never_mixes_with_ambient_url(
 
 
 # ---------------------------------------------------------------------------
-# Finding I: legacy direct/reattach callers keep the ambient pair (both
-# halves together). The atomic-pair rule only applies once a capture exists.
+# Finding I: direct callers without a capture still resolve the owner pair.
 # ---------------------------------------------------------------------------
 
 
-def test_gateway_worker_legacy_direct_caller_keeps_ambient_pair(
+def test_gateway_worker_legacy_direct_caller_resolves_owner_pair(
     two_profiles_ambient_a_session_b,
 ):
-    """A direct worker invocation that captured NO key/URL pair (both None)
-    keeps the historical ambient resolution — both halves from the
-    environment together, never a capture half."""
+    from api import profiles
+
     _, profile_b_home, monkeypatch = two_profiles_ambient_a_session_b
+    # The direct worker resolves the logical profile itself, not via the
+    # dispatch helper patched by the fixture. Point that lookup at the files.
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", profile_b_home.parent.parent)
+    assert profiles.get_hermes_home_for_profile("b") == profile_b_home
 
     session_dir = profile_b_home.parent / "sessions_legacy"
     session_dir.mkdir(exist_ok=True)
@@ -415,11 +417,8 @@ def test_gateway_worker_legacy_direct_caller_keeps_ambient_pair(
 
     url = captured.get("url", "")
     auth = captured.get("headers", {}).get("Authorization", "")
-    assert url.startswith("http://profile-a.invalid:8642"), (
-        f"Legacy direct caller sent {url!r}; the historical ambient pair "
-        "(env URL + env key) must be preserved when NOTHING was captured."
-    )
-    assert auth == "Bearer KEY_FOR_PROFILE_A"
+    assert url.startswith("http://profile-b.invalid:8642/")
+    assert auth == "Bearer KEY_FOR_PROFILE_B"
 
 
 # ---------------------------------------------------------------------------
@@ -498,19 +497,16 @@ def isolated_dispatch_env(tmp_path, monkeypatch):
         os.environ.pop(k, None)
 
 
-def test_dispatch_api_key_capture_failure_unregisters_stream_state(
+def test_dispatch_endpoint_capture_failure_unregisters_stream_state(
     isolated_dispatch_env, tmp_path
 ):
-    """A raise from ANY capture helper (here ``_gateway_session_api_key``,
-    after the owner-cfg capture succeeded) must re-run the same cleanup:
-    stream/run/goal state released, session's active_stream_id reset, and
-    the original error surfaced."""
+    """A failed endpoint capture must release stream state and surface the error."""
     monkeypatch, session_dir = isolated_dispatch_env
 
     def _raise(*args, **kwargs):
-        raise RuntimeError("simulated api_key capture failure")
+        raise RuntimeError("simulated endpoint capture failure")
 
-    monkeypatch.setattr(gateway_chat, "_gateway_session_api_key", _raise)
+    monkeypatch.setattr(gateway_chat, "_gateway_session_endpoint", _raise)
 
     s = models.new_session(profile="default")
     s.pending_user_message = "hello"
@@ -532,7 +528,7 @@ def test_dispatch_api_key_capture_failure_unregisters_stream_state(
     except Exception as e:
         raised = e
     assert raised is not None, "Dispatch should have raised"
-    assert "simulated api_key capture failure" in str(raised)
+    assert "simulated endpoint capture failure" in str(raised)
 
     assert len(STREAMS) == 0, f"STREAMS non-empty after failed dispatch: {list(STREAMS)!r}"
     assert len(gateway_chat._STREAM_RUN_LIFECYCLE) == 0, (

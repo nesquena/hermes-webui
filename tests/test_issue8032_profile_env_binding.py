@@ -426,8 +426,6 @@ _ALLOWED = {
     ("config.py", "get_config_snapshot_for_profile_home"): "value reader: snapshot via the isolated loader",
     # #7170: reasoning effort writer (raw loader + save)
     ("config.py", "set_reasoning_effort"): _WRITER + " (reasoning effort route)",
-    # #7170: gateway endpoint presence check (value reader)
-    ("gateway_chat.py", "_gateway_session_has_own_endpoint"): "value reader: endpoint presence check",
 }
 
 

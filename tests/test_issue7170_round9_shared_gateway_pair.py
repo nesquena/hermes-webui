@@ -129,6 +129,21 @@ def test_unconfigured_profile_still_gets_anonymous_key_for_sibling_ambient_value
     )
 
 
+@pytest.mark.parametrize(
+    ("setting", "expected"),
+    [("API_SERVER_KEY", "shared-key"), ("HERMES_WEBUI_GATEWAY_API_KEY", "profile-test-value")],
+)
+def test_key_only_profile_uses_shared_url(tmp_path, monkeypatch, setting, expected):
+    home = _profile_home(tmp_path, "b", env_lines=[f"{setting}=profile-test-value"])
+    _root_shared_pair(monkeypatch, "root")
+    monkeypatch.delenv("API_SERVER_KEY", raising=False)
+    monkeypatch.setattr(models, "_get_profile_home", lambda profile: home)
+    session = _session_for_profile("b")
+
+    assert gateway_chat._gateway_session_base_url(session) == "http://shared-gw.invalid:8642"
+    assert gateway_chat._gateway_session_api_key(session) == expected
+
+
 def test_profile_with_own_url_keeps_launcher_key(tmp_path, monkeypatch):
     """No regression of the round-2 BRICK fix: a profile that overrides the URL
     but has no key of its own keeps the launcher/deployment key (F1 contract)."""

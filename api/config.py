@@ -1038,68 +1038,38 @@ def get_config_for_profile_home(
 
 
 def get_config_snapshot_for_profile_home(profile_home: "Path | str | None") -> dict:
-    """Return a request-owned config snapshot for an explicit profile home.
+    """Read the session config as a detached, profile-bound value.
 
-    Same resolution as ``get_config_for_profile_home`` (ambient-home fast
-    path, divergent-home disk read, nonexistent home -> ``{}``, profiles-are-
-    islands), but every path that touches the shared cache deep-copies it
-    UNDER ``_cfg_lock``: ``_refresh_config_cache`` clears and repopulates the
-    shared ``_cfg_cache`` object in place, so copying outside the lock can
-    tear the object mid-copy when a concurrent profile reload fires (greptile
-    P1 on ``_gateway_session_owner_cfg``'s out-of-lock deepcopy). The
-    divergent-home read is a pure disk read with no shared mutation and
-    already returns a fresh dict, so it needs no lock — mirroring
-    ``get_config_for_profile_home``'s race-free slow path.
+    Root honors an operator-mounted override, not a named profile's file.
+    Even when the source is the ambient file, expand its raw values under
+    the owner binding instead of reusing the process-expanded cache.
     """
     if not profile_home:
         return get_config_snapshot()
-    try:
-        target = Path(profile_home).expanduser()
-    except Exception:
-        return get_config_snapshot()
 
-    from api.workspace import _safe_resolve as _cfg_safe_resolve
+    from api.profiles import expand_profile_config, get_hermes_home_for_profile
+    from api.workspace import _safe_resolve
 
-    # Canonicalize both sides (same identity checks as
-    # ``get_config_for_profile_home``: a symlink-aliased home or an
-    # authoritative ``HERMES_CONFIG_PATH`` inside it must take the fast path).
-    target = _cfg_safe_resolve(target)
-    try:
-        from api.profiles import get_active_hermes_home
-
-        if _cfg_safe_resolve(Path(get_active_hermes_home()).expanduser()) == target:
-            return get_config_snapshot()
-    except Exception:
-        pass
-    try:
-        if _cfg_safe_resolve(_get_config_path().parent) == target:
-            return get_config_snapshot()
-    except Exception:
-        pass
-    if not target.exists():
-        return {}
-    # Read the profile file directly and apply documented defaults locally so
-    # the returned dict matches ambient get_config() shape (including built-in
-    # personalities) without mutating any global cache state. The ${VAR}
-    # expansion is bound to the TARGET home's own runtime env — the same
-    # construction the request-scope profile binding uses — never the calling
-    # thread's binding: a session owned by profile B but read while the thread
-    # is bound to profile A must still resolve B's references with B's values
-    # (#7170, droopanu 2026-10-27). The raw parse stays memoized; expansion
-    # re-runs per call.
-    _raw_cfg = _load_yaml_config_file_raw(target / "config.yaml", _copy=False)
-    if not isinstance(_raw_cfg, dict) or not _raw_cfg:
-        return {}
-    from api.profiles import (
-        filter_runtime_env_for_gateway_parity,
-        get_profile_runtime_env,
+    root = _safe_resolve(Path(get_hermes_home_for_profile("default")))
+    source = _profile_home_config_source(
+        profile_home,
+        isolate_config_override=_safe_resolve(Path(profile_home).expanduser()) == root,
     )
-
-    _target_env = dict(
-        filter_runtime_env_for_gateway_parity(get_profile_runtime_env(target))
-    )
-    _target_env.setdefault("HERMES_HOME", str(target))
-    profile_cfg = _expand_env_vars(_raw_cfg, env=_target_env)
+    if source is None:
+        return {}
+    if source is _AMBIENT_CONFIG:
+        # Preserve explicitly injected in-memory config without handing out a
+        # live cache object. Ordinary file-backed reads stay profile-scoped.
+        with _cfg_lock:
+            if cfg is not _cfg_cache:
+                return copy.deepcopy(cfg)
+        config_path = _get_config_path()
+    elif isinstance(source, Path):
+        config_path = source
+    else:
+        return {}
+    raw = _load_yaml_config_file_raw(config_path, _copy=False)
+    profile_cfg = expand_profile_config(profile_home, raw)
     if not isinstance(profile_cfg, dict):
         return {}
     _apply_config_defaults(profile_cfg)

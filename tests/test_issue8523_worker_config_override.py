@@ -64,6 +64,24 @@ def test_root_aliases_resolve_like_root(external_root_with_named_active, tmp_pat
     assert _posted_urls(session, tmp_path, monkeypatch)[0].endswith("/v1/runs")
 
 
+def test_root_dispatch_snapshot_keeps_external_session_transport(
+    external_root_with_named_active,  # noqa: F811 (pytest fixture imported above)
+):
+    from api.gateway_sessions import configured
+
+    _root, _work, external = external_root_with_named_active
+    external.write_text(external.read_text() + "\nwebui_gateway_session_transport: local\n")
+    config.reload_config()
+
+    session = models.Session(
+        session_id="i8523-root-dispatch", profile="default", is_cli_session=True, source_tag="cli",
+    )
+    snapshot = gateway_chat._gateway_session_owner_cfg(session)
+
+    assert configured(vars(session), snapshot)
+    assert snapshot["agent"]["reasoning_effort"] == "xhigh"
+
+
 @pytest.mark.parametrize("opt_in_where", ["external", "work-file"])
 def test_named_profile_keeps_the_earlier_resolver(
     external_root_with_named_active, tmp_path, monkeypatch, opt_in_where  # noqa: F811 (pytest fixture imported above)

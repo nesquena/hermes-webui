@@ -488,244 +488,43 @@ def _gateway_shared_pair() -> tuple[str, str]:
     return _gateway_base_url(get_config(), environ), _gateway_api_key(environ)
 
 
-def _gateway_session_own_env(home) -> dict[str, str] | None:
-    """Environ for the session-owning profile, with mirrored profile keys stripped.
-
-    ``os.environ`` minus ``_profiles._loaded_profile_env_keys`` (the
-    process-active profile's mirrored ``.env``), overlaid with this profile's
-    filtered runtime env. ``None`` on failure preserves the historical
-    ``_gateway_api_key()``/``_gateway_base_url()`` ambient fallback.
-    """
-    from api import profiles as _profiles
-
-    try:
-        environ = {
-            k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys
-        }
-        environ.update(
-            _profiles.filter_runtime_env_for_gateway_parity(
-                _profiles.get_profile_runtime_env(home)
-            )
-        )
-        return environ
-    except Exception:
-        return None
-
-
-def _gateway_session_has_own_endpoint(home, environ: dict[str, str] | None) -> bool:
-    """True when the session profile configures any half of the Gateway endpoint itself.
-
-    A profile that sets its own URL and/or key owns the endpoint decision: its
-    own key wins, the launcher key is kept when only the URL is overridden (the
-    round-2 BRICK contract), and an explicitly empty key stays empty for an
-    anonymous profile. A profile with NEITHER half inherits the deployment-level
-    shared pair instead (round-9 P1).
-    """
-    from api.config import _load_yaml_config_file_raw
-
-    source = environ if isinstance(environ, dict) else {}
-    if (
-        str(source.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
-        or str(source.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
-        or str(source.get("API_SERVER_KEY") or "").strip()
-    ):
-        return True
-    try:
-        raw_cfg = _load_yaml_config_file_raw(_profile_config_path(home), _copy=False)
-    except Exception:
-        return False
-    return bool(
-        isinstance(raw_cfg, dict) and str(raw_cfg.get("webui_gateway_base_url") or "").strip()
-    )
-
-
 def _gateway_session_owner_cfg(session) -> dict:
-    """Resolve an IMMUTABLE config snapshot for the profile owning ``session``.
-
-    Called at /api/chat/start dispatch time (routes.py), on the request
-    thread, and handed into the detached gateway worker as ``session_cfg``.
-    The worker runs on its own thread that does NOT inherit the per-request
-    thread-local profile context, so a ``get_config()`` inside the worker
-    would read the process-global profile (usually ``default``) instead of
-    the profile owning this session — on a multi-profile instance that lets
-    one profile's per-model ``agent.reasoning_overrides`` (and capability
-    coercion) leak into another profile's request (issue #7170). Resolving
-    the session's own profile home at dispatch (issue #3294 pattern) gives
-    the worker the same snapshot the in-process path uses.
-
-    The returned dict is a request-owned snapshot: it is deep-copied from the
-    shared cache UNDER the cache lock (``get_config_snapshot_for_profile_home``),
-    so a concurrent profile reload — which clears and repopulates the cached
-    object in place — can neither tear the copy mid-flight nor mutate it
-    afterwards. Without the lock-held copy, the worker would read a live,
-    shared, MUTABLE object — a later profile-A reload would clear and
-    repopulate that very dict in place, so profile B's still-running worker
-    could observe A's ``reasoning_overrides``, gateway URL, request options
-    and prefill context. A request-owned snapshot removes that coupling: the
-    worker keeps the view it was dispatched with, and reloads can no longer
-    mutate it underneath (greptile P1: the copy used to run OUTSIDE
-    ``_cfg_lock``, so a concurrent reload could tear it mid-deepcopy).
-    """
-    from api.config import get_config_snapshot_for_profile_home  # imported lazily to avoid config-cycle churn
+    """Capture a detached config bound to the owning profile."""
+    from api.config import get_config_snapshot_for_profile_home
     from api.models import _get_profile_home
 
-    resolved = get_config_snapshot_for_profile_home(
-        _get_profile_home(getattr(session, "profile", None))
-    )
-    if not isinstance(resolved, dict):
-        return {}
-    return resolved
+    return get_config_snapshot_for_profile_home(_get_profile_home(getattr(session, "profile", None)))
+
+
+def _gateway_session_endpoint(session) -> tuple[str, str]:
+    """Capture the URL and its matching key together before starting a worker."""
+    from api.models import _get_profile_home
+
+    profile = getattr(session, "profile", None)
+    home = _get_profile_home(profile)
+    if not home:
+        return "", ""
+    return _gateway_endpoint_for_profile(profile, dispatch_home=home)
 
 
 def _gateway_session_api_key(session) -> str:
-    """Resolve the Gateway API key for the profile owning ``session``.
-
-    Mirrors ``_gateway_session_owner_cfg()``'s profile-isolation guarantee.
-    The session-owning profile's ``HERMES_WEBUI_GATEWAY_API_KEY`` (or
-    ``API_SERVER_KEY``) is read on the REQUEST thread — where the dispatch
-    runs and where the request can know the session's profile home — and
-    the result is handed into the detached gateway worker as
-    ``session_api_key``. A bare ``_gateway_api_key()`` inside the worker
-    reads ``os.environ``, which on a multi-profile instance holds the
-    process-active profile's credentials; that is exactly the cross-profile
-    leak the #7170 round-7 P1 finding called out (the worker could send
-    profile A's credential to profile B's gateway endpoint, or fail auth
-    because the keys disagree).
-
-    The key environ is built EXACTLY like ``_gateway_session_base_url()``
-    below: ``os.environ`` minus the loaded profile env keys (so a key that
-    some profile's ``.env`` loaded into the process env can never leak into
-    another profile's capture), overlaid with the session profile's filtered
-    runtime env. That also picks up LAUNCHER-provided keys the documented
-    docker-compose deployments set on the process env
-    (``HERMES_WEBUI_GATEWAY_API_KEY=${API_SERVER_KEY:-}``): no profile
-    ``.env`` claims those, so they survive the strip and are captured for
-    every session — the round-2 BRICK finding (the old code read only the
-    profile runtime env, captured ``""`` for the launcher key and sent an
-    anonymous request the keyed Gateway rejected with 401).
-
-    Returns the empty string when the session profile configures an endpoint
-    but no key (matches the historical contract of ``_gateway_api_key``, which
-    also returns ``""`` on absence). The worker is the only consumer; it treats
-    an empty string identically to a missing key (no ``Authorization`` header
-    is sent — issue #7074 keeps the anonymous path for unauthenticated local
-    gateways working).
-
-    A session profile that configures NEITHER half of the Gateway endpoint
-    inherits the deployment-level shared pair (launcher environment, the root
-    profile's ``.env``, ambient config) instead of resolving to ``""``: the
-    loaded-profile strip deliberately removes that pair from the profile
-    environ, and dropping it would send the documented docker-compose
-    deployments to the default URL with no key (greptile 2026-10-17 P1).
-    """
-    try:
-        from api.models import _get_profile_home
-        home = _get_profile_home(getattr(session, "profile", None))
-    except Exception:
-        return ""
-    if not home:
-        return ""
-    environ = _gateway_session_own_env(home)
-    if not _gateway_session_has_own_endpoint(home, environ):
-        # No Gateway settings of its own → inherit the deployment-level shared
-        # pair (launcher env / root profile's .env). The stripped loaded-profile
-        # keys ARE that shared pair when the process-active profile is root, so
-        # falling through here would send the documented docker-compose
-        # deployments to the default URL with no key (greptile 2026-10-17 P1).
-        try:
-            return _gateway_shared_pair()[1]
-        except Exception:
-            return ""
-    try:
-        return _gateway_api_key(environ)
-    except Exception:
-        return ""
+    return _gateway_session_endpoint(session)[1]
 
 
 def _gateway_session_base_url(session) -> str:
-    """Resolve the Gateway base URL for the profile owning ``session``.
-
-    Mirrors ``_gateway_session_api_key()``'s profile-isolation guarantee and
-    ``_gateway_endpoint_for_profile()``'s 'never the process-active profile'
-    resolution: the URL is read on the REQUEST thread from the
-    session-owning profile's env (with the loaded profile env stripped so
-    the process-active profile's URL cannot leak in), and the result is
-    handed into the detached gateway worker as ``session_base_url``.
-
-    A bare ``_gateway_base_url(cfg)`` inside the worker reads
-    ``os.environ`` first, and on a multi-profile instance
-    ``os.environ`` holds the AMBIENT process-active profile's
-    ``HERMES_WEBUI_GATEWAY_BASE_URL`` — pairing that with the session's
-    captured API key either fails auth or sends the session profile's
-    bearer token to the wrong gateway (greptile 2026-09-26 P1, #7170
-    round-7 follow-up: "Gateway key crosses endpoints").
-
-    Returns the resolved URL (the default ``http://127.0.0.1:8642`` counts
-    as resolved) or ``""`` only when the helper could not determine the
-    session profile's home at all. A profile that configures neither the URL
-    nor a key inherits the deployment-level shared URL rather than the built-in
-    default, mirroring ``_gateway_session_api_key``'s shared-pair inheritance
-    (greptile 2026-10-17 P1) and keeping the captured pair atomic.
-    """
-    try:
-        from api.config import get_config_for_profile_home
-        from api.models import _get_profile_home
-        home = _get_profile_home(getattr(session, "profile", None))
-    except Exception:
-        return ""
-    if not home:
-        return ""
-    environ = _gateway_session_own_env(home)
-    if not _gateway_session_has_own_endpoint(home, environ):
-        # No Gateway settings of its own → the shared deployment URL, never the
-        # built-in default (greptile 2026-10-17 P1). The key half resolves the
-        # same way in ``_gateway_session_api_key``, so the captured pair stays
-        # atomic.
-        try:
-            return _gateway_shared_pair()[0]
-        except Exception:
-            return ""
-    try:
-        cfg_data = get_config_for_profile_home(home)
-    except Exception:
-        cfg_data = None
-    try:
-        return _gateway_base_url(cfg_data, environ)
-    except Exception:
-        return ""
+    return _gateway_session_endpoint(session)[0]
 
 
 def _gateway_session_env(session) -> dict[str, str]:
-    """Environ for the session-owning profile, for worker-thread scoped reads.
+    """Bind detached reasoning probes to the same owner as the config snapshot."""
+    from api.models import _get_profile_home
+    from api.profiles import profile_env_binding
 
-    Built exactly like ``_gateway_session_own_env`` — the env the dispatch
-    already uses to capture ``session_api_key``/``session_base_url``:
-    ``os.environ`` minus ``_profiles._loaded_profile_env_keys`` (so a key
-    some profile's ``.env`` mirrored into the process env can never leak into
-    another profile's capture), overlaid with the session profile's filtered
-    runtime env (its own ``.env``, launcher exports it legitimately carries).
-
-    The detached gateway worker runs on a thread with NO thread-local owner
-    env (``api.config._thread_ctx.env`` is empty there), so scoped capability
-    probes — LM Studio's reasoning probe reads ``LM_API_KEY`` through that
-    thread-local env — went KEYLESS in the worker and 401'd, failing the
-    capability probe (greptile P1: ``xhigh`` was not demoted to ``high``).
-    The dispatch captures this env on the request thread and hands it to the
-    worker as ``session_env``; the worker pins it for the duration of its
-    reasoning-effort resolution. ``{}`` on failure keeps the fail-closed
-    scoped contract: a probe that cannot see the session profile's own key
-    goes keyless rather than borrowing the process-active profile's.
-    """
     try:
-        from api.models import _get_profile_home
-
         home = _get_profile_home(getattr(session, "profile", None))
+        return profile_env_binding(home) if home else {}
     except Exception:
         return {}
-    if not home:
-        return {}
-    environ = _gateway_session_own_env(home)
-    return environ if isinstance(environ, dict) else {}
 
 
 def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | None = None) -> bool:
@@ -2560,7 +2359,7 @@ def _same_profile_home(a, b) -> bool:
     return _safe_resolve(Path(a).expanduser()) == _safe_resolve(Path(b).expanduser())
 
 
-def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
+def _gateway_endpoint_for_profile(profile_name, *, dispatch_home: Path | None = None) -> tuple[str, str]:
     """URL and key for a session's profile, never those of the process-active profile.
 
     The shared pair is what the WebUI process was given (launcher environment, default profile's .env, ambient
@@ -2586,9 +2385,13 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
     from api import profiles as _profiles
     from api.config import _expand_env_vars, _load_yaml_config_file_raw, _thread_ctx, get_config
 
-    shared_url, shared_key = _gateway_base_url(get_config(), os.environ), _gateway_api_key(os.environ)
+    ambient_cfg = get_config()
+    process_env = dict(os.environ)
+    shared_url, shared_key = _gateway_base_url(ambient_cfg, process_env), _gateway_api_key(process_env)
 
-    home = Path(_profiles.get_hermes_home_for_profile(str(profile_name or "").strip()))
+    home = dispatch_home if dispatch_home is not None else Path(
+        _profiles.get_hermes_home_for_profile(str(profile_name or "").strip())
+    )
     own_env = _profiles.filter_runtime_env_for_gateway_parity(_profiles.get_profile_runtime_env(home))
     raw_cfg = _load_yaml_config_file_raw(_profile_config_path(home), _copy=False)
     own_url_cfg = raw_cfg.get("webui_gateway_base_url") if isinstance(raw_cfg, dict) else None
@@ -2605,7 +2408,7 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
         shared_alias = ""
 
     if not (own_url_env or own_url_cfg or own_key):
-        return shared_url, shared_key
+        return _gateway_shared_pair() if dispatch_home is not None else (shared_url, shared_key)
 
     url = shared_url
     if own_url_env or own_url_cfg:
@@ -2630,7 +2433,19 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
                 f"({url}); set it in that profile's .env"
             )
     if url != shared_url:
-        return url, own_key  # the profile's own Gateway: its own key or none, never the shared one
+        # Dispatch has a key-only launcher compatibility rule: when the
+        # launcher did not configure an address, its key can authenticate
+        # the profile-selected URL. A profile-sourced key never qualifies.
+        if dispatch_home is not None and not own_key and not (
+            process_env.get(_WEBUI_GATEWAY_BASE_URL_ENV) or ambient_cfg.get("webui_gateway_base_url")
+        ):
+            launcher = {
+                key: process_env[key]
+                for key in (_WEBUI_GATEWAY_API_KEY_ENV, "API_SERVER_KEY")
+                if process_env.get(key) and not _env_value_is_profile_sourced(_profiles, key, process_env[key])
+            }
+            own_key = _gateway_api_key(launcher)
+        return url, own_key
     if not own_url_env and not own_url_cfg and own_key and _shared_url_may_belong_to_process_profile(home):
         # #8432: this profile set a key but no URL, and the "shared" URL may be the NAMED process profile's own
         # (mirrored from its .env or read from its config). Never send this profile's key there; use the process
@@ -2645,6 +2460,9 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
     # v0.52.492 sends the shared key. Only an explicit WebUI alias set for this profile
     # (HERMES_WEBUI_GATEWAY_API_KEY in its .env) outranks the shared key; its API_SERVER_KEY is used only when the
     # WebUI was given no shared key at all. A profile that wants its own route sets its own URL.
+    if dispatch_home is not None and not _process_profile_is_root():
+        allowed_url, allowed_key = _gateway_shared_pair()
+        shared_key = allowed_key if allowed_url == url else ""
     return url, (own_alias or shared_key or own_key)
 
 
@@ -3597,42 +3415,9 @@ def _run_gateway_chat_streaming(
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
-        # Issue #7170: the detached worker thread does NOT inherit the
-        # per-request thread-local profile context. The /api/chat/start
-        # dispatch captured the session-owning profile's config snapshot and
-        # passed it in as ``session_cfg`` — use that for the override
-        # selection, capability coercion, request overrides, runs-API gate,
-        # and prefill context below. Resolving config here would read the
-        # ambient (process-active) profile, which on a multi-profile instance
-        # lets one profile's ``agent.reasoning_overrides`` leak into another
-        # profile's request. Only direct/legacy callers that did not capture
-        # a snapshot fall back to the session's own profile home (issue #3294
-        # pattern) — never the ambient process profile.
-        cfg = session_cfg
-        if not isinstance(cfg, dict):
-            # Legacy/direct callers that spawned the worker without a dispatch
-            # snapshot: resolve the session's own profile home (issue #3294
-            # pattern) — never the ambient process profile. The resolver deep
-            # copies, so a concurrent reload of another profile cannot mutate
-            # what this worker reads.
-            cfg = _gateway_session_owner_cfg(s)
-            # Fallback to config_for_session when _gateway_session_owner_cfg
-            # returns empty OR when it lacks gateway-specific settings that
-            # config_for_session would resolve (e.g., HERMES_CONFIG_PATH override
-            # for root profile with Runs API opt-in). This ensures compatibility
-            # with test_issue8523 which expects config_for_session behavior.
-            if not isinstance(cfg, dict) or not cfg:
-                from api.gateway_sessions import config_for_session
-                cfg = config_for_session(vars(s))
-            elif not _gateway_use_runs_api_enabled(cfg):
-                # _gateway_session_owner_cfg may not include HERMES_CONFIG_PATH
-                # overrides (e.g., webui_gateway_use_runs_api). If Runs API is
-                # not enabled in the resolved config, check if config_for_session
-                # would enable it (root profile with external HERMES_CONFIG_PATH).
-                from api.gateway_sessions import config_for_session
-                cfg_for_session = config_for_session(vars(s))
-                if _gateway_use_runs_api_enabled(cfg_for_session):
-                    cfg = cfg_for_session
+        # Fresh turns bring the dispatch snapshot. Reattach and direct callers
+        # resolve the same owner-bound config, never a process-expanded fallback.
+        cfg = session_cfg if isinstance(session_cfg, dict) else _gateway_session_owner_cfg(s)
         # Defensive re-copy for callers that handed in a live cache object
         # (older dispatch paths / direct test callers): the worker must observe
         # the snapshot it was dispatched with, never a later profile reload.
@@ -3640,18 +3425,6 @@ def _run_gateway_chat_streaming(
             cfg = copy.deepcopy(cfg)
         except Exception:
             cfg = dict(cfg) if isinstance(cfg, dict) else {}
-        # A legacy session (no stored effort) inherits agent.reasoning_effort from its
-        # own profile's isolated config, as the composer chip and the local worker do:
-        session_effort = getattr(s, "reasoning_effort", None)
-        try:
-            from api.config import effective_session_reasoning_effort
-            from api.profiles import get_hermes_home_for_profile
-
-            session_effort = effective_session_reasoning_effort(
-                session_effort, get_hermes_home_for_profile(getattr(s, "profile", None)),
-            )
-        except Exception:
-            logger.warning("isolated reasoning config read failed; using the session config", exc_info=True)
         # #7170 round-10 P1: scoped capability probes (LM Studio's reasoning
         # probe reads ``LM_API_KEY`` via ``api.config._thread_ctx.env``) run
         # keyless on this detached thread — the request thread's thread-local
@@ -3750,7 +3523,10 @@ def _run_gateway_chat_streaming(
             _gw_overrides = {}
         _runs_api_enabled = _gateway_use_runs_api_enabled(cfg)
         from api.gateway_sessions import configured, run_session, SessionTransportDisconnected
-        _use_session_rpc = (reattach_run or {}).get("transport") == "session" or configured(vars(s), cfg)
+        # Direct callers and recovery have no dispatch snapshot. Let the
+        # native transport resolve the owning profile through its own reader.
+        native_cfg = cfg if isinstance(session_cfg, dict) else None
+        _use_session_rpc = (reattach_run or {}).get("transport") == "session" or configured(vars(s), native_cfg)
         _use_runs_api = _use_session_rpc or bool(reattach_run) or (_runs_api_enabled and gateway_supports_approval(base_url, api_key))
         if not _use_runs_api and runs_api_pending_marked:
             _finish_gateway_run_starting(stream_id, result="fallback")
