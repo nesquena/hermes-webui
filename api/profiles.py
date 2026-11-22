@@ -1165,7 +1165,42 @@ def _read_profile_dotenv(home: Path) -> dict[str, str]:
                         env[k] = v
         except Exception:
             logger.debug("Failed to read runtime env from %s", env_path)
+    # A profile can hold credentials in an external secret source (config.yaml's
+    # ``secrets:`` block — Bitwarden, 1Password, a command helper) instead of in
+    # ``.env``; the Agent injects those at startup, so a turn that resolves
+    # ``${env:VAR}`` against this dict alone sees the literal placeholder and
+    # every provider call 401s. Merge them underneath the file's own values.
+    for k, v in (_external_secret_values(home) or {}).items():
+        k = str(k).strip()
+        if k and v and k not in _PROTECTED_ENV_KEYS:
+            env.setdefault(k, v)
     return env
+
+
+def _external_secret_values(home: Path) -> dict[str, str]:
+    """Resolve a profile's external secret sources, or ``{}`` when unavailable.
+
+    Returns the same mapping the Agent puts into ``os.environ`` at startup, so
+    ``${env:VAR}`` refs in this profile's config resolve identically here.
+    Fail-open: a missing Agent checkout or a broken source must not break the
+    profile's ``.env``-only reads.
+    """
+    try:
+        try:
+            from api.config import _AGENT_DIR as agent_dir
+        except Exception:
+            agent_dir = None
+        if agent_dir and str(agent_dir) not in sys.path:
+            sys.path.append(str(agent_dir))
+        from hermes_cli.env_loader import hydrate_profile_secret_sources
+    except Exception:
+        logger.debug("Hermes agent not importable; external secret sources skipped for %s", home)
+        return {}
+    try:
+        return dict(hydrate_profile_secret_sources(Path(home)) or {})
+    except Exception:
+        logger.debug("External secret sources failed for %s", home, exc_info=True)
+        return {}
 
 
 # ── Reading config VALUES from a profile's raw config.yaml (#8032) ───────────
