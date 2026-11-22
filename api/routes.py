@@ -35915,6 +35915,19 @@ def _resolve_clarify_legacy(sid: str, clarify_id: str, response: str) -> bool:
 
 
 def _handle_clarify_respond(handler, body):
+    try:
+        return _handle_clarify_respond_inner(handler, body)
+    except GatewayClarifyUnavailable:
+        # Not stale: the prompt is still parked, so the browser keeps the card
+        # and the typed answer for a retry (any non-409 error does).
+        return j(handler, {
+            "ok": False,
+            "error": "Gateway is temporarily unavailable; your answer was not delivered. Try again.",
+            "retryable": True,
+        }, status=503)
+
+
+def _handle_clarify_respond_inner(handler, body):
     sid = body.get("session_id", "")
     if not sid:
         return bad(handler, "session_id is required")
@@ -35933,20 +35946,11 @@ def _handle_clarify_respond(handler, body):
 
     from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
 
-    try:
-        if runtime_adapter_enabled():
-            adapter = LegacyJournalRuntimeAdapter(clarify_delegate=_resolve_clarify_legacy)
-            ok = adapter.respond_clarify(sid, clarify_id, response).accepted
-        else:
-            ok = _resolve_clarify_legacy(sid, clarify_id, response)
-    except GatewayClarifyUnavailable:
-        # Not stale: the prompt is still parked, so the browser keeps the card
-        # and the typed answer for a retry (any non-409 error does).
-        return j(handler, {
-            "ok": False,
-            "error": "Gateway is temporarily unavailable; your answer was not delivered. Try again.",
-            "retryable": True,
-        }, status=503)
+    if runtime_adapter_enabled():
+        adapter = LegacyJournalRuntimeAdapter(clarify_delegate=_resolve_clarify_legacy)
+        ok = adapter.respond_clarify(sid, clarify_id, response).accepted
+    else:
+        ok = _resolve_clarify_legacy(sid, clarify_id, response)
 
     if not ok:
         # Both the runtime adapter and legacy paths set ok=False for
