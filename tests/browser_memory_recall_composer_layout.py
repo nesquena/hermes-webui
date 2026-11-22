@@ -28,10 +28,13 @@ workspace and model labels at their baseline widths, and a visible, clickable
 Saved Prompts button.
 
 Synthetic sessions/transport; no provider, credentials or production state.
+A failure leaves the server log, a screenshot and the measurements in
+LIFECYCLE_ARTIFACT_DIR (a kept temporary directory when that is unset).
 Run: python tests/browser_memory_recall_composer_layout.py
 """
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -175,15 +178,25 @@ def compare(phase, base, now):
     return bad
 
 
-def run(pw, base_url, workspace, name, width, height, touch, open_panels):
+def save_evidence(page, artifact_dir, name, report):
+    try:
+        (artifact_dir / f'{name}.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+        if page is not None:
+            page.screenshot(path=str(artifact_dir / f'{name}.png'), timeout=10000)
+    except Exception as exc:  # noqa: BLE001 - never hide the original failure
+        print(f'   could not save evidence for {name}: {exc}', file=sys.stderr)
+
+
+def run(pw, base_url, workspace, artifact_dir, name, width, height, touch, open_panels):
     browser = pw.chromium.launch(headless=True)
-    failures = []
+    failures, errors, phases = [], [], {}
+    page = None
+    completed = False
     try:
         context = browser.new_context(viewport={'width': width, 'height': height},
                                       has_touch=touch, bypass_csp=True)
         context.add_init_script(INIT)
         page = context.new_page()
-        errors = []
         page.on('pageerror', lambda e: errors.append(str(e)))
         session = session_payload(workspace, make_history(24))
 
@@ -229,7 +242,7 @@ def run(pw, base_url, workspace, name, width, height, touch, open_panels):
         page.wait_for_timeout(300)
         page.evaluate(SETTLE_FIT)
 
-        phases = {'baseline': page.evaluate(MEASURE)}
+        phases['baseline'] = page.evaluate(MEASURE)
         base = phases['baseline']
         # The baseline itself must be the populated, full-label layout the
         # regression broke; otherwise the comparison proves nothing.
@@ -283,8 +296,12 @@ def run(pw, base_url, workspace, name, width, height, touch, open_panels):
                     'labels': [m[k]['width'] for k in ('persona', 'workspace', 'model')],
                     'savedPrompts': m['savedPrompts']['hit']}
             for phase, m in phases.items()}}), flush=True)
-        context.close()
+        completed = True
     finally:
+        if failures or not completed:
+            save_evidence(page, artifact_dir, name, {
+                'completed': completed, 'failures': failures, 'pageErrors': errors, 'phases': phases,
+            })
         browser.close()
     return failures
 
@@ -293,6 +310,9 @@ def main() -> int:
     from playwright.sync_api import sync_playwright
 
     failed = 0
+    artifact_env = (os.environ.get('LIFECYCLE_ARTIFACT_DIR') or '').strip()
+    artifact_dir = Path(artifact_env or tempfile.mkdtemp(prefix='webui-recall-layout-artifacts-'))
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='webui-recall-layout-') as temp:
         state = Path(temp)
         workspace = state / 'release-planning'
@@ -306,12 +326,12 @@ def main() -> int:
             HERMES_WEBUI_AGENT_DIR=str(state / 'no-agent'),
             HERMES_WEBUI_DEFAULT_WORKSPACE=str(workspace),
         )
-        proc, log, _, base_url = _start_webui_server(ROOT, env, state)
+        proc, log, _, base_url = _start_webui_server(ROOT, env, artifact_dir)
         try:
             with sync_playwright() as pw:
                 for name, width, height, touch, open_panels in VIEWPORTS:
                     try:
-                        bad = run(pw, base_url, str(workspace), name, width, height, touch, open_panels)
+                        bad = run(pw, base_url, str(workspace), artifact_dir, name, width, height, touch, open_panels)
                     except Exception as exc:  # noqa: BLE001
                         bad = [f'EXCEPTION {exc}']
                     failed += bool(bad)
@@ -321,6 +341,10 @@ def main() -> int:
         finally:
             _terminate_process(proc)
             log.close()
+    if failed:
+        print(f'Artifacts: {artifact_dir}', file=sys.stderr)
+    elif not artifact_env:
+        shutil.rmtree(artifact_dir, ignore_errors=True)
     print(f'{"PASS" if not failed else "FAIL"}: memory recall keeps the composer layout '
           f'({len(VIEWPORTS) - failed}/{len(VIEWPORTS)} viewports)')
     return 1 if failed else 0

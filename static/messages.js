@@ -2600,8 +2600,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(_priorInflightStreamId&&_priorInflightStreamId!==streamId){
     INFLIGHT[activeSid].lastRunJournalSeq=0;
     INFLIGHT[activeSid].lastRunJournalEventId='';
-    INFLIGHT[activeSid].memoryRecall='';
   }
+  // Only a value proven to be this stream's survives; ownerless counts as foreign.
+  if(INFLIGHT[activeSid].memoryRecall&&_priorInflightStreamId!==streamId) INFLIGHT[activeSid].memoryRecall='';
   INFLIGHT[activeSid].streamId=streamId;
   // A reattach resumes after the journal cursor, past the memory_recall event.
   if(INFLIGHT[activeSid].memoryRecall&&typeof _noteLiveMemoryRecall==='function'){
@@ -7099,10 +7100,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }
           // Stamp _ts on the last assistant message if it has no timestamp
           if(lastAsst&&!lastAsst._ts&&!lastAsst.timestamp) lastAsst._ts=Date.now()/1000;
-          if(lastAsst&&!lastAsst._memoryRecall&&typeof _liveMemoryRecallText==='function'){
-            const _recall=_liveMemoryRecallText(activeSid,streamId);
-            if(_recall) lastAsst._memoryRecall=_recall;
-          }
           if(d.usage){
             const _doneUsageFallback={...(S.lastUsage||{})};
             if(S.session){
@@ -7573,15 +7570,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('memory_recall',e=>{
       // An external memory provider injected context for this turn. Shown in the
       // turn header, as the CLI prints it above the reply; the server persists it
-      // on the settled turn as _memoryRecall.
+      // on the settled turn as _memoryRecall. The browser never originates that field:
+      // a server-started turn pushes no user row, so the transcript's tail can
+      // still be an earlier turn.
       try{
         const d=JSON.parse(e.data||'{}')||{};
         if(d.session_id&&d.session_id!==activeSid) return;
         if(!d.message) return;
+        const _recallInflight=INFLIGHT[activeSid];
+        // A late event from an older stream must not take over the newer one.
+        if(_recallInflight&&_recallInflight.streamId&&_recallInflight.streamId!==streamId) return;
         if(typeof _noteLiveMemoryRecall==='function') _noteLiveMemoryRecall(activeSid,streamId,String(d.message));
         // Kept with the stream's recovery state: a reload resumes after the
         // journal cursor, past this event.
-        const _recallInflight=INFLIGHT[activeSid];
         if(_recallInflight&&_recallInflight.memoryRecall!==String(d.message)){
           _recallInflight.memoryRecall=String(d.message);
           persistInflightState();
@@ -7896,7 +7897,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const pm=prevIdx.get(k); if(!pm) continue;
       for(const f of _EPHEMERAL_TURN_FIELDS){
         if(f==='_anchor_activity_scene'&&_isHistoricalAnchorActivityScene(pm[f])) continue;
-        if(pm[f]!=null && nm[f]==null) nm[f]=pm[f];
+        if(pm[f]!=null && nm[f]==null){
+          // Identical rows (two cancel markers in one second) don't prove whose recall it is.
+          if(f==='_memoryRecall'&&nextMessages.filter(o=>_messageIdentityKey(o)===k).length>1) continue;
+          nm[f]=pm[f];
+        }
       }
     }
     return nextMessages;

@@ -3287,15 +3287,17 @@ async function loadSession(sid){
     ? _serverLiveSnapshotInflight(S.session.runtime_journal_snapshot, S.session.pending_attachments||[])
     : null;
   const hadLiveRecoveryInflight=!!INFLIGHT[sid];
-  // Whichever recovery source wins, keep the turn's memory recall line from
-  // either one; both resume after the memory_recall event.
-  const _localMemoryRecall=(INFLIGHT[sid]&&String(INFLIGHT[sid].streamId||'')===String(activeStreamId||''))
-    ? String(INFLIGHT[sid].memoryRecall||'')
-    : '';
+  // Both recovery sources resume after the memory_recall event, so either may
+  // lend the line to the winner, but only between sources that own the active
+  // stream: a snapshot the selector rejected for its stream lends nothing.
+  const _ownsActiveStream=source=>!!source&&!!activeStreamId&&String(source.streamId||'')===String(activeStreamId);
+  const _localMemoryRecall=_ownsActiveStream(INFLIGHT[sid])?String(INFLIGHT[sid].memoryRecall||''):'';
   const liveRecoveryInflight=_selectLiveRecoveryInflight(INFLIGHT[sid], serverLiveSnapshot, activeStreamId);
   if(liveRecoveryInflight){
-    if(!liveRecoveryInflight.memoryRecall){
-      const _recall=_localMemoryRecall||String(serverLiveSnapshot&&serverLiveSnapshot.memoryRecall||'');
+    if(activeStreamId&&!_ownsActiveStream(liveRecoveryInflight)){
+      if(liveRecoveryInflight.memoryRecall) liveRecoveryInflight.memoryRecall='';
+    }else if(!liveRecoveryInflight.memoryRecall){
+      const _recall=_localMemoryRecall||(_ownsActiveStream(serverLiveSnapshot)?String(serverLiveSnapshot.memoryRecall||''):'');
       if(_recall) liveRecoveryInflight.memoryRecall=_recall;
     }
     INFLIGHT[sid]=liveRecoveryInflight;

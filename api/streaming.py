@@ -3512,6 +3512,22 @@ def _persist_cancelled_turn(
         session.messages.append(_marker)
 
 
+def _stamp_cancel_marker_memory_recall(session, stream_id, *owner_session_ids) -> None:
+    """Keep the stopped run's recall on this turn's cancel marker."""
+    from api.models import _stamp_marker_memory_recall
+
+    for row in reversed(getattr(session, 'messages', None) or []):
+        if not isinstance(row, dict):
+            continue
+        if row.get('role') == 'user':
+            return
+        if row.get('role') == 'assistant' and row.get('_error') is True:
+            content = str(row.get('content') or '').strip().lower()
+            if any(pattern in content for pattern in _CANCEL_MARKER_PATTERNS):
+                _stamp_marker_memory_recall(session, stream_id, row, *owner_session_ids)
+                return
+
+
 def _cleanup_ephemeral_cancelled_turn(session) -> None:
     """Remove transient /btw session state after a cancel without saving it."""
     session.active_stream_id = None
@@ -3692,6 +3708,7 @@ def _finalize_cancelled_turn(
             message=message,
             partial_stream_id=stream_id if preserve_partials else None,
         )
+    _stamp_cancel_marker_memory_recall(session, stream_id)
     try:
         session.save()
     except Exception:
@@ -3943,6 +3960,24 @@ def _capture_turn_served_model(s, agent) -> str | None:
     if s is not None:
         s.last_used_model = (_used_model[:240]) if _used_model else None
     return _used_model
+
+
+def _stamp_settled_turn_memory_recall(messages, identity, recall) -> None:
+    """Stamp the recall on this turn's last assistant row, never on an older turn's."""
+    if not recall or not messages:
+        return
+    checkpoint = _active_turn_checkpoint_index(messages, identity)
+    start = -1 if checkpoint is None else checkpoint
+    for idx in range(len(messages) - 1, start, -1):
+        row = messages[idx]
+        if not isinstance(row, dict):
+            continue
+        if row.get('role') == 'assistant':
+            # A copy: settlement can share the row with context_messages.
+            messages[idx] = {**row, '_memoryRecall': recall}
+            return
+        if checkpoint is None and row.get('role') == 'user':
+            return
 
 
 def _active_turn_checkpoint_index(messages, identity) -> int | None:
@@ -18884,6 +18919,10 @@ def _run_agent_streaming(
                                     # ``finally`` cannot re-materialize this user
                                     # turn and append a spurious "Response
                                     # interrupted" marker after the settled answer.
+                                    # This branch returns before the common settle step.
+                                    _stamp_settled_turn_memory_recall(
+                                        s.messages, _active_turn_identity, _turn_memory_recall[0],
+                                    )
                                     s.tool_calls = _extract_tool_calls_from_messages(
                                         s.messages,
                                         live_tool_calls=_live_tool_calls,
@@ -20165,6 +20204,9 @@ def _cancel_stream_impl(
                     if _cancel_by_server:
                         _cancel_marker['cancel_initiator'] = CANCEL_INITIATOR_SERVER
                     _cs.messages.append(_cancel_marker)
+                _stamp_cancel_marker_memory_recall(
+                    _cs, stream_id, _snap_owner_session_id, active_run_session_id,
+                )
 
                 # A journal-only turn has no in-memory partial to carry into the
                 # cancel save. Persist an exact-stream recovery capability on

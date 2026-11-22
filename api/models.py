@@ -1129,6 +1129,7 @@ def _recovered_model_context_projection(message: dict) -> dict | None:
         return None
     projected = dict(message)
     projected.pop('reasoning', None)
+    projected.pop('_memoryRecall', None)  # display only
     if projected.get('_error'):
         return None
     if _content_has_reasoning_only_parts(projected.get('content')):
@@ -4113,6 +4114,66 @@ def _materialize_unsaved_gateway_terminal_error(
     return True
 
 
+def _session_run_memory_recall(session, stream_id: str | None, *owner_session_ids) -> str:
+    from api.run_journal import memory_recall_for_run
+
+    return memory_recall_for_run(
+        stream_id,
+        getattr(session, 'session_id', None),
+        getattr(session, 'parent_session_id', None),
+        *owner_session_ids,
+    )
+
+
+def _stamp_marker_memory_recall(session, stream_id, marker: dict, *owner_session_ids) -> dict:
+    """Keep a run's recall on the marker that ended it.
+
+    Markers are ``_error`` rows, so the line stays out of model context.
+    """
+    if marker.get('_error') is True and not marker.get('_memoryRecall'):
+        recall = _session_run_memory_recall(session, stream_id, *owner_session_ids)
+        if recall:
+            marker['_memoryRecall'] = recall
+    return marker
+
+
+def _stamp_pending_turn_memory_recall(session, stream_id: str | None) -> None:
+    """Keep a run's recall on its answer when repair adds no marker.
+
+    Call before the pending fields are cleared: they identify the turn, and a turn
+    that cannot be identified is left alone. The row is copied because recovery
+    can share it with ``context_messages``.
+    """
+    recall = _session_run_memory_recall(session, stream_id)
+    if not recall:
+        return
+    messages = session.messages or []
+    token = _pending_active_turn_token(session)
+    answer = None
+    for idx in range(len(messages) - 1, -1, -1):
+        row = messages[idx]
+        if not isinstance(row, dict):
+            continue
+        if row.get('role') == 'assistant' and answer is None:
+            answer = idx
+        elif row.get('role') == 'user':
+            # state.db and core transcript rows carry no token, only the checkpoint.
+            if _transcript_user_row_is_pending_turn(row, session, token) or (
+                not row.get('_active_turn_token')
+                and _message_matches_pending_checkpoint(
+                    row,
+                    session.pending_user_message,
+                    session.pending_started_at,
+                    session.pending_user_source,
+                    session.pending_attachments,
+                )
+            ):
+                if answer is not None and not messages[answer].get('_memoryRecall'):
+                    messages[answer] = {**messages[answer], '_memoryRecall': recall}
+                return
+            answer = None
+
+
 def _recover_journaled_output_and_terminal_error(
     session,
     stream_id: str | None,
@@ -5299,6 +5360,8 @@ def _retry_journal_recovery_in_place(
                     )
                 )
 
+            # A journal that arrived after the marker was written can carry the recall.
+            _stamp_marker_memory_recall(session, stream_id, msg)
             if recovered_output or terminal_error_recovered:
                 if cancel_hook:
                     # Only this successful cancellation action can authorize
@@ -5480,6 +5543,7 @@ def _apply_core_sync_or_error_marker(
                 _stream_id,
                 dedupe_existing=True,
             )
+            _stamp_pending_turn_memory_recall(session, _stream_id)
             session.active_stream_id = None
             session.pending_user_message = None
             session.pending_attachments = []
@@ -5504,6 +5568,7 @@ def _apply_core_sync_or_error_marker(
             # the stale pending fields and return; the transcript is
             # already correct and durable.
             if _transcript_already_advanced_past_pending(session):
+                _stamp_pending_turn_memory_recall(session, _stream_id)
                 session.active_stream_id = None
                 session.pending_user_message = None
                 session.pending_attachments = []
@@ -5542,13 +5607,15 @@ def _apply_core_sync_or_error_marker(
         session.pending_started_at = None
         session.pending_user_source = None
         if not terminal_error_recovered:
-            session.messages.append(
+            session.messages.append(_stamp_marker_memory_recall(
+                session,
+                _stream_id,
                 _build_recovery_marker_with_retry_hook(
                     recovered_output=recovered_output,
                     stream_id=_stream_id,
                     pending_started_at=_pending_started_at,
-                )
-            )
+                ),
+            ))
         session.save(touch_updated_at=touch_updated_at)
         logger.info(
             "Session %s: recovered pending user turn (messages non-empty), added error marker",
@@ -5599,19 +5666,24 @@ def _apply_core_sync_or_error_marker(
                 )
             )
             _pending_started_at = session.pending_started_at
+            if not recovered_output or terminal_error_recovered:
+                # No marker below: the turn's answer carries the recall.
+                _stamp_pending_turn_memory_recall(session, _stream_id)
             session.active_stream_id = None
             session.pending_user_message = None
             session.pending_attachments = []
             session.pending_started_at = None
             session.pending_user_source = None
             if recovered_output and not terminal_error_recovered:
-                session.messages.append(
+                session.messages.append(_stamp_marker_memory_recall(
+                    session,
+                    _stream_id,
                     _interrupted_recovery_marker(
                         recovered_output=True,
                         stream_id=_stream_id,
                         pending_started_at=_pending_started_at,
-                    )
-                )
+                    ),
+                ))
             # NOTE: when the core transcript was synced in but the run journal
             # is not yet visible, intentionally do NOT append a lazy-retry
             # marker here. In this branch the canonical history is the core
@@ -5653,13 +5725,15 @@ def _apply_core_sync_or_error_marker(
     session.pending_started_at = None
     session.pending_user_source = None
     if not terminal_error_recovered:
-        session.messages.append(
+        session.messages.append(_stamp_marker_memory_recall(
+            session,
+            _stream_id,
             _build_recovery_marker_with_retry_hook(
                 recovered_output=recovered_output,
                 stream_id=_stream_id,
                 pending_started_at=_pending_started_at,
-            )
-        )
+            ),
+        ))
     session.save(touch_updated_at=touch_updated_at)
     logger.info("Session %s: no core transcript found, added error marker", sid)
     return True
@@ -6090,6 +6164,7 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         # writer's newer record.
         locked.messages = merged_messages
         locked.context_messages = merged_context
+        _stamp_pending_turn_memory_recall(locked, locked_stream_id)
         locked.active_stream_id = None
         locked.pending_user_message = None
         locked.pending_attachments = []

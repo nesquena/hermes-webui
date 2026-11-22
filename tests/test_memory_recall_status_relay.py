@@ -317,8 +317,14 @@ def test_settled_rows_and_live_paths_apply_the_recall_line():
     ) in UI_JS
     for name in ("_moveLiveRunStatusToTurnEnd", "placeLiveRunStatusHost"):
         assert "_syncLiveAssistantMemoryRecall();" in _function_source(UI_JS, name), name
-    done = MESSAGES_JS[MESSAGES_JS.index("lastAsst._ts=Date.now()/1000;"):]
-    assert done.index("lastAsst._memoryRecall=_recall;") < 400
+    # Settled ownership is the server's: the browser never originates the field,
+    # by assignment, bracket assignment or object literal.
+    for write in (
+        r"\._memoryRecall\s*=(?!=)",
+        r"\[\s*['\"`]_memoryRecall['\"`]\s*\]\s*=(?!=)",
+        r"[{,]\s*['\"]?_memoryRecall['\"]?\s*:",
+    ):
+        assert not re.search(write, MESSAGES_JS + UI_JS), write
 
 
 # ── Mid-stream reload ─────────────────────────────────────────────────────────
@@ -417,10 +423,10 @@ def test_reload_paths_carry_memory_recall():
     load = _function_body(sessions_js, "loadSession")
     assert "memoryRecall:String(stored.memoryRecall||'')" in load
     # Whichever recovery source wins keeps the line from the other.
-    assert "if(!liveRecoveryInflight.memoryRecall){" in load
+    assert "else if(!liveRecoveryInflight.memoryRecall){" in load
     assert "liveRecoveryInflight.memoryRecall=_recall;" in load
     # The reattach hands it back to the live turn, and a new stream starts empty.
     attach = _function_body(MESSAGES_JS, "attachLiveStream")
     assert "_noteLiveMemoryRecall(activeSid,streamId,INFLIGHT[activeSid].memoryRecall);" in attach
-    reset = attach[attach.index("if(_priorInflightStreamId&&_priorInflightStreamId!==streamId){"):]
-    assert reset.index("INFLIGHT[activeSid].memoryRecall='';") < reset.index("INFLIGHT[activeSid].streamId=streamId;")
+    reset = attach.index("_priorInflightStreamId!==streamId) INFLIGHT[activeSid].memoryRecall='';")
+    assert reset < attach.index("INFLIGHT[activeSid].streamId=streamId;")

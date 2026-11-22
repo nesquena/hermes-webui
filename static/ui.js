@@ -14074,6 +14074,8 @@ function restoreLiveTurnHtmlForSession(sid){
     return false;
   }
   else inner.appendChild(restored);
+  // The saved HTML can predate the active stream.
+  if(typeof _syncLiveAssistantMemoryRecall==='function') _syncLiveAssistantMemoryRecall();
   // Transparent Stream: liveTurnHtml is restored via template.innerHTML, which
   // drops the property-bound onclick/onkeydown handlers wired by
   // _wireTransparentHeaderToggle / _attachCopyButton / _syncTransparentEventControls /
@@ -15874,7 +15876,8 @@ function _syncLiveAssistantMemoryRecall(){
   if(!turn) return;
   if(turn.dataset.sessionId&&turn.dataset.sessionId!==S.session.session_id) return;
   const text=_liveMemoryRecallText(S.session.session_id, S.activeStreamId);
-  if(text) _setAssistantTurnMemoryRecall(turn, text);
+  // While a stream is active, a reused turn drops the line of an earlier one.
+  if(text||S.activeStreamId) _setAssistantTurnMemoryRecall(turn, text);
 }
 function _createAssistantTurn(tsTitle='', tpsText=''){
   const row=document.createElement('div');

@@ -263,7 +263,7 @@ when integrating with the live chat SSE relay.
 | `title` | Session title update (often after `done`) |
 | `title_status` | Title generation status / skip reason |
 | `warning` | Non-fatal provider/fallback warning |
-| `memory_recall` | Agent memory recall indicator for the turn (shown in the assistant turn header and persisted as `_memoryRecall` on the settled turn; journal-replayed after reconnect) |
+| `memory_recall` | Agent memory recall indicator for the turn (shown in the assistant turn header and persisted as `_memoryRecall` on that stream's settled turn, including Stop and a successful retry, and by repair when it leaves an identifiable answer or marker of that turn; excluded from model input; journal-replayed after reconnect) |
 | `runtime_model` | Local Agent serving identity observed at output or successful completion |
 | `apperror` | Terminal application error (no trailing `stream_end`) |
 | `cancel` | Run cancelled |
