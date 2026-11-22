@@ -29,6 +29,8 @@
 
 ### Security
 
+- **A provider entry with its own endpoint keeps its key on that endpoint when WebUI looks up a model's context window (#9262, refs #8822).** When a `providers` entry for a built-in provider such as Anthropic, Novita or OpenAI Codex declares its own endpoint (`api`, `url` or `base_url`, the shape Hermes Agent's own config migration writes), the Agent uses that entry's key only with that endpoint. WebUI's context-window lookup could still send the key to the provider's own metadata host when you reloaded a conversation, switched model or started a chat. It now asks only the entry's own endpoint, and otherwise uses the catalog or default context window. An entry without an endpoint of its own is unchanged. Standalone installs without the Agent now also recognise the `chatgpt`, `chatgpt-codex`, `novita-ai` and `novitaai` provider names.
+
 - **A malformed passkey response is refused with 400/401, never a server error.** Registering or signing in with a
   crafted passkey response, for example one whose declared credential ID is longer than the real one, could make the
   CBOR reader raise an unexpected error and answer `500 Internal server error`. Every malformed registration or login
