@@ -6682,8 +6682,8 @@ function _sessionInternalReferenceForSession(session){
 
 async function _copyTextToClipboard(text){
   if(navigator&&navigator.clipboard&&typeof navigator.clipboard.writeText==='function'){
-    await navigator.clipboard.writeText(text);
-    return true;
+    // A denied or unavailable clipboard permission rejects: use the textarea copy below.
+    try{ await navigator.clipboard.writeText(text); return true; }catch(_){}
   }
   const ta=document.createElement('textarea');
   ta.value=text;
@@ -6692,6 +6692,7 @@ async function _copyTextToClipboard(text){
   ta.style.left='-9999px';
   ta.style.top='0';
   document.body.appendChild(ta);
+  ta.focus({preventScroll:true});
   ta.select();
   try{return document.execCommand('copy');}
   finally{ta.remove();}
@@ -6918,12 +6919,11 @@ function _syncSessionShareState(session, nextSession){
   void renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
 }
 
-// The conversation panel acts on the conversation on screen ({requireActive:true}).
-// Once its dialog is answered, act only if that conversation is still on screen and
-// no switch to another conversation is in flight; otherwise fail closed.
-function _sessionLeftScreen(session, opts){
-  if(!(opts&&opts.requireActive)) return false;
-  if(!(S.session&&S.session.session_id===session.session_id)) return true;
+// An action bound to the conversation on screen when it was clicked checks this once
+// its dialog is answered: true if that conversation is no longer on screen or a switch
+// to another conversation is in flight. The caller then fails closed.
+function _sessionLeftScreen(session){
+  if(!session||!(S.session&&S.session.session_id===session.session_id)) return true;
   return !!(_loadingSessionId&&_loadingSessionId!==session.session_id);
 }
 
@@ -6940,7 +6940,7 @@ async function _createOrRefreshSessionShare(session, opts){
     });
     // Closing the dialog (×, Escape, backdrop) is not "Refresh snapshot": do nothing.
     if(reuse===null) return;
-    if(_sessionLeftScreen(session,opts)) return;
+    if(opts&&opts.requireActive&&_sessionLeftScreen(session)) return;
     if(reuse){
       let copied=true;
       try{ await _copyTextToClipboard(existing); }catch(_){ copied=false; }
@@ -6973,7 +6973,7 @@ async function _revokeSessionShare(session, opts){
     confirmLabel:t('stop_sharing_session'),
     danger:true,
   });
-  if(!ok||_sessionLeftScreen(session,opts)) return;
+  if(!ok||(opts&&opts.requireActive&&_sessionLeftScreen(session))) return;
   const res=await api('/api/share/revoke',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
   if(res&&res.session) _syncSessionShareState(session,res.session);
   showToast(t('share_session_revoked'));

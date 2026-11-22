@@ -8,6 +8,13 @@ was opened for.
   conversation (Share, Stop sharing, Clear conversation, a workspace file delete);
 * the session shortcuts (J/K, Ctrl+K) do nothing while a dialog is open.
 
+* a dismissed share dialog (close button, Escape, backdrop, a conversation change)
+  writes nothing, from the panel and from the sidebar menu, including when the
+  dialog was reopened before the sidebar refreshed or the switch is vetoed;
+* copying a share link still works when the clipboard permission is denied;
+* a dialog opened while a switch to another conversation is still in flight
+  never acts on that next conversation.
+
 Starts a real ``server.py`` with its own state, seeds conversations through
 ``/api/session/import`` (A shared through the real ``/api/share/create``, B and C
 never shared; the later tests seed their own), then drives headless Chromium.
@@ -492,3 +499,154 @@ def test_workspace_file_delete_confirm_never_deletes_in_another_workspace(page, 
     outcome = {"writes": page.writes, "one": files["one"].exists(), "two": files["two"].exists()}
     assert outcome == {"writes": [], "one": True, "two": True}, outcome
     assert survived is False, "the conversation change should dismiss the dialog"
+
+
+# ── a dismissed share dialog writes nothing ──────────────────────────────────
+
+def _history_go(page, sid):
+    """Browser Back to the latest earlier history entry for ``sid`` (one navigation,
+    no waiting for the switch to finish)."""
+    cdp = page.context.new_cdp_session(page)
+    history = cdp.send("Page.getNavigationHistory")
+    earlier = history["entries"][:history["currentIndex"]]
+    entry = next((e for e in reversed(earlier) if e["url"].endswith(f"/session/{sid}")), None)
+    assert entry, history
+    cdp.send("Page.navigateToHistoryEntry", {"entryId": entry["id"]})
+
+
+def _open_sidebar_share(page, sid):
+    page.hover(f".session-item[data-sid='{sid}']")
+    page.click(f".session-item[data-sid='{sid}'] .session-actions-trigger")
+    page.wait_for_selector(".session-action-opt", timeout=WAIT_MS)
+    assert page.evaluate("""() => {
+      const item = [...document.querySelectorAll('.session-action-opt')]
+        .find(el => (el.querySelector('.ws-opt-name') || {}).textContent === t('share_session'));
+      if (item) item.click();
+      return !!item;
+    }""")
+
+
+def _slow_network(page, latency_ms=1000):
+    cdp = page.context.new_cdp_session(page)
+    cdp.send("Network.enable")
+    cdp.send("Network.emulateNetworkConditions",
+             {"offline": False, "latency": latency_ms, "downloadThroughput": -1, "uploadThroughput": -1})
+
+
+def _share_dialog_dismissed_by_history_writes_nothing(page, shares):
+    state = page.evaluate(_STATE_JS)
+    assert page.share_posts == [], "a dismissed share dialog published a snapshot"
+    assert state["copied"] == [] and state["opened"] == []
+    _assert_only_a_shared(shares)
+    assert state["dialogOpen"] is False, "the conversation change should dismiss the dialog"
+
+
+def test_reopened_sidebar_share_dialog_dismissed_by_history_writes_nothing(page, shares):
+    _open_a_after_b(page, shares)
+    _slow_network(page)
+    # Share A from its menu (answering Refresh if it already asks), then reopen the
+    # menu Share before the sidebar refresh: the row now knows A is shared and asks.
+    _open_sidebar_share(page, shares["A"])
+    _wait_until(page, "() => window.__opened.length > 0 || _isAppDialogOpen()")
+    if page.evaluate("() => _isAppDialogOpen()"):
+        page.click("#appDialogCancel")
+    _wait_until(page, "() => window.__opened.length > 0")
+    page.share_posts.clear()
+    page.evaluate("() => { window.__opened = []; window.__copied = []; return true; }")
+    _open_sidebar_share(page, shares["A"])
+    _wait_until(page, "() => _isAppDialogOpen()")
+    _history_go(page, shares["B"])
+    page.wait_for_timeout(2500)
+    _share_dialog_dismissed_by_history_writes_nothing(page, shares)
+
+
+def test_panel_share_dialog_dismissed_by_a_vetoed_history_change_writes_nothing(page, shares):
+    _open_a_after_b(page, shares)
+    # An extension cancels the switch before it starts: A stays on screen.
+    page.evaluate("() => { registerHermesSessionOpenHandler((sid, data, opts) => opts.preload ? {cancel: true} : {}); return true; }")
+    _open_panel_share_dialog(page)
+    _history_go(page, shares["B"])
+    page.wait_for_timeout(SETTLE_MS)
+    assert page.evaluate(_STATE_JS)["sid"] == shares["A"]
+    _share_dialog_dismissed_by_history_writes_nothing(page, shares)
+
+
+# ── clipboard permission denied ──────────────────────────────────────────────
+
+@pytest.mark.parametrize("entry", ["panel", "menu"])
+def test_share_link_is_copied_when_the_clipboard_permission_is_denied(browser, shares, entry):
+    ctx = browser.new_context(viewport={"width": 1400, "height": 900}, base_url=shares["base"])
+    ctx.add_init_script("window.__opened = []; window.open = (u) => { window.__opened.push(String(u)); return null; };")
+    try:
+        page = ctx.new_page()
+        _open_a_after_b(page, shares)
+        ctx.grant_permissions(["clipboard-write"])
+        page.evaluate("() => navigator.clipboard.writeText('CLIPBOARD-SENTINEL')")
+        ctx.clear_permissions()
+        cdp = page.context.new_cdp_session(page)
+        context_id = cdp.send("Target.getTargetInfo")["targetInfo"]["browserContextId"]
+        cdp.send("Browser.setPermission", {
+            "permission": {"name": "clipboard-write", "allowWithoutSanitization": False},
+            "setting": "denied", "origin": shares["base"], "browserContextId": context_id,
+        })
+        assert page.evaluate("async () => (await navigator.permissions.query({name: 'clipboard-write'})).state") == "denied"
+        if entry == "panel":
+            _open_panel_share_dialog(page)
+        else:
+            _open_sidebar_share(page, shares["A"])
+            _wait_until(page, "() => window.__opened.length > 0 || _isAppDialogOpen()")
+        if page.evaluate("() => _isAppDialogOpen()"):
+            page.click("#appDialogConfirm")  # Copy existing
+        _wait_until(page, "() => window.__opened.length > 0")
+        page.wait_for_timeout(300)
+        ctx.grant_permissions(["clipboard-read", "clipboard-write"])
+        assert page.evaluate("() => navigator.clipboard.readText()") == _a_url(page, shares)
+    finally:
+        ctx.close()
+
+
+# ── a dialog opened while a switch is still in flight ────────────────────────
+
+@pytest.mark.parametrize("action", ["clear", "file-delete"])
+def test_dialog_opened_during_a_pending_switch_never_acts_on_the_next_conversation(page, server, action):
+    tag = f"{action}-{int(time.time() * 1000)}"
+    files = {}
+    sids = []
+    for name in ("first", "second"):
+        workspace = server["state"] / f"pending-{tag}-{name}"
+        workspace.mkdir()
+        files[name] = workspace / "notes.txt"
+        files[name].write_text(f"{name} notes\n", encoding="utf-8")
+        sids.append(_import(server, f"Pending {tag} {name}", workspace))
+    first, second = sids
+    _open_after(page, first, second)
+    page.fill("#msg", "an unsent draft")
+    page.click(".rail-btn[data-panel='settings']")
+    page.wait_for_selector("#btnClearConvModal", state="visible", timeout=WAIT_MS)
+    held = []
+    page.route("**/api/session/draft", lambda route: held.append(route))
+    # Back to the first conversation: the switch waits for the draft save of the second.
+    _history_go(page, first)
+    deadline = time.time() + 10
+    while not held and time.time() < deadline:
+        page.wait_for_timeout(50)
+    assert held, "the draft save was not held"
+    assert page.evaluate(_STATE_JS)["sid"] == second
+    if action == "clear":
+        page.click("#btnClearConvModal")
+    else:
+        page.evaluate("() => { deleteWorkspaceFile('notes.txt', 'notes.txt'); return true; }")
+    _wait_until(page, "() => _isAppDialogOpen()")
+    held.pop().continue_()
+    page.unroute("**/api/session/draft")
+    _active(page, first)
+    page.wait_for_timeout(300)
+    if page.evaluate("() => _isAppDialogOpen()"):
+        page.click("#appDialogConfirm")
+    page.wait_for_timeout(SETTLE_MS)
+    outcome = {
+        "writes": page.writes,
+        "messages": [_message_count(server, first), _message_count(server, second)],
+        "files": [files["first"].exists(), files["second"].exists()],
+    }
+    assert outcome == {"writes": [], "messages": [2, 2], "files": [True, True]}, outcome

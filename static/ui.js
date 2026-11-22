@@ -27685,15 +27685,16 @@ function _renderTreeItems(container, entries, depth){
 }
 
 async function deleteWorkspaceDir(relPath, name){
-  if(!S.session)return;
+  const session=S.session;
+  if(!session)return;
   if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(relPath)){
     showToast(t('external_link_read_only'), 2000);
     return;
   }
   const ok=await showConfirmDialog({title:t('delete_dir_confirm',name),message:'',confirmLabel:'Delete',danger:true,focusCancel:true});
-  if(!ok)return;
+  if(!ok||_sessionLeftScreen(session))return;
   try{
-    await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath,recursive:true})});
+    await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:relPath,recursive:true})});
     showToast(t('deleted')+name);
     // Remove from expanded dirs cache
     if(S._expandedDirs){S._expandedDirs.delete(relPath);if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();}
@@ -27844,7 +27845,8 @@ function _showFileContextMenu(e, item){
 }
 
 async function _inlineRenameFileItem(item){
-  if(!S.session)return;
+  const session=S.session;
+  if(!session)return;
   if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(item.path)){
     showToast(t('external_link_read_only'), 2000);
     return;
@@ -27862,9 +27864,9 @@ async function _inlineRenameFileItem(item){
     selectStem:!isDirLike,
     selectAll:isDirLike
   });
-  if(!newName||newName===item.name)return;
+  if(!newName||newName===item.name||_sessionLeftScreen(session))return;
   try{
-    await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path,new_name:newName})});
+    await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:item.path,new_name:newName})});
     showToast(t('renamed_to')+newName);
     _treeRowRenamed(item.path,newName);
     // Update expanded dirs cache key if renaming a directory
@@ -27882,15 +27884,16 @@ async function _inlineRenameFileItem(item){
 }
 
 async function deleteWorkspaceFile(relPath, name){
-  if(!S.session)return;
+  const session=S.session;
+  if(!session)return;
   if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(relPath)){
     showToast(t('external_link_read_only'), 2000);
     return;
   }
   const _delFile=await showConfirmDialog({title:t('delete_confirm',name),message:'',confirmLabel:'Delete',danger:true,focusCancel:true});
-  if(!_delFile) return;
+  if(!_delFile||_sessionLeftScreen(session)) return;
   try{
-    await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath})});
+    await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:relPath})});
     showToast(t('deleted')+name);
     // Close preview if we just deleted the viewed file
     if($('previewPathText').textContent===relPath)$('btnClearPreview').onclick();
@@ -27909,7 +27912,8 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
       if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
-  if(!S.session)return;
+  const session=S.session;
+  if(!session)return;
   if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(targetDir)){
     showToast(t('external_link_read_only'), 2000);
     return;
@@ -27920,10 +27924,10 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
     placeholder:'filename.txt',
     confirmLabel:t('create')
   });
-  if(!name||!name.trim()) return;
+  if(!name||!name.trim()||_sessionLeftScreen(session)) return;
   const relPath=_workspaceJoinTargetPath(targetDir,name);
   try{
-    await api('/api/file/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath,content:''})});
+    await api('/api/file/create',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:relPath,content:''})});
     showToast(t('created')+name.trim());
     delete S._dirCache[targetDir || '.'];
     await loadDir(S.currentDir);
@@ -27942,7 +27946,8 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
-  if(!S.session)return;
+  const session=S.session;
+  if(!session)return;
   if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(targetDir)){
     showToast(t('external_link_read_only'), 2000);
     return;
@@ -27953,14 +27958,14 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
     placeholder:'folder-name',
     confirmLabel:t('create')
   });
-  if(!name||!name.trim()) return;
+  if(!name||!name.trim()||_sessionLeftScreen(session)) return;
   const relPath=_workspaceJoinTargetPath(targetDir,name);
   try{
-    await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath})});
+    await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:relPath})});
     showToast(t('folder_created')+name.trim());
     delete S._dirCache[targetDir || '.'];
     await loadDir(S.currentDir);
-    const absPath=S.session.workspace?(targetDir==='.'?`${S.session.workspace}/${name.trim()}`:`${S.session.workspace}/${targetDir}/${name.trim()}`):null;
+    const absPath=session.workspace?(targetDir==='.'?`${session.workspace}/${name.trim()}`:`${session.workspace}/${targetDir}/${name.trim()}`):null;
     if(absPath){
       const addAsSpace=await showConfirmDialog({
         title:t('folder_add_as_space_title'),
