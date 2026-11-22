@@ -35838,8 +35838,59 @@ def _handle_approval_respond(handler, body):
     })
 
 
+_GATEWAY_CLARIFY_DEAD_CODES = frozenset({
+    "stale_generation", "approval_not_pending", "not_found", "invalid_params",
+})
+
+
+def _resolve_gateway_run_clarify(sid: str, clarify_id: str, response: str) -> bool | None:
+    """Answer a Gateway Runs API clarify card at ``POST /v1/runs/{id}/clarify``.
+
+    None when ``clarify_id`` is not a Gateway run prompt (local / native
+    session transports keep their own path). A run prompt never falls back to
+    local settlement: the Gateway is the only owner of its waiter.
+    """
+    from api.clarify import GATEWAY_RUN_CLARIFY_PREFIX, gateway_run_pending, settle_gateway_run_pending
+
+    if not str(clarify_id or "").startswith(GATEWAY_RUN_CLARIFY_PREFIX):
+        return None
+    entry = gateway_run_pending(sid, clarify_id)
+    if not entry:
+        return False
+    run_id = str(entry.get("_gateway_run_id") or "")
+    prompt_id = str(entry.get("_gateway_prompt_id") or "")
+    generation = entry.get("_gateway_execution_generation")
+    if not run_id or not prompt_id or type(generation) is not int:
+        return False
+    from api.gateway_chat import gateway_run_endpoint
+    from api.runner_client import HttpRunnerClient, RunnerClientError
+
+    try:
+        base_url, api_key = gateway_run_endpoint(run_id)
+        result = HttpRunnerClient(base_url=base_url, api_key=api_key).respond_clarify(
+            run_id, prompt_id, response, execution_generation=generation,
+        )
+    except RunnerClientError as exc:
+        if exc.code in _GATEWAY_CLARIFY_DEAD_CODES:
+            # The Gateway proved this prompt can no longer be answered: retire
+            # the card so it does not linger, and report the answer as stale.
+            settle_gateway_run_pending(sid, run_id, prompt_id)
+        logger.info("Gateway rejected clarify answer for run %s: %s", run_id, exc.code or exc.status)
+        return False
+    except (ValueError, OSError):
+        logger.debug("Gateway clarify relay failed for run %s", run_id, exc_info=True)
+        return False
+    status = str((result or {}).get("status") or "") if isinstance(result, dict) else ""
+    # Either way the Gateway no longer has this prompt parked.
+    settle_gateway_run_pending(sid, run_id, prompt_id)
+    return status == "resolved"
+
+
 def _resolve_clarify_legacy(sid: str, clarify_id: str, response: str) -> bool:
     """Resolve clarify through its owning transport without a local fallback."""
+    gateway_run = _resolve_gateway_run_clarify(sid, clarify_id, response)
+    if gateway_run is not None:
+        return gateway_run
     from api.gateway_sessions import respond_clarify
     remote = respond_clarify(sid, clarify_id, response)
     if remote is not None:
@@ -35866,9 +35917,12 @@ def _handle_clarify_respond(handler, body):
     if response is None:
         response = body.get("choice")
     response = str(response or "").strip()
-    if not response:
-        return bad(handler, "response is required")
     clarify_id = body.get("clarify_id", "")
+    # An empty answer is the Gateway Runs API's documented skip; every other
+    # clarify transport still requires a response.
+    from api.clarify import gateway_run_pending
+    if not response and not gateway_run_pending(sid, clarify_id):
+        return bad(handler, "response is required")
 
     from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
 
