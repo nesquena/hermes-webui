@@ -700,15 +700,29 @@ python3 -c "import agent.memory_manager as m; print('claim_instance:', callable(
 
 Masking applies to the server's own stdout/stderr stream only. The Logs panel (`agent.log`, `errors.log`, `gateway.log` under the Hermes home) is written by the Agent with its own handlers and is unaffected.
 
-**Diagnostic commands.**
+**Diagnostic commands.** Use the interpreter the server actually runs on — the shell's `python3` may be a different one, and the Agent directory is only on `sys.path` for that interpreter. The startup banner names both:
 
 ```bash
-# The server log is the launcher's captured stdout/stderr.
-grep -E 'base_url=' <webui-server-log>
-
-# Confirm the Agent's formatter is reachable from the WebUI's interpreter.
-python3 -c "from agent.redact import RedactingFormatter; print(RedactingFormatter)"
+cd ~/hermes-webui && ./start.sh 2>&1 | grep -iE 'agent dir|python' | head -5
+#   agent dir   : /path/to/hermes-agent
+#   python      : /path/to/python
 ```
+
+Run the check with that interpreter, and with the Agent directory importable:
+
+```bash
+# The server's selected Python (from the banner, or $HERMES_WEBUI_PYTHON).
+PY=/path/to/python
+
+# Confirm the Agent's formatter is reachable from that interpreter.
+"$PY" -c "import sys; sys.path.insert(0, '/path/to/hermes-agent'); \
+from agent.redact import RedactingFormatter; print(RedactingFormatter)"
+
+# Or, with the Agent already on the path (the venv that has it installed):
+"$PY" -c "from agent.redact import RedactingFormatter; print(RedactingFormatter)"
+```
+
+A failure here means the Agent is not importable for the server's interpreter — the Agent venv (`<agent dir>/venv/bin/python`) is the one that normally has it. Fix that before trusting the masking behavior; see "AIAgent not available -- check that hermes-agent is on sys.path" above for the full recovery flow.
 
 **Fix.** Nothing to fix if the userinfo is masked — that is the intended behavior. If a credential is in clear, the Agent was not importable at the moment that record was written: install the Hermes Agent (or its dependencies) and restart the WebUI so the formatter is available before the first warning. Redaction follows the Agent's `security.redact_secrets` policy, so an Agent configured to allow raw credentials in logs will not mask them.
 
