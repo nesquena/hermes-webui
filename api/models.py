@@ -7087,34 +7087,14 @@ def _cached_session_lags_disk(cached) -> bool:
     return False
 
 
-def _detach_session_for_intentional_shrink(sid) -> None:
-    """Drop *sid* from the LRU while an intentional shrink is being persisted.
-
-    retry/undo/truncate/clear all shrink the cached Session object's message
-    list in memory before saving it. Between the shrink and the save the
-    cached object holds FEWER messages than its sidecar — exactly the shape
-    ``_cached_session_lags_disk`` reads as a stale cache. A concurrent full
-    read in that window reloads the old sidecar over the shrunk object
-    (#9029): the reply the user just removed comes back in the transcript,
-    and the next save writes it to disk again.
-
-    Detaching the entry first turns the window into a cache miss instead of
-    a stale hit: concurrent readers cold-load the sidecar — still the old,
-    un-shrunk content, which is the correct pre-save semantics — and the
-    caller republishes the shrunk object once it is durable. This changes
-    nothing about ``_cached_session_lags_disk``; a genuinely stale cache
-    (sidecar ahead of cache through another writer) still takes the reload
-    path.
-    """
-    with LOCK:
-        SESSIONS.pop(sid, None)
-
-
 def _republish_session_after_shrink(sid, session) -> None:
     """Publish a shrunk, already-saved session back into the LRU (#9029).
 
-    Counterpart to ``_detach_session_for_intentional_shrink``: called once
-    the shrunk object is durable so the cache and the sidecar agree again.
+    retry/undo drop the entry under LOCK together with the in-place shrink,
+    so a concurrent read can never observe the shorter object while the
+    sidecar still holds the longer transcript, and call this once the
+    truncation is durable. The truncate/clear path in api/routes.py also
+    uses it to publish the object it just saved.
     """
     with LOCK:
         SESSIONS[sid] = session
@@ -7447,6 +7427,10 @@ _FULL_SESSION_RESOLVE_LOCAL = threading.local()
 # A cold load re-reads at most this many times when another writer replaces
 # the sidecar mid-read (#8267), then publishes its last read as before.
 _COLD_PUBLISH_ATTEMPTS = 3
+# #9229: how many times a cache-hit full read re-reads the sidecar when a
+# concurrent writer keeps replacing it. Same intent as the cold-load retry:
+# never publish a snapshot that a later write already superseded.
+_CACHED_RELOAD_ATTEMPTS = 3
 
 
 def _claim_full_session_resolve(session_id: str) -> tuple[bool, threading.Event]:
@@ -7508,6 +7492,7 @@ def _resolve_session_once(
         if not metadata_only and _cached_session_lags_disk(cached):
             if not allow_full_load:
                 raise _FullSessionResolveRequired
+            disk_session = None
             try:
                 # #9229: a full read that starts before an intentional shrink
                 # (retry/undo) saves can still be holding the OLD sidecar when
@@ -7520,56 +7505,69 @@ def _resolve_session_once(
                 # the cache-hit reload path needs the same guard: if another
                 # writer replaced the sidecar while this read was in flight,
                 # our snapshot is stale and must not be published.
-                before = _sidecar_write_generation(sid)
-                disk_session = Session.load(sid)
-                with LOCK:
-                    now = _sidecar_write_generation(sid)
-                    # Writes by THIS thread (a self-heal save inside load) are
-                    # part of what it read; only other writers make it stale.
-                    unchanged = (now[0] - before[0]) == (now[1] - before[1])
-                    if unchanged:
-                        SESSIONS[sid] = disk_session
-                        if promote_cache:
-                            SESSIONS.move_to_end(sid)
-                        cached = disk_session
-                    else:
-                        # Another writer replaced the sidecar while this read
-                        # was in flight, so our snapshot may be stale. Which
-                        # snapshot is the correct one depends on what that
-                        # writer changed:
-                        #   - An intentional shrink (retry/undo) published a
-                        #     SHORTER transcript. Our snapshot is the
-                        #     pre-shrink one; publishing it would put the
-                        #     removed reply back, so serve the resident.
-                        #   - Any other write (e.g. a reasoning-effort pick,
-                        #     which rewrites the sidecar without touching the
-                        #     transcript, or a writer that appended messages)
-                        #     leaves the resident BEHIND the disk. Discarding
-                        #     our snapshot there would serve older messages
-                        #     than the sidecar holds, and the next save of
-                        #     that object could erase the newer messages.
-                        # The freshness check is the same one this path
-                        # already trusts: the resident is behind the sidecar
-                        # only while the sidecar holds MORE messages.
-                        resident = SESSIONS.get(sid)
-                        if resident is None:
-                            pass  # nothing cached to fall back to
-                        elif _cached_session_lags_disk(resident):
-                            # The resident is behind the sidecar: keep the
-                            # transcript we just loaded and publish it.
+                #
+                # A conflicting write is not resolved by choosing between the
+                # two snapshots this thread holds, because either one can lag
+                # a different part of the state:
+                #   - an intentional shrink (retry/undo) publishes a SHORTER
+                #     transcript, so publishing our pre-shrink read puts the
+                #     removed reply back;
+                #   - a field-only write (a reasoning-effort pick) rewrites
+                #     the sidecar without touching messages, so a read taken
+                #     before it serves the older setting even though the
+                #     cache already carries the new one.
+                # Re-read instead, the way the cold-load path does, and
+                # publish only a load that no other writer overtook.
+                for _ in range(_CACHED_RELOAD_ATTEMPTS):
+                    before = _sidecar_write_generation(sid)
+                    disk_session = Session.load(sid)
+                    with LOCK:
+                        now = _sidecar_write_generation(sid)
+                        # Writes by THIS thread (a self-heal save inside load)
+                        # are part of what it read; only other writers make it
+                        # stale.
+                        unchanged = (now[0] - before[0]) == (now[1] - before[1])
+                        if unchanged:
                             SESSIONS[sid] = disk_session
                             if promote_cache:
                                 SESSIONS.move_to_end(sid)
                             cached = disk_session
-                        else:
-                            # The resident is at parity with (or ahead of) the
-                            # sidecar -- the shrink case. Serve it and drop our
-                            # pre-shrink snapshot.
-                            cached = resident
+                            break
+                        # Read the resident under LOCK, but run the lag check
+                        # outside it: that check can reach a full legacy-layout
+                        # load, whose duplicate-partial self-heal takes
+                        # _session_persist_lock — taking it under LOCK would
+                        # invert the documented persist -> index -> LOCK order.
+                        resident = SESSIONS.get(sid)
+                    if resident is not None and not _cached_session_lags_disk(resident):
+                        # A writer published an object that is at parity with
+                        # the sidecar (the shrink's republish, or a writer that
+                        # saved and published): it already reflects everything
+                        # on disk, including any field it wrote, so serve it
+                        # instead of our pre-write snapshot.
+                        cached = resident
+                        break
+                    # The write generation moved and the cache cannot prove it
+                    # is current: read the sidecar again.
+                else:
+                    # Every attempt was overtaken. Publish the newest snapshot
+                    # actually read -- this branch is entered because the
+                    # pre-reload object lags the sidecar, so handing that one
+                    # back would serve a transcript known to be stale.
+                    with LOCK:
+                        SESSIONS[sid] = disk_session
+                        if promote_cache:
+                            SESSIONS.move_to_end(sid)
+                    cached = disk_session
             except Exception:
                 logger.debug(
                     "cached session disk-freshness check failed for session %s", sid, exc_info=True,
                 )
+                if disk_session is not None:
+                    # Never fall back to the pre-reload object once a reload
+                    # has run: this branch already knows that object lags the
+                    # sidecar.
+                    cached = disk_session
         if not metadata_only and _inactive_cache_tail_needs_disk_check(cached):
             if not allow_full_load:
                 raise _FullSessionResolveRequired

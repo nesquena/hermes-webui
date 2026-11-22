@@ -243,9 +243,10 @@ def test_genuine_stale_cache_still_reloads_from_disk(monkeypatch, tmp_path):
 #      object, so the removed reply is back in the cache. The next read shows
 #      it and the next whole-session save writes it back to disk.
 #
-# The reader is started from the shrink/detach seam so the ordering is
-# deterministic: the cache-hit reload path is only taken when the cached
-# object is ALREADY shorter than the sidecar.
+# The reader is started from Session.save -- a seam that exists on master --
+# so the ordering is deterministic: save runs after the in-memory shrink but
+# before the truncated transcript is durable, so the reader still reads the
+# OLD sidecar.
 # ---------------------------------------------------------------------------
 
 
@@ -288,15 +289,19 @@ def _seed_session(models, session_id: str):
     return session
 
 
-def _run_mutation_with_a_late_reader(models, session_ops, session_id, barrier, mutate):
+def _run_mutation_with_a_late_reader(
+    monkeypatch, models, session_id, barrier, mutate
+):
     """Drive *mutate* (retry/undo) while a full read finishes AFTER the save.
 
-    The reader is started at the shrink/detach seam: by then the cached
-    object is already shorter than the sidecar, so the reader takes the
-    cache-hit reload path and reads the OLD file.
+    The reader starts inside ``Session.save`` -- a seam that exists on master
+    -- so the ordering is deterministic: save runs after the in-memory shrink
+    but before the truncated transcript is durable, so the sidecar still holds
+    the OLD transcript when the reader reads it. The reader then publishes
+    only after the save and the republish have completed.
     """
-    real_detach = session_ops._detach_session_for_intentional_shrink
     results: dict = {}
+    started = []
 
     def _read():
         try:
@@ -304,20 +309,18 @@ def _run_mutation_with_a_late_reader(models, session_ops, session_id, barrier, m
         except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion
             results["error"] = exc
 
-    def _detach_hook(sid):
-        # The shrink already happened; the sidecar still holds the OLD
-        # transcript. Start the reader here so it captures the shortened
-        # cached object and takes the cache-hit reload path.
-        reader = threading.Thread(target=_read, name=barrier.thread_name)
-        reader.start()
-        assert barrier.loaded.wait(10), "the reader never reached the sidecar read"
-        return real_detach(sid)
+    real_save = models.Session.save
 
-    session_ops._detach_session_for_intentional_shrink = _detach_hook
-    try:
-        mutate(session_id)
-    finally:
-        session_ops._detach_session_for_intentional_shrink = real_detach
+    def _save_hook(self, *args, **kwargs):
+        if str(getattr(self, "session_id", "")) == session_id and not started:
+            started.append(True)
+            reader = threading.Thread(target=_read, name=barrier.thread_name)
+            reader.start()
+            assert barrier.loaded.wait(10), "the reader never reached the sidecar read"
+        return real_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(models.Session, "save", _save_hook)
+    mutate(session_id)
     return results
 
 
@@ -377,7 +380,7 @@ def test_retry_with_a_late_concurrent_read_does_not_restore_removed_reply(
 
     barrier = _LateReaderBarrier(monkeypatch, "late-reader-retry")
     results = _run_mutation_with_a_late_reader(
-        models, session_ops, "retrylate", barrier, session_ops.retry_last
+        monkeypatch, models, "retrylate", barrier, session_ops.retry_last
     )
 
     # Let the reader publish its stale snapshot over the republished object.
@@ -405,7 +408,7 @@ def test_undo_with_a_late_concurrent_read_does_not_restore_removed_reply(
 
     barrier = _LateReaderBarrier(monkeypatch, "late-reader-undo")
     results = _run_mutation_with_a_late_reader(
-        models, session_ops, "undolate", barrier, session_ops.undo_last
+        monkeypatch, models, "undolate", barrier, session_ops.undo_last
     )
 
     barrier.resume.set()
@@ -535,4 +538,114 @@ def test_a_concurrent_non_transcript_write_does_not_serve_older_messages(
     cached_contents = [m["content"] for m in (cached_now.messages or [])]
     assert "q3" in cached_contents and "A3" in cached_contents, (
         f"the cache kept the stale transcript: {cached_contents}"
+    )
+
+    # Greptile P1: the concurrent effort pick must survive the read too. The
+    # reader's snapshot was taken before the pick, so publishing it would roll
+    # the cached setting back even though the sidecar already holds the new one.
+    assert results["session"].reasoning_effort == "high", (
+        "the read published a snapshot taken before the concurrent effort "
+        f"pick: reasoning_effort={results['session'].reasoning_effort!r}"
+    )
+    assert cached_now.reasoning_effort == "high", (
+        "the cache kept the pre-pick reasoning setting: "
+        f"{cached_now.reasoning_effort!r}"
+    )
+
+
+def test_a_conflicting_reload_with_no_resident_serves_the_newer_transcript(
+    monkeypatch, tmp_path
+):
+    """#9229 gate blocker: a conflicting reload must never hand back the
+    pre-reload object when the cache entry is gone.
+
+    The cache holds a four-message resident and the sidecar six. The reader
+    reloads; while its load is in flight another thread commits a field-only
+    write and evicts the entry through a real cold load of a second session
+    (cache cap 1), so by the time the reader takes LOCK there is no resident
+    to compare against. Returning the pre-reload object serves four messages
+    while disk holds six -- the shape that let a later undo truncate the
+    wrong turn. The read must re-read like the cold-load path instead.
+    """
+    models = _prepare_session_dir(monkeypatch, tmp_path, "nores")
+
+    resident = models.Session(
+        session_id="nores",
+        messages=[
+            _msg("user", "q1", 1.0, "u1"),
+            _msg("assistant", "a1", 2.0, "a1"),
+            _msg("user", "q2", 3.0, "u2"),
+            _msg("assistant", "a2", 4.0, "a2"),
+        ],
+    )
+    resident.save()
+    models.SESSIONS["nores"] = resident
+
+    # A six-message sidecar committed through a second object.
+    other = models.Session.load("nores")
+    other.messages = other.messages + [
+        _msg("user", "q3", 5.0, "u3"),
+        _msg("assistant", "a3", 6.0, "a3"),
+    ]
+    other.save()
+
+    # A second session, so the real LRU eviction has something to load.
+    evictor = models.Session(
+        session_id="evictor", messages=[_msg("user", "e1", 0.5, "e1")]
+    )
+    evictor.save()
+
+    # Real eviction, cap 1: cold-loading the second session pushes the target
+    # out of the cache, so the reload finds no resident.
+    monkeypatch.setattr(models._cfg, "get_sessions_cache_max", lambda: 1)
+
+    real_load = models.Session.load.__func__
+    fired = []
+
+    def _load(cls, sid):
+        session = real_load(cls, sid)
+        if (
+            sid == "nores"
+            and threading.current_thread().name == "no-resident-reader"
+            and not fired
+        ):
+            fired.append(True)
+
+            def _writer_and_eviction():
+                models.set_session_reasoning_effort("nores", "high")
+                models.get_session("evictor")  # cold load -> publish -> cap eviction
+
+            thread = threading.Thread(
+                target=_writer_and_eviction, name="no-resident-writer"
+            )
+            thread.start()
+            thread.join(10)
+            assert not thread.is_alive(), "the concurrent writer/eviction never finished"
+            with models.LOCK:
+                assert models.SESSIONS.get("nores") is None, (
+                    "the eviction did not run, so the no-resident branch was "
+                    "never exercised"
+                )
+        return session
+
+    monkeypatch.setattr(models.Session, "load", classmethod(_load))
+
+    results: dict = {}
+
+    def _read():
+        try:
+            results["session"] = models.get_session("nores")
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion
+            results["error"] = exc
+
+    reader = threading.Thread(target=_read, name="no-resident-reader")
+    reader.start()
+    reader.join(10)
+    assert not reader.is_alive(), "the reader never finished"
+    assert "error" not in results, f"the reader raised: {results.get('error')}"
+
+    contents = [m["content"] for m in (results["session"].messages or [])]
+    assert contents == ["q1", "a1", "q2", "a2", "q3", "a3"], (
+        "a conflicting reload with no resident served the pre-reload object "
+        f"instead of re-reading: {contents}"
     )
