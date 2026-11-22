@@ -1,14 +1,12 @@
-"""Profile-owned resolution of ``skills.external_dirs``.
+"""Profile-owned resolution of ``skills.external_dirs`` (#7842).
 
-``agent.skill_utils.get_external_skills_dirs()`` resolves the configured paths
-through the Hermes home (the context-local home override when the Agent provides
-one, else ``os.environ['HERMES_HOME']``) and expands variables from the process
-environment, so a named profile could list another profile's external roots
-(and, mid-turn, the root profile could follow a streaming turn's mirrored home).
-
-The WebUI therefore resolves the request profile's external roots itself, from
-that profile's own ``config.yaml`` and runtime environment. Nothing here calls the
-Agent helper, so no Agent home binding or routing check is needed.
+The Agent's ``agent.skill_utils.get_external_skills_dirs()`` reads the config of
+the process's Hermes home and expands variables from the process environment.
+WebUI profiles are per request, so a named profile's Skills panel would list the
+root profile's external roots instead of its own. This module reads the request
+profile's own ``config.yaml`` and resolves each entry as the Agent does
+(``agent/skill_utils.py``: ``_config_str_list``, ``_expand_path``,
+``_home_relative``), with variables bound by ``profile_env_binding``.
 """
 
 from __future__ import annotations
@@ -22,34 +20,27 @@ from api import yaml_compat as yaml
 
 logger = logging.getLogger(__name__)
 
+# ``$VAR`` and ``${VAR}``, as ``os.path.expandvars`` accepts both.
 _PATH_ENV_VAR = re.compile(r'\$(?:\{([^}]+)\}|([A-Za-z_][A-Za-z0-9_]*))')
 
 
 def profile_external_skill_dirs(profile_home: Path) -> list[Path]:
-    """Resolve external roots without the Agent's process-env expansion/cache.
+    """Existing external skill roots configured for the profile at *profile_home*.
 
-    Read fresh on each call: both config and profile .env can change, and the
-    Agent's config-signature-only cache cannot distinguish expansion contexts.
-    Never fall back to a streaming turn's process environment for path variables.
-    Config handling follows the Agent's ``_load_raw_config()`` / ``_skills_cfg()``
-    / ``_config_str_list()``: a malformed config lists no external roots, and an
-    entry that does not resolve to a readable directory is skipped. A config that
-    cannot be read at all raises ``OSError`` so the caller reports an incomplete
-    list that the browser retries.
+    Like the Agent: an unreadable or malformed config lists none, entries are
+    expanded in a single pass (an unknown variable stays literal text), relative
+    paths start at the profile home, the profile's own ``skills/`` dir and
+    duplicates are dropped, and an entry that is not a directory is skipped.
+    The live process environment is never read.
     """
-    from api.paths import HOME, STARTUP_ENV
-    from api.profiles import (
-        _DEFAULT_HERMES_HOME,
-        filter_runtime_env_for_gateway_parity,
-        get_profile_runtime_env,
-    )
+    from api.paths import HOME
+    from api.profiles import profile_env_binding
 
     config_path = profile_home / 'config.yaml'
-    if not config_path.exists():
-        return []
-    data = config_path.read_bytes()
     try:
-        config = yaml.safe_load(data.decode('utf-8-sig'))
+        config = yaml.safe_load(config_path.read_bytes().decode('utf-8-sig'))
+    except FileNotFoundError:
+        return []
     except Exception:
         logger.debug("Could not read skills config %s", config_path, exc_info=True)
         return []
@@ -60,54 +51,37 @@ def profile_external_skill_dirs(profile_home: Path) -> list[Path]:
     if not isinstance(raw, list):
         return []
     entries = [entry for entry in (str(item).strip() for item in raw) if entry]
+    if not entries:
+        return []
 
-    # Only the actual root home inherits launch variables. A named profile,
-    # including one pinned as the process profile, keeps its own environment.
-    # Compare resolved homes rather than a display name or the process anchor.
-    env = dict(STARTUP_ENV) if profile_home.resolve() == _DEFAULT_HERMES_HOME.resolve() else {}
-    env.update(filter_runtime_env_for_gateway_parity(get_profile_runtime_env(profile_home)))
-    env['HERMES_HOME'] = str(profile_home)
-    # Shell identity is not supplied by profile .env (gateway parity). Use the
-    # WebUI's stable shell home for ~ and $HOME, never a live process-env read.
+    # The profile's own ${VAR} binding (#8129): a named profile gets only its own
+    # .env; root gets the launch-time env under root's .env. HERMES_HOME is the
+    # profile home. A profile .env does not supply HOME, so ~ and $HOME use the
+    # WebUI's stable shell home.
+    env = profile_env_binding(profile_home)
     env['HOME'] = str(HOME)
 
     def expand_var(match):
-        # Single pass, as the Agent's os.path.expandvars: an unknown variable stays
-        # literal text (it is never looked up in the live process environment),
-        # and a `$` inside a replacement value is not expanded again.
-        key = match.group(1) or match.group(2)
-        return env.get(key, match.group(0))
+        return env.get(match.group(1) or match.group(2), match.group(0))
 
-    def resolve(entry):
-        expanded = _PATH_ENV_VAR.sub(expand_var, entry)
-        if expanded == '~' or expanded.startswith('~/') or expanded.startswith('~\\'):
-            expanded = str(HOME) + expanded[1:]
-        elif expanded.startswith('~'):
-            # ~user names another account's home, as the Agent's expanduser does.
-            expanded = os.path.expanduser(expanded)
-        root = Path(expanded)
-        if not root.is_absolute():
-            root = profile_home / root
-        return root.resolve()
-
-    # The Agent drops an entry naming the local skills dir already scanned.
     local_skills = (profile_home / 'skills').resolve()
-    roots = []
+    roots: list[Path] = []
     for entry in entries:
         try:
-            root = resolve(entry)
-            if not root.is_dir():
+            expanded = _PATH_ENV_VAR.sub(expand_var, entry)
+            if expanded == '~' or expanded.startswith(('~/', '~\\')):
+                expanded = str(HOME) + expanded[1:]
+            else:
+                expanded = os.path.expanduser(expanded)  # ~user, as the Agent's expanduser
+            root = Path(expanded)
+            if not root.is_absolute():
+                root = profile_home / root
+            root = root.resolve()
+            if root == local_skills or root in roots or not root.is_dir():
                 continue
         except (OSError, RuntimeError, ValueError):
-            # RuntimeError: symlink loop in Path.resolve() before Python 3.13;
-            # ValueError: an embedded NUL character.
+            # RuntimeError: symlink loop before Python 3.13; ValueError: embedded NUL.
             logger.debug("Skipping unreadable external skills dir entry %r", entry)
             continue
-        if root != local_skills and root not in roots:
-            roots.append(root)
+        roots.append(root)
     return roots
-
-
-# Scope label reported by the Skills API.
-SCOPE_PROFILE = "profile"            # external roots resolved from the request profile
-SCOPE_UNAVAILABLE = "unavailable"    # config.yaml unreadable; external roots withheld
