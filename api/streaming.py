@@ -13667,6 +13667,11 @@ def _adopt_session_db_for_cached_agent(agent, new_session_db):
         return new_session_db
     existing = getattr(agent, "_session_db", None)
     if new_session_db is None:
+        # No store was built for this turn (nothing to adopt), so there is no
+        # adoption path to retry a failed bind from: keep today's behaviour
+        # and do not call the hook here. The agent stays marked as needing a
+        # rebind (_BIND_FAILED_ATTR), and the next cached turn that does have
+        # a usable store retries it; the turn itself continues on ``existing``.
         return existing
     if existing is new_session_db:
         return existing
@@ -13726,12 +13731,27 @@ def _reuse_cached_agent_session_db(agent, session_db, agent_kwargs):
 _BIND_FAILED_ATTR = "_webui_context_engine_bind_failed"
 _BIND_WARNED_ATTR = "_webui_context_engine_bind_warned"
 
+# Serializes the one-shot claim of a per-agent flag. The flag lives on the
+# agent object, so ``dict.setdefault`` does not apply; without a lock two
+# concurrent failing turns for the same agent (different request threads)
+# could both observe the flag unset and log the same failure twice.
+_BIND_FLAG_CLAIM_LOCK = threading.Lock()
+
 
 def _set_agent_flag(agent, name, value):
     try:
         setattr(agent, name, value)
     except Exception:
         pass  # best-effort bookkeeping; never fail the turn over it
+
+
+def _claim_agent_flag(agent, name):
+    """Atomically claim a one-shot per-agent flag; True only for the winner."""
+    with _BIND_FLAG_CLAIM_LOCK:
+        if getattr(agent, name, False) is True:
+            return False
+        _set_agent_flag(agent, name, True)
+        return True
 
 
 def _call_bind_session_state(bind, session_db, session_id, bind_kwargs):
@@ -13767,8 +13787,11 @@ def _rebind_context_engine_session(agent, session_db):
                 bind, session_db, getattr(agent, "session_id", ""), bind_kwargs
             )
         except Exception as exc:
-            if getattr(agent, _BIND_WARNED_ATTR, False) is not True:
-                _set_agent_flag(agent, _BIND_WARNED_ATTR, True)
+            # One WARNING per agent, and the traceback only alongside it: a
+            # hook that keeps failing is retried every cached turn, so logging
+            # ``exc_info`` unconditionally repeats the same traceback forever.
+            first_failure = _claim_agent_flag(agent, _BIND_WARNED_ATTR)
+            if first_failure:
                 logger.warning(
                     "context engine bind_session_state during cached adoption "
                     "failed (%s); retrying on the next cached turn",
@@ -13776,7 +13799,7 @@ def _rebind_context_engine_session(agent, session_db):
                 )
             logger.debug(
                 "context engine bind_session_state during cached adoption failed",
-                exc_info=True,
+                exc_info=first_failure,
             )
             _set_agent_flag(agent, _BIND_FAILED_ATTR, True)
             return False
@@ -13867,10 +13890,14 @@ def _add_supported_run_conversation_kwarg(callable_obj, kwargs, name, value):
         parameters = inspect.signature(callable_obj).parameters
     except (TypeError, ValueError):
         return False
-    if name in parameters or any(
+    if any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in parameters.values()
     ):
+        kwargs[name] = value
+        return True
+    parameter = parameters.get(name)
+    if parameter is not None and parameter.kind is not inspect.Parameter.POSITIONAL_ONLY:
         kwargs[name] = value
         return True
     return False
