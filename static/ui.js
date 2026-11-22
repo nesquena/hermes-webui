@@ -11443,6 +11443,18 @@ function setStatus(t){
 
 let _composerStatusTimer=null;
 
+// Above 640px the status disclosure is a bubble drawn by `.composer-footer::after`
+// (see style.css) so the reveal never changes the row's geometry and Send cannot
+// move between a click's pointer-down and pointer-up. A pseudo-element inside the
+// status row itself would be clipped by its `overflow:hidden`, and `attr()` can
+// only read an attribute, so mirror the text onto the footer.
+function _syncComposerStatusTitle(el,t){
+  const footer=el&&el.closest?el.closest('.composer-footer'):null;
+  if(!footer)return;
+  if(t)footer.dataset.statusTitle=t;
+  else delete footer.dataset.statusTitle;
+}
+
 function setComposerStatus(t,timeoutMs){
   if(_composerStatusTimer!==null){
     clearTimeout(_composerStatusTimer);
@@ -11456,6 +11468,7 @@ function setComposerStatus(t,timeoutMs){
     el.textContent='';
     el.removeAttribute('title');
     el.removeAttribute('tabindex');
+    _syncComposerStatusTitle(el,'');
     return;
   }
   if(!t){
@@ -11463,6 +11476,7 @@ function setComposerStatus(t,timeoutMs){
     el.textContent='';
     el.removeAttribute('title');
     el.removeAttribute('tabindex');
+    _syncComposerStatusTitle(el,'');
     return;
   }
   // Defensive reset: a stale hidden class should never block live status text.
@@ -11471,10 +11485,11 @@ function setComposerStatus(t,timeoutMs){
   el.textContent=t;
   // The row is narrow and ellipsizes long text (e.g. a prefill filename), so keep
   // the full value reachable instead of leaving a cut-off fragment: `title` for
-  // hover, and a focusable row so touch and keyboard users (who never hover) can
-  // reveal it too — see the `.composer-status:focus` rule in style.css.
+  // hover, a focusable row so touch and keyboard users (who never hover) can
+  // reveal it, and the mirrored `data-status-title` the >640px bubble renders.
   el.title=t;
   el.tabIndex=0;
+  _syncComposerStatusTitle(el,t);
   el.style.display='';
   if(timeoutMs>0){
     const timer=setTimeout(()=>{

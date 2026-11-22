@@ -13,9 +13,9 @@ WHY THIS EXISTS
   recover it. The reviewer reproduced it by hand; this file makes it a gate.
 
 WHAT IT CHECKS
-  Three viewports (390x844, 360x740, 320x700) x two labels (a ~55-char spaced
-  name and an unbroken one) x two focus paths (a real tap, and Tab from the
-  composer), so twelve cases. For every case:
+  Part 1 — portrait matrix. Three viewports (390x844, 360x740, 320x700) x two
+  labels (a ~55-char spaced name and an unbroken one) x two focus paths (a real
+  tap, and Tab from the composer), so twelve cases. For every case:
   - the status row is reachable and focusable while it carries a label;
   - the focused label is actually readable: it wraps inside its own box and
     nothing is clipped (scrollWidth/scrollHeight fit clientWidth/clientHeight);
@@ -23,6 +23,20 @@ WHAT IT CHECKS
     target, and its centre is hit-testable (nothing overlays it);
   - the document does not hide the overflow behind an unscrollable clip;
   - an ordinary send still works: the typed text reaches /api/chat/start.
+
+  Part 2 — reveal-then-send above 640px (the #7856 gate-certificate blocker).
+  Four schedules — 1440x900 click, 1920x1000 click, 800x900 click, 844x390 touch
+  — each: type the draft FIRST with the status collapsed, reveal the long
+  (~128-char) label, then press Send while the row still has focus, and require
+  the POST to carry the typed message. Both arms also require Send to stay
+  within SEND_STABILITY_PX of where it was pressed, because pointer-down on Send
+  blurs the row and a disclosure that resizes the composer row moves the button
+  out from under pointer-up: the click then lands on a container and nothing is
+  sent. Above 640px the disclosure is an out-of-flow bubble on
+  `.composer-footer::after`, capped with `100cqw` against the composer row.
+  The `lost-click` arm asserts only stability + delivery, so it passes on master
+  (where the row is not focusable); the `reveal` arm asserts the disclosure
+  itself and is expected to fail master for that new behavior.
 
 SCOPE
   Agent-free, like tests/browser_smoke.py: the real server.py on an ephemeral
@@ -62,6 +76,27 @@ LABEL_MEDIUM = "production staging guardrails"
 
 VIEWPORTS = ((390, 844), (360, 740), (320, 700))
 FOCUS_MODES = ("tap", "tab")
+
+# A long, permitted label: ~128 characters, well past the 52ch cap the focused
+# desktop row used to resolve against its own content-sized flex parent. This is
+# the case that displaced Send above 640px (#7856 gate certificate).
+LABEL_DISCLOSURE = (
+    "Production emergency guardrails review staging for the customer escalation"
+    " handoff packet that arrives on the Tuesday morning bridge call"
+)
+# Above 640px the disclosure must not change the row's geometry, so the schedule
+# below is: type a draft, reveal the label, then press Send without touching the
+# input again. (desktop, wide desktop, tablet, phone landscape)
+SEND_VIEWPORTS = (
+    (1440, 900, False),
+    (1920, 1000, False),
+    (800, 900, False),
+    (844, 390, True),
+)
+# The disclosure must keep Send within this many px of where the operator
+# pressed. Layout noise (a `cf-icons` stage flip, subpixel rounding) is smaller;
+# the >640px defect this guards moved the button ~400px in one frame.
+SEND_STABILITY_PX = 1.5
 
 
 def _wait_for_health(timeout=30):
@@ -150,6 +185,240 @@ def _focus_by_tab(page, max_presses=25):
         if page.evaluate(_ACTIVE_IS_STATUS):
             return True
     return False
+
+
+# Geometry for the reveal-then-send schedule: the composer row, Send, and the
+# disclosure bubble that the desktop path renders on `::after`.
+_MEASURE_SEND = """
+() => {
+  const row = document.querySelector('.composer-status');
+  const send = document.querySelector('#btnSend');
+  const foot = document.querySelector('.composer-footer');
+  const box = (el) => {
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return {left: r.left, top: r.top, right: r.right, bottom: r.bottom,
+            width: r.width, height: r.height};
+  };
+  const s = box(send);
+  const after = foot ? getComputedStyle(foot, '::after') : null;
+  let hitSendCentre = null;
+  if (send) {
+    const el = document.elementFromPoint((s.left + s.right) / 2, (s.top + s.bottom) / 2);
+    hitSendCentre = !!(el && (el === send || send.contains(el)));
+  }
+  return {
+    send: s,
+    row: box(row),
+    footer: box(foot),
+    focused: !!(document.activeElement && document.activeElement.classList
+                && document.activeElement.classList.contains('composer-status')),
+    tabindex: row ? row.getAttribute('tabindex') : null,
+    whiteSpace: row ? getComputedStyle(row).whiteSpace : null,
+    rowScrollWidth: row ? row.scrollWidth : 0,
+    rowClientWidth: row ? row.clientWidth : 0,
+    bubble: after ? after.content : null,
+    bubblePosition: after ? after.position : null,
+    hitSendCentre: hitSendCentre,
+    docScrollWidth: document.documentElement.scrollWidth,
+    vw: window.innerWidth,
+  };
+}
+"""
+
+
+def _settle_composer_stages(page):
+    """Run the footer's fit pass so a `cf-icons`/`cf-burger` flip cannot land in
+    the middle of the measurement and be mistaken for the disclosure moving Send."""
+    for _ in range(2):
+        page.evaluate(
+            "() => { if (window._fitComposerFooter) window._fitComposerFooter(); }"
+        )
+        page.wait_for_timeout(150)
+
+
+def _check_send_after_reveal(browser, width, height, touch, require_reveal):
+    """The gate certificate's lost-click schedule, at one viewport.
+
+    Type the draft FIRST, with the status still collapsed. Then reveal the label
+    (a real tap, or Tab on a keyboard) and press Send while the row still has
+    focus — the schedule that lost the click: pointer-down lands on Send, the
+    blur collapses the reveal, and the button moves away before pointer-up.
+
+    `require_reveal=True` is the new-behavior case: it asserts the row is
+    focusable and the whole label is disclosed. `require_reveal=False` is the
+    lost-click regression proper: it asserts only that revealing the label does
+    not move Send and that the typed message still leaves, so it also passes on
+    master, where the row is not focusable at all.
+    """
+    fails = []
+    kind = "reveal" if require_reveal else "lost-click"
+    tag = f"{width}x{height}/{'touch' if touch else 'click'}/{kind}"
+    ctx = browser.new_context(
+        viewport={"width": width, "height": height},
+        base_url=BASE,
+        is_mobile=touch,
+        has_touch=touch,
+        device_scale_factor=2 if touch else 1,
+    )
+    page = ctx.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto("/", wait_until="domcontentloaded")
+    if not page.wait_for_selector("#msg", timeout=15000):
+        ctx.close()
+        return [f"  [{tag}] composer never appeared"]
+    if not _wait_until(page, "typeof S !== 'undefined'", 15000):
+        ctx.close()
+        return [f"  [{tag}] the app did not initialize"]
+    time.sleep(SETTLE_SECONDS)
+
+    state = page.evaluate(_SET_LABEL, LABEL_DISCLOSURE)
+    if state != "ok":
+        ctx.close()
+        return [f"  [{tag}] could not establish the status label: {state}"]
+    _settle_composer_stages(page)
+
+    # Draft before the reveal (the certificate's schedule).
+    page.click("#msg")
+    page.keyboard.type("hello")
+    page.wait_for_selector("#btnSend:not([disabled])", timeout=5000)
+    page.wait_for_timeout(150)
+    before = page.evaluate(_MEASURE_SEND)
+
+    if require_reveal:
+        if touch:
+            try:
+                page.locator(".composer-status").first.tap(timeout=5000)
+            except Exception as exc:  # noqa: BLE001 - report, don't crash
+                fails.append(f"  [{tag}] tap on the status row failed: {exc}")
+        elif not _focus_by_tab(page):
+            fails.append(f"  [{tag}] the status row is not reachable with Tab")
+    else:
+        # Best-effort reveal, exactly as a pointer/keyboard user could leave the
+        # row: no assertion that it took, because master has no focus reveal.
+        page.evaluate(
+            "() => { const r = document.querySelector('.composer-status');"
+            " if (r && r.focus) r.focus(); }"
+        )
+    page.wait_for_timeout(250)
+
+    after = page.evaluate(_MEASURE_SEND)
+    vw = after["vw"]
+
+    if require_reveal:
+        if not after["focused"]:
+            fails.append(
+                f"  [{tag}] the row did not receive focus"
+                f" (tabindex={after['tabindex']!r})"
+            )
+        elif after["tabindex"] != "0":
+            fails.append(f"  [{tag}] the row is not in the tab order")
+        if width > 640:
+            # The desktop disclosure is an out-of-flow bubble: it must carry the
+            # whole label and must not be an in-flow box that resizes the row.
+            if after["bubblePosition"] != "absolute":
+                fails.append(
+                    f"  [{tag}] the disclosure is not an out-of-flow bubble"
+                    f" (position={after['bubblePosition']!r})"
+                )
+            if LABEL_DISCLOSURE not in str(after["bubble"]):
+                fails.append(
+                    f"  [{tag}] the focused disclosure does not carry the full"
+                    f" label: {str(after['bubble'])[:80]!r}"
+                )
+        else:
+            if after["whiteSpace"] != "normal":
+                fails.append(
+                    f"  [{tag}] the focused row still uses"
+                    f" white-space={after['whiteSpace']}; the label stays clipped"
+                )
+            if after["rowScrollWidth"] > after["rowClientWidth"] + 1:
+                fails.append(
+                    f"  [{tag}] the label is clipped horizontally:"
+                    f" scrollWidth={after['rowScrollWidth']:.0f}"
+                    f" > clientWidth={after['rowClientWidth']:.0f}"
+                )
+
+    # The invariant both arms share: revealing the label must not move Send.
+    send_before, send_after = before["send"], after["send"]
+    if send_before is None or send_after is None:
+        fails.append(f"  [{tag}] Send control not found")
+    else:
+        moved = {
+            edge: round(send_after[edge] - send_before[edge], 2)
+            for edge in ("left", "top", "right", "bottom")
+            if abs(send_after[edge] - send_before[edge]) > SEND_STABILITY_PX
+        }
+        if moved:
+            fails.append(
+                f"  [{tag}] revealing the label moved Send by {moved}px"
+                f" (before={send_before['left']:.0f},{send_before['top']:.0f}"
+                f" after={send_after['left']:.0f},{send_after['top']:.0f})"
+            )
+        if after["hitSendCentre"] is False:
+            fails.append(
+                f"  [{tag}] Send is covered: elementFromPoint at its centre is"
+                f" not the button"
+            )
+        if send_after["right"] > vw + 0.5 or send_after["left"] < -0.5:
+            fails.append(
+                f"  [{tag}] Send left the viewport:"
+                f" x={send_after['left']:.0f}-{send_after['right']:.0f},"
+                f" viewport={vw}px"
+            )
+
+    # The document must not be relying on horizontal scroll to hide the problem,
+    # and the disclosure must not add overflow of its own. A pre-existing few-px
+    # document overflow is identical on both arms at these desktop fixtures (the
+    # gate certificate measured the same 14px on master), so the assertion is
+    # "the reveal did not widen the document", not "the document is exactly the
+    # viewport".
+    if after["docScrollWidth"] > before["docScrollWidth"] + 1:
+        fails.append(
+            f"  [{tag}] the reveal widened the document:"
+            f" scrollWidth {before['docScrollWidth']} -> {after['docScrollWidth']}"
+            f" at a {vw}px viewport"
+        )
+
+    # Press Send with the row still focused: the request must carry the draft.
+    page.route(
+        "**/api/chat/start*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body='{"stream_id": "probe", "session_id": "probe"}',
+        ),
+    )
+    try:
+        with page.expect_request(
+            lambda req: "/api/chat/start" in req.url, timeout=10000
+        ) as req_info:
+            if touch:
+                page.locator("#btnSend").tap(timeout=5000)
+            else:
+                page.locator("#btnSend").click(timeout=5000)
+        payload = json.loads(req_info.value.post_data or "{}")
+    except Exception as exc:  # noqa: BLE001
+        fails.append(
+            f"  [{tag}] Send did not send after the reveal: no POST to"
+            f" /api/chat/start reached the server"
+            f" ({type(exc).__name__}: {exc})"
+        )
+    else:
+        if payload.get("message") != "hello":
+            fails.append(
+                f"  [{tag}] the sent message was not the typed text:"
+                f" {payload.get('message')!r}"
+            )
+    finally:
+        page.unroute("**/api/chat/start*")
+
+    if errors:
+        fails.append(f"  [{tag}] page errors: {errors[:3]}")
+
+    ctx.close()
+    return fails
 
 
 def _check(browser, width, height, label, label_name, focus_mode):
@@ -364,6 +633,18 @@ def main():
                         failures.extend(
                             _check(browser, width, height, label, label_name, focus_mode)
                         )
+            # Above 640px: the disclosure must not move Send at all. Run the
+            # certificate's schedule twice per viewport — once as the new-behavior
+            # case (row focusable, label disclosed) and once as the lost-click
+            # regression (Send stable, typed text delivered) — so the regression
+            # is the arm that also passes on master.
+            for width, height, touch in SEND_VIEWPORTS:
+                failures.extend(
+                    _check_send_after_reveal(browser, width, height, touch, True)
+                )
+                failures.extend(
+                    _check_send_after_reveal(browser, width, height, touch, False)
+                )
             browser.close()
 
         if failures:
