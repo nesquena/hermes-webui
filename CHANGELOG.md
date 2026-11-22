@@ -35,6 +35,8 @@
 
 ### Fixed
 
+- **A reply is no longer lost when the Agent shortens an old tool result to save space (#9286, refs #9233).** When the Agent's cold-cache pruning replaced an earlier tool output with a short placeholder, WebUI could no longer prove the new turn extended the saved conversation and refused to keep the reply. WebUI now restores its own full copy of that tool row before the check, so the reply is kept; any other difference is still refused as before.
+
 - **Memory and skill changes can no longer land in the wrong profile after a switch in another tab (#9216, part of #9077).** The active profile is shared across tabs, so an open Memory editor or skill list could still show one profile's data after another tab switched profile, and saving or toggling then wrote into the profile now active. The server now refuses such a write with a clear message, nothing is saved, and the Memory editor keeps your text so you can copy it. Skill toggles show an error and reload the list for the active profile.
 
 - **A reused conversation recovers when its context compressor fails to reconnect to session storage (#9215).** When WebUI keeps an agent cached between turns and hands it a new session-storage handle, it reconnects the context compressor to that handle. If that failed once, it stayed failed for as long as the agent stayed cached, and only a debug line recorded it. The next turn now retries, the first failure logs one warning, and a store that has already been released is replaced instead of reused. The check for whether a hook accepts a keyword argument now matches the Hermes Agent's own rule, and the reconnect is still called once per turn, as the Agent's reset path does.
