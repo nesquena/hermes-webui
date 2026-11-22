@@ -1,0 +1,378 @@
+"""Real-browser regression: the conversation panel's Share acts only on the
+conversation it was opened for, and session shortcuts do nothing while a shared
+app dialog is open.
+
+Starts a real ``server.py`` with its own state, seeds three conversations through
+``/api/session/import`` (A shared through the real ``/api/share/create``, B and C
+never shared), then drives headless Chromium: Settings -> Conversation -> Share
+on A opens the "already shared" confirm dialog. Every ``/api/share/create``
+request body is recorded, and share state is read back from the server.
+"""
+import json
+import os
+import random
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+playwright = pytest.importorskip("playwright.sync_api")
+
+REPO = Path(__file__).resolve().parent.parent
+_BROWSER_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
+WAIT_MS = 15000
+SETTLE_MS = 1500
+
+# Record clipboard writes and opened share tabs instead of performing them.
+_INIT = """
+window.__copied = [];
+window.__opened = [];
+try {
+  Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {
+    writeText: async (text) => { window.__copied.push(String(text)); },
+    readText: async () => '',
+  }});
+} catch (_) {}
+window.open = function (url) { window.__opened.push(String(url)); return null; };
+"""
+
+_STATE_JS = """() => ({
+  sid: (typeof S !== 'undefined' && S.session) ? S.session.session_id : null,
+  dialogOpen: typeof _isAppDialogOpen === 'function' ? _isAppDialogOpen() : null,
+  copied: window.__copied.slice(),
+  opened: window.__opened.slice(),
+})"""
+
+
+def _free_port():
+    start = random.randint(18000, 19999)
+    for offset in range(2000):
+        port = 18000 + (start - 18000 + offset) % 2000
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    raise RuntimeError("no free port in 18000-19999")
+
+
+def _request(base, path, body=None):
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(
+        base + path, data=data, method="GET" if body is None else "POST",
+        headers={"Content-Type": "application/json", "Origin": base},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+
+
+def _share_token(base, sid):
+    status, reply = _request(base, f"/api/session?session_id={sid}")
+    assert status == 200, reply
+    return reply["session"].get("share_token")
+
+
+@pytest.fixture(scope="module")
+def server(tmp_path_factory):
+    state = tmp_path_factory.mktemp("share-bind-state")
+    workspace = state / "workspace"
+    workspace.mkdir()
+    (state / "tmp").mkdir()
+    port = _free_port()
+    base = f"http://127.0.0.1:{port}"
+    # A minimal explicit environment: nothing from the runner's credentials or
+    # Hermes home reaches this server.
+    env = {
+        "PATH": os.environ.get("PATH", os.defpath),
+        "HOME": os.environ.get("HOME", str(state)),
+        "LANG": "C.UTF-8",
+        "TMPDIR": str(state / "tmp"),
+        "PYTHONUNBUFFERED": "1",
+        "HERMES_WEBUI_PORT": str(port),
+        "HERMES_WEBUI_HOST": "127.0.0.1",
+        "HERMES_WEBUI_STATE_DIR": str(state),
+        "HERMES_HOME": str(state),
+        "HERMES_BASE_HOME": str(state),
+        "HERMES_CONFIG_PATH": str(state / "config.yaml"),
+        "HERMES_WEBUI_DEFAULT_WORKSPACE": str(workspace),
+        "HERMES_WEBUI_SKIP_ONBOARDING": "1",
+        "HERMES_WEBUI_AGENT_DIR": str(state / "no-agent"),
+        "HERMES_WEBUI_PASSWORD": "",
+        "HERMES_DISABLE_LAZY_INSTALLS": "1",
+        "HERMES_WEBUI_TEST_NETWORK_BLOCK": "1",
+        "BROWSER": "echo",
+    }
+    for key in ("SYSTEMROOT", "WINDIR", "PATHEXT", "COMSPEC", "USERPROFILE", "LOCALAPPDATA"):
+        if key in os.environ:
+            env[key] = os.environ[key]
+    log_path = state / "server.log"
+    with open(log_path, "w", encoding="utf-8") as log:
+        proc = subprocess.Popen(
+            [sys.executable, str(REPO / "server.py")], cwd=REPO, env=env,
+            stdout=log, stderr=subprocess.STDOUT,
+            **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
+        )
+    try:
+        deadline = time.time() + 45
+        while True:
+            if proc.poll() is not None or time.time() > deadline:
+                pytest.fail("share test server did not start:\n" + log_path.read_text(errors="replace")[-3000:])
+            try:
+                with urllib.request.urlopen(base + "/health", timeout=2) as resp:
+                    if resp.status == 200:
+                        break
+            except (OSError, urllib.error.URLError):
+                time.sleep(0.25)
+        sids = {}
+        for name in ("C", "A", "B"):
+            status, reply = _request(base, "/api/session/import", {
+                "title": f"Conversation {name}",
+                "workspace": str(workspace),
+                "messages": [
+                    {"role": "user", "content": f"{name} question"},
+                    {"role": "assistant", "content": f"{name} answer"},
+                ],
+            })
+            assert status == 200, reply
+            sids[name] = reply["session"]["session_id"]
+        status, reply = _request(base, "/api/share/create", {"session_id": sids["A"]})
+        assert status == 200, reply
+        yield {"base": base, **sids, "a_token": reply["share"]["token"]}
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="module")
+def browser():
+    with playwright.sync_playwright() as pw:
+        try:
+            chromium = pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        except Exception as exc:  # no browser binary in this environment
+            pytest.skip(f"chromium unavailable: {exc}")
+        yield chromium
+        chromium.close()
+
+
+@pytest.fixture
+def shares(server):
+    """Every test starts from: A shared with its original link, B and C not shared."""
+    base = server["base"]
+    for name in ("B", "C"):
+        if _share_token(base, server[name]):
+            status, reply = _request(base, "/api/share/revoke", {"session_id": server[name]})
+            assert status == 200, reply
+    assert _share_token(base, server["A"]) == server["a_token"]
+    return server
+
+
+@pytest.fixture
+def page(browser, shares):
+    ctx = browser.new_context(viewport={"width": 1400, "height": 900}, base_url=shares["base"])
+    ctx.add_init_script(_INIT)
+    pg = ctx.new_page()
+    pg.share_posts = []
+    pg.share_statuses = []
+
+    def on_request(req):
+        if req.method == "POST" and req.url.endswith("/api/share/create"):
+            pg.share_posts.append(json.loads(req.post_data or "{}").get("session_id"))
+
+    def on_response(resp):
+        if resp.request.method == "POST" and resp.url.endswith("/api/share/create"):
+            pg.share_statuses.append(resp.status)
+
+    pg.on("request", on_request)
+    pg.on("response", on_response)
+    yield pg
+    ctx.close()
+
+
+def _wait_until(page, expression, arg=None, timeout_ms=WAIT_MS):
+    """Poll with page.evaluate: the app's CSP has no 'unsafe-eval'."""
+    deadline = time.time() + timeout_ms / 1000
+    while time.time() < deadline:
+        if page.evaluate(expression, arg):
+            return True
+        page.wait_for_timeout(50)
+    raise AssertionError(f"timed out waiting for {expression!r} ({arg!r})")
+
+
+def _active(page, sid):
+    _wait_until(page, "(sid) => typeof S !== 'undefined' && !!S.session && S.session.session_id === sid", sid)
+
+
+def _open_a_after_b(page, server):
+    """Browser history B -> A, A opened from its sidebar row."""
+    page.goto(f"/session/{server['B']}", wait_until="domcontentloaded")
+    page.wait_for_selector("#msg", timeout=30000)
+    _active(page, server["B"])
+    row = f".session-item[data-sid='{server['A']}'] .session-title"
+    page.wait_for_selector(row, timeout=WAIT_MS)
+    page.click(row)
+    _active(page, server["A"])
+    page.wait_for_timeout(800)
+
+
+def _open_panel_share_dialog(page):
+    page.click(".rail-btn[data-panel='settings']")
+    page.wait_for_selector("#btnShareSession", state="visible", timeout=WAIT_MS)
+    _wait_until(page, "() => !document.getElementById('btnShareSession').disabled")
+    page.click("#btnShareSession")
+    _wait_until(page, "() => _isAppDialogOpen()")
+    page.wait_for_timeout(300)
+
+
+def _browser_back_to(page, sid, presses=3):
+    """The browser Back button's code path (CDP history navigation)."""
+    cdp = page.context.new_cdp_session(page)
+    for _ in range(presses):
+        history = cdp.send("Page.getNavigationHistory")
+        index = history["currentIndex"] - 1
+        assert index >= 0, history
+        cdp.send("Page.navigateToHistoryEntry", {"entryId": history["entries"][index]["id"]})
+        page.wait_for_timeout(SETTLE_MS)
+        if page.evaluate(_STATE_JS)["sid"] == sid:
+            return
+    raise AssertionError(f"browser Back never reached {sid}")
+
+
+def _assert_only_a_shared(server):
+    base = server["base"]
+    assert _share_token(base, server["B"]) is None
+    assert _share_token(base, server["C"]) is None
+    assert _share_token(base, server["A"]) == server["a_token"]
+
+
+def _a_url(page, server):
+    return page.evaluate("(token) => new URL('/share/' + token, location.origin).href", server["a_token"])
+
+
+# ── a conversation change while the dialog is open ───────────────────────────
+
+@pytest.mark.parametrize("answer", ["#appDialogCancel", "#appDialogConfirm", "Escape"])
+def test_conversation_change_while_the_dialog_is_open_writes_nothing(page, shares, answer):
+    _open_a_after_b(page, shares)
+    _open_panel_share_dialog(page)
+    _browser_back_to(page, shares["B"])
+    assert page.evaluate(_STATE_JS)["dialogOpen"] is True
+    if answer == "Escape":
+        page.keyboard.press("Escape")
+    else:
+        page.click(answer)
+    page.wait_for_timeout(SETTLE_MS)
+    state = page.evaluate(_STATE_JS)
+    assert state["sid"] == shares["B"]
+    assert state["dialogOpen"] is False
+    # Fail closed: the answer belonged to A's dialog, and A is no longer on
+    # screen, so nothing is written, copied or opened for either conversation.
+    assert page.share_posts == []
+    assert state["copied"] == [] and state["opened"] == []
+    assert page.evaluate("() => S.session.share_token || null") is None
+    _assert_only_a_shared(shares)
+
+
+def test_session_keys_are_ignored_while_the_dialog_is_open(page, shares):
+    _open_a_after_b(page, shares)
+    _open_panel_share_dialog(page)
+    page.click("#appDialogDesc")  # focus leaves the dialog buttons
+    rows = page.evaluate("() => [...document.querySelectorAll('.session-item[data-sid]')].map(r => r.dataset.sid)")
+    index = rows.index(shares["A"])
+    # Press every key that would move away from A (j = next row, k = previous row).
+    keys = (["j"] if index < len(rows) - 1 else []) + (["k"] if index > 0 else [])
+    assert keys, rows
+    for key in keys:
+        page.keyboard.press(key)
+        page.wait_for_timeout(SETTLE_MS)
+        state = page.evaluate(_STATE_JS)
+        assert state["sid"] == shares["A"], f"{key!r} switched the conversation under the dialog"
+        assert state["dialogOpen"] is True
+    page.click("#appDialogCancel")  # Refresh snapshot, still on A
+    _wait_until(page, "() => window.__opened.length > 0")
+    assert page.share_posts == [shares["A"]]
+    assert page.share_statuses == [200]
+    _assert_only_a_shared(shares)
+
+
+def test_new_chat_shortcut_is_ignored_while_the_dialog_is_open(page, shares):
+    _open_a_after_b(page, shares)
+    _open_panel_share_dialog(page)
+    status, before = _request(shares["base"], "/api/sessions")
+    assert status == 200, before
+    page.keyboard.press("Control+k")
+    page.wait_for_timeout(SETTLE_MS)
+    state = page.evaluate(_STATE_JS)
+    assert state["sid"] == shares["A"], "Ctrl+K opened a new chat under the dialog"
+    assert state["dialogOpen"] is True
+    status, after = _request(shares["base"], "/api/sessions")
+    assert status == 200, after
+    assert len(after["sessions"]) == len(before["sessions"])
+    page.click("#appDialogConfirm")  # Copy existing
+    page.wait_for_timeout(SETTLE_MS)
+    assert page.share_posts == []
+    _assert_only_a_shared(shares)
+
+
+# ── controls: no conversation change ─────────────────────────────────────────
+
+def test_refresh_snapshot_without_a_switch_refreshes_the_open_conversation(page, shares):
+    _open_a_after_b(page, shares)
+    _open_panel_share_dialog(page)
+    page.click("#appDialogCancel")
+    _wait_until(page, "() => window.__opened.length > 0")
+    state = page.evaluate(_STATE_JS)
+    assert page.share_posts == [shares["A"]]
+    assert page.share_statuses == [200]
+    assert state["sid"] == shares["A"]
+    assert state["opened"] == [_a_url(page, shares)]
+    assert state["copied"] == [_a_url(page, shares)]
+    assert page.evaluate("() => S.session.share_token") == shares["a_token"]
+    _assert_only_a_shared(shares)
+
+
+def test_copy_existing_without_a_switch_copies_the_link_and_writes_nothing(page, shares):
+    _open_a_after_b(page, shares)
+    _open_panel_share_dialog(page)
+    page.click("#appDialogConfirm")
+    _wait_until(page, "() => window.__opened.length > 0")
+    page.wait_for_timeout(500)
+    state = page.evaluate(_STATE_JS)
+    assert page.share_posts == []
+    assert state["copied"] == [_a_url(page, shares)]
+    assert state["opened"] == [_a_url(page, shares)]
+    _assert_only_a_shared(shares)
+
+
+def test_sidebar_menu_share_still_shares_its_own_row(page, shares):
+    _open_a_after_b(page, shares)
+    target = shares["C"]
+    page.hover(f".session-item[data-sid='{target}']")
+    page.click(f".session-item[data-sid='{target}'] .session-actions-trigger")
+    page.wait_for_selector(".session-action-opt", timeout=WAIT_MS)
+    clicked = page.evaluate("""() => {
+      const item = [...document.querySelectorAll('.session-action-opt')]
+        .find(el => (el.querySelector('.ws-opt-name') || {}).textContent === t('share_session'));
+      if (item) item.click();
+      return !!item;
+    }""")
+    assert clicked
+    _wait_until(page, "() => window.__opened.length > 0")
+    assert page.share_posts == [target]
+    assert page.share_statuses == [200]
+    assert page.evaluate(_STATE_JS)["sid"] == shares["A"]
+    assert page.evaluate("() => S.session.share_token") == shares["a_token"]
+    assert _share_token(shares["base"], target)
+    assert _share_token(shares["base"], shares["B"]) is None

@@ -6918,7 +6918,7 @@ function _syncSessionShareState(session, nextSession){
   void renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
 }
 
-async function _createOrRefreshSessionShare(session){
+async function _createOrRefreshSessionShare(session, opts){
   if(!session||!session.session_id) return;
   const existing=_sessionPublicShareUrl(session);
   if(existing){
@@ -6931,6 +6931,10 @@ async function _createOrRefreshSessionShare(session){
     });
     // Closing the dialog (×, Escape, backdrop) is not "Refresh snapshot": do nothing.
     if(reuse===null) return;
+    // The conversation panel asks about the conversation on screen. If another one
+    // was opened while the dialog was up, the answer no longer matches what the
+    // user is looking at: fail closed, write and copy nothing.
+    if(opts&&opts.requireActive&&!(S.session&&S.session.session_id===session.session_id)) return;
     if(reuse){
       let copied=true;
       try{ await _copyTextToClipboard(existing); }catch(_){ copied=false; }
@@ -14837,6 +14841,8 @@ function navigateSession(dir){
 document.addEventListener('keydown',(e)=>{
   if(e.key!=='j'&&e.key!=='k') return;
   if(e.ctrlKey||e.metaKey||e.altKey) return;
+  // A shared app dialog is modal: never switch the conversation underneath it.
+  if(typeof _isAppDialogOpen==='function'&&_isAppDialogOpen()) return;
   // Title buttons retain focus after opening; J/K must remain available there.
   const onSessionTitle=e.target instanceof Element&&e.target.matches('.session-open-control');
   if(!onSessionTitle&&typeof _isInteractiveSwipeTarget==='function'&&_isInteractiveSwipeTarget(e.target)) return;
