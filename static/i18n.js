@@ -7,6 +7,7 @@ const LOCALES = {
   en: {
     composer_placeholder_read_only: 'Read-only in WebUI',
     composer_read_only_connection: 'How to connect',
+
     offline_title: 'Connection lost',
     offline_browser_detail: 'Your browser reports that this device is offline.',
     offline_network_detail: 'Hermes is unreachable from this browser right now.',
@@ -15,6 +16,12 @@ const LOCALES = {
     offline_checking: 'Checking…',
     offline_stream_waiting: 'Connection lost. Waiting to refresh…',
     _lang: 'en',
+    preview_fullscreen_enter: 'Fullscreen',
+    preview_fullscreen_exit: 'Exit fullscreen',
+    preview_fullscreen_region: 'Fullscreen preview',
+    preview_zoom_out: 'Zoom out',
+    preview_zoom_in: 'Zoom in',
+
     _label: 'English',
     remote_image_open: 'Open image',
     remote_image_reason: 'Remote image not loaded automatically. Opens {host} in a new tab.',
@@ -1953,6 +1960,7 @@ const LOCALES = {
   it: {
     composer_placeholder_read_only: 'Sola lettura in WebUI',
     composer_read_only_connection: 'Come connettersi',
+
     offline_title: 'Connessione persa',
     offline_browser_detail: 'Il browser segnala che questo dispositivo è offline.',
     offline_network_detail: 'Hermes non è raggiungibile da questo browser al momento.',
@@ -1961,6 +1969,12 @@ const LOCALES = {
     offline_checking: 'Verifica in corso…',
     offline_stream_waiting: 'Connessione persa. In attesa di aggiornare…',
     _lang: 'it',
+    preview_fullscreen_enter: 'Schermo intero',
+    preview_fullscreen_exit: 'Esci da schermo intero',
+    preview_fullscreen_region: 'Anteprima a schermo intero',
+    preview_zoom_out: 'Riduci zoom',
+    preview_zoom_in: 'Aumenta zoom',
+
     _label: 'Italiano',
     remote_image_open: 'Apri immagine',
     remote_image_reason: 'Immagine remota non caricata automaticamente. Apre {host} in una nuova scheda.',
@@ -3839,7 +3853,7 @@ const LOCALES = {
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
-  
+
     kanban_bulk_status_aria: 'Bulk status',
     insights_period_7d: '7 days',
     insights_period_30d: '30 days',
@@ -3877,6 +3891,7 @@ const LOCALES = {
   ja: {
     composer_placeholder_read_only: 'WebUIでは読み取り専用',
     composer_read_only_connection: '接続方法',
+
     offline_title: '接続が切断されました',
     offline_browser_detail: 'ブラウザはこのデバイスがオフラインだと報告しています。',
     offline_network_detail: '現在、このブラウザからHermesに到達できません。',
@@ -3885,6 +3900,12 @@ const LOCALES = {
     offline_checking: '確認中…',
     offline_stream_waiting: '接続が切断されました。更新を待っています…',
     _lang: 'ja',
+    preview_fullscreen_enter: '全画面',
+    preview_fullscreen_exit: '全画面を終了',
+    preview_fullscreen_region: '全画面プレビュー',
+    preview_zoom_out: 'ズームアウト',
+    preview_zoom_in: 'ズームイン',
+
     _label: '日本語',
     remote_image_open: '画像を開く',
     remote_image_reason: 'リモート画像は自動では読み込まれません。新しいタブで {host} を開きます。',
@@ -5768,7 +5789,7 @@ const LOCALES = {
     wiki_search_placeholder: 'ページを検索...',
     wiki_no_pages: 'Wikiページが見つかりません',
     wiki_not_configured: 'Wikiが設定されていません',
-  
+
     kanban_bulk_status_aria: 'Bulk status',
     insights_period_7d: '7 days',
     insights_period_30d: '30 days',
@@ -5806,6 +5827,7 @@ const LOCALES = {
   ru: {
     composer_placeholder_read_only: 'Только чтение в WebUI',
     composer_read_only_connection: 'Как подключиться',
+
     offline_title: 'Соединение потеряно',
     offline_browser_detail: 'Браузер сообщает, что это устройство офлайн.',
     offline_network_detail: 'Hermes сейчас недоступен из этого браузера.',
@@ -5814,6 +5836,12 @@ const LOCALES = {
     offline_checking: 'Проверка…',
     offline_stream_waiting: 'Соединение потеряно. Ожидаю обновления…',
     _lang: 'ru',
+    preview_fullscreen_enter: 'Полноэкранный режим',
+    preview_fullscreen_exit: 'Выйти из полноэкранного режима',
+    preview_fullscreen_region: 'Полноэкранный предпросмотр',
+    preview_zoom_out: 'Уменьшить масштаб',
+    preview_zoom_in: 'Увеличить масштаб',
+
     _label: 'Русский',
     remote_image_open: 'Открыть изображение',
     remote_image_reason: 'Удалённое изображение не загружено автоматически. Откроет {host} в новой вкладке.',
@@ -7679,7 +7707,7 @@ const LOCALES = {
     wiki_search_placeholder: 'Искать страницы…',
     wiki_no_pages: 'Страницы wiki не найдены',
     wiki_not_configured: 'Wiki не настроена',
-  
+
     kanban_bulk_status_aria: 'Bulk status',
     insights_period_7d: '7 days',
     insights_period_30d: '30 days',
@@ -7717,6 +7745,7 @@ const LOCALES = {
   es: {
     composer_placeholder_read_only: 'Solo lectura en WebUI',
     composer_read_only_connection: 'Cómo conectarse',
+
     offline_title: 'Conexión perdida',
     offline_browser_detail: 'Tu navegador indica que este dispositivo está sin conexión.',
     offline_network_detail: 'Hermes no está disponible desde este navegador ahora mismo.',
@@ -7725,6 +7754,12 @@ const LOCALES = {
     offline_checking: 'Comprobando…',
     offline_stream_waiting: 'Conexión perdida. Esperando para actualizar…',
     _lang: 'es',
+    preview_fullscreen_enter: 'Pantalla completa',
+    preview_fullscreen_exit: 'Salir de pantalla completa',
+    preview_fullscreen_region: 'Vista previa a pantalla completa',
+    preview_zoom_out: 'Reducir zoom',
+    preview_zoom_in: 'Aumentar zoom',
+
     _label: 'Español',
     remote_image_open: 'Abrir imagen',
     remote_image_reason: 'La imagen remota no se cargó automáticamente. Abre {host} en una pestaña nueva.',
@@ -9548,7 +9583,7 @@ const LOCALES = {
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
-  
+
     kanban_bulk_status_aria: 'Bulk status',
     insights_period_7d: '7 days',
     insights_period_30d: '30 days',
@@ -9586,6 +9621,7 @@ const LOCALES = {
   de: {
     composer_placeholder_read_only: 'In WebUI nur lesbar',
     composer_read_only_connection: 'So stellst du eine Verbindung her',
+
     offline_title: 'Verbindung verloren',
     offline_browser_detail: 'Dein Browser meldet, dass dieses Gerät offline ist.',
     offline_network_detail: 'Hermes ist von diesem Browser aus gerade nicht erreichbar.',
@@ -9594,6 +9630,12 @@ const LOCALES = {
     offline_checking: 'Prüfe…',
     offline_stream_waiting: 'Verbindung verloren. Warte auf Aktualisierung…',
     _lang: 'de',
+    preview_fullscreen_enter: 'Vollbild',
+    preview_fullscreen_exit: 'Vollbild verlassen',
+    preview_fullscreen_region: 'Vollbildvorschau',
+    preview_zoom_out: 'Verkleinern',
+    preview_zoom_in: 'Vergrößern',
+
     _label: 'Deutsch',
     remote_image_open: 'Bild öffnen',
     remote_image_reason: 'Externes Bild wurde nicht automatisch geladen. Öffnet {host} in einem neuen Tab.',
@@ -11413,7 +11455,7 @@ const LOCALES = {
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
-  
+
     kanban_bulk_status_aria: 'Bulk status',
     insights_period_7d: '7 days',
     insights_period_30d: '30 days',
@@ -11509,6 +11551,7 @@ const LOCALES = {
   zh: {
     composer_placeholder_read_only: '在 WebUI 中只读',
     composer_read_only_connection: '如何连接',
+
     offline_title: '连接已断开',
     offline_browser_detail: '浏览器报告此设备当前离线。',
     offline_network_detail: '此浏览器当前无法连接到 Hermes。',
@@ -11517,6 +11560,12 @@ const LOCALES = {
     offline_checking: '正在检查…',
     offline_stream_waiting: '连接已断开。正在等待刷新…',
     _lang: 'zh',
+    preview_fullscreen_enter: '全屏',
+    preview_fullscreen_exit: '退出全屏',
+    preview_fullscreen_region: '全屏预览',
+    preview_zoom_out: '缩小',
+    preview_zoom_in: '放大',
+
     _label: '\u7b80\u4f53\u4e2d\u6587',
     remote_image_open: '打开图片',
     remote_image_reason: '远程图片未自动加载。将在新标签页中打开 {host}。',
@@ -13329,7 +13378,7 @@ const LOCALES = {
     wiki_search_placeholder: '搜索页面...',
     wiki_no_pages: '未找到维基页面',
     wiki_not_configured: '维基未配置',
-  
+
     kanban_bulk_status_aria: 'Bulk status',
     insights_period_7d: '7 days',
     insights_period_30d: '30 days',
@@ -13369,6 +13418,7 @@ const LOCALES = {
     composer_placeholder_read_only: '在 WebUI 中唯讀',
     composer_read_only_connection: '如何連線',
 
+
     offline_title: '連線中斷',
     offline_browser_detail: '瀏覽器回報此裝置目前離線。',
     offline_network_detail: 'Hermes 目前無法從這個瀏覽器連上。',
@@ -13377,6 +13427,12 @@ const LOCALES = {
     offline_checking: '正在檢查…',
     offline_stream_waiting: '連線中斷。等待重新整理…',
     _lang: 'zh-Hant',
+    preview_fullscreen_enter: '全螢幕',
+    preview_fullscreen_exit: '退出全螢幕',
+    preview_fullscreen_region: '全螢幕預覽',
+    preview_zoom_out: '縮小',
+    preview_zoom_in: '放大',
+
     _label: '繁體中文',
     remote_image_open: '開啟圖片',
     remote_image_reason: '遠端圖片未自動載入。將在新分頁中開啟 {host}。',
@@ -15295,6 +15351,7 @@ const LOCALES = {
   pt: {
     composer_placeholder_read_only: 'Somente leitura no WebUI',
     composer_read_only_connection: 'Como conectar',
+
     offline_title: 'Conexão perdida',
     offline_browser_detail: 'O navegador informa que este dispositivo está offline.',
     offline_network_detail: 'O Hermes está inacessível neste navegador agora.',
@@ -15303,6 +15360,12 @@ const LOCALES = {
     offline_checking: 'Verificando…',
     offline_stream_waiting: 'Conexão perdida. Aguardando para atualizar…',
     _lang: 'pt',
+    preview_fullscreen_enter: 'Tela cheia',
+    preview_fullscreen_exit: 'Sair da tela cheia',
+    preview_fullscreen_region: 'Pré-visualização em tela cheia',
+    preview_zoom_out: 'Reduzir zoom',
+    preview_zoom_in: 'Aumentar zoom',
+
     _label: 'Português',
     remote_image_open: 'Abrir imagem',
     remote_image_reason: 'A imagem remota não foi carregada automaticamente. Abre {host} numa nova aba.',
@@ -16993,7 +17056,7 @@ const LOCALES = {
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
-  
+
     kanban_bulk_status_aria: 'Bulk status',
     insights_period_7d: '7 days',
     insights_period_30d: '30 days',
@@ -17030,6 +17093,7 @@ const LOCALES = {
   ko: {
     composer_placeholder_read_only: 'WebUI에서 읽기 전용',
     composer_read_only_connection: '연결 방법',
+
     offline_title: '연결이 끊겼습니다',
     offline_browser_detail: '브라우저가 이 장치가 오프라인이라고 보고합니다.',
     offline_network_detail: '현재 이 브라우저에서 Hermes에 연결할 수 없습니다.',
@@ -17038,6 +17102,12 @@ const LOCALES = {
     offline_checking: '확인 중…',
     offline_stream_waiting: '연결이 끊겼습니다. 새로고침을 기다리는 중…',
     _lang: 'ko',
+    preview_fullscreen_enter: '전체 화면',
+    preview_fullscreen_exit: '전체 화면 종료',
+    preview_fullscreen_region: '전체 화면 미리보기',
+    preview_zoom_out: '축소',
+    preview_zoom_in: '확대',
+
     _label: '한국어',
     remote_image_open: '이미지 열기',
     remote_image_reason: '원격 이미지는 자동으로 로드되지 않습니다. 새 탭에서 {host}을(를) 엽니다.',
@@ -18906,7 +18976,7 @@ const LOCALES = {
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
-  
+
     kanban_bulk_status_aria: 'Bulk status',
     insights_period_7d: '7 days',
     insights_period_30d: '30 days',
@@ -18944,6 +19014,7 @@ const LOCALES = {
   fr: {
     composer_placeholder_read_only: 'Lecture seule dans WebUI',
     composer_read_only_connection: 'Comment se connecter',
+
     offline_title: 'Connexion perdue',
     offline_browser_detail: 'Votre navigateur signale que cet appareil est hors ligne.',
     offline_network_detail: 'Hermes est actuellement inaccessible depuis ce navigateur.',
@@ -18952,6 +19023,12 @@ const LOCALES = {
     offline_checking: 'Vérification\u2026',
     offline_stream_waiting: 'Connexion perdue. En attente de rafraîchissement\u2026',
     _lang: 'fr',
+    preview_fullscreen_enter: 'Plein écran',
+    preview_fullscreen_exit: 'Quitter le plein écran',
+    preview_fullscreen_region: 'Aperçu en plein écran',
+    preview_zoom_out: 'Zoom arrière',
+    preview_zoom_in: 'Zoom avant',
+
     _label: 'Français',
     remote_image_open: 'Ouvrir l’image',
     remote_image_reason: 'Image distante non chargée automatiquement. Ouvre {host} dans un nouvel onglet.',
@@ -20838,6 +20915,7 @@ const LOCALES = {
   cs: {
     composer_placeholder_read_only: 'Ve WebUI pouze ke čtení',
     composer_read_only_connection: 'Jak se připojit',
+
     _label: 'Čeština',
     sessions_source_webui: 'Relace WebUI ({0})',
     sessions_source_cli: 'Relace CLI ({0})',
@@ -20845,6 +20923,12 @@ const LOCALES = {
     project_chip_unassigned: 'Nepřiřazeno',
     project_chip_unassigned_title: 'Zobrazit konverzace, které ještě nejsou přiřazeny k projektu',
     _lang: 'cs',
+    preview_fullscreen_enter: 'Celá obrazovka',
+    preview_fullscreen_exit: 'Ukončit celou obrazovku',
+    preview_fullscreen_region: 'Náhled na celou obrazovku',
+    preview_zoom_out: 'Oddálit',
+    preview_zoom_in: 'Přiblížit',
+
     remote_image_open: 'Otevřít obrázek',
     remote_image_reason: 'Vzdálený obrázek nebyl načten automaticky. Otevře {host} na nové kartě.',
     _speech: 'cs-CZ',
@@ -22684,7 +22768,7 @@ const LOCALES = {
     tool_action_label: _i18nToolActionLabelCs,
     tool_worklog_summary: _i18nToolWorklogSummaryCs,
     tool_summary_join: _i18nToolSummaryJoinCs,
-  
+
     kanban_bulk_status_aria: 'Bulk status',
     insights_period_7d: '7 days',
     insights_period_30d: '30 days',
@@ -22725,6 +22809,7 @@ const LOCALES = {
 
 
 
+
     offline_title: 'Bağlantı kesildi',
     offline_browser_detail: 'Tarayıcınız bu cihazın çevrimdışı olduğunu bildiriyor.',
     offline_network_detail: 'Hermes\'e şu anda bu tarayıcıdan ulaşılamıyor.',
@@ -22733,6 +22818,12 @@ const LOCALES = {
     offline_checking: 'Kontrol ediliyor\u2026',
     offline_stream_waiting: 'Bağlantı kesildi. Yenilenmesi bekleniyor\u2026',
     _lang: 'tr',
+    preview_fullscreen_enter: 'Tam ekran',
+    preview_fullscreen_exit: 'Tam ekrandan çık',
+    preview_fullscreen_region: 'Tam ekran önizleme',
+    preview_zoom_out: 'Uzaklaştır',
+    preview_zoom_in: 'Yakınlaştır',
+
     _label: 'Türkçe',
     remote_image_open: 'Görseli aç',
     remote_image_reason: 'Uzak görsel otomatik olarak yüklenmedi. {host} yeni bir sekmede açılır.',
@@ -24603,7 +24694,7 @@ const LOCALES = {
   
   
   
-  
+
     kanban_bulk_status_aria: 'Bulk status',
     insights_period_7d: '7 days',
     insights_period_30d: '30 days',
@@ -24640,6 +24731,7 @@ const LOCALES = {
   pl: {
     composer_placeholder_read_only: 'Tylko do odczytu w WebUI',
     composer_read_only_connection: 'Jak się połączyć',
+
     offline_title: 'Połączenie utracone',
     offline_browser_detail: 'Twoja przeglądarka zgłasza, że to urządzenie jest offline.',
     offline_network_detail: 'Hermes jest obecnie nieosiągalny z tej przeglądarki.',
@@ -24648,6 +24740,12 @@ const LOCALES = {
     offline_checking: 'Sprawdzanie…',
     offline_stream_waiting: 'Połączenie utracone. Oczekiwanie na odświeżenie…',
     _lang: 'pl',
+    preview_fullscreen_enter: 'Pełny ekran',
+    preview_fullscreen_exit: 'Wyjdź z pełnego ekranu',
+    preview_fullscreen_region: 'Podgląd na pełnym ekranie',
+    preview_zoom_out: 'Pomniejsz',
+    preview_zoom_in: 'Powiększ',
+
     _label: 'Polski',
     remote_image_open: 'Otwórz obraz',
     remote_image_reason: 'Zdalny obraz nie został wczytany automatycznie. Otwiera {host} w nowej karcie.',
@@ -26522,7 +26620,7 @@ const LOCALES = {
     checkpoint_diff_title: 'Zmiany w punkcie kontrolnym',
     checkpoint_diff_no_changes: 'Nie znaleziono różnic między tym punktem kontrolnym a obecnym obszarem roboczym.',
     checkpoint_diff_files_changed: (n) => n === 1 ? '1 plik zmieniony' : `${n} zmienionych plików`,
-  
+
     kanban_bulk_status_aria: 'Bulk status',
     insights_period_7d: '7 days',
     insights_period_30d: '30 days',
@@ -26559,6 +26657,7 @@ const LOCALES = {
   vi: {
     composer_placeholder_read_only: 'Chỉ đọc trong WebUI',
     composer_read_only_connection: 'Cách kết nối',
+
     offline_title: 'Mất kết nối',
     offline_browser_detail: 'Trình duyệt báo rằng thiết bị này đang ngoại tuyến.',
     offline_network_detail: 'Không thể kết nối tới Hermes từ trình duyệt lúc này.',
@@ -26567,6 +26666,12 @@ const LOCALES = {
     offline_checking: 'Đang kiểm tra…',
     offline_stream_waiting: 'Mất kết nối. Đang chờ làm mới…',
     _lang: 'vi',
+    preview_fullscreen_enter: 'Toàn màn hình',
+    preview_fullscreen_exit: 'Thoát toàn màn hình',
+    preview_fullscreen_region: 'Xem trước toàn màn hình',
+    preview_zoom_out: 'Thu nhỏ',
+    preview_zoom_in: 'Phóng to',
+
     _label: 'Tiếng Việt',
     remote_image_open: 'Mở hình ảnh',
     remote_image_reason: 'Hình ảnh từ xa không được tải tự động. Mở {host} trong thẻ mới.',
@@ -28983,6 +29088,15 @@ function applyLocaleToDOM() {
     const val = t(key);
     if (val && val !== key) el.setAttribute('aria-label', val);
   });
+  // The fullscreen toggle's label is stateful ("Fullscreen" vs "Exit
+  // fullscreen"), so it owns its own localized strings instead of carrying a
+  // static data-i18n key. Keep this early: a project test pins a 2000-char
+  // window after applyLocaleToDOM().
+  if (typeof _setPreviewFullscreenButtonState === 'function') {
+    _setPreviewFullscreenButtonState(
+      !!document.querySelector('.rightpanel.preview-fullscreen')
+    );
+  }
   // Dynamic text that also carries a data-i18n fallback key (e.g. the chat-todos
   // summary #chatTodosSummary with data-i18n="tab_todos") is clobbered by the
   // re-stamp above: opening Settings — or any locale change — reset the live

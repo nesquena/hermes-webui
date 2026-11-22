@@ -58,11 +58,36 @@ def test_css_has_floating_fixed_rule():
     )
 
 
+def _css_rule_body(selector: str) -> str:
+    """Return the declaration block of the rule whose selector ends in `selector`.
+
+    The guard below must look at the FOOTER's own rule, not the whole sheet: it
+    asserts that no one neutralised `container-type` on the composer footer. A
+    sheet-wide search for the string also fires on unrelated, legitimate uses
+    (e.g. `.rightpanel.preview-fullscreen`, which neutralises its OWN inline-size
+    container so the panel's narrow-width @container rules stop applying while it
+    covers the viewport).
+    """
+    match = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", CSS)
+    assert match, f"{selector} rule missing from static/style.css"
+    return match.group(1)
+
+
 def test_no_geist_backdrop_override_added_for_model_dropdown():
     """Because the menu leaves the footer, the Geist backdrop-filter workaround
-    must NOT be introduced (the reparent is the fix, not a per-skin override)."""
-    assert "container-type:normal" not in CSS.replace(" ", ""), (
+    must NOT be introduced (the reparent is the fix, not a per-skin override).
+
+    Scoped to the footer rule: the assertion is about not neutralising the
+    FOOTER's containing block, not about the string appearing anywhere in the
+    stylesheet.
+    """
+    footer = _css_rule_body(".composer-footer")
+    assert "container-type:normal" not in footer.replace(" ", ""), (
         "do not neutralise container-type on the footer — reparent instead"
+    )
+    assert "container-type:inline-size" in footer.replace(" ", ""), (
+        "the composer footer must KEEP its inline-size container; the dropdown "
+        "escapes it by reparenting, not by removing the container"
     )
 
 
