@@ -33014,9 +33014,23 @@ def _handle_chat_sync(handler, body):
             # the connection-only view that followed still truncated the record's
             # api_mode / credential_pool / ACP transport before the constructor.
             try:
-                _bundle = _resolve_agent_connection_bundle(
-                    _provider, _api_key, _base_url, _rt
-                )
+                from api.profiles import profile_env_for_thread_readonly
+
+                # The named custom provider's credential ladder must resolve
+                # under THIS session's profile env (#9249). The HTTP handler
+                # thread carries no profile-scoped thread-local env, so an
+                # unbound ladder resolves a `${VAR}` against the server process
+                # environment — the process-wide profile's value — which let a
+                # named profile authenticate with a credential it does not own.
+                # The binding is THREAD-ONLY (pure in-memory expansion, nothing
+                # read from os.environ) and a no-op for default/root sessions,
+                # so profile-less behaviour is unchanged.
+                with profile_env_for_thread_readonly(
+                    s, "chat custom provider connection", logger_override=logger,
+                ):
+                    _bundle = _resolve_agent_connection_bundle(
+                        _provider, _api_key, _base_url, _rt
+                    )
             except api_config.CustomProviderRouteError as _route_err:
                 # The named route resolved no usable connection. Constructing
                 # AIAgent with the incomplete pair would send this turn through
@@ -37016,6 +37030,7 @@ def _handle_handoff_summary(handler, body):
         resolved_provider = None
         resolved_base_url = None
         session_model_provider = None
+        session_profile = None
         try:
             from api.models import get_session
             s_obj = get_session(sid)
@@ -37030,6 +37045,7 @@ def _handle_handoff_summary(handler, body):
             # endpoint; base_url is backfilled from that provider's own custom
             # entry by the custom-provider authority block below.
             session_model_provider = getattr(s_obj, "model_provider", None)
+            session_profile = getattr(s_obj, "profile", None) or None
         except Exception:
             pass
 
@@ -37056,10 +37072,19 @@ def _handle_handoff_summary(handler, body):
         # Atomic custom-provider authority (see the /api/chat note): the session's
         # own custom_providers[] row owns BOTH the endpoint and the credential,
         # plus the api_mode / credential_pool / ACP transport that travel with
-        # them as one constructor bundle.
-        _bundle = _resolve_agent_connection_bundle(
-            resolved_provider, resolved_api_key, resolved_base_url, _rt
-        )
+        # them as one constructor bundle. Bind the session's profile env around
+        # the resolution so a `${VAR}` the profile does not define cannot be
+        # resolved against the server process environment (#9249); a no-op for
+        # default/root sessions.
+        from api.profiles import profile_env_for_thread_readonly
+
+        with profile_env_for_thread_readonly(
+            session_profile, "handoff summary custom provider connection",
+            logger_override=logger,
+        ):
+            _bundle = _resolve_agent_connection_bundle(
+                resolved_provider, resolved_api_key, resolved_base_url, _rt
+            )
         resolved_provider = _bundle["provider"]
         resolved_api_key = _bundle["api_key"]
         resolved_base_url = _bundle["base_url"]
