@@ -308,6 +308,9 @@ def test_failed_startup_enumeration_keeps_a_single_retry_timer(world, monkeypatc
     assert len(armed) == 1  # repeated failures share one pending retry
     assert _wait_for(lambda: len(attempts) >= 11)  # the timer itself retried
     assert _wait_for(lambda: len(armed) == 2)  # and re-armed exactly one successor
+    # The successor is armed from inside the fired timer's own thread, which only
+    # exits once its callback returns: wait for that exit before counting threads.
+    assert _wait_for(lambda: not armed[0].is_alive())  # the fired timer's thread is gone
     assert sum(t.is_alive() for t in armed) <= 1
     assert world["calls"] == []
 
