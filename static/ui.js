@@ -4282,6 +4282,11 @@ function _remoteImagePlaceholderHtml(raw, altText){
 // MEDIA: pipeline uses, so ![x](file:///p.png) renders the artifact card instead
 // of the broken "!<a>" anchor it used to produce, and ![x](data:image/...) stops
 // dumping raw base64 text into the chat.
+// The destination is attribute-escaped for the same reason as an anchor's (see
+// _markdownAnchor): restored emphasis tags must not reach the attribute raw, or
+// the <img> tag is cut short at their `>` and the picture disappears into the
+// transcript as text. Decoding one entity level first keeps the attribute equal
+// to the destination the earlier pass escaped, instead of a double-escaped copy.
 function _mdImageHtml(alt, url){
   if(/^data:/i.test(url)){
     const img=_dataImageHtml(url, alt);
@@ -4290,7 +4295,11 @@ function _mdImageHtml(alt, url){
   }
   if(/^file:\/\//i.test(url)) return _inlineMediaHtmlForRef(url,undefined,alt);
   if(typeof _remoteImageAllowed==='function'&&!_remoteImageAllowed(url)) return _remoteImagePlaceholderHtml(url, alt);
-  return `<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
+  // The destination is attribute-escaped for the same reason as an anchor's
+  // (see _markdownAnchor): restored emphasis tags must not reach the attribute
+  // raw, or the <img> tag itself is cut short at their `>` and the picture
+  // disappears into the transcript as text.
+  return `<img src="${esc(String(url==null?'':url).replace(/&(?:amp|lt|gt|quot|#39);/g,m=>({'&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&#39;':"'"}[m])).replace(/"/g,'%22'))}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
 }
 
 function _mediaTokenParts(source, matchOffset, rawRef){
@@ -11151,9 +11160,10 @@ function renderMd(raw){
   // stashed or they surface as literal &lt;strong&gt; and double-escape an
   // already-escaped &#39; into &amp;#39;. Only bare tags/entities are stashed,
   // never their content, so nested emphasis (**a *b* c**) still renders. The
-  // token carries a per-call random prefix because renderMd() does not strip NUL
-  // from its input: a message containing a literal token would otherwise be
-  // restored as markup, and \x00B already belongs to _al_stash. See #8235.
+  // token carries a per-call random prefix as defence in depth: renderMd()
+  // already replaces raw NULs with U+FFFD at entry, so message text cannot carry
+  // a literal token, and \x00B belongs to _al_stash. Keeping the prefix means a
+  // pass that ever stops normalizing NULs cannot turn text into markup. See #8235.
   function _mkEmphasisStash(){
     const tk='\x00I'+Math.random().toString(36).slice(2,8)+'_';
     const re=new RegExp(tk.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'(\\d+)\x00','g');
@@ -11185,7 +11195,7 @@ function renderMd(raw){
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
     // is not consumed by the [label](url) link regex.
-    t=t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+    t=t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${esc(_decodeAttrEntities(url).replace(/"/g,'%22'))}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
@@ -11430,7 +11440,7 @@ function renderMd(raw){
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
-  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${esc(_decodeAttrEntities(url).replace(/"/g,'%22'))}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
@@ -11455,6 +11465,16 @@ function renderMd(raw){
     // there. No attribute legitimately carries one: drop them, and any stray \x00.
     return String(v||'').replace(/\x00[^\x00]*\x00/g,'').replace(/\x00/g,'')
       .replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').trim();
+  }
+  // Decode exactly one level of the HTML entities an earlier escaping pass
+  // introduced, so a destination survives being re-escaped for an attribute.
+  // Single pass on purpose: `&amp;lt;` becomes `&lt;` (the text the author wrote),
+  // never `<`. Escaping the already-escaped form instead double-escapes it:
+  // `[x](https://e.com/?q=1<2)` decoded back to `?q=1&lt;2`, losing a destination
+  // the renderer preserved before the emphasis stash existed. See #8235 review.
+  function _decodeAttrEntities(v){
+    const ent={'&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&#39;':"'"};
+    return String(v==null?'':v).replace(/&(?:amp|lt|gt|quot|#39);/g,m=>ent[m]);
   }
   function _markdownHref(raw){
     const href=String(raw||'').replace(/"/g,'%22');
@@ -11529,8 +11549,10 @@ function renderMd(raw){
     // The destination must be attribute-escaped: the emphasis stash restores
     // renderer-emitted <strong>/<em> tags before links are built, so a URL that
     // contained bold markers (`[x](https://e.com/**b**)`) reached this point
-    // with live markup in it and closed the href attribute early. See #8235.
-    return `<a${internal?' class="session-link"':''} href="${esc(_safeAttrValue(href))}"${internal?'':' target="_blank" rel="noopener"'}>${_markdownLabelHtml(label)}</a>`;
+    // with live markup in it and closed the href attribute early. Decode one
+    // entity level first, so the attribute decodes back to the destination the
+    // author wrote instead of a double-escaped copy of it. See #8235.
+    return `<a${internal?' class="session-link"':''} href="${esc(_decodeAttrEntities(href).trim())}"${internal?'':' target="_blank" rel="noopener"'}>${_markdownLabelHtml(label)}</a>`;
   }
   function _isSafeUrl(v, img){
     const raw=_safeAttrValue(v);
@@ -11613,7 +11635,10 @@ function renderMd(raw){
           tipAttr=` title="${esc(tip)}"`;
         }
       }
-      return `<a${cls} href="${esc(_safeAttrValue(a.href))}"${target}${rel}${download}${tipAttr}>`;
+      // Decode one entity level before re-escaping: this sanitizer re-emits the
+      // href that _markdownAnchor already escaped, and escaping the escaped form
+      // again is what turned `?q=1<2` into a decoded `?q=1&lt;2`. See #8235.
+      return `<a${cls} href="${esc(_decodeAttrEntities(a.href).trim())}"${target}${rel}${download}${tipAttr}>`;
     }
     if(name==='img'){
       if(!_isSafeUrl(a.src,true)) return '';

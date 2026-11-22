@@ -14,9 +14,11 @@ raw HTML inside nested emphasis must still be escaped, because the fix only
 protects renderer-emitted tag tokens, never user content.
 
 One case also pins the token-collision guard: the emphasis stash must not use a
-token that message text can reproduce. ``renderMd`` does not strip NUL bytes
-from its input, so a literal ``\\x00B0\\x00`` in a message used to be restored
-as a stashed tag and broke a following link.
+token that message text can reproduce. ``renderMd`` normalizes raw NUL bytes to
+U+FFFD before any token exists, so text cannot carry a literal token; the
+per-call random prefix is kept as defence in depth, and because ``\\x00B``
+belongs to the autolink stash. A literal ``\\x00B0\\x00`` in a message is plain
+text and must not disturb a following link.
 """
 
 from __future__ import annotations
@@ -58,6 +60,9 @@ function extractFunc(name) {
 }
 eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
+// Older revisions predate this helper; the harness must still load the file so
+// the same suite can run against a base revision for before/after comparison.
+try { eval(extractFunc('_mdImageHtml')); } catch (e) {}
 eval(extractFunc('renderMd'));
 let buf = '';
 process.stdin.setEncoding('utf8');
@@ -89,6 +94,21 @@ def _no_literal_tags(out: str) -> None:
     assert "&lt;strong&gt;" not in out and "&lt;/strong&gt;" not in out, out
     assert "&lt;em&gt;" not in out and "&lt;del&gt;" not in out, out
     assert "&amp;#39;" not in out and "&amp;quot;" not in out and "&amp;amp;" not in out, out
+
+
+_ENTITIES = {"&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'"}
+
+
+def _decode_entities(value: str) -> str:
+    """Decode one HTML entity level, the way a browser reads an attribute."""
+    return re.sub(r"&(?:amp|lt|gt|quot|#39);", lambda m: _ENTITIES[m.group(0)], value)
+
+
+def _attr(html: str, name: str) -> str:
+    """The decoded value of the first ``name="..."`` attribute."""
+    m = re.search(name + r'="([^"]*)"', html)
+    assert m, html
+    return _decode_entities(m.group(1))
 
 
 # ── The reported bug ──────────────────────────────────────────────────────────
@@ -210,6 +230,50 @@ def test_link_destination_with_quotes_cannot_add_attributes(driver_path):
     assert anchor, out
     assert "onmouseover=alert(1)>" not in anchor.group(0), out
     assert 'href="https://e.com/' in anchor.group(0), out
+
+
+# ── Destination fidelity (gate review finding) ───────────────────────────────
+
+def test_link_destination_with_angle_bracket_survives(driver_path):
+    """The destination is escaped for the attribute and then re-emitted by the
+    final tag sanitizer. Escaping the already-escaped text escaped ``<`` twice,
+    so ``?q=1<2`` decoded back to ``?q=1&lt;2`` — a destination the renderer
+    preserved before the emphasis stash existed. The attribute must decode to the
+    destination the author wrote."""
+    out = _render(driver_path, "[x](https://example.com/search?q=1<2)")
+    assert _attr(out, "href") == "https://example.com/search?q=1<2", out
+    assert "&amp;lt;" not in out, out
+
+
+def test_link_destination_with_ampersand_query_unchanged(driver_path):
+    """The ordinary query-string control: one level of escaping, decoded once."""
+    out = _render(driver_path, "[x](https://e.com/?a=1&b=2)")
+    assert _attr(out, "href") == "https://e.com/?a=1&b=2", out
+
+
+@pytest.mark.parametrize("src", [
+    "![pic](https://app.example/**b**.png)",
+    "*![pic](https://app.example/**b**.png)*",
+])
+def test_image_with_emphasis_markers_in_url_still_renders(driver_path, src):
+    """Restored emphasis tags must not reach the src attribute raw. The <img>
+    stash stops at the first ``>``, so a raw tag inside src cut the image tag
+    short and dumped ``b</strong>.png" alt="pic"`` into the transcript as text."""
+    out = _render(driver_path, src)
+    tag = re.search(r"<img\b[^>]*>", out)
+    assert tag, out
+    assert out.count("<img") == 1, out
+    assert 'alt="pic"' in tag.group(0), out
+    assert _attr(tag.group(0), "src").endswith(".png"), out
+    # nothing from the tag may survive as visible text
+    assert "alt=" not in out.replace(tag.group(0), ""), out
+
+
+def test_adjacent_backtick_token_text_stays_plain(driver_path):
+    """A token-shaped string next to inline code is message text, not a token:
+    ``renderMd`` normalizes raw NULs, so it must render literally."""
+    out = _render(driver_path, "`a`I0`b`")
+    assert "<code>a</code>I0<code>b</code>" in out, out
 
 
 # ── No regression for the previously-working shapes ──────────────────────────
