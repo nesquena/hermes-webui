@@ -700,15 +700,23 @@ python3 -c "import agent.memory_manager as m; print('claim_instance:', callable(
 
 Masking applies to the server's own stdout/stderr stream only. The Logs panel (`agent.log`, `errors.log`, `gateway.log` under the Hermes home) is written by the Agent with its own handlers and is unaffected.
 
-**Diagnostic commands.** Use the interpreter the server actually runs on — the shell's `python3` may be a different one, and the Agent directory is only on `sys.path` for that interpreter. The startup banner names both:
+**Diagnostic commands.** Use the interpreter the server actually runs on — the shell's `python3` may be a different one, and the Agent directory is only on `sys.path` for that interpreter. The startup banner names both the Agent directory and the selected Python:
 
-```bash
-cd ~/hermes-webui && ./start.sh 2>&1 | grep -iE 'agent dir|python' | head -5
-#   agent dir   : /path/to/hermes-agent
-#   python      : /path/to/python
+```
+  agent dir   : /path/to/hermes-agent
+  python      : /path/to/python
 ```
 
-Run the check with that interpreter, and with the Agent directory importable:
+Read that banner from wherever your server's output went — it is not always on the terminal:
+
+```bash
+# The server log: $HERMES_WEBUI_STATE_DIR (default: $HERMES_HOME/webui, else ~/.hermes/webui).
+grep -iE 'agent dir|python' "$HERMES_WEBUI_STATE_DIR"/bootstrap-*.log | tail -5
+```
+
+On a POSIX launch from a terminal the server inherits your shell's stdout, so the same two lines are in the terminal output; on Windows, and when the launcher starts the server as a detached child, stdout/stderr are redirected into `bootstrap-<port>.log` instead. If the server is already running, read the banner from its log — starting it again is not required.
+
+Then run the check with that interpreter, and with the Agent directory importable:
 
 ```bash
 # The server's selected Python (from the banner, or $HERMES_WEBUI_PYTHON).
