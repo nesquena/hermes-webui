@@ -1190,6 +1190,13 @@ def _relay_gateway_run_events(
             sse_event = "message"
             continue
         if payload_event in {"tool.started", "tool.completed", "reasoning.available"}:
+            # #8901: the held delta tail belongs to the prose that produced
+            # it, and a tool frame opens a new activity group — release the
+            # tail BEFORE the tool frame, the same boundary rule as
+            # interim_assistant. Without it a held character run lands after
+            # the tool row (or is dropped at the terminal), and the live
+            # snapshot no longer matches the settled one.
+            flush_stream_delta_tail(delta_redactor, emit)
             translated = _gateway_tool_progress_event(payload)
             if translated:
                 event_name, event_payload = translated
@@ -1286,6 +1293,12 @@ def _relay_gateway_run_events(
         usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
         commit()
     commit()
+    # #8901: a healthy stream that ends without a terminal frame (plain
+    # [DONE] / EOF) must release the held tail too — the error and failure
+    # paths above flush before unwinding, and without this the last
+    # streamed characters stay swallowed in the redactor's window and the
+    # transcript ends truncated.
+    flush_stream_delta_tail(delta_redactor, emit)
     return final_text, usage, outcome, accepted_frame
 
 
