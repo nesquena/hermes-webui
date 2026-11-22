@@ -340,18 +340,23 @@ def test_cancel_does_not_close_mobile_sidebar():
 def test_no_early_closemobilesidebar_before_sidebar_open():
     """The three premature closeMobileSidebar() calls before _openSidebarSession
     must be removed — a {cancel:true} veto must not close the sidebar."""
-    # Tap-to-open handler: the setTimeout callback that calls _openSidebarSession
-    # must NOT contain a closeMobileSidebar() before the await.
+    # Tap-to-open handler: the setTimeout callback opens through the row's
+    # shared _openRowSession helper (also used by keyboard/screen-reader
+    # activation); neither may closeMobileSidebar() before the await.
     tap_block = _extract_block(SESSIONS_JS, "_tapTimer=setTimeout(async()=>{")
-    # Find the _openSidebarSession call inside the tap handler.
-    idx_open = tap_block.index("await _openSidebarSession(s)")
-    before_open = tap_block[:idx_open]
-    assert "closeMobileSidebar()" not in before_open, (
+    assert "await _openRowSession()" in tap_block
+    assert "closeMobileSidebar()" not in tap_block, (
         "tap-to-open handler must not closeMobileSidebar() before veto"
+    )
+    row_open_block = _extract_block(SESSIONS_JS, "const _openRowSession=async()=>{")
+    idx_open = row_open_block.index("await _openSidebarSession(s)")
+    before_open = row_open_block[:idx_open]
+    assert "closeMobileSidebar()" not in before_open, (
+        "row open helper must not closeMobileSidebar() before veto"
     )
 
     # Child-session open handler must not contain closeMobileSidebar() at all.
-    child_block = _extract_block(SESSIONS_JS, "const openChildSession=async(childSession)=>{")
+    child_block = _extract_block(SESSIONS_JS, "const openChildSession=async(childSession, openOpts={})=>{")
     assert "closeMobileSidebar()" not in child_block, (
         "openChildSession handler must not contain closeMobileSidebar()"
     )

@@ -24,6 +24,7 @@ from api.config import get_config
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SCOPES = ("openid", "profile", "email")
+_TOKEN_AUTH_METHODS = ("auto", "client_secret_basic", "client_secret_post")
 _PENDING_TTL_SECONDS = 600
 _MAX_PENDING_FLOWS = 128
 _CLOCK_SKEW_SECONDS = 60
@@ -37,6 +38,16 @@ _discovery_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 _jwks_lock = threading.Lock()
 _jwks_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+_warned_allow_values: set[str] = set()
+
+_ALLOW_VALUES_WHITESPACE_WARNING = (
+    "webui_oidc.allow_values (HERMES_WEBUI_OIDC_ALLOW_VALUES) has one or more entries "
+    "with internal whitespace; whitespace is not a value separator, so a value like "
+    '"alice@example.com bob@example.com" is treated as a single entry. '
+    'Use a comma-delimited scalar (e.g. "value1,value2") or a YAML array. '
+    "If this is one intentional multi-word group, it is already correct and no action is needed."
+)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -117,17 +128,25 @@ def complete_authorization_code_flow(
     if not token_endpoint:
         raise OIDCConfigError("OIDC discovery document is missing token_endpoint")
     redirect_uri = _resolve_redirect_uri(cfg, request_base_url)
-    token_response = _post_form_json(
-        token_endpoint,
-        {
-            "grant_type": "authorization_code",
-            "client_id": cfg["client_id"],
-            "code": code,
-            "code_verifier": pending["code_verifier"],
-            "redirect_uri": redirect_uri,
-            **({"client_secret": cfg["client_secret"]} if cfg.get("client_secret") else {}),
-        },
-    )
+    token_form = {
+        "grant_type": "authorization_code",
+        "client_id": cfg["client_id"],
+        "code": code,
+        "code_verifier": pending["code_verifier"],
+        "redirect_uri": redirect_uri,
+    }
+    token_headers: dict[str, str] = {}
+    if cfg.get("client_secret"):
+        if _resolve_token_endpoint_auth(cfg, discovery) == "client_secret_basic":
+            token_headers["Authorization"] = _basic_client_authorization(
+                cfg["client_id"], cfg["client_secret"]
+            )
+            # RFC 6749 section 2.3: a single client authentication mechanism
+            # per request — the Basic header already identifies the client.
+            del token_form["client_id"]
+        else:
+            token_form["client_secret"] = cfg["client_secret"]
+    token_response = _post_form_json(token_endpoint, token_form, headers=token_headers)
     id_token = str(token_response.get("id_token") or "").strip()
     if not id_token:
         raise OIDCAuthError("OIDC token response did not include an id_token", status_code=502)
@@ -166,9 +185,17 @@ def _resolve_oidc_config() -> dict[str, Any]:
         return env_value if env_value is not None else raw.get(name)
 
     scopes = _normalize_scopes(pick("scopes", "HERMES_WEBUI_OIDC_SCOPES"))
-    allow_values = _normalize_allow_values(
-        pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES")
-    )
+    raw_allow = pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES")
+    allow_values = _normalize_allow_values(raw_allow)
+    if (
+        raw_allow is not None
+        and not isinstance(raw_allow, (list, tuple, set))
+        and any(any(ch.isspace() for ch in v) for v in allow_values)
+    ):
+        key = str(raw_allow)
+        if key not in _warned_allow_values:
+            _warned_allow_values.add(key)
+            logger.warning(_ALLOW_VALUES_WHITESPACE_WARNING)
     return {
         "issuer": str(pick("issuer", "HERMES_WEBUI_OIDC_ISSUER") or "").strip(),
         "client_id": str(pick("client_id", "HERMES_WEBUI_OIDC_CLIENT_ID") or "").strip(),
@@ -177,6 +204,9 @@ def _resolve_oidc_config() -> dict[str, Any]:
         "scopes": scopes,
         "allow_claim": str(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM") or "").strip(),
         "allow_values": allow_values,
+        "token_auth_method": _normalize_token_auth_method(
+            pick("token_auth_method", "HERMES_WEBUI_OIDC_TOKEN_AUTH_METHOD")
+        ),
     }
 
 
@@ -189,6 +219,69 @@ def _require_oidc_config() -> dict[str, Any]:
             "Native OIDC login requires webui_oidc.allow_claim and allow_values"
         )
     return cfg
+
+
+def _normalize_token_auth_method(raw: Any) -> str:
+    value = str(raw or "").strip().lower()
+    if not value:
+        return "auto"
+    if value in _TOKEN_AUTH_METHODS:
+        return value
+    # The config is resolved on every auth check, so warn once per distinct
+    # unsupported value rather than once per request. The set is bounded:
+    # values come from operator config, and past the cap we stay quiet.
+    with _UNSUPPORTED_TOKEN_AUTH_WARNED_LOCK:
+        first = (
+            value not in _UNSUPPORTED_TOKEN_AUTH_WARNED
+            and len(_UNSUPPORTED_TOKEN_AUTH_WARNED) < 32
+        )
+        if first:
+            _UNSUPPORTED_TOKEN_AUTH_WARNED.add(value)
+    if first:
+        logger.warning(
+            "Ignoring unsupported webui_oidc.token_auth_method %r; using auto", value
+        )
+    return "auto"
+
+
+_UNSUPPORTED_TOKEN_AUTH_WARNED: set[str] = set()
+_UNSUPPORTED_TOKEN_AUTH_WARNED_LOCK = threading.Lock()
+
+
+def _resolve_token_endpoint_auth(cfg: dict[str, Any], discovery: dict[str, Any]) -> str:
+    """Pick how the client secret is presented to the token endpoint.
+
+    A configured method always wins. In auto mode, keep the historical
+    client_secret_post behavior whenever the provider accepts it or does not
+    publish token_endpoint_auth_methods_supported; switch to
+    client_secret_basic only when the discovery document announces that
+    client_secret_post is unavailable — the one case where the form-body
+    secret is guaranteed to be rejected (RFC 6749 section 2.3.1 only requires
+    servers to support HTTP Basic).
+    """
+    configured = str(cfg.get("token_auth_method") or "auto")
+    if configured != "auto":
+        return configured
+    raw_methods = discovery.get("token_endpoint_auth_methods_supported")
+    if not isinstance(raw_methods, list):
+        return "client_secret_post"
+    methods = {str(item).strip().lower() for item in raw_methods}
+    if "client_secret_post" in methods:
+        return "client_secret_post"
+    if "client_secret_basic" in methods:
+        return "client_secret_basic"
+    return "client_secret_post"
+
+
+def _basic_client_authorization(client_id: str, client_secret: str) -> str:
+    # RFC 6749 section 2.3.1: the id and secret are each
+    # application/x-www-form-urlencoded before forming the Basic credentials,
+    # so reserved characters (":" in particular) stay unambiguous. quote_plus
+    # implements that algorithm — space encodes to "+", not "%20".
+    username = urllib.parse.quote_plus(client_id)
+    password = urllib.parse.quote_plus(client_secret)
+    credentials = f"{username}:{password}".encode("utf-8")
+    return "Basic " + base64.b64encode(credentials).decode("ascii")
 
 
 def _normalize_scopes(raw: Any) -> list[str]:
@@ -377,16 +470,23 @@ def _fetch_json(url: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _post_form_json(url: str, form_data: dict[str, Any]) -> dict[str, Any]:
+def _post_form_json(
+    url: str,
+    form_data: dict[str, Any],
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     _validate_outbound_oidc_url(url)
     body = urllib.parse.urlencode(form_data).encode("utf-8")
+    request_headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    if headers:
+        request_headers.update(headers)
     req = urllib.request.Request(
         url,
         data=body,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
+        headers=request_headers,
         method="POST",
     )
     try:

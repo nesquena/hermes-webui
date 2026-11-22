@@ -13,11 +13,18 @@ import os
 import re
 import json
 import pathlib
+import shutil
+import subprocess
 import pytest
 
 from tests.conftest import requires_agent_modules
 
 TEST_BASE = f"http://127.0.0.1:{os.environ.get('HERMES_WEBUI_TEST_PORT', '8788')}"
+
+
+def _js_block(source, start_marker, end_marker):
+    start = source.index(start_marker)
+    return source[start:source.index(end_marker, start)]
 
 
 def _read_static_file(name: str) -> str:
@@ -151,11 +158,12 @@ class TestYoloEndpointPost:
         data = _get(f"/api/session/yolo?session_id={sid_b}")
         assert data.get("yolo_enabled") is False
 
-    def test_yolo_post_defaults_to_enabled(self):
-        """POST without 'enabled' key defaults to True."""
+    def test_yolo_post_without_enabled_is_rejected(self):
+        """#9101: POST without a boolean 'enabled' is a 400 and changes nothing."""
         sid = "test-yolo-default-001"
         data = _post("/api/session/yolo", {"session_id": sid})
-        assert data.get("yolo_enabled") is True
+        assert "enabled" in (data.get("error") or "")
+        assert _get(f"/api/session/yolo?session_id={sid}").get("yolo_enabled") is False
 
 
 # ── Frontend JS tests (static file analysis — no server needed) ──
@@ -211,7 +219,13 @@ class TestYoloPillHTML:
         assert 'id="yoloPill"' in index_html
 
     def test_yolo_pill_has_onclick(self, index_html):
-        assert 'onclick="cmdYolo()"' in index_html
+        # #9101: the pill is shown only while YOLO is ON and is titled "click
+        # to disable", so its click only disables (the session it was painted
+        # for). /yolo stays the toggle; the pill must not route through it.
+        pill_match = re.search(r'<button[^>]*id="yoloPill"[^>]*>', index_html)
+        assert pill_match
+        assert 'onclick="disableYoloFromPill()"' in pill_match.group(0)
+        assert "cmdYolo" not in pill_match.group(0)
 
     def test_yolo_pill_hidden_by_default(self, index_html):
         pill_match = re.search(r'<button[^>]*id="yoloPill"[^>]*>', index_html)
@@ -265,3 +279,49 @@ class TestYoloI18n:
 
         for key in self.REQUIRED_KEYS:
             assert key in block, f"Key '{key}' missing in locale '{locale}'"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_yolo_command_ignores_stale_same_session_generation():
+    commands_js = _read_static_file("commands.js")
+    messages_js = _read_static_file("messages.js")
+    start = commands_js.index("async function cmdYolo(")
+    cmd_yolo = commands_js[start:commands_js.index("\n// ── Branch / fork command", start)]
+
+    def run(api_source, expected_calls):
+        script = "\n".join([
+            "const calls=[]; const toasts=[]; let pillUpdates=0; let cardHides=0;",
+            "const S={session:{session_id:'old-session'}};",
+            "let _loadSessionGeneration=1;",
+            "let _yoloEnabled=false; let _approvalSessionId=null; let _approvalCurrentId=null;",
+            # #9101: cmdYolo writes through the keyed view's single writer.
+            "let _loadingSessionId=null;",
+            _js_block(messages_js, "let _yoloView =", "\n"),
+            _js_block(messages_js, "function _applyYoloState(", "\n// Fire-and-forget read"),
+            "const t=k=>k; const showToast=msg=>toasts.push(msg);",
+            "const $=()=>({classList:{contains:()=>false}});",
+            "const _updateYoloPill=()=>{pillUpdates+=1;};",
+            "const hideApprovalCard=()=>{cardHides+=1;};",
+            "const toggleYoloFromApproval=async()=>{throw new Error('unexpected card path');};",
+            f"const api={api_source};",
+            cmd_yolo,
+            "(async()=>{",
+            " await cmdYolo();",
+            f" if(JSON.stringify(calls)!==JSON.stringify({expected_calls!r})) throw new Error('wrong calls '+JSON.stringify(calls));",
+            " if(_yoloEnabled!==false) throw new Error('stale response changed new session state');",
+            " if(pillUpdates!==0) throw new Error('stale response updated the new session pill');",
+            " if(cardHides!==0) throw new Error('stale response hid the new session card');",
+            " if(toasts.length!==0) throw new Error('stale response emitted a toast');",
+            "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+        ])
+        result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
+
+    run(
+        "async path=>{calls.push(path);_loadSessionGeneration=2;return {yolo_enabled:false};}",
+        ["/api/session/yolo?session_id=old-session"],
+    )
+    run(
+        "async (path,opts)=>{calls.push(path);if(path.includes('?'))return {yolo_enabled:false};_loadSessionGeneration=2;const e=new Error('relay failed');e.body=JSON.stringify({error:'relay failed',yolo_enabled:true});throw e;}",
+        ["/api/session/yolo?session_id=old-session", "/api/session/yolo"],
+    )

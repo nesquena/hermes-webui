@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from api.streaming import (
+    _api_safe_message_positions,
     _compact_image_parts_for_persistence,
     _compact_session_image_parts_for_persistence,
     _restore_reasoning_metadata,
@@ -307,6 +308,46 @@ def test_sanitize_messages_drops_empty_tool_calls_array():
     for m in sanitized:
         assert not ("tool_calls" in m and not m["tool_calls"]), \
             "no message may ship an empty tool_calls array"
+
+
+def test_api_safe_message_positions_drops_empty_tool_calls_array():
+    """#5737 mirror path: _api_safe_message_positions must apply the same
+    empty-tool_calls drop as _sanitize_messages_for_api, so metadata
+    restoration (which aligns rows against these positions) never treats a
+    tool_calls: [] row as a different message. Empty array -> key removed;
+    populated tool_calls chain -> preserved."""
+    messages = [
+        {"role": "user", "content": "hi"},
+        # Empty tool_calls: [] must be dropped (would 400 on strict providers).
+        {"role": "assistant", "content": "thinking out loud", "tool_calls": []},
+        {"role": "user", "content": "go on"},
+        # Populated tool_calls (+ its tool result) must be preserved untouched.
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"type": "function", "id": "call-9",
+                 "function": {"name": "terminal", "arguments": "{}"}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-9", "content": "ok"},
+    ]
+
+    positions = _api_safe_message_positions(messages)
+
+    sanitized = [msg for _idx, msg in positions]
+    # The empty-tool_calls assistant message survives, but WITHOUT the key.
+    empty_asst = next(m for m in sanitized if m.get("content") == "thinking out loud")
+    assert empty_asst["role"] == "assistant"
+    assert "tool_calls" not in empty_asst, "empty tool_calls: [] must be dropped"
+    # The populated chain is preserved.
+    populated = next(m for m in sanitized if m.get("role") == "assistant" and m.get("tool_calls"))
+    assert populated["tool_calls"][0]["id"] == "call-9"
+    assert any(m.get("tool_call_id") == "call-9" for m in sanitized)
+    # No row that reaches the API carries an empty tool_calls array.
+    for _idx, msg in positions:
+        assert not ("tool_calls" in msg and not msg["tool_calls"]), \
+            "no API-safe position may ship an empty tool_calls array"
 
 
 def test_gateway_conversation_history_no_oob():

@@ -5,7 +5,9 @@ from __future__ import annotations
 import copy
 import logging
 import re
+import secrets
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -25,6 +27,15 @@ except Exception:  # pragma: no cover - depends on installed hermes-agent
     _NativeGoalManager = None  # type: ignore
     GoalState = None  # type: ignore
     judge_goal = None  # type: ignore
+
+try:  # Older hermes-agent builds predate inline completion contracts.
+    from hermes_cli.goals import (  # type: ignore
+        CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE,
+        parse_contract,
+    )
+except Exception:  # pragma: no cover - depends on installed hermes-agent
+    CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE = ""  # type: ignore
+    parse_contract = None  # type: ignore
 
 GoalManager = _NativeGoalManager  # type: ignore
 
@@ -73,8 +84,119 @@ def _profile_db(profile_home: str | Path):
     return db
 
 
+def _profile_home_context_api():
+    """Return the native context-local Hermes home setters when available."""
+    try:
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    except Exception:  # pragma: no cover - depends on installed hermes-agent
+        return None
+    return set_hermes_home_override, reset_hermes_home_override
+
+
+def _context_db_path_resolver():
+    """The Agent's call-time ``state.db`` path resolver, or None: ``hermes_state._default_db_path``
+    on older Agents; on newer ones (no ``_default_db_path``) the goal store opens
+    ``profile_scope(home=get_hermes_home())``, whose file ``store_location(profile_scope())`` names."""
+    try:
+        from hermes_state import _default_db_path  # type: ignore
+
+        if callable(_default_db_path):
+            return _default_db_path
+    except Exception:  # pragma: no cover - depends on installed hermes-agent
+        pass
+    try:
+        from persistence_assembly import profile_scope, store_location  # type: ignore
+    except Exception:  # pragma: no cover - depends on installed hermes-agent
+        return None
+    return lambda: store_location(profile_scope())
+
+
+def _native_profile_context_api(profile_home: str | Path):
+    """Return context setters only when SessionDB resolves that context at call time."""
+    context_api = _profile_home_context_api()
+    if context_api is None:
+        return None
+    _default_db_path = _context_db_path_resolver()
+    if _default_db_path is None:
+        return None
+
+    home = Path(profile_home).expanduser().resolve()
+    set_home, reset_home = context_api
+    try:
+        token = set_home(home)
+    except Exception:  # pragma: no cover - depends on installed hermes-agent
+        return None
+    try:
+        resolved_db_path = Path(_default_db_path()).expanduser().resolve()
+    except Exception:  # pragma: no cover - depends on installed hermes-agent
+        return None
+    finally:
+        reset_home(token)
+    if resolved_db_path != home / "state.db":
+        return None
+    return context_api
+
+
 class _ProfileGoalManager:
-    """Small WebUI-local GoalManager adapter with explicit profile persistence."""
+    """Run the native GoalManager under a context-local profile home."""
+
+    def __init__(
+        self,
+        session_id: str,
+        *,
+        profile_home: str | Path,
+        default_max_turns: int = 20,
+        context_api=None,
+    ):
+        if _NativeGoalManager is None:
+            raise RuntimeError("Hermes goal manager unavailable")
+        context_api = context_api or _profile_home_context_api()
+        if context_api is None:
+            raise RuntimeError("Hermes profile context unavailable")
+        self.session_id = session_id
+        self.profile_home = Path(profile_home).expanduser().resolve()
+        self._set_home, self._reset_home = context_api
+        self._manager = self._scoped(
+            _NativeGoalManager,
+            session_id=session_id,
+            default_max_turns=default_max_turns,
+        )
+
+    def _scoped(self, func, *args, **kwargs):
+        token = self._set_home(self.profile_home)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            self._reset_home(token)
+
+    @property
+    def state(self):
+        return self._manager.state
+
+    def __getattr__(self, name):
+        value = getattr(self._manager, name)
+        if not callable(value):
+            return value
+
+        def scoped_call(*args, **kwargs):
+            return self._scoped(value, *args, **kwargs)
+
+        return scoped_call
+
+    def _restore_state(self, snapshot) -> None:
+        from hermes_cli.goals import save_goal  # type: ignore
+
+        self._manager._state = snapshot
+        self._scoped(save_goal, self.session_id, snapshot)
+
+
+def _state_has_contract(state: Any) -> bool:
+    contract = getattr(state, "contract", None)
+    return contract is not None and not contract.is_empty()
+
+
+class _LegacyProfileGoalManager:
+    """Explicit-DB fallback for Hermes versions without profile context."""
 
     def __init__(self, session_id: str, *, profile_home: str | Path, default_max_turns: int = 20):
         if GoalState is None:
@@ -134,7 +256,7 @@ class _ProfileGoalManager:
             return f"✓ Goal done ({turns}): {s.goal}"
         return f"Goal ({s.status}, {turns}): {s.goal}"
 
-    def set(self, goal: str, *, max_turns: Optional[int] = None):
+    def set(self, goal: str, *, max_turns: Optional[int] = None, contract: Any = None):
         goal = (goal or "").strip()
         if not goal:
             raise ValueError("goal text is empty")
@@ -145,6 +267,7 @@ class _ProfileGoalManager:
             max_turns=int(max_turns) if max_turns else self.default_max_turns,
             created_at=time.time(),
             last_turn_at=0.0,
+            **({"contract": contract} if contract is not None else {}),
         )
         self._state = state
         self._save(state)
@@ -193,7 +316,9 @@ class _ProfileGoalManager:
         if judge_goal is None:
             verdict, reason = "continue", "goal judge unavailable"
         else:
-            verdict, reason = judge_goal(state.goal, str(last_response or ""))
+            # Judge against the parsed contract too: state.goal holds only the headline.
+            contract_kwargs = {"contract": state.contract} if _state_has_contract(state) else {}
+            verdict, reason, *_ = judge_goal(state.goal, str(last_response or ""), **contract_kwargs)
         state.last_verdict = verdict
         state.last_reason = reason
 
@@ -238,6 +363,10 @@ class _ProfileGoalManager:
     def next_continuation_prompt(self) -> Optional[str]:
         if not self._state or self._state.status != "active":
             return None
+        if _state_has_contract(self._state) and CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE:
+            return CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE.format(
+                goal=self._state.goal, contract_block=self._state.contract.render_block()
+            )
         return CONTINUATION_PROMPT_TEMPLATE.format(goal=self._state.goal)
 
 
@@ -246,7 +375,15 @@ def _manager(session_id: str, *, profile_home: str | Path | None = None):
         return None
     if profile_home and GoalManager is _NativeGoalManager and GoalState is not None:
         try:
-            return _ProfileGoalManager(
+            context_api = _native_profile_context_api(profile_home)
+            if context_api is not None:
+                return _ProfileGoalManager(
+                    session_id=session_id,
+                    profile_home=profile_home,
+                    default_max_turns=_default_max_turns(),
+                    context_api=context_api,
+                )
+            return _LegacyProfileGoalManager(
                 session_id=session_id,
                 profile_home=profile_home,
                 default_max_turns=_default_max_turns(),
@@ -407,6 +544,9 @@ def restore_goal_state(session_id: str, snapshot: Any, *, profile_home: str | Pa
             pass
         return
     if isinstance(mgr, _ProfileGoalManager):
+        mgr._restore_state(snapshot)
+        return
+    if isinstance(mgr, _LegacyProfileGoalManager):
         mgr._state = snapshot
         mgr._save(snapshot)
         return
@@ -416,6 +556,31 @@ def restore_goal_state(session_id: str, snapshot: Any, *, profile_home: str | Pa
         save_goal(str(session_id or ""), snapshot)
     except Exception as exc:  # pragma: no cover - native fallback only
         logger.debug("Goal state restore failed for %s: %s", session_id, exc)
+
+
+def is_goal_gate_command(args: str) -> bool:
+    """Return True when /goal args are a ``gate`` subcommand rather than goal text."""
+    words = str(args or "").split(None, 1)
+    return bool(words) and words[0].lower() == "gate"
+
+
+def goal_gate_refusal_payload(state: Any = None) -> Dict[str, Any]:
+    """Refuse /goal gate without touching the goal.
+
+    Gates are shell commands rerun after every turn with no later approval, and
+    WebUI has no rule yet for who may add them.
+    """
+    return _payload(
+        ok=False,
+        action="gate",
+        error="unsupported_gate",
+        message=(
+            "/goal gate is not supported in WebUI: gates run shell commands after every "
+            "turn without another approval. The current goal is unchanged. "
+            "To set a goal that starts with the word gate, use /goal -- followed by your goal text."
+        ),
+        state=state,
+    )
 
 
 def goal_command_payload(
@@ -432,8 +597,12 @@ def goal_command_payload(
     - /goal pause pauses
     - /goal resume resumes without auto-starting a turn
     - /goal clear|stop|done clears
+    - /goal gate ... is refused without touching the goal: gates run shell
+      commands after every turn and WebUI has no rule yet for who may add them
+    - /goal -- <text> sets goal text that starts with a control word
     - /goal <text> sets a new active goal and returns kickoff_prompt so the
-      caller can start the first normal user-role turn immediately.
+      caller can start the first normal user-role turn immediately. Inline
+      ``outcome:``/``verification:``/... lines become the completion contract.
     """
     sid = str(session_id or "").strip()
     if not sid:
@@ -500,6 +669,9 @@ def goal_command_payload(
             state=getattr(mgr, "state", None),
         )
 
+    if is_goal_gate_command(text):
+        return goal_gate_refusal_payload(getattr(mgr, "state", None))
+
     if stream_running:
         return _payload(
             ok=False,
@@ -511,8 +683,18 @@ def goal_command_payload(
             ),
         )
 
+    if text.split(None, 1)[0] == "--":
+        # `/goal -- <text>` sets goal text that starts with a control word.
+        text = text[2:].strip()
+    # Split inline contract lines off the headline the way Hermes Agent's
+    # /goal handler does; text without contract lines is stored verbatim.
+    goal_text, set_kwargs = text, {}
+    if parse_contract is not None:
+        headline, contract = parse_contract(text)
+        if not contract.is_empty():
+            goal_text, set_kwargs = headline or text, {"contract": contract}
     try:
-        state = mgr.set(text)
+        state = mgr.set(goal_text, **set_kwargs)
     except ValueError as exc:
         return _payload(ok=False, action="set", error="invalid_goal", message=f"Invalid goal: {exc}")
 
@@ -526,7 +708,8 @@ def goal_command_payload(
         message_key="goal_set",
         message_args=[state.max_turns, state.goal],
         state=state,
-        kickoff_prompt=state.goal,
+        # The first turn gets the whole text so it starts under the contract too.
+        kickoff_prompt=text if set_kwargs else state.goal,
     )
 
 
@@ -606,3 +789,250 @@ def evaluate_goal_after_turn(
     decision = dict(decision)
     decision = _goal_decision_payload(decision, getattr(mgr, "state", None))
     return decision
+
+
+# ── #6885 goal-continuation admission (single-record lifecycle) ─────────────
+# Round 2 (maintainer review 2026-09-26): the marker set and the prompt map
+# are one logical record. Writers register both under the lock; readers admit
+# a turn only after the wire text is normalized to the canonical semantic
+# user text. Helpers live here (not routes.py) because streaming.py,
+# gateway_chat.py and routes.py all mutate the pair — a shared module owned by
+# the goal domain keeps add/consume/sweep atomic in one place.
+from api import config as _cfg
+
+
+def _goal_continuation_normalize_wire_text(text: str) -> str:
+    """Strip the browser's transport decorations from an outgoing /chat/start
+    message, yielding the canonical semantic user text (#6885 round 2).
+
+    The browser rewrites the composer text before POSTing (static/messages.js
+    ``send()``): ``/use <skill>`` arms a directive, the forced-skill envelope
+    and the queued-continuation tail are all prepended to whatever the user
+    (or the queue) submitted, and file uploads append an attached-files
+    marker. The goal-continuation prompt recorded server-side is the RAW
+    semantic text, so the admission check must compare like with like or a
+    legitimate continuation fails the match and the marker pair leaks.
+
+    Server-side equivalent of static/sessions.js ``_stripForcedSkillEnvelope``
+    / ``_stripAttachedFilesMarker``; deliberately anchored so a user-authored
+    lookalike envelope in the middle of a message is NOT stripped (the front
+    text, before the first envelope, is only admitted when what remains is
+    exactly the continuation prompt).
+    """
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    # Leading `[USER OVERRIDE] ...` directive line (`/use`), line-anchored.
+    value = re.sub(r"^\[USER OVERRIDE\][^\n]*\n*", "", value).strip()
+    # Forced-skill envelope blocks, line-anchored at the front (repeat: a
+    # second consecutive envelope is still transport, not user content).
+    while True:
+        matched = re.match(
+            r"\[FORCED SKILL CONTEXT:[^\]]+\][\s\S]*?\[/FORCED SKILL CONTEXT\]\s*",
+            value,
+        )
+        if not matched:
+            break
+        value = value[matched.end():].strip()
+    # Attached-files tail appended by the upload path.
+    value = re.sub(r"\n\n\[Attached files: [^\]]+\]$", "", value).strip()
+    return value
+
+
+def register_pending_goal_continuation(session_id: str, continuation_prompt: str) -> str | None:
+    """Record a pending goal continuation as ONE marker+prompt+ID record.
+
+    Returns the continuation ID when a record was written (non-empty prompt),
+    or None when there was nothing to register — callers must only emit the
+    goal_continue SSE event when this returns a truthy ID so the frontend
+    queue and the server record cannot disagree.
+
+    The ID is the admission token (#7855): the browser carries it on the
+    queued entry through inline edits and combines, and /api/chat/start
+    validates it. A genuine user message never carries it, which is the
+    #6885 distinction. Matching on the prompt text is what previously
+    dropped the goal after an edit or a late send.
+
+    No wall-clock expiry (#7855): the browser deliberately keeps a queued
+    continuation — it survives a refresh and is restored into the composer
+    for the user to send later — so a TTL retired a continuation that was
+    still perfectly usable. A record now lives until it is consumed
+    (admitted-and-consumed by its ID) or explicitly retired (goal cleared /
+    session retired). Pause does NOT retire it — the resume path restores
+    the active goal with the same pending continuation, so clearing it on
+    pause silently stopped the goal loop (test_7855_regate_behaviour CORE 2).
+    """
+    session_id = str(session_id or "").strip()
+    prompt = str(continuation_prompt or "").strip()
+    if not session_id or not prompt:
+        return None
+    record = {
+        "prompt": prompt,
+        "continuation_id": uuid.uuid4().hex,
+    }
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        _cfg.PENDING_GOAL_CONTINUATION.add(session_id)
+        _cfg.PENDING_GOAL_CONTINUATION_PROMPTS[session_id] = record
+    return str(record["continuation_id"])
+
+
+def peek_pending_goal_continuation_id(session_id: str) -> str | None:
+    """Return the pending continuation ID for *session_id* without consuming.
+
+    Used by the gateway when it re-emits the goal_continue event for a
+    reconnecting stream so the browser and the server record agree.
+    """
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return None
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        record = _cfg.PENDING_GOAL_CONTINUATION_PROMPTS.get(session_id)
+        if not isinstance(record, dict):
+            return None
+        cont_id = str(record.get("continuation_id") or "").strip()
+        return cont_id or None
+
+
+def consume_pending_goal_continuation(session_id: str, msg: str) -> str | dict | bool | None:
+    """Admit the pending continuation record for *session_id* by its ID.
+
+    *msg* is the continuation ID issued by
+    :func:`register_pending_goal_continuation`. On a match the record is
+    removed, the turn becomes goal-related, and the consumed record is
+    returned as a **rollback receipt** (a dict, or the session id when only
+    the in-memory marker had no record half). Any other value (a genuine user
+    turn, or a queued turn whose entry lost its ID) keeps user priority and
+    the record stays for the browser's real dispatch; ``None`` or ``False``
+    is returned. Fails closed when no record is present.
+
+    Matching on the ID rather than the prompt text is the #7855 fix: the
+    browser's queue lets the user edit or combine a queued continuation, and
+    an exact-text comparison silently turned those into ordinary turns.
+    There is no wall-clock expiry — a late send (after any amount of time,
+    including across a refresh) is still admitted, because the browser
+    deliberately keeps queued continuations alive.
+
+    The receipt exists because a chat start can be rejected *after*
+    admission (#7249 rolls back rejected starts). Re-adding only the marker
+    on rollback — the pre-#7855 shape — left the retry unmatchable, because
+    admission also pops the record half. Returning both halves lets
+    :func:`restore_pending_goal_continuation` put the pair back together (see
+    its "newer continuation armed" guard).
+    """
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return False
+    incoming = str(msg or "").strip()
+    if not incoming:
+        return False
+    # A genuine user turn is arbitrary text (any language). Admission is by
+    # ID, so a non-ASCII-ineligible value can never match — reject it before
+    # compare_digest, which raises TypeError on non-ASCII input.
+    if any(c not in "0123456789abcdef" for c in incoming.lower()) or len(incoming) != 32:
+        return False
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        if session_id not in _cfg.PENDING_GOAL_CONTINUATION:
+            return False
+        record = _cfg.PENDING_GOAL_CONTINUATION_PROMPTS.get(session_id)
+        if not isinstance(record, dict):
+            # Marker without record (legacy/abnormal state): fail closed and
+            # clear the broken half so the session is not stuck (#6885).
+            _drop_pending_goal_continuation(session_id)
+            return False
+        cont_id = str(record.get("continuation_id") or "").strip()
+        if not cont_id:
+            # Legacy record without an ID (pre-#7855 process): fail closed and
+            # clear, so the session is not stuck with an unmatchable record.
+            _drop_pending_goal_continuation(session_id)
+            return False
+        if not secrets.compare_digest(cont_id, incoming):
+            # Mismatch: keep the record for the browser's real dispatch.
+            return False
+        _drop_pending_goal_continuation(session_id)
+        return dict(record)
+
+
+def restore_pending_goal_continuation(session_id: str, receipt) -> bool:
+    """Re-arm an admitted continuation from *receipt* (rollback path).
+
+    Called when a chat start that admitted a continuation is rejected
+    (#7249's transactional rollback). Restoring the marker without the
+    record — the pre-#7855 shape — left the retry unable to match, because
+    admission pops both halves.
+
+    The *newer continuation* guard is what keeps rollback honest: if another
+    ``register_pending_goal_continuation`` armed this session while the start
+    was in flight, this receipt is stale and must NOT overwrite the newer
+    record (that would burn a continuation the browser has not sent yet).
+    Restoring an older ID would also resurrect a consumed one.
+
+    ``receipt`` is what
+    :func:`consume_pending_goal_continuation` returned: the record dict, or
+    the session id when only the marker was present.
+    """
+    session_id = str(session_id or "").strip()
+    if not session_id or receipt is None or receipt is False:
+        return False
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        if session_id in _cfg.PENDING_GOAL_CONTINUATION_PROMPTS:
+            # A newer continuation is armed; keep it and drop the stale receipt.
+            return False
+        if isinstance(receipt, dict):
+            record = dict(receipt)
+            if not str(record.get("continuation_id") or "").strip():
+                return False
+        else:
+            # Marker-only admission (no popped record): re-arm the marker
+            # alone, matching #7249's rollback for the legacy half-pair.
+            record = None
+        _cfg.PENDING_GOAL_CONTINUATION.add(session_id)
+        if record is not None:
+            _cfg.PENDING_GOAL_CONTINUATION_PROMPTS[session_id] = record
+        return True
+
+
+def _drop_pending_goal_continuation(session_id: str) -> None:
+    """Remove both halves of the record. Caller holds the lock."""
+    _cfg.PENDING_GOAL_CONTINUATION.discard(session_id)
+    _cfg.PENDING_GOAL_CONTINUATION_PROMPTS.pop(session_id, None)
+
+
+def clear_pending_goal_continuation(session_id: str) -> None:
+    """Drop any pending continuation record for *session_id* (goal clear /
+    session-retirement paths). Pause deliberately does NOT clear it: the
+    resume path restores the active goal with the same pending continuation,
+    so clearing it on pause broke the resume retry (test_7855_regate_behaviour
+    CORE 2)."""
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        _drop_pending_goal_continuation(session_id)
+
+
+def sweep_expired_goal_continuations() -> int:
+    """Remove every orphaned continuation record; return count.
+
+    An orphan is a marker in the set whose record is missing — the reverse
+    (record without marker) is cleared here too, so the two halves cannot
+    drift apart. Safe to call from any thread; called from the /goal command
+    handler so the sweep runs on live traffic without a background timer.
+
+    There is no wall-clock sweep (#7855): the browser deliberately keeps a
+    queued continuation (it survives a refresh and is restored into the
+    composer for a later send), so a TTL retired continuations that were
+    still usable. Records end when they are consumed or the goal/session
+    explicitly retires them.
+    """
+    swept = 0
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        for session_id in list(_cfg.PENDING_GOAL_CONTINUATION_PROMPTS.keys()):
+            record = _cfg.PENDING_GOAL_CONTINUATION_PROMPTS.get(session_id)
+            if not isinstance(record, dict) or not str(record.get("continuation_id") or "").strip():
+                _drop_pending_goal_continuation(session_id)
+                swept += 1
+        for session_id in list(_cfg.PENDING_GOAL_CONTINUATION):
+            if session_id not in _cfg.PENDING_GOAL_CONTINUATION_PROMPTS:
+                _drop_pending_goal_continuation(session_id)
+                swept += 1
+    return swept

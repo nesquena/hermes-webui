@@ -101,9 +101,17 @@ def _captured_status(handler):
 class TestHandleChatSteerHappyPath:
     """Endpoint accepts text and calls agent.steer() when all gates pass."""
 
-    def test_accepts_when_agent_cached_and_running(self, _clear_caches):
+    def test_accepts_when_agent_cached_and_running(self, _clear_caches, monkeypatch):
         from api.streaming import _handle_chat_steer
-        from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK, STREAMS, STREAMS_LOCK
+        from api import config
+        from api.config import (
+            ACTIVE_RUNS,
+            ACTIVE_RUNS_LOCK,
+            SESSION_AGENT_CACHE,
+            SESSION_AGENT_CACHE_LOCK,
+            STREAMS,
+            STREAMS_LOCK,
+        )
         sid, stream_id = "sid_happy", "stream_happy"
         agent = MagicMock()
         agent.steer = MagicMock(return_value=True)
@@ -112,6 +120,11 @@ class TestHandleChatSteerHappyPath:
         with STREAMS_LOCK:
             import queue as _q
             STREAMS[stream_id] = _q.Queue()
+        # Cache-only Steer requires positive ownership: stream owner AND
+        # active-run session must both equal the requesting session.
+        monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {stream_id: sid})
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": "legacy", "phase": "running"}
 
         sess = MagicMock()
         sess.active_stream_id = stream_id
@@ -135,12 +148,14 @@ class TestHandleChatSteerFallbacks:
         assert body["accepted"] is False
         assert body["fallback"] == "no_cached_agent"
 
-    def test_gateway_owned_stream_without_cached_agent_queues_fallback(self, _clear_caches):
+    def test_gateway_owned_stream_without_cached_agent_queues_fallback(self, _clear_caches, monkeypatch):
         from api.streaming import _handle_chat_steer
+        from api import config
         from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK, STREAMS, STREAMS_LOCK
         import queue as _q
 
         sid, stream_id = "sid_gateway", "stream_gateway"
+        monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {stream_id: sid})
         with STREAMS_LOCK:
             STREAMS[stream_id] = _q.Queue()
         with ACTIVE_RUNS_LOCK:
@@ -226,10 +241,18 @@ class TestHandleChatSteerFallbacks:
         assert body["fallback"] == "stream_dead"
         agent.steer.assert_not_called()
 
-    def test_steer_raises(self, _clear_caches):
+    def test_steer_raises(self, _clear_caches, monkeypatch):
         """If agent.steer() raises, return steer_error rather than 500."""
         from api.streaming import _handle_chat_steer
-        from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK, STREAMS, STREAMS_LOCK
+        from api import config
+        from api.config import (
+            ACTIVE_RUNS,
+            ACTIVE_RUNS_LOCK,
+            SESSION_AGENT_CACHE,
+            SESSION_AGENT_CACHE_LOCK,
+            STREAMS,
+            STREAMS_LOCK,
+        )
         sid, stream_id = "sid_throws", "stream_throws"
         agent = MagicMock()
         agent.steer = MagicMock(side_effect=RuntimeError("boom"))
@@ -238,6 +261,9 @@ class TestHandleChatSteerFallbacks:
         with STREAMS_LOCK:
             import queue as _q
             STREAMS[stream_id] = _q.Queue()
+        monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {stream_id: sid})
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": "legacy", "phase": "running"}
         sess = MagicMock()
         sess.active_stream_id = stream_id
         with patch("api.streaming.get_session", return_value=sess):
@@ -840,6 +866,120 @@ class TestFrontendWiring:
         )
         subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
 
+    def test_old_owner_steer_recovery_persistence_rejection_is_consumed(self):
+        import json
+        import shutil
+        import subprocess
+        import textwrap
+
+        node = shutil.which("node")
+        if not node:  # pragma: no cover
+            pytest.skip("node not available")
+        assert node is not None
+
+        steer_src = _source_between(
+            self.cmds,
+            "function _steerUploadedAttachmentPaths",
+            "\nasync function cmdTitle",
+        )
+        sessions_src = (Path(__file__).parent.parent / "static" / "sessions.js").read_text(encoding="utf-8")
+        failure_src = _source_between(
+            sessions_src,
+            "function _handleComposerDraftPostFailure(",
+            "\nfunction _postComposerDraftPayload",
+        )
+        failure_src += "\n" + _source_between(
+            sessions_src,
+            "function _composerDraftHasPayload(",
+            "\nfunction _sessionComposerDraftHasPayload",
+        )
+
+        script = textwrap.dedent(
+            """
+            const assert = require('assert');
+            let unhandled = 0;
+            process.on('unhandledRejection', () => { unhandled += 1; });
+
+            const failureSrc = %(failure_src)s;
+            const steerSrc = %(steer_src)s;
+            const toasts = [];
+            const saveCalls = [];
+            const known = new Set();
+            const pending = [{name:'steer-a', size:1}];
+            const originalText = 'recover me';
+
+            let S = {
+              session: {session_id:'A', active_stream_id:'stream-1'},
+              activeStreamId: 'stream-1',
+              activeProfile: 'work',
+              busy: true,
+              pendingFiles: [...pending],
+            };
+            let INFLIGHT = {A:{messages:[]}};
+
+            function t(k){ return k; }
+            function $(id) { return null; }
+            function autoResize() {}
+            function renderTray() {}
+            function updateSendBtn() {}
+            function _showSteerRecovery() {}
+            function _steerFailureMessageKey(fallback){ return 'steer_fail_'+fallback; }
+            function _clearComposerDraft() {}
+            function setComposerStatus() {}
+            function showToast(key) { toasts.push(key); }
+            const _composerDraftKnownPayloadSessions = known;
+            eval(failureSrc);
+            eval(steerSrc);
+
+            _steerOwnerIsCurrent = () => false;
+            _saveComposerDraftNow = (sid, text, files) => {
+              saveCalls.push({sid, text, files: (Array.isArray(files)?files.filter(Boolean):[])});
+              return Promise.reject(new Error('steer save failed'));
+            };
+            api = async (url, options) => {
+              assert.strictEqual(url, '/api/chat/steer');
+              return {accepted:false, fallback:'stream_dead'};
+            };
+            uploadPendingFiles = async () => [];
+
+            (async()=> {
+              const delivered = await _trySteer(originalText, false);
+              assert.strictEqual(delivered, false);
+              await Promise.resolve();
+              const draft = S.session && S.session.composer_draft ? S.session.composer_draft : null;
+              console.log(JSON.stringify({
+                unhandled,
+                toasts,
+                saveCalls,
+                draft,
+                knownPayload: known.has('A'),
+                busy: S.busy,
+                activeStreamId: S.activeStreamId,
+                activeSessionStream: S.session && S.session.active_stream_id,
+              }));
+            })().catch(err => { console.log(JSON.stringify({error: String(err && err.message || err || 'failure')})); });
+            """
+        ) % {
+            "steer_src": json.dumps(steer_src),
+            "failure_src": json.dumps(failure_src),
+        }
+
+        proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+        out = json.loads(proc.stdout.strip())
+        assert out["unhandled"] == 0
+        assert out["toasts"] == []
+        assert out["saveCalls"] == [{
+            "sid": "A",
+            "text": "recover me",
+            "files": [{"name": "steer-a", "size": 1}],
+        }], out
+        assert out["knownPayload"] is True
+        assert out["busy"] is True
+        assert out["activeStreamId"] == "stream-1"
+        assert out["activeSessionStream"] == "stream-1"
+        assert out["draft"] == {"text": "recover me", "files": [{"name": "steer-a", "size": 1}]}
+
     def test_send_busy_steer_accepts_file_only_input(self):
         idx = self.msgs.find("if(S.busy||compressionRunning)")
         assert idx >= 0
@@ -1000,7 +1140,7 @@ class TestLeftoverDelivery:
         on the same turn."""
         src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(encoding="utf-8")
         # Find the drain invocation and the next put('done', ...) AFTER it
-        drain_idx = src.find("_drain_pending_steer()")
+        drain_idx = src.find("_settle_pending_steer()", src.index("    def put(event, data):", src.index("def _run_agent_streaming(")))
         assert drain_idx >= 0
         done_idx = src.find("put('done'", drain_idx)
         assert done_idx >= 0
