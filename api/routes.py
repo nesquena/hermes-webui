@@ -14898,6 +14898,7 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     finish_session_yolo_transition,
     gateway_pending_mirror,
     gateway_pending_mirrors,
+    any_protected_approval,
     pending_protected_approval,
     release_gateway_approval_relay_owner,
     retire_gateway_pending_mirror,
@@ -35470,6 +35471,15 @@ def _enable_session_yolo_and_release_pending(
                 stale_cleared = not exact_owner
 
             run_mirrors = gateway_pending_mirrors(sid)
+            if any_protected_approval(run_mirrors):
+                return _gateway_approval_failure(
+                    sid,
+                    choice,
+                    code="gateway_protected_approval_pending",
+                    error=_GATEWAY_PROTECTED_APPROVAL_PENDING,
+                    status=409,
+                    enable_yolo=True,
+                )
             relayed = 0
             for mirror in run_mirrors:
                 relay_payload, relay_status = _relay_gateway_run_approval(

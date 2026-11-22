@@ -1227,6 +1227,18 @@ def is_protected_approval(approval) -> bool:
     return str(approval.get("surface") or "").strip().lower() in _PROTECTED_APPROVAL_SURFACES
 
 
+def any_protected_approval(approvals) -> bool:
+    """True when any approval in the collection asks for consent instead of command authorization (#9108)."""
+    if not approvals:
+        return False
+    return any(
+        is_protected_approval(
+            getattr(entry, "data", entry) if not isinstance(entry, dict) else entry
+        )
+        for entry in approvals
+    )
+
+
 def pending_protected_approval(session_key: str) -> bool:
     """True when the session parks any protected (elicitation/publish) approval.
 
@@ -1237,12 +1249,11 @@ def pending_protected_approval(session_key: str) -> bool:
     """
     with _lock:
         reconcile_gateway_pending_mirror_locked(session_key)
-        for entry in _gateway_queues.get(session_key) or []:
-            if is_protected_approval(getattr(entry, "data", None)):
-                return True
+        if any_protected_approval(_gateway_queues.get(session_key) or []):
+            return True
         queue = _pending.get(session_key)
         entries = queue if isinstance(queue, list) else [queue] if queue else []
-        return any(is_protected_approval(entry) for entry in entries if isinstance(entry, dict))
+        return any_protected_approval(entries)
 
 
 def resolve_gateway_pending_local_all(
