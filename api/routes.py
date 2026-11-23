@@ -1317,6 +1317,32 @@ def _get_disabled_skill_names_for_profile() -> set:
     return _normalize_disabled_set(skills_cfg.get("disabled"))
 
 
+def _get_disabled_plugins_for_profile() -> set:
+    """Read ``plugins.disabled`` for the requesting profile.
+
+    Native plugin-skill serving (``tools/skills_tool_plugin._serve_plugin_skill``)
+    refuses a skill whose OWNING plugin is in this deny-list, so the WebUI
+    listing must report the same policy instead of trusting the warmed plugin
+    registry membership alone (PR #7781 review, 2026-11-23 follow-up).
+
+    ``hermes_cli.plugins._get_disabled_plugins`` reads the process-global
+    Hermes config, so callers invoke this inside
+    ``_plugin_manager_home_context()`` to bind the requesting profile's home.
+    Fail-soft: an isolated WebUI (no hermes_cli) or an unreadable config
+    reports an empty set so warm rows keep their pre-existing state.
+    """
+    try:
+        from hermes_cli.plugins import _get_disabled_plugins
+
+        return {
+            str(name).strip()
+            for name in (_get_disabled_plugins() or ())
+            if str(name).strip()
+        }
+    except Exception:
+        return set()
+
+
 def _parse_config_string_list(value) -> list:
     """Decode a config value that may hold a JSON-array string into a list.
 
@@ -15752,11 +15778,31 @@ def _list_plugin_skills_for_response(manager=None) -> list:
                 entries = pm.list_plugin_skill_metadata() or []
             except Exception:
                 return []
+            # #7781 review follow-up: ``plugins.disabled`` is per-profile, so
+            # read it under the same home scope as discovery. A failure here
+            # must not 500 the listing (fail-soft below).
+            try:
+                plugin_disabled = _get_disabled_plugins_for_profile()
+            except Exception:
+                plugin_disabled = set()
     except Exception:
         return []
     if not isinstance(entries, list):
         return []
     disabled = _get_disabled_skill_names_for_profile()
+    # Native serving refuses a plugin skill whose OWNING plugin is disabled
+    # (``_serve_plugin_skill``: ``plugin_skill_owners(manager, qualified) &
+    # _get_disabled_plugins()``). Mirror that policy so a warm registry row
+    # whose plugin moved into ``plugins.disabled`` is MARKED disabled rather
+    # than advertised as usable. The owner lookup needs the registry map, so
+    # it is resolved once here and stays fail-soft: without it the row keeps
+    # its previous ``skills.disabled`` verdict.
+    _plugin_skill_owner_of = None
+    if plugin_disabled:
+        try:
+            from hermes_cli.plugins_content import plugin_skill_owners as _plugin_skill_owner_of
+        except Exception:
+            _plugin_skill_owner_of = None
     out: list = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -15781,6 +15827,14 @@ def _list_plugin_skills_for_response(manager=None) -> list:
         # toggle state the same way it does for directory skills.
         if not skill_matches_platform(frontmatter):
             continue
+        row_disabled = raw_name in disabled
+        if not row_disabled and _plugin_skill_owner_of is not None:
+            # Owner-plugin policy (``plugins.disabled``): native serving denies
+            # the skill, so the row must not claim ``disabled: false``.
+            try:
+                row_disabled = bool(_plugin_skill_owner_of(pm, raw_name) & plugin_disabled)
+            except Exception:
+                row_disabled = False
         out.append(
             {
                 "name": raw_name,
@@ -15788,7 +15842,7 @@ def _list_plugin_skills_for_response(manager=None) -> list:
                 "category": "plugin",
                 "plugin": namespace,
                 "source": "plugin",
-                "disabled": raw_name in disabled,
+                "disabled": row_disabled,
             }
         )
     return out

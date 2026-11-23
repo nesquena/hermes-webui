@@ -59,11 +59,14 @@ pytestmark = requires_agent_modules
 
 class _FakePluginManager:
     def __init__(self, skills=None, find_paths=None, raise_on_list=False,
-                 raise_on_find=False, raise_on_discover=False):
+                 raise_on_find=False, raise_on_discover=False, plugin_skills=None):
         # skills: list[dict] of plugin-skill metadata
         # find_paths: dict[qualified_name -> Path]
         self._skills = list(skills or [])
         self._find_paths = dict(find_paths or {})
+        # Mirrors the real PluginManager registry map that
+        # ``plugin_skill_owners`` reads for plugin-key/name identity.
+        self._plugin_skills = dict(plugin_skills or {})
         self._raise_on_list = raise_on_list
         self._raise_on_find = raise_on_find
         self._raise_on_discover = raise_on_discover
@@ -462,6 +465,98 @@ class TestListPluginSkillsForResponse:
                 "disabled": False,
             },
         ]
+
+    def test_owning_plugin_in_plugins_disabled_marks_rows_disabled(self):
+        # PR #7781 review (2026-11-23) follow-up: a warmed registry entry must
+        # not keep reporting ``disabled: false`` once its OWNING plugin lands
+        # in the profile's ``plugins.disabled`` — native plugin-skill serving
+        # (``_serve_plugin_skill``) refuses exactly that combination.
+        manager = _FakePluginManager(skills=[
+            {"name": "reviewdemo:under_score", "description": "Warmed skill"},
+        ])
+        manager._plugin_skills = {
+            "reviewdemo:under_score": {
+                "plugin_key": "reviewdemo",
+                "plugin_name": "reviewdemo",
+            },
+        }
+        import api.routes as routes
+        with patch(
+            "api.routes._get_disabled_skill_names_for_profile",
+            return_value=set(),
+        ), patch(
+            "api.routes._get_disabled_plugins_for_profile",
+            return_value={"reviewdemo"},
+        ):
+            entries = routes._list_plugin_skills_for_response(manager=manager)
+        assert [e["disabled"] for e in entries] == [True], entries
+
+    def test_owning_plugin_disable_matches_manifest_name_spelling(self):
+        # ``plugins.disabled`` may name the plugin by its manifest name while
+        # the registry entry carries a path-derived key. The owner lookup must
+        # cover both spellings (mirrors ``plugin_skill_owners``).
+        manager = _FakePluginManager(skills=[
+            {"name": "superpowers:brainstorming", "description": "B"},
+        ])
+        manager._plugin_skills = {
+            "superpowers:brainstorming": {
+                "plugin_key": "user/superpowers",
+                "plugin_name": "superpowers",
+            },
+        }
+        import api.routes as routes
+        with patch(
+            "api.routes._get_disabled_skill_names_for_profile",
+            return_value=set(),
+        ), patch(
+            "api.routes._get_disabled_plugins_for_profile",
+            return_value={"superpowers"},
+        ):
+            entries = routes._list_plugin_skills_for_response(manager=manager)
+        assert [e["disabled"] for e in entries] == [True], entries
+
+    def test_plugin_disable_policy_leaves_unrelated_plugin_rows_enabled(self):
+        manager = _FakePluginManager(skills=[
+            {"name": "alpha:one", "description": "A"},
+            {"name": "beta:two", "description": "B"},
+        ])
+        manager._plugin_skills = {
+            "alpha:one": {"plugin_key": "alpha", "plugin_name": "alpha"},
+            "beta:two": {"plugin_key": "beta", "plugin_name": "beta"},
+        }
+        import api.routes as routes
+        with patch(
+            "api.routes._get_disabled_skill_names_for_profile",
+            return_value=set(),
+        ), patch(
+            "api.routes._get_disabled_plugins_for_profile",
+            return_value={"alpha"},
+        ):
+            entries = routes._list_plugin_skills_for_response(manager=manager)
+        assert {e["name"]: e["disabled"] for e in entries} == {
+            "alpha:one": True,
+            "beta:two": False,
+        }, entries
+
+    def test_plugin_disable_policy_lookup_failure_keeps_rows_enabled(self):
+        # Fail-soft: an isolated WebUI (no hermes_cli) or an unreadable config
+        # must not flip every warm row to disabled.
+        manager = _FakePluginManager(skills=[
+            {"name": "reviewdemo:under_score", "description": "Warmed"},
+        ])
+        manager._plugin_skills = {
+            "reviewdemo:under_score": {"plugin_key": "reviewdemo"},
+        }
+        import api.routes as routes
+        with patch(
+            "api.routes._get_disabled_skill_names_for_profile",
+            return_value=set(),
+        ), patch(
+            "api.routes._get_disabled_plugins_for_profile",
+            side_effect=RuntimeError("config unreadable"),
+        ):
+            entries = routes._list_plugin_skills_for_response(manager=manager)
+        assert [e["disabled"] for e in entries] == [False], entries
 
     def test_filters_entries_without_a_namespace_separator(self):
         # An un-qualified name would be ambiguous against a local skill and
