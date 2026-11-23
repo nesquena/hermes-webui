@@ -696,7 +696,7 @@ def test_run_agent_streaming_turns_overlap_when_skill_manager_shares_skills_tool
     monkeypatch.setattr(
         _streaming,
         "resolve_model_provider",
-        lambda model_with_provider_context, explicitly_picked=None: (model_with_provider_context, None, None),
+        lambda model_with_provider_context, explicitly_picked=None, session_provider=None: (model_with_provider_context, None, None),
     )
     monkeypatch.setattr(_streaming, "_runtime_preferred_base_url", lambda rt, provider, configured_base_url: configured_base_url)
     monkeypatch.setattr(
