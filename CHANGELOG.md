@@ -41,6 +41,8 @@
 
 ### Fixed
 
+- **Saving a default model from a provider's pinned model group in Settings no longer breaks every later chat (#9304, fixes #9300).** The picker can send the group's id (for example `nous:meituan/longcat-2.5`) as the provider; it was written into `config.yaml` unchanged, and the WebUI and the CLI then refused every turn with an unknown-provider error until the file was edited by hand. The save now keeps only the provider (`nous`), and a provider your config declares under a name with a colon (for example `openrouter:eu`) is kept as is. Thanks @zhangkom.
+
 - **A full disk or quota now shows "Storage on the server is full" instead of "Internal server error" (#9169, closes #9167).** Thanks @angelusbr. When a write fails with no space left (ENOSPC) or over quota (EDQUOT), the server answers HTTP 507 with a message that says to free up space, and the chat shows it. Freeing space is enough; no restart is needed. `docs/troubleshooting.md` has the recovery steps.
 
 - **When Hermes Agent declines to claim an external memory provider while WebUI builds a session's agent, that refusal is now recorded (#9240, refs #9061).** Thanks @chhxbchhxb. WebUI already recorded its own cross-profile refusals, but not the Agent's, so the session's memory status read as normal although the provider was gone. Built-in memory is unaffected.
