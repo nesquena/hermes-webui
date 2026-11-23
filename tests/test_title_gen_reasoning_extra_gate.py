@@ -209,6 +209,9 @@ class TestAuxReasoningExtraRouteContract:
              ('openrouter', 'deepseek/deepseek-r1:free', None), {'reasoning': {'enabled': False}}),
             ('auto', '@custom:relay:vendor/model:thinking', 'https://relay.example/v1', 'openai', 'gpt-5', '',
              ('custom:relay', 'vendor/model:thinking', 'https://relay.example/v1'), None),
+            # A concrete provider keeps its route; the picker hint names only the model.
+            ('custom:relay', '@openrouter:deepseek/deepseek-r1:free', 'https://relay.example/v1', 'openai', 'gpt-5', '',
+             ('custom:relay', 'deepseek/deepseek-r1:free', 'https://relay.example/v1'), None),
             ('auto', '', '', 'minimax', 'MiniMax-M2.5', 'https://api.minimaxi.com/v1',
              ('minimax', 'MiniMax-M2.5', 'https://api.minimaxi.com/v1'),
              {'reasoning': {'enabled': False}, 'reasoning_split': True}),
@@ -1788,3 +1791,95 @@ class TestRealAgentTitleRouteOverHttp:
         assert [(r['path'], _sent_key(r), r['model']) for r in wire.requests] == [
             (expected_path, expected_key, 'main-model'),
         ]
+
+    @staticmethod
+    def _loopback_only(monkeypatch, aux, wire):
+        """Send OpenRouter's built-in endpoint to the loopback and refuse any other host."""
+        import socket
+
+        monkeypatch.setattr(aux, 'OPENROUTER_BASE_URL', wire.url + '/openrouter/v1')
+        resolve = socket.getaddrinfo
+
+        def loopback_only(host, *args, **kwargs):
+            if host not in ('127.0.0.1', 'localhost'):
+                raise OSError(f'refused a request to {host}')
+            return resolve(host, *args, **kwargs)
+
+        monkeypatch.setattr(socket, 'getaddrinfo', loopback_only)
+
+    @pytest.mark.parametrize(('provider', 'model', 'expected'), (
+        # A concrete configured provider keeps its endpoint and key; the
+        # picker hint names only the model, parsed with the shared grammar.
+        (
+            'custom:private', '@openrouter:vendor/title-model:free',
+            ('/private/v1/chat/completions', 'title-task-key', 'vendor/title-model:free'),
+        ),
+        (
+            'custom:private', '@custom:private:title-model',
+            ('/private/v1/chat/completions', 'title-task-key', 'title-model'),
+        ),
+        # An implicit provider still takes the picker's.
+        (
+            'auto', '@openrouter:vendor/title-model:free',
+            ('/openrouter/v1/chat/completions', 'title-task-key', 'vendor/title-model:free'),
+        ),
+    ))
+    def test_picker_title_model_keeps_a_concrete_configured_provider(
+        self, real_agent_wire, monkeypatch, provider, model, expected,
+    ):
+        wire = real_agent_wire.wire
+        self._loopback_only(monkeypatch, real_agent_wire.aux, wire)
+        real_agent_wire.write_config({
+            'model': self._main_route(wire.url + '/main/v1'),
+            'custom_providers': [{
+                'name': 'private', 'base_url': wire.url + '/private/v1',
+                'api_key': 'custom-key',
+            }],
+            'auxiliary': {'title_generation': {
+                'provider': provider, 'model': model, 'api_key': 'title-task-key',
+            }},
+        })
+
+        assert generate_title_raw_via_aux('question', 'answer') == ('Wire Title', 'llm_aux')
+
+        assert [(r['path'], _sent_key(r), r['model']) for r in wire.requests] == [expected]
+
+    @pytest.mark.parametrize(('provider', 'model', 'expected'), (
+        # An ambiguous configured provider is refused whatever the hint names.
+        ('openai', '@custom:private:title-model', None),
+        # A hint's ambiguous name does not refuse a concrete provider's route.
+        (
+            'custom:private', '@openai:title-model',
+            ('/private/v1/chat/completions', 'title-task-key', 'title-model'),
+        ),
+        # An implicit provider is judged on the hint's name.
+        ('auto', '@openai:title-model', None),
+    ))
+    def test_provider_name_ambiguity_is_judged_on_the_routed_provider(
+        self, real_agent_wire, monkeypatch, provider, model, expected,
+    ):
+        wire = real_agent_wire.wire
+        self._loopback_only(monkeypatch, real_agent_wire.aux, wire)
+        real_agent_wire.write_config({
+            'model': self._main_route(wire.url + '/main/v1'),
+            # Two records claim the built-in name openai (#8690).
+            'providers': {
+                'custom:openai': {'base_url': wire.url + '/named/v1', 'api_key': 'named-key'},
+                'openai': {'base_url': wire.url + '/openai/v1', 'api_key': 'openai-key'},
+            },
+            'custom_providers': [{
+                'name': 'private', 'base_url': wire.url + '/private/v1',
+                'api_key': 'custom-key',
+            }],
+            'auxiliary': {'title_generation': {
+                'provider': provider, 'model': model, 'api_key': 'title-task-key',
+            }},
+        })
+
+        result = generate_title_raw_via_aux('question', 'answer')
+
+        sent = [(r['path'], _sent_key(r), r['model']) for r in wire.requests]
+        if expected is None:
+            assert (result, sent) == ((None, 'provider_name_ambiguous_aux'), [])
+        else:
+            assert (result, sent) == (('Wire Title', 'llm_aux'), [expected])

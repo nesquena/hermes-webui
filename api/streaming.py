@@ -6893,6 +6893,10 @@ def _aux_title_model_on_route(
     return title_model or route_model
 
 
+# Configured title providers that leave the route to a picker hint or the Agent.
+_AUX_TITLE_IMPLICIT_PROVIDERS = frozenset({'', 'auto', 'local'})
+
+
 def _effective_aux_title_route(
     provider: str, model: str, base_url: str, *,
     resolved_credentials: Optional[dict] = None,
@@ -6913,17 +6917,21 @@ def _effective_aux_title_route(
     supplied_model = str(model or '').strip()
     supplied_base_url = str(base_url or '').strip()
     provider_lower = supplied_provider.lower()
-    implicit_route = provider_lower in {'', 'auto', 'local'}
+    implicit_route = provider_lower in _AUX_TITLE_IMPLICIT_PROVIDERS
     picker_route = supplied_model.startswith('@')
 
     if picker_route:
-        # Picker IDs carry an explicit provider hint. Parse the shared grammar
-        # but leave endpoint/key resolution to the Agent in the active profile;
+        # Picker IDs carry a provider hint. Parse the shared grammar but leave
+        # endpoint/key resolution to the Agent in the active profile;
         # resolve_model_provider() reads WebUI's ambient cfg (often root).
+        # The hint names the provider only for an implicit route: a concrete
+        # configured provider keeps its endpoint and key.
         from api.config import _parse_provider_qualified_model_id
         parsed = _parse_provider_qualified_model_id(supplied_model)
         if parsed is not None:
             picked_model, picked_provider = parsed
+            if not implicit_route:
+                picked_provider = supplied_provider
             return picked_provider, picked_model, supplied_base_url
 
     if supplied_base_url and not picker_route:
@@ -7435,12 +7443,15 @@ def generate_title_raw_via_aux(
         provider = ''
     model = model or configured.get('model', '') or ''
     base_url = base_url or configured.get('base_url', '') or ''
-    # Judge the provider name call_llm will hand the Agent (#8690). A picker
-    # model carries it in its @provider: prefix; _effective_aux_title_route
-    # parses the same grammar below.
+    # Judge the provider name call_llm will hand the Agent (#8690). For an
+    # implicit provider a picker model carries it in its @provider: prefix;
+    # _effective_aux_title_route applies the same grammar and precedence below.
     route_name = provider
     picked_route = _parse_provider_qualified_model_id(model)
-    if picked_route is not None:
+    if (
+        picked_route is not None
+        and str(provider).strip().lower() in _AUX_TITLE_IMPLICIT_PROVIDERS
+    ):
         route_name = picked_route[1]
     if _title_provider_name_ambiguous(route_name, base_url):
         return None, 'provider_name_ambiguous_aux'

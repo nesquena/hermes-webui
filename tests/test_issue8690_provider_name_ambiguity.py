@@ -900,6 +900,22 @@ def test_a_picker_title_model_is_judged_by_its_provider_hint(monkeypatch, aux_ca
     assert bool(aux_calls) is not refused
 
 
+@pytest.mark.parametrize("provider, model, refused", [
+    ("openai", "@anthropic:gpt-synthetic", True),   # a concrete provider keeps its name
+    ("anthropic", "@openai:gpt-synthetic", False),  # the hint names only the model
+    ("local", "@openai:gpt-synthetic", True),       # implicit: the hint's provider
+])
+def test_a_picker_title_model_keeps_a_concrete_provider_for_the_guard(monkeypatch, aux_calls, provider, model, refused):
+    """The guard judges the provider the request goes to, so a configured provider
+    other than blank, ``auto`` or ``local`` wins over the picker's hint."""
+    _title_route(monkeypatch, {"provider": provider, "model": model},
+                 _records("openai", "named-first"), main_provider="anthropic")
+    raw, status = streaming.generate_title_raw_via_aux("hello there", "hi, how can I help")
+    assert (status == TITLE_REFUSED) is refused
+    assert {(c["provider"], c["model"]) for c in aux_calls} == (
+        set() if refused else {(provider, "gpt-synthetic")})
+
+
 # ── Codex r4: the title guard reads the profile the Agent's call_llm will load ──
 
 

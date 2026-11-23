@@ -241,6 +241,11 @@ must consume that same resolved route.
 
 - A configured explicit provider/model/base URL is injected into the auxiliary
   request. A caller-supplied route does not receive the configured task API key.
+- A `@provider:model` title model is parsed with the shared picker grammar
+  and sent without its prefix. Its provider names the route only when the
+  configured provider is implicit (blank, `auto` or `local`); a concrete
+  configured provider keeps its route, endpoint and key. The provider-name
+  ambiguity check judges that same provider.
 - A blank provider plus an explicit base URL and non-picker model is an
   Agent-custom route. Preserve its blank provider, model, and URL; never borrow
   the main chat provider or model.
