@@ -167,11 +167,20 @@ def _runtime_after_save(monkeypatch, shape: str, route: str):
     return lambda: resolve_runtime_provider_with_anthropic_env_lock(runtime_provider.resolve_runtime_provider)
 
 
+# What the Agent raises for each switched-off shape: an alias it no longer knows (hermes_cli AuthError, a
+# RuntimeError) and a mapping key marked disabled (ValueError).
+SWITCHED_OFF_REFUSALS = {
+    "name_alias_off": (RuntimeError, r"Unknown provider 'openrouter:eu'"),
+    "key_off": (ValueError, r"'openrouter:eu' is disabled in config"),
+}
+
+
 @pytest.mark.parametrize("route", sorted(SAVE_ROUTES))
-@pytest.mark.parametrize("shape", ["name_alias_off", "key_off"])
+@pytest.mark.parametrize("shape", sorted(SWITCHED_OFF_REFUSALS))
 def test_switched_off_declaration_stays_unresolvable_after_save(monkeypatch, shape, route):
     resolve = _runtime_after_save(monkeypatch, shape, route)
-    with pytest.raises(Exception):
+    expected, message = SWITCHED_OFF_REFUSALS[shape]
+    with pytest.raises(expected, match=message):
         resolve()
 
 
