@@ -1556,6 +1556,10 @@ _PROVIDER_ALIASES = {
     "moonshot": "kimi-coding",
     "claude": "anthropic",
     "claude-code": "anthropic",
+    "chatgpt": "openai-codex",
+    "chatgpt-codex": "openai-codex",
+    "novita-ai": "novita",
+    "novitaai": "novita",
     "deep-seek": "deepseek",
     "minimax-china": "minimax-cn",
     "minimax_cn": "minimax-cn",
@@ -3743,6 +3747,14 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         _active_slug = _canon_config_provider
         for slug, pdef in providers_cfg.items():
             if not isinstance(pdef, dict):
+                continue
+            # A record the user switched off is invisible to the Agent's
+            # resolver, so it must not own a WebUI route either: skip it here
+            # so the chat routes as if that record didn't list the model
+            # (#8954). Without this the scan first-matches the switched-off
+            # spelling and pairs the ENABLED record's key with the disabled
+            # record's base_url.
+            if not _raw_provider_record_enabled(pdef):
                 continue
             if target not in _configured_model_ids(pdef.get('models')):
                 continue
@@ -14582,6 +14594,7 @@ _SETTINGS_DEFAULTS = {
     "send_key": "enter",  # 'enter', 'ctrl+enter', or 'shift+enter'
     "show_token_usage": False,  # show input/output token badge below assistant messages
     "show_quota_chip": False,  # show ambient provider quota chip in composer footer (default off; wide desktop only when enabled, see style.css @media)
+    "quota_chip_window": "most_constrained",  # most_constrained | shortest | longest: which account window the quota chip shows
     "show_conversation_outline": False,  # show opt-in desktop jump-to-question outline panel
     "show_busy_placeholder_hint": False,  # opt-in busy composer placeholder hint
     "hide_empty_state_suggestions": False,  # hide the default new-chat suggestion buttons
@@ -14936,6 +14949,7 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter", "shift+enter"},
     "sidebar_density": {"compact", "detailed"},
+    "quota_chip_window": {"most_constrained", "shortest", "longest"},
     "update_channel": {"stable", "experimental"},
     "font_size": {"small", "default", "large", "xlarge"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},

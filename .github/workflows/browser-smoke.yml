@@ -168,6 +168,10 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_terminal_screen_reader_mode.py
 
+      - name: Run share hidden-text gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_share_hidden_text.py
+
       - name: Run composer status label gate
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_composer_status_label.py

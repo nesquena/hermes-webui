@@ -114,3 +114,143 @@ def test_refusal_helper_is_false_off_gateway(monkeypatch):
 
     monkeypatch.delenv("HERMES_WEBUI_CHAT_BACKEND", raising=False)
     assert not refuse_on_gateway_backend(object(), "/btw", {})
+
+
+@pytest.fixture
+def captured_route_j(monkeypatch):
+    """Capture the payload returned through ``routes.j`` (success responses)."""
+    box = {}
+
+    def fake_j(handler, payload, status=200, extra_headers=None, *, pretty=True):
+        box["payload"] = payload
+        box["status"] = status
+        return True
+
+    monkeypatch.setattr(routes, "j", fake_j)
+    return box
+
+
+def _prime_handoff_summary(monkeypatch):
+    """Stub the state reads the handoff handler performs before the model call."""
+    from api import models
+
+    msgs = [
+        {"role": "user", "content": "Please fix the failing build", "timestamp": 1},
+        {"role": "assistant", "content": "Build fixed; tests pass", "timestamp": 2},
+    ]
+    monkeypatch.setattr(models, "get_cli_session_messages", lambda _sid: msgs)
+    monkeypatch.setattr(
+        models, "count_conversation_rounds", lambda _sid, since=None: 10
+    )
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "_persist_handoff_summary", lambda *a, **k: {})
+
+
+def _stub_model_resolution(monkeypatch):
+    """Make execution reach in-process agent construction deterministically.
+
+    The handler imports the agent runtime lazily and wraps the whole model
+    path in ``except Exception`` → fallback, so without these stubs a missing
+    module would make both backend modes return the fallback and the
+    gateway/no-agent assertion below would pass for the wrong reason.
+    """
+    import types
+
+    import api.config as api_config
+    import api.oauth as api_oauth
+
+    fake_runtime_provider = types.ModuleType("hermes_cli.runtime_provider")
+    fake_runtime_provider.resolve_runtime_provider = lambda *a, **k: {}
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.runtime_provider = fake_runtime_provider
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(
+        sys.modules, "hermes_cli.runtime_provider", fake_runtime_provider
+    )
+    monkeypatch.setattr(routes, "ensure_agent_runtime_current", lambda: None)
+    monkeypatch.setattr(routes, "require_ai_agent_class", lambda: object)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_agent_connection_bundle",
+        lambda provider, api_key, base_url, _rt: {
+            "provider": provider,
+            "api_key": api_key,
+            "base_url": base_url,
+        },
+    )
+    monkeypatch.setattr(routes, "_agent_bundle_kwargs", lambda _cls, _bundle: {})
+    monkeypatch.setattr(
+        api_config, "model_with_provider_context", lambda model, provider: model
+    )
+    monkeypatch.setattr(
+        api_config, "resolve_model_provider", lambda _model: ("m", "openai", None)
+    )
+    monkeypatch.setattr(
+        api_oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda _fn, requested=None: {"api_key": "test-key", "provider": "openai"},
+    )
+
+
+def test_handoff_summary_never_builds_an_agent_in_gateway_mode(
+    monkeypatch, captured_route_j, gateway_mode
+):
+    """#8971 item 2: gateway mode returns the deterministic fallback.
+
+    The handler exists for gateway sessions, so the fix is the local fallback,
+    not a 409 — but it must never construct the in-process helper agent that
+    calls the model outside the gateway and the session's profile.
+    """
+    _prime_handoff_summary(monkeypatch)
+    _stub_model_resolution(monkeypatch)
+
+    built = []
+
+    def record_agent_construction(*args, **kwargs):
+        built.append((args, kwargs))
+        raise AssertionError("unreachable fake agent")
+
+    monkeypatch.setattr(
+        routes, "construct_memoryless_helper_agent", record_agent_construction
+    )
+
+    routes._handle_handoff_summary(object(), {"session_id": "s1"})
+
+    # If the agent were built, its construction would be recorded even though
+    # the handler's own ``except Exception`` turns the failure into a fallback.
+    assert built == []
+    assert captured_route_j["status"] == 200
+    assert captured_route_j["payload"]["ok"] is True
+    assert captured_route_j["payload"]["fallback"] is True
+    assert captured_route_j["payload"]["summary"]
+    assert captured_route_j["payload"]["rounds"] == 10
+
+
+def test_handoff_summary_reaches_the_model_path_off_gateway(
+    monkeypatch, captured_route_j
+):
+    """The gateway gate is the only thing that skips agent construction."""
+    monkeypatch.delenv("HERMES_WEBUI_CHAT_BACKEND", raising=False)
+    _prime_handoff_summary(monkeypatch)
+    _stub_model_resolution(monkeypatch)
+
+    class FakeAgent:
+        reasoning_config = None
+
+    built = []
+
+    def record_agent_construction(*args, **kwargs):
+        built.append((args, kwargs))
+        return FakeAgent()
+
+    monkeypatch.setattr(
+        routes, "construct_memoryless_helper_agent", record_agent_construction
+    )
+
+    routes._handle_handoff_summary(object(), {"session_id": "s1"})
+
+    # Off gateway, the handler proceeds into the model path; the fake agent
+    # then fails inside it and the handler degrades to the fallback, which is
+    # fine — the assertion is that construction was attempted at all.
+    assert built, "gateway gate skipped agent construction off gateway"
