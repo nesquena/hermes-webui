@@ -120,6 +120,16 @@ function doSwitch(){
     _loadingSessionId = 'B';
     return;
   }
+  if(SC.switchKind === 'continuation'){
+    // The user opened A's compression continuation A2 and staged a new file
+    // there with an empty composer before A's start answered.
+    input.value = '';
+    S.session = {session_id:'A2', workspace:'/a', profile:'pa', model:'model-a', model_provider:'prov-a',
+                 title:'Chat A'};
+    S.messages = [];
+    S.pendingFiles = [{name:'newer.txt'}];
+    return;
+  }
   if(SC.switchKind === 'loadingBack'){
     // The user clicked B, then A again before B loaded: A is reloading.
     _loadingSessionId = 'A';
@@ -128,6 +138,7 @@ function doSwitch(){
   // The switch saved A's composer as A's draft and loaded B's.
   input.value = 'b-draft';
   S.session = B_SESSION;
+  if(SC.bStaged) S.pendingFiles = [{name:'b.txt'}];
   S.messages = [{role:'user', content:'b-row'}];
   S.activeStreamId = null;
   S.busy = false;
@@ -213,6 +224,7 @@ function _hydrateTodosFromSession(){ rec('_hydrateTodosFromSession'); }
 function _syncProviderQuotaForActiveContext(){}
 function _restoreComposerDraftAfterFailedSend(text, files, sid){
   rec('_restoreComposerDraftAfterFailedSend', text, sid);
+  rec('restore.files', sid, (files || []).map(f => f && f.name));
 }
 function attachLiveStream(sid, streamId){ rec('attachLiveStream', sid, streamId); LIVE[sid] = streamId; }
 async function loadSession(sid){ rec('loadSession', sid); }
@@ -805,3 +817,26 @@ def test_control_slash_sends_without_a_switch_start_where_master_starts_them(sce
     assert result["sendInProgress"] is False
     if "bundle" in scenario:
         assert _named(result, "resolveBundleCommand") == [["/mybundle do it", sid]]
+
+
+
+# Codex r11: a 409 session_rotated restores into the continuation. When the
+# user already moved there and staged a file with an empty composer, that file
+# stays staged next to the restored one (the helper replaces the tray with what
+# it is given, so the caller hands it both).
+def test_rotated_restore_keeps_a_file_staged_on_the_continuation():
+    result = _run(switchAt="start", switchKind="continuation", start="409-rotated", files=True)
+    assert _named(result, "_restoreComposerDraftAfterFailedSend") == [["hello", "A2"]]
+    assert _named(result, "restore.files") == [["A2", ["newer.txt", "f.txt"]]]
+
+
+def test_rotated_restore_to_a_continuation_off_screen_passes_only_the_snapshot():
+    """On B with b.txt staged, a rotation to A2 (not on screen) hands A2 only A's file."""
+    result = _run(switchAt="start", start="409-rotated", files=True, bStaged=True)
+    assert _named(result, "restore.files") == [["A2", ["f.txt"]]]
+
+
+def test_failed_start_restore_into_the_issuing_chat_passes_only_the_snapshot():
+    """B's staged files are B's: a failure for A never hands them to A's draft."""
+    result = _run(switchAt="start", start="500", files=True, bStaged=True)
+    assert _named(result, "restore.files") == [["A", ["f.txt"]]]

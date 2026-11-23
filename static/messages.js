@@ -2288,7 +2288,14 @@ async function send(){
         const body=e&&e.status===409?JSON.parse(e.body||'{}'):null;
         if(body&&body.code==='session_rotated'&&typeof body.continuation_session_id==='string'&&body.continuation_session_id) draftSid=body.continuation_session_id;
       }catch(_){ }
-      if(!deleted) _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, draftSid, _composerDraftClearPromise, _goalContinuationId);
+      // A rotation can name a continuation the user already moved to: files
+      // staged there after this send stay staged next to the restored ones.
+      let restoreFiles=_failedSendFilesSnapshot;
+      if(_isSessionCurrentPane(draftSid)&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length){
+        const staged=S.pendingFiles;
+        restoreFiles=staged.concat((restoreFiles||[]).filter(f=>f&&!staged.includes(f)));
+      }
+      if(!deleted) _restoreComposerDraftAfterFailedSend(_failedSendDraftText, restoreFiles, draftSid, _composerDraftClearPromise, _goalContinuationId);
       const owner=_sendOwnerLabel(_ownerTitle);
       if(_sendOwnerIsNewChat(_ownerTitle,_ownerHadMessages)) showToast(t('send_offscreen_new_chat'),null,'error');
       else showToast(deleted?t('send_offscreen_deleted',owner)
