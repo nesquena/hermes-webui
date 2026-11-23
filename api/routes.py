@@ -21092,6 +21092,11 @@ def handle_post(handler, parsed) -> bool:
         # 404 for an unknown id, 403 for a read-only imported session, and the
         # write goes through the server's session object — never a raw sidecar
         # write (the file has a single writer).
+        #
+        # Contract: marking an ALREADY-done session replaces its timestamp (the
+        # explicit `done_at`, else now()) rather than keeping the first one --
+        # a backfill re-running over the same rows is expected to converge on
+        # the caller's value. `done: false` clears it.
         try:
             require(body, "session_id")
         except ValueError as e:
@@ -21104,9 +21109,16 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "done must be a boolean")
         explicit_ts = body.get("done_at")
         if explicit_ts is not None:
+            # Numbers only: `float()` would happily turn `true` into 1.0 and
+            # `"99"` into 99.0, storing a timestamp the caller never sent, so
+            # reject booleans and non-numbers before the conversion.
+            if isinstance(explicit_ts, bool) or not isinstance(explicit_ts, (int, float)):
+                return bad(handler, "done_at must be a unix timestamp")
             try:
                 explicit_ts = float(explicit_ts)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
+                # OverflowError: a JSON integer too large for float(), e.g.
+                # 10**400 -- a 500 on master. `float()` also accepts nan/inf.
                 return bad(handler, "done_at must be a unix timestamp")
             # `float()` happily accepts nan/inf and 1e400 → inf. `Session.save()`
             # writes with a default json.dumps, so a non-finite value becomes a

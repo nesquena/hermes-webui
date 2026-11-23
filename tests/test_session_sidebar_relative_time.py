@@ -33,6 +33,10 @@ def _run_session_time_case(script_body: str) -> dict:
             "_localDayOrdinal",
             "_sessionCalendarBoundaries",
             "_formatSessionDate",
+            # `_formatRelativeSessionTime` delegates the formatting itself to
+            # `_formatSessionTimeAgo` (so the done-badge tooltip can format a
+            # zero timestamp while this helper keeps treating 0 as missing).
+            "_formatSessionTimeAgo",
             "_formatRelativeSessionTime",
             "_sessionTimeBucketLabel",
         )

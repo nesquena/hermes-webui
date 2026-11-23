@@ -184,6 +184,18 @@ def test_mark_done_accepts_zero_timestamp():
     assert _sidebar_row(sid).get("done_at") == 0
 
 
+def test_mark_done_rejects_oversized_integer_and_non_numbers():
+    """`float()` alone would 500 on a 401-digit int (`OverflowError`), store
+    `true` as 1.0 and `"99"` as 99.0. All of those are 400, and nothing is
+    written."""
+    sid = _seed_session()
+    for bad in (10**400, True, False, "99", [1], {"t": 1}):
+        body, status = _post("/api/session/mark-done", {"session_id": sid, "done_at": bad})
+        assert status == 400, (repr(bad)[:40], status, body)
+    row = _sidebar_row(sid)
+    assert not row.get("done_at"), row.get("done_at")
+
+
 def test_mark_done_does_not_bump_updated_at():
     """Marking done is not new activity: `updated_at` must not move, or a
     backfill re-sorts the whole sidebar and resets every row's last-activity."""

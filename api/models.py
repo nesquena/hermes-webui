@@ -1972,10 +1972,13 @@ class Session:
         self.archived = bool(archived)
         # Workflow state, distinct from `archived` (storage): set by the
         # /api/session/mark-done endpoint, never inferred from the title.
-        try:
-            self.done_at = float(done_at) if done_at not in (None, '') else None
-        except (TypeError, ValueError):
-            self.done_at = None
+        # Normalized on the way in (a finite, non-negative float or None): a
+        # stored "nan"/"inf" would otherwise reach the sidebar payload as a
+        # bare NaN token and break `JSON.parse` for every client.
+        self.done_at = _normalize_done_at(done_at)
+        # The value this object last loaded or saved; save() compares against
+        # it to tell an own change from a stale snapshot (mark-done, #9282).
+        self._done_at_saved = self.done_at
         self.project_id = project_id or None
         self.profile = profile
         self.input_tokens = input_tokens or 0
@@ -2218,6 +2221,22 @@ class Session:
                 self.share_token, self.share_created_at = on_disk_share
                 self._share_token_saved = self.share_token
                 self._share_created_at_saved = self.share_created_at
+        # #9282: `done_at` is written by /api/session/mark-done, but every other
+        # writer saves a Session it resolved earlier (the CLI-import refresh is
+        # the live one: it loads its own copy before reading CLI history, then
+        # saves). The endpoint's lock does not reach that writer, so without
+        # this guard a mark-done landing between the refresh's load and save is
+        # reverted to the stale value -- the same class #7881 and #8399 close.
+        # Adopt the sidecar's value unless THIS object changed it since it last
+        # loaded or saved it.
+        if self.done_at == getattr(self, '_done_at_saved', self.done_at):
+            on_disk_done = _persisted_done_at(self.path)
+            if on_disk_done is not _DONE_AT_ABSENT:
+                self.done_at = on_disk_done
+                # Move the baseline with the adoption, so a refused or failed
+                # save below cannot leave the adopted value looking like this
+                # object's own change.
+                self._done_at_saved = on_disk_done
         self._webui_pending_user_timestamp_identity = (
             _validated_webui_pending_user_timestamp_identity(
                 self, getattr(self, '_webui_pending_user_timestamp_identity', None)
@@ -2280,7 +2299,13 @@ class Session:
                 self.session_id,
             )
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
+        # #9282: normalize at the write boundary too. `__init__` and the
+        # mark-done endpoint already do, but a caller that assigns
+        # `session.done_at` directly must not be able to put a bare `NaN` in
+        # the sidecar -- `json.dumps` emits it as a token `JSON.parse` rejects.
+        meta['done_at'] = _normalize_done_at(meta.get('done_at'))
         written_reasoning_effort = meta.get('reasoning_effort')
+        written_done_at = meta['done_at']
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
         # sidebar-poll freshness check never have to parse the full (250-480KB)
@@ -2578,6 +2603,7 @@ class Session:
         # The value this save actually wrote, not one set on the live object
         # after the payload was built.
         self._reasoning_effort_saved = written_reasoning_effort
+        self._done_at_saved = written_done_at
         self._share_token_saved = self.share_token
         self._share_created_at_saved = self.share_created_at
 
@@ -6585,6 +6611,72 @@ def _persisted_share_fields(path):
         _normalize_persisted_share_token(data.get('share_token')),
         data.get('share_created_at'),
     )
+
+
+_DONE_AT_ABSENT = object()
+
+
+def _normalize_done_at(value):
+    """`done_at` as stored, sent and rendered: a finite, non-negative float or None.
+
+    Everything else -- a non-numeric string, NaN/Infinity, a negative stamp, a
+    boolean, an integer too large for `float()` -- is malformed and reads as
+    "not marked done". A non-finite value must never reach the sidecar or the
+    list response: `json.dumps` writes it as a bare `NaN`/`Infinity` token that
+    a browser's `JSON.parse` rejects, which breaks the sidebar fetch for every
+    client until the file is repaired by hand.
+    """
+    if value is None or value == '' or isinstance(value, bool):
+        return None
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(timestamp) or timestamp < 0:
+        return None
+    return timestamp
+
+
+def _persisted_done_at(path):
+    """The sidecar's persisted `done_at`, or `_DONE_AT_ABSENT` if it has none.
+
+    Mirrors ``_persisted_reasoning_effort``: the bounded metadata prefix answers
+    the common case, a prefix miss parses the whole sidecar, and only a missing
+    file or a parsed sidecar without the key reports absence. A key that IS
+    present but malformed normalizes to None -- an explicit "not done" this
+    save may adopt instead of a stale timestamp. A sidecar that exists but
+    cannot be read raises OSError, so save() fails closed.
+    """
+    parsed = None
+    try:
+        raw = _read_metadata_json_prefix(path)
+        parsed = json.loads(raw) if raw else None
+    except FileNotFoundError:
+        return _DONE_AT_ABSENT
+    except (OSError, ValueError):
+        parsed = None
+    if isinstance(parsed, dict) and 'done_at' in parsed:
+        return _normalize_done_at(parsed['done_at'])
+    try:
+        text = Path(path).read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return _DONE_AT_ABSENT
+    except UnicodeDecodeError:
+        text = None
+    data = None
+    if text is not None:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+    if not isinstance(data, dict):
+        logger.warning(
+            "session sidecar %s is not a JSON object; no persisted done_at to keep", path,
+        )
+        return _DONE_AT_ABSENT
+    if 'done_at' not in data:
+        return _DONE_AT_ABSENT
+    return _normalize_done_at(data['done_at'])
 
 
 # #7881: per-session reentrant persistence locks. Every Session.save() of one

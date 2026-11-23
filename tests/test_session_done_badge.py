@@ -70,7 +70,9 @@ function t(key, ...args) {{
   if (value === undefined) return key;
   return value.replace('{{0}}', String(args[0] === undefined ? '' : args[0]));
 }}
-function _formatRelativeSessionTime(ms) {{ return ms ? '2h ago' : 'unknown'; }}
+// The renderer's tooltip formatter; the real one is exercised separately by
+// test_done_tooltip_uses_the_real_formatter.
+function _formatSessionDoneTime(ms) {{ return (ms === 0 || ms) ? 'a while ago' : 'unknown'; }}
 
 const out = [];
 for (const s of {json.dumps(rows)}) {{
@@ -84,6 +86,7 @@ for (const s of {json.dumps(rows)}) {{
     textContent: c.textContent,
     title: c.title,
     ariaLabel: c.attrs ? c.attrs['aria-label'] : undefined,
+    role: c.attrs ? c.attrs.role : undefined,
   }})) }});
 }}
 console.log(JSON.stringify(out));
@@ -103,7 +106,9 @@ def test_row_with_done_at_renders_the_badge():
     # A glyph in the row; the localised word survives as the accessible name.
     assert badge["textContent"] == "✓"
     assert badge["ariaLabel"] == "Done"
-    assert badge["title"] == "Marked done 2h ago"
+    # The label needs an explicit role on a role-less span to reach AT.
+    assert badge["role"] == "img"
+    assert badge["title"] == "Marked done a while ago"
     assert out[0]["isDone"] is True
 
 
@@ -131,6 +136,95 @@ def test_done_row_gets_the_done_class_and_archived_stays_independent():
     assert "(s.archived?' archived':'')" in line
     assert f"(({DONE_PREDICATE})?' done':'')" in line
     assert "s.archived?s.done_at" not in line and "s.done_at?s.archived" not in line
+
+
+def _js_function(name: str) -> str:
+    """Source of a top-level `function name(...) { ... }` from sessions.js.
+
+    Brace counting is enough here: none of these formatting helpers carries a
+    brace inside a string literal. Extracting the real bodies (instead of
+    re-typing them) is the point — a stub cannot see a presence check that
+    treats a valid epoch timestamp as "missing".
+    """
+    start = SESSIONS_JS.index(f"function {name}(")
+    body_start = SESSIONS_JS.index("{", start)
+    depth = 0
+    for idx in range(body_start, len(SESSIONS_JS)):
+        char = SESSIONS_JS[idx]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return SESSIONS_JS[start : idx + 1]
+    raise AssertionError(f"unterminated function {name} in static/sessions.js")
+
+
+def _run_formatters(cases):
+    """Execute the REAL relative-time formatter chain under node."""
+    sources = "\n".join(
+        _js_function(name)
+        for name in (
+            "_localDayOrdinal",
+            "_sessionCalendarBoundaries",
+            "_formatSessionDate",
+            "_formatSessionTimeAgo",
+            "_formatRelativeSessionTime",
+            "_formatSessionDoneTime",
+        )
+    )
+    harness = f"""
+const NOW = 1780000000000; // 2026-05-28-ish; far from 1970
+function _serverNowMs() {{ return NOW; }}
+function t(key, ...args) {{
+  const table = {{
+    session_time_unknown: 'unknown',
+    session_time_minutes_ago: '{{0}}m ago',
+    session_time_hours_ago: '{{0}}h ago',
+    session_time_days_ago: '{{0}}d ago',
+    session_time_last_week: 'last week',
+  }};
+  const value = table[key];
+  if (value === undefined) return key;
+  return value.replace('{{0}}', String(args[0] === undefined ? '' : args[0]));
+}}
+{sources}
+const cases = {json.dumps(cases)};
+console.log(JSON.stringify(cases.map((ms) => ({{
+  done: _formatSessionDoneTime(ms, NOW),
+  relative: _formatRelativeSessionTime(ms, NOW),
+}}))));
+"""
+    proc = subprocess.run(
+        ["node", "-e", harness], capture_output=True, text=True, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_done_tooltip_formats_an_epoch_zero_timestamp():
+    """`done_at: 0` is a valid timestamp; the tooltip must not say "unknown".
+
+    Runs the real formatter from sessions.js, not a stub: the stub used by the
+    render harness returns a fixed string and cannot see the bug.
+    """
+    out = _run_formatters([0])
+    assert out[0]["done"] != "unknown", out
+    assert "1970" in out[0]["done"], out
+    # The activity-time formatter keeps treating 0 as "no timestamp": other
+    # callers rely on that (`_sessionTimestampMs` returns 0 for a row without
+    # one), so the done tooltip gets its own presence check instead of
+    # loosening the shared one.
+    assert out[0]["relative"] == "unknown", out
+
+
+def test_done_tooltip_keeps_relative_wording_for_recent_timestamps():
+    """The done tooltip reuses the relative wording, so it never diverges."""
+    now_s = 1780000000
+    out = _run_formatters([(now_s - 2 * 3600) * 1000, None, ""])
+    assert out[0]["done"] == "2h ago", out
+    assert out[1]["done"] == "unknown", out
+    assert out[2]["done"] == "unknown", out
 
 
 def test_badge_style_is_defined_once():

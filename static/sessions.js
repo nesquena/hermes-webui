@@ -9329,6 +9329,10 @@ function _formatSessionDate(timestampMs, nowMs) {
 
 function _formatRelativeSessionTime(timestampMs, nowMs) {
   if (!timestampMs) return t('session_time_unknown');
+  return _formatSessionTimeAgo(timestampMs, nowMs);
+}
+
+function _formatSessionTimeAgo(timestampMs, nowMs) {
   nowMs = nowMs || _serverNowMs();
   const diffMs = Math.max(0, nowMs - timestampMs);
   const minute = 60 * 1000;
@@ -9348,6 +9352,20 @@ function _formatRelativeSessionTime(timestampMs, nowMs) {
   if (timestampMs >= startOfWeek) return t('session_time_days_ago', dayDiff);
   if (timestampMs >= startOfLastWeek) return t('session_time_last_week');
   return _formatSessionDate(timestampMs, nowMs);
+}
+
+// A `done_at` of 0 is a valid epoch timestamp, so the done badge's tooltip
+// cannot use `_formatRelativeSessionTime`'s "0 means missing" check (correct
+// for the activity-time callers, where `_sessionTimestampMs` returns 0 for a
+// row with no timestamp). Presence is decided here; the relative formatting is
+// the same function those callers use, so the wording never diverges.
+function _formatSessionDoneTime(timestampMs, nowMs) {
+  const value = Number(timestampMs);
+  if (timestampMs === null || timestampMs === undefined || timestampMs === ''
+      || !Number.isFinite(value) || value < 0) {
+    return t('session_time_unknown');
+  }
+  return _formatSessionTimeAgo(value, nowMs);
 }
 
 function _sessionTimeBucketLabel(timestampMs, nowMs) {
@@ -11569,9 +11587,12 @@ function renderSessionListFromCache(){
       // as aria-label and the timestamp as tooltip, so meaning is not lost.
       const doneLabel=t('session_done_badge');
       doneEl.textContent='✓';
+      // `aria-label` on a role-less span is skipped by some screen readers; a
+      // glyph-only element needs an explicit role to be exposed.
+      doneEl.setAttribute('role','img');
       doneEl.setAttribute('aria-label',doneLabel);
       const doneMs=Number(s.done_at)*1000;
-      doneEl.title=t('session_done_tooltip', _formatRelativeSessionTime(doneMs));
+      doneEl.title=t('session_done_tooltip', _formatSessionDoneTime(doneMs));
       titleRow.appendChild(doneEl);
     }
     if(childCount>0){
