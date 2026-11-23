@@ -12951,9 +12951,9 @@ function showToast(msg,ms,type){
 // ── Shared app dialogs ───────────────────────────────────────────────────────
 // showConfirmDialog(opts) and showPromptDialog(opts) replace browser-native dialog calls
 // throughout the UI. Both return Promises and support: title, message, confirmLabel,
-// cancelLabel, danger (confirm only), placeholder/value/inputType (prompt only).
+// cancelLabel, dismissIsNull (confirm only: closing with ×, Escape or the backdrop resolves null, the cancel button false), danger (confirm only), placeholder/value/inputType (prompt only).
 
-const APP_DIALOG={resolve:null,kind:null,lastFocus:null};
+const APP_DIALOG={resolve:null,kind:null,lastFocus:null,dismissNull:false};
 let _appDialogBound=false;
 
 function _isAppDialogOpen(){
@@ -12976,12 +12976,19 @@ function _finishAppDialog(result, restoreFocus=true){
   APP_DIALOG.resolve=null;
   APP_DIALOG.kind=null;
   APP_DIALOG.lastFocus=null;
+  APP_DIALOG.dismissNull=false;
   if(overlay){overlay.style.display='none';overlay.setAttribute('aria-hidden','true');}
   if(dialog) dialog.setAttribute('role','dialog');
   if(input){input.value='';input.style.display='none';input.placeholder='';}
   if(confirmBtn){confirmBtn.classList.remove('danger');confirmBtn.textContent=t('dialog_confirm_btn');}
   if(restoreFocus&&lastFocus&&typeof lastFocus.focus==='function'){setTimeout(()=>lastFocus.focus(),0);}
   if(resolve) resolve(result);
+}
+
+// What closing the dialog without choosing a button resolves: null for a prompt, and for a confirm that
+// asked for it (opts.dismissIsNull), so a caller can tell a dismissal from the cancel button.
+function _appDialogDismissResult(){
+  return (APP_DIALOG.kind==='prompt'||APP_DIALOG.dismissNull)?null:false;
 }
 
 function _ensureAppDialogBindings(){
@@ -12993,11 +13000,11 @@ function _ensureAppDialogBindings(){
   const closeBtn=$('appDialogClose');
   if(overlay){
     overlay.addEventListener('click',e=>{
-      if(e.target===overlay) _finishAppDialog(APP_DIALOG.kind==='prompt'?null:false);
+      if(e.target===overlay) _finishAppDialog(_appDialogDismissResult());
     });
   }
   if(cancelBtn) cancelBtn.addEventListener('click',()=>_finishAppDialog(APP_DIALOG.kind==='prompt'?null:false));
-  if(closeBtn)  closeBtn.addEventListener('click',()=>_finishAppDialog(APP_DIALOG.kind==='prompt'?null:false));
+  if(closeBtn)  closeBtn.addEventListener('click',()=>_finishAppDialog(_appDialogDismissResult()));
   if(confirmBtn){
     confirmBtn.addEventListener('click',()=>{
       if(APP_DIALOG.kind==='prompt'){
@@ -13012,7 +13019,7 @@ function _ensureAppDialogBindings(){
     if(!_isAppDialogOpen()) return;
     if(e.key==='Escape'){
       e.preventDefault();
-      _finishAppDialog(APP_DIALOG.kind==='prompt'?null:false);
+      _finishAppDialog(_appDialogDismissResult());
       return;
     }
     if(e.key==='Enter'){
@@ -13021,7 +13028,9 @@ function _ensureAppDialogBindings(){
       const isTextarea=target&&target.tagName==='TEXTAREA';
       if(!isTextarea){
         e.preventDefault();
-        if(target===cancelBtn||target===closeBtn){
+        if(target===closeBtn){
+          _finishAppDialog(_appDialogDismissResult());
+        }else if(target===cancelBtn){
           _finishAppDialog(APP_DIALOG.kind==='prompt'?null:false);
         }else if(APP_DIALOG.kind==='prompt'){
           const input=$('appDialogInput');
@@ -13047,10 +13056,10 @@ function _ensureAppDialogBindings(){
 
 function showConfirmDialog(opts={}){
   _ensureAppDialogBindings();
-  if(APP_DIALOG.resolve) _finishAppDialog(false,false);
+  if(APP_DIALOG.resolve) _finishAppDialog(APP_DIALOG.dismissNull?null:false,false);
   const overlay=$('appDialogOverlay'),dialog=$('appDialog'),title=$('appDialogTitle'),
     desc=$('appDialogDesc'),input=$('appDialogInput'),cancelBtn=$('appDialogCancel'),confirmBtn=$('appDialogConfirm');
-  APP_DIALOG.resolve=null;APP_DIALOG.kind='confirm';APP_DIALOG.lastFocus=document.activeElement;
+  APP_DIALOG.resolve=null;APP_DIALOG.kind='confirm';APP_DIALOG.lastFocus=document.activeElement;APP_DIALOG.dismissNull=!!opts.dismissIsNull;
   if(title) title.textContent=opts.title||t('dialog_confirm_title');
   if(desc) desc.textContent=opts.message||'';
   if(input){input.style.display='none';input.value='';}
