@@ -13,7 +13,14 @@ was opened for.
   dialog was reopened before the sidebar refreshed or the switch is vetoed;
 * copying a share link still works when the clipboard permission is denied;
 * a dialog opened while a switch to another conversation is still in flight
-  never acts on that next conversation.
+  never acts on that next conversation;
+* an answer given while a switch is still pending, or after a programmatic switch
+  left the dialog open, writes nothing (Share, Stop sharing, Clear, the five
+  workspace file dialogs, the outside-workspace link authorization);
+* an answer whose request is still in flight when another conversation opens
+  lands only on its own conversation and leaves the new one's pane alone;
+* the sidebar menu's Share and Stop sharing act on their own row whichever
+  conversation is on screen.
 
 Starts a real ``server.py`` with its own state, seeds conversations through
 ``/api/session/import`` (A shared through the real ``/api/share/create``, B and C
@@ -29,6 +36,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -53,6 +61,12 @@ try {
 } catch (_) {}
 window.open = function (url) { window.__opened.push(String(url)); return null; };
 """
+
+# Writing endpoints whose request bodies are recorded in ``page.writes``.
+_WRITE_PATHS = (
+    "/api/session/clear", "/api/share/revoke", "/api/file/delete", "/api/file/create",
+    "/api/file/create-dir", "/api/file/rename", "/api/escape/authorize", "/api/workspaces/add",
+)
 
 _STATE_JS = """() => ({
   sid: (typeof S !== 'undefined' && S.session) ? S.session.session_id : null,
@@ -205,7 +219,7 @@ def page(browser, shares):
     def on_request(req):
         if req.method == "POST" and req.url.endswith("/api/share/create"):
             pg.share_posts.append(json.loads(req.post_data or "{}").get("session_id"))
-        for path in ("/api/session/clear", "/api/share/revoke", "/api/file/delete"):
+        for path in _WRITE_PATHS:
             if req.method == "POST" and req.url.endswith(path):
                 pg.writes.append((path, json.loads(req.post_data or "{}")))
 
@@ -515,15 +529,19 @@ def _history_go(page, sid):
 
 
 def _open_sidebar_share(page, sid):
+    _open_sidebar_action(page, sid, "share_session")
+
+
+def _open_sidebar_action(page, sid, label_key):
     page.hover(f".session-item[data-sid='{sid}']")
     page.click(f".session-item[data-sid='{sid}'] .session-actions-trigger")
     page.wait_for_selector(".session-action-opt", timeout=WAIT_MS)
-    assert page.evaluate("""() => {
+    assert page.evaluate("""(key) => {
       const item = [...document.querySelectorAll('.session-action-opt')]
-        .find(el => (el.querySelector('.ws-opt-name') || {}).textContent === t('share_session'));
+        .find(el => (el.querySelector('.ws-opt-name') || {}).textContent === t(key));
       if (item) item.click();
       return !!item;
-    }""")
+    }""", label_key)
 
 
 def _slow_network(page, latency_ms=1000):
@@ -674,3 +692,469 @@ def test_dialog_opened_during_a_pending_switch_never_acts_on_the_next_conversati
         "files": [files["first"].exists(), files["second"].exists()],
     }
     assert outcome == {"writes": [], "messages": [2, 2], "files": [True, True]}, outcome
+
+
+# ── answered while a switch is pending, or after it ──────────────────────────
+#
+# A history change dismisses an open dialog before it switches, so the cases above
+# never reach the checks made once a dialog is answered. Here the switch is
+# programmatic (``loadSession``, as a new chat, a background run or an extension
+# does): the dialog stays open, and is answered while the switch is still pending
+# (its metadata read held) or after it has completed.
+
+def _hold(page, matcher):
+    """Hold the requests ``matcher`` selects until ``release()``."""
+    held = []
+    page.route(matcher, lambda route: held.append(route))
+
+    def release():
+        while held:
+            held.pop(0).continue_()
+        page.unroute(matcher)  # also lets through a request matched since the loop
+    return held, release
+
+
+def _wait_held(page, held, what):
+    deadline = time.time() + WAIT_MS / 1000
+    while not held and time.time() < deadline:
+        page.wait_for_timeout(50)
+    assert held, f"{what} was not held"
+
+
+def _switch_pending(page, target):
+    """Start a switch to ``target`` and hold its first metadata read: the open
+    conversation is still ``S.session``, and ``_loadingSessionId`` names ``target``.
+    Returns the function that lets the switch finish."""
+    def is_target_load(url):
+        return "/api/session?" in url and f"session_id={target}&messages=0&resolve_model=0" in url
+    held, release = _hold(page, is_target_load)
+    page.evaluate("(sid) => { void loadSession(sid); return true; }", target)
+    _wait_held(page, held, "the switch's session load")
+    state = page.evaluate("() => ({sid: S.session && S.session.session_id, loading: _loadingSessionId})")
+    assert state["loading"] == target and state["sid"] not in (None, target), state
+    return release
+
+
+def _switch_to(page, target):
+    """A programmatic switch that completes (nothing dismisses an open dialog)."""
+    page.evaluate("(sid) => loadSession(sid).then(() => true)", target)
+    _active(page, target)
+
+
+def _track(page, name):
+    """Keep the promise of the next call to the app function ``name`` (its UI entry
+    points call it through the global binding) for ``_outcome``."""
+    page.evaluate("""(name) => {
+      const original = window[name];
+      window.__op = null;
+      window[name] = function (...args) {
+        window[name] = original;
+        const run = original.apply(this, args);
+        window.__op = Promise.resolve(run).then(
+          (value) => ({done: true, value: value === undefined ? null : value}),
+          (err) => ({done: true, error: String((err && err.message) || err)}));
+        return run;
+      };
+      return true;
+    }""", name)
+
+
+def _outcome(page):
+    """The tracked call's result once it settles, or ``{"done": False, "dialog": True}``
+    if it opened another dialog instead (the follow-up "add as space" prompt)."""
+    return page.evaluate("""(ms) => new Promise((resolve) => {
+      const end = Date.now() + ms;
+      if (!window.__op) { resolve({done: false, started: false}); return; }
+      window.__op.then(resolve);
+      const tick = () => {
+        if (_isAppDialogOpen()) resolve({done: false, dialog: true});
+        else if (Date.now() > end) resolve({done: false});
+        else setTimeout(tick, 50);
+      };
+      setTimeout(tick, 50);
+    })""", WAIT_MS)
+
+
+_DROPPED = {"done": True, "value": None}
+
+
+def _answer(page, text=None):
+    if text is not None:
+        page.fill("#appDialogInput", text)
+    page.click("#appDialogConfirm")
+
+
+def _share(server, sid):
+    status, reply = _request(server["base"], "/api/share/create", {"session_id": sid})
+    assert status == 200, reply
+    return reply["share"]["token"]
+
+
+@pytest.mark.parametrize("button", ["#appDialogConfirm", "#appDialogCancel"], ids=["copy-existing", "refresh-snapshot"])
+def test_share_answered_while_a_switch_is_pending_writes_nothing(page, shares, button):
+    _open_a_after_b(page, shares)
+    _track(page, "_createOrRefreshSessionShare")
+    _open_panel_share_dialog(page)
+    release = _switch_pending(page, shares["B"])
+    page.click(button)
+    assert _outcome(page) == _DROPPED
+    state = page.evaluate(_STATE_JS)
+    assert page.share_posts == [] and state["copied"] == [] and state["opened"] == []
+    release()
+    _active(page, shares["B"])
+    assert page.share_posts == []
+    _assert_only_a_shared(shares)
+
+
+def test_stop_sharing_answered_while_a_switch_is_pending_revokes_nothing(page, server):
+    first, second = _import(server, "Pending stop first"), _import(server, "Pending stop second")
+    token = _share(server, first)
+    _open_after(page, second, first)
+    _track(page, "_revokeSessionShare")
+    _open_panel_dialog(page, "#btnStopSharingSession")
+    release = _switch_pending(page, second)
+    page.click("#appDialogConfirm")
+    assert _outcome(page) == _DROPPED
+    assert page.writes == []
+    release()
+    _active(page, second)
+    assert page.writes == []
+    assert _share_token(server["base"], first) == token
+    assert _share_token(server["base"], second) is None
+
+
+def test_clear_answered_while_a_switch_is_pending_clears_nothing(page, server):
+    first, second = _import(server, "Pending clear first"), _import(server, "Pending clear second")
+    _open_after(page, second, first)
+    _track(page, "clearConversation")
+    _open_panel_dialog(page, "#btnClearConvModal")
+    release = _switch_pending(page, second)
+    page.click("#appDialogConfirm")
+    assert _outcome(page) == _DROPPED
+    assert page.writes == []
+    release()
+    _active(page, second)
+    assert page.writes == []
+    assert [_message_count(server, first), _message_count(server, second)] == [2, 2]
+
+
+@pytest.mark.parametrize("action", ["share", "stop-sharing"])
+def test_panel_share_dialog_answered_after_another_conversation_opened_writes_nothing(page, server, action):
+    first, second = _import(server, f"Opened {action} first"), _import(server, f"Opened {action} second")
+    token = _share(server, first)
+    _open_after(page, second, first)
+    if action == "share":
+        _track(page, "_createOrRefreshSessionShare")
+        _open_panel_share_dialog(page)
+    else:
+        _track(page, "_revokeSessionShare")
+        _open_panel_dialog(page, "#btnStopSharingSession")
+    _switch_to(page, second)
+    assert page.evaluate("() => _isAppDialogOpen()"), "a programmatic switch should leave the dialog open"
+    # Share asks Copy existing / Refresh snapshot: Refresh is the answer that writes.
+    page.click("#appDialogCancel" if action == "share" else "#appDialogConfirm")
+    assert _outcome(page) == _DROPPED
+    state = page.evaluate(_STATE_JS)
+    assert page.share_posts == [] and page.writes == []
+    assert state["copied"] == [] and state["opened"] == []
+    assert state["sid"] == second and page.evaluate("() => S.session.share_token || null") is None
+    assert _share_token(server["base"], first) == token
+    assert _share_token(server["base"], second) is None
+
+
+# ── the sidebar menu acts on its own row ─────────────────────────────────────
+#
+# The sidebar list carries no share token: a row offers "Copy existing / Refresh
+# snapshot" and Stop sharing once a share made on this page told it, until the
+# next list refresh. The tests share the row from its menu and hold the list
+# refresh, so the row keeps knowing for the whole test.
+
+def _share_row_from_its_menu(page, sid):
+    """Share ``sid`` from its sidebar menu (it asks nothing yet) and keep the sidebar
+    list from refreshing. Returns the function that lets it refresh again."""
+    def is_list(url):
+        return urllib.parse.urlsplit(url).path.endswith("/api/sessions")
+    _held, release = _hold(page, is_list)
+    _open_sidebar_action(page, sid, "share_session")
+    _wait_until(page, "() => window.__opened.length > 0")
+    _wait_until(page, "(sid) => !!(_allSessions.find(s => s.session_id === sid) || {}).share_token", sid)
+    page.share_posts.clear()
+    page.share_statuses.clear()
+    page.evaluate("() => { window.__opened = []; window.__copied = []; return true; }")
+    return release
+
+
+@pytest.mark.parametrize("pending", [False, True], ids=["off-screen", "switch-pending"])
+def test_sidebar_menu_refresh_snapshot_shares_its_own_row(page, server, pending):
+    on_screen, other, row = (_import(server, f"Sidebar share {name}") for name in ("open", "other", "row"))
+    _open_after(page, other, on_screen)
+    release_list = _share_row_from_its_menu(page, row)
+    token = _share_token(server["base"], row)
+    assert token
+    _track(page, "_createOrRefreshSessionShare")
+    _open_sidebar_action(page, row, "share_session")
+    _wait_until(page, "() => _isAppDialogOpen()")
+    release = _switch_pending(page, other) if pending else None
+    page.click("#appDialogCancel")  # Refresh snapshot
+    assert _outcome(page) == _DROPPED
+    url = page.evaluate("(token) => new URL('/share/' + token, location.origin).href", token)
+    state = page.evaluate(_STATE_JS)
+    assert page.share_posts == [row] and page.share_statuses == [200]
+    assert state["opened"] == [url] and state["copied"] == [url]
+    assert state["sid"] == on_screen
+    assert page.evaluate("() => S.session.share_token || null") is None
+    release_list()
+    if release:
+        release()
+        _active(page, other)
+    assert _share_token(server["base"], row) == token
+    assert _share_token(server["base"], on_screen) is None
+    assert _share_token(server["base"], other) is None
+
+
+@pytest.mark.parametrize("pending", [False, True], ids=["off-screen", "switch-pending"])
+def test_sidebar_menu_stop_sharing_revokes_its_own_row(page, server, pending):
+    on_screen, other, row = (_import(server, f"Sidebar stop {name}") for name in ("open", "other", "row"))
+    on_screen_token = _share(server, on_screen)
+    _open_after(page, other, on_screen)
+    release_list = _share_row_from_its_menu(page, row)
+    assert _share_token(server["base"], row)
+    _track(page, "_revokeSessionShare")
+    _open_sidebar_action(page, row, "stop_sharing_session")
+    _wait_until(page, "() => _isAppDialogOpen()")
+    release = _switch_pending(page, other) if pending else None
+    page.click("#appDialogConfirm")
+    assert _outcome(page) == _DROPPED
+    assert page.writes == [("/api/share/revoke", {"session_id": row})]
+    assert page.evaluate(_STATE_JS)["sid"] == on_screen
+    assert page.evaluate("() => S.session.share_token") == on_screen_token
+    release_list()
+    if release:
+        release()
+        _active(page, other)
+    assert _share_token(server["base"], row) is None
+    assert _share_token(server["base"], on_screen) == on_screen_token
+
+
+# ── the workspace file dialogs and the outside-workspace link ────────────────
+
+# op -> (function, its arguments, text typed into the prompt, API path,
+#        the root-level change on disk, the conversation's tree once it shows it)
+_WORKSPACE_OPS = {
+    "file-delete": ("deleteWorkspaceFile", "'notes.txt', 'notes.txt'", None, "/api/file/delete",
+                    lambda paths: paths - {"notes.txt"}),
+    "dir-delete": ("deleteWorkspaceDir", "'docs', 'docs'", None, "/api/file/delete",
+                   lambda paths: paths - {"docs", "docs/readme.txt"}),
+    "rename": ("_inlineRenameFileItem", "{path: 'notes.txt', name: 'notes.txt', type: 'file'}", "renamed.txt",
+               "/api/file/rename", lambda paths: (paths - {"notes.txt"}) | {"renamed.txt"}),
+    "new-file": ("promptNewFile", "'.'", "created.txt", "/api/file/create",
+                 lambda paths: paths | {"created.txt"}),
+    "new-folder": ("promptNewFolder", "'.'", "made-dir", "/api/file/create-dir",
+                   lambda paths: paths | {"made-dir"}),
+}
+
+# Counts loadDir calls in flight so a test can wait for a tree load to finish.
+_TRACK_LOAD_DIR = """() => {
+  if (window.__loadDir) return true;
+  const original = loadDir;
+  window.__loadDir = {active: 0};
+  window.loadDir = async function (...args) {
+    window.__loadDir.active++;
+    try { return await original.apply(this, args); } finally { window.__loadDir.active--; }
+  };
+  return true;
+}"""
+
+_TREE_JS = "() => [...document.querySelectorAll('#fileTree [data-a11y-tree-path]')].map(r => r.dataset.a11yTreePath)"
+
+
+def _workspace_pair(server, label):
+    """Two conversations, each with its own workspace holding the same relative paths
+    plus one marker file (``first-only.txt`` / ``second-only.txt``)."""
+    tag = f"{label}-{time.time_ns()}"
+    sids, roots = [], []
+    for name in ("first", "second"):
+        root = server["state"] / f"ws-{tag}-{name}"
+        (root / "docs").mkdir(parents=True)
+        (root / "notes.txt").write_text(f"{name} notes\n", encoding="utf-8")
+        (root / "docs" / "readme.txt").write_text(f"{name} docs\n", encoding="utf-8")
+        (root / f"{name}-only.txt").write_text(f"{name}\n", encoding="utf-8")
+        roots.append(root)
+        sids.append(_import(server, f"Workspace {tag} {name}", root))
+    return sids, roots
+
+
+def _on_disk(root):
+    return {p.relative_to(root).as_posix() for p in root.rglob("*")}
+
+
+def _tree_settled(page, sid, marker):
+    """``sid`` is on screen with its own tree rendered and no tree load in flight."""
+    _wait_until(page, """([sid, marker]) => !!S.session && S.session.session_id === sid && !_loadingSessionId
+      && window.__loadDir.active === 0
+      && !!document.querySelector(`#fileTree [data-a11y-tree-path="${marker}"]`)""", [sid, marker])
+
+
+@pytest.mark.parametrize("op", list(_WORKSPACE_OPS))
+def test_workspace_op_answered_while_a_switch_is_pending_changes_nothing(page, server, op):
+    fn, args, text, _path, _change = _WORKSPACE_OPS[op]
+    (first, second), roots = _workspace_pair(server, f"pending-{op}")
+    before = [_on_disk(root) for root in roots]
+    _open_after(page, second, first)
+    _track(page, fn)
+    page.evaluate(f"() => {{ void {fn}({args}); return true; }}")
+    _wait_until(page, "() => _isAppDialogOpen()")
+    release = _switch_pending(page, second)
+    _answer(page, text)
+    assert _outcome(page) == _DROPPED
+    assert page.writes == []
+    release()
+    _active(page, second)
+    assert page.writes == []
+    assert [_on_disk(root) for root in roots] == before
+
+
+@pytest.mark.parametrize("op", list(_WORKSPACE_OPS))
+def test_workspace_op_in_flight_when_another_conversation_opens_changes_only_its_own(page, server, op):
+    fn, args, text, path, change = _WORKSPACE_OPS[op]
+    (first, second), roots = _workspace_pair(server, f"flight-{op}")
+    before = [_on_disk(root) for root in roots]
+    _open_after(page, second, first)
+    page.evaluate(_TRACK_LOAD_DIR)
+    _tree_settled(page, first, "first-only.txt")
+    _track(page, fn)
+    page.evaluate(f"() => {{ void {fn}({args}); return true; }}")
+    _wait_until(page, "() => _isAppDialogOpen()")
+    held, release = _hold(page, f"**{path}")
+    _answer(page, text)
+    _wait_held(page, held, path)
+    # The user moves on to the second conversation and opens a file there.
+    _history_go(page, second)
+    _tree_settled(page, second, "second-only.txt")
+    page.evaluate("() => { void openFile('notes.txt'); return true; }")
+    _wait_until(page, """() => window.__loadDir.active === 0 && $('previewPathText').textContent === 'notes.txt'
+      && $('previewArea').classList.contains('visible')""")
+    page.evaluate("""() => {
+      window.__openFileCalls = [];
+      const original = openFile;
+      window.openFile = function (...args) { window.__openFileCalls.push(String(args[0])); return original.apply(this, args); };
+      return true;
+    }""")
+    tree = page.evaluate(_TREE_JS)
+    release()
+    assert _outcome(page) == _DROPPED
+    assert [p for p, _ in page.writes] == [path]
+    assert page.writes[0][1]["session_id"] == first
+    assert [_on_disk(root) for root in roots] == [change(before[0]), before[1]]
+    pane = page.evaluate("""() => ({
+      sid: S.session.session_id, dialogOpen: _isAppDialogOpen(), openFileCalls: window.__openFileCalls,
+      preview: $('previewPathText').textContent, previewVisible: $('previewArea').classList.contains('visible'),
+    })""")
+    assert pane == {"sid": second, "dialogOpen": False, "openFileCalls": [],
+                    "preview": "notes.txt", "previewVisible": True}, pane
+    assert page.evaluate(_TREE_JS) == tree
+    # Reopened, the first conversation's tree shows the change (it reloads from the server).
+    _switch_to(page, first)
+    _tree_settled(page, first, "first-only.txt")
+    shown = set(page.evaluate(_TREE_JS))
+    assert shown == {p for p in change(before[0]) if "/" not in p}, shown
+
+
+def _outside_link(server, root):
+    """A link in ``root`` to a folder outside every workspace."""
+    outside = server["state"] / f"outside-{time.time_ns()}"
+    outside.mkdir()
+    (outside / "elsewhere.txt").write_text("outside\n", encoding="utf-8")
+    try:
+        (root / "outside-link").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create a symlink here: {exc}")
+
+
+_AUTHORIZE = "authorizeWorkspaceEscapeNavigation({path: 'outside-link', name: 'outside-link'})"
+_GRANTS_JS = "() => Object.values(S._escapeGrants || {}).map(g => ({sessionId: g.sessionId, path: g.path}))"
+
+
+def test_outside_link_answered_while_a_switch_is_pending_authorizes_nothing(page, server):
+    (first, second), roots = _workspace_pair(server, "escape-pending")
+    _outside_link(server, roots[0])
+    _open_after(page, second, first)
+    _track(page, "authorizeWorkspaceEscapeNavigation")
+    page.evaluate(f"() => {{ void {_AUTHORIZE}; return true; }}")
+    _wait_until(page, "() => _isAppDialogOpen()")
+    release = _switch_pending(page, second)
+    _answer(page)
+    assert _outcome(page) == _DROPPED
+    assert page.writes == []
+    release()
+    _active(page, second)
+    assert page.writes == [] and page.evaluate(_GRANTS_JS) == []
+
+
+def test_outside_link_answered_after_another_conversation_opened_authorizes_nothing(page, server):
+    (first, second), roots = _workspace_pair(server, "escape-opened")
+    _outside_link(server, roots[0])
+    _open_after(page, second, first)
+    _track(page, "authorizeWorkspaceEscapeNavigation")
+    page.evaluate(f"() => {{ void {_AUTHORIZE}; return true; }}")
+    _wait_until(page, "() => _isAppDialogOpen()")
+    _switch_to(page, second)
+    _answer(page)
+    assert _outcome(page) == _DROPPED
+    assert page.writes == [] and page.evaluate(_GRANTS_JS) == []
+
+
+def test_outside_link_in_flight_when_another_conversation_opens_grants_nothing(page, server):
+    (first, second), roots = _workspace_pair(server, "escape-flight")
+    _outside_link(server, roots[0])
+    _open_after(page, second, first)
+    _track(page, "authorizeWorkspaceEscapeNavigation")
+    page.evaluate(f"() => {{ void {_AUTHORIZE}; return true; }}")
+    _wait_until(page, "() => _isAppDialogOpen()")
+    held, release = _hold(page, "**/api/escape/authorize")
+    _answer(page)
+    _wait_held(page, held, "the authorization")
+    _history_go(page, second)
+    _active(page, second)
+    release()
+    # No grant for the conversation now on screen, so its tree never opens the link.
+    assert _outcome(page) == _DROPPED
+    assert page.writes == [("/api/escape/authorize", {"session_id": first, "path": "outside-link"})]
+    assert page.evaluate(_GRANTS_JS) == []
+
+
+def test_outside_link_answered_on_its_conversation_authorizes_that_conversation(page, server):
+    (first, second), roots = _workspace_pair(server, "escape-control")
+    _outside_link(server, roots[0])
+    _open_after(page, second, first)
+    _track(page, "authorizeWorkspaceEscapeNavigation")
+    page.evaluate(f"() => {{ void {_AUTHORIZE}; return true; }}")
+    _wait_until(page, "() => _isAppDialogOpen()")
+    _answer(page)
+    outcome = _outcome(page)
+    assert outcome["done"] is True and outcome["value"]["path"] == "outside-link", outcome
+    assert outcome["value"]["sessionId"] == first
+    assert page.writes == [("/api/escape/authorize", {"session_id": first, "path": "outside-link"})]
+    assert page.evaluate(_GRANTS_JS) == [{"sessionId": first, "path": "outside-link"}]
+
+
+# ── Clear in flight when another conversation opens ──────────────────────────
+
+def test_clear_in_flight_when_another_conversation_opens_leaves_that_one_alone(page, server):
+    first, second = _import(server, "Flight clear first"), _import(server, "Flight clear second")
+    _open_after(page, second, first)
+    _track(page, "clearConversation")
+    _open_panel_dialog(page, "#btnClearConvModal")
+    held, release = _hold(page, "**/api/session/clear")
+    page.click("#appDialogConfirm")
+    _wait_held(page, held, "the clear")
+    _history_go(page, second)
+    _active(page, second)
+    _wait_until(page, "() => Array.isArray(S.messages) && S.messages.length === 2")
+    release()
+    assert _outcome(page) == _DROPPED
+    assert page.writes == [("/api/session/clear", {"session_id": first})]
+    assert [_message_count(server, first), _message_count(server, second)] == [0, 2]
+    pane = page.evaluate("() => ({sid: S.session.session_id, count: S.messages.length, text: $('msgInner').textContent})")
+    assert pane["sid"] == second and pane["count"] == 2, pane
+    assert "Flight clear second question" in pane["text"]
