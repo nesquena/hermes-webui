@@ -35,7 +35,7 @@ LABEL_KEY = "settings_label_skip_delete_confirm"
 DESC_KEY = "settings_desc_skip_delete_confirm"
 SETTING_KEY = "skip_delete_confirm"
 
-TOP_LEVEL_LOCALES = ("en", "it", "ja", "ru", "es", "de", "zh", "pt", "ko", "fr", "cs", "tr", "pl", "vi")
+TOP_LEVEL_LOCALES = ("en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "fr", "cs", "tr", "pl", "vi")
 
 JAPANESE_WIKI_VALUES = {
     "wiki_browse": "Wikiを閲覧",
@@ -62,7 +62,7 @@ def _get(path):
 
 
 def _extract_locale_block(src, locale_key):
-    start_match = re.search(rf"\b{re.escape(locale_key)}\s*:\s*\{{", src)
+    start_match = re.search(rf"['\"]?{re.escape(locale_key)}['\"]?\s*:\s*\{{", src)
     assert start_match, f"{locale_key} locale block not found"
     brace_start = start_match.end() - 1
     depth = 0
@@ -177,8 +177,9 @@ def test_new_keys_exist_in_every_locale_block():
         block = _extract_locale_block(src, locale)
         assert f"{LABEL_KEY}:" in block, f"{locale}: {LABEL_KEY} missing from its locale block"
         assert f"{DESC_KEY}:" in block, f"{locale}: {DESC_KEY} missing from its locale block"
-    # zh-Hant lives nested inside the zh block, so the total number of locale
-    # _lang markers is the honest count of translated bundles.
+    # zh-Hant is its own top-level locale block (not nested inside zh), so the
+    # per-block coverage above has to name it explicitly; the count is only a
+    # belt-and-braces check that no bundle was dropped.
     assert src.count("_lang: '") >= 15, "expected every shipped locale to carry the two new keys"
     assert src.count(f"{LABEL_KEY}:") >= 15, "the label key must be translated in all bundles"
     assert src.count(f"{DESC_KEY}:") >= 15, "the description key must be translated in all bundles"
