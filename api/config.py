@@ -3748,6 +3748,14 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         for slug, pdef in providers_cfg.items():
             if not isinstance(pdef, dict):
                 continue
+            # A record the user switched off is invisible to the Agent's
+            # resolver, so it must not own a WebUI route either: skip it here
+            # so the chat routes as if that record didn't list the model
+            # (#8954). Without this the scan first-matches the switched-off
+            # spelling and pairs the ENABLED record's key with the disabled
+            # record's base_url.
+            if not _raw_provider_record_enabled(pdef):
+                continue
             if target not in _configured_model_ids(pdef.get('models')):
                 continue
             if _is_native_custom_provider_key(slug) and not _is_bare_builtin_provider_id(slug):
