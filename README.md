@@ -246,6 +246,12 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Chat links using `workspace://path/to/file` open files in the right-side preview pane
 - Edit, create, delete, and rename files; create folders
 - Binary file download (auto-detected from server)
+- Right-click a file in the tree and choose **Copy file URL** to copy a direct
+  link to it without opening the preview. HTML files open rendered (sandboxed);
+  types the server has no MIME type for (such as `.md` or `.txt`) download.
+  The link only works in a browser with the same WebUI login and profile, and
+  only while that conversation exists. Offered for regular files only, not for
+  folders, links outside the workspace, or read-only paths outside the workspace.
 - File preview auto-closes on directory navigation (with unsaved-edit guard)
 - Dismissing the workspace panel is respected: resizing the viewport or showing the
   on-screen keyboard no longer force-reopens the panel after you close it (#6710)
