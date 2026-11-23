@@ -2961,39 +2961,40 @@
      `title` only reaches mouse users. setComposerStatus() marks the row
      focusable while it carries text, so focusing it — Tab, or a tap on a touch
      device — reveals the whole value instead of a cut-off fragment.
-     Above 640px the reveal is a disclosure bubble drawn by the
-     `@media (min-width:641px)` block below, NOT a wider status box: growing the
-     box in place changes `.composer-right` (content-sized) and the row height,
-     which moves Send. Pressing Send blurs the status first, so Send would move
-     out from under the pointer between pointer-down and pointer-up and the
-     click would land on a container — the message never leaves. Only the ring
-     below applies here; it is an outline, which takes no space.
-     Below 640px the phone block further down expands the box in place instead,
-     where there is no left cluster to squeeze. */
+     At EVERY width the reveal is the disclosure bubble drawn below, NOT a wider
+     status box. Expanding the box in place changes the row height (and, above
+     640px, `.composer-right`, which is content-sized), and both move Send.
+     Pressing Send blurs the status first, so Send moves out from under the
+     pointer between pointer-down and pointer-up and the click lands on a
+     container — the message never leaves. The phone branch hit exactly that
+     (320x700 touch: reveal, then press the primary button, 0 of 3 requests
+     delivered), so the bubble is not gated on the desktop breakpoint: the
+     invariant is that the button's position never depends on whether the status
+     row has focus, at any width. Only the ring below applies to the row itself;
+     it is an outline, which takes no space. */
   .composer-status:focus-visible{outline:1px solid var(--border2);outline-offset:2px;border-radius:4px;}
-  /* Desktop/tablet/landscape disclosure. The bubble hangs off `.composer-footer`
-     so it is out of flow: the status keeps its ellipsized box, `.composer-right`
-     keeps its width, the left cluster keeps its room and Send does not move
-     through focus or blur. `.composer-footer` is the inline-size container, so
-     `calc(100cqw - 24px)` bounds the bubble against the real composer row —
-     never against a content-sized percentage, which resolves cyclically and is
-     what pushed Send hundreds of px off its mark. `pointer-events:none` keeps a
-     click that starts on the bubble from swallowing the next Send press.
-     The text comes from `data-status-title` (set alongside `title` in
-     setComposerStatus) because the row's own `overflow:hidden` would clip any
-     pseudo-element rendered inside it. */
-  @media (min-width:641px){
-    .composer-footer:has(.composer-status:focus)::after{
-      content:attr(data-status-title);
-      position:absolute;right:10px;bottom:calc(100% - 2px);z-index:60;
-      box-sizing:border-box;width:max-content;
-      max-width:min(52ch,calc(100cqw - 24px));
-      padding:6px 10px;border:1px solid var(--border2);border-radius:10px;
-      background:var(--surface);box-shadow:0 12px 30px rgba(0,0,0,.28);
-      font-size:11px;line-height:1.45;color:var(--text);text-align:left;
-      white-space:normal;overflow-wrap:anywhere;word-break:break-word;text-overflow:clip;
-      pointer-events:none;
-    }
+  /* The disclosure bubble, at every width. It hangs off `.composer-footer` so it
+     is out of flow: the status keeps its ellipsized box, `.composer-right` keeps
+     its width, the left cluster keeps its room, the footer keeps its height, and
+     Send does not move through focus or blur. `.composer-footer` is the
+     inline-size container, so `calc(100cqw - 24px)` bounds the bubble against
+     the real composer row — never against a content-sized percentage, which
+     resolves cyclically and is what pushed Send hundreds of px off its mark.
+     `pointer-events:none` keeps a click that starts on the bubble from
+     swallowing the next Send press. The text comes from `data-status-title` (set
+     alongside `title` in setComposerStatus) because the row's own
+     `overflow:hidden` would clip any pseudo-element rendered inside it. The
+     phone block narrows the offsets to that block's 8px footer padding. */
+  .composer-footer:has(.composer-status:focus)::after{
+    content:attr(data-status-title);
+    position:absolute;right:10px;bottom:calc(100% - 2px);z-index:60;
+    box-sizing:border-box;width:max-content;
+    max-width:min(52ch,calc(100cqw - 24px));
+    padding:6px 10px;border:1px solid var(--border2);border-radius:10px;
+    background:var(--surface);box-shadow:0 12px 30px rgba(0,0,0,.28);
+    font-size:11px;line-height:1.45;color:var(--text);text-align:left;
+    white-space:normal;overflow-wrap:anywhere;word-break:break-word;text-overflow:clip;
+    pointer-events:none;
   }
   /* Context usage indicator */
   .ctx-indicator-wrap{position:relative;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;}
@@ -3535,17 +3536,14 @@
     /* icon-only composer chips continue below mobile widths */
     .composer-divider{display:none;}
     .composer-status{flex:0 1 auto;min-width:0;max-width:96px;font-size:10px;text-align:right;}
-    /* On a phone the focused disclosure expands the row in place — there is no
-       left cluster to squeeze at this width, and the phone has no hover so the
-       row itself must carry the text. The cap must resolve against the COMPOSER
-       ROW, not against `.composer-right`: that box is `width:auto`, i.e.
-       content-sized, so a percentage there shrinks with the label and a short
-       one collapses to 0px (invisible row, inflated footer). `.composer-footer`
-       is the inline-size container, so `100cqw` is the full row width;
-       subtracting the 44px Send tap target, the 6px row gap and the composer
-       padding keeps the button inside the right edge at 390px or narrower while
-       any label — short or long — still gets a usable width. */
-    .composer-status:focus{max-width:max(72px,calc(100cqw - 120px));white-space:normal;overflow-wrap:anywhere;word-break:break-word;text-overflow:clip;}
+    /* Phone disclosure offsets. The reveal itself is the shared bubble above —
+       it must NOT grow this row in place: at 320x700 the in-flow expansion
+       raised the footer by 26px, so blurring the row on pointer-down moved the
+       primary button from y=635 back to y=609 between pointer-up and click and
+       the press was dropped (0 of 3 Steer taps delivered). Only the bubble's
+       offsets change here, to match this block's 8px footer padding. The row
+       keeps its ellipsized 96px box at every focus state. */
+    .composer-footer:has(.composer-status:focus)::after{right:8px;max-width:calc(100cqw - 16px);}
     .send-btn{width:44px;height:44px;}
     .ctx-indicator-wrap{display:none!important;}
     .ctx-indicator{width:44px;height:44px;}

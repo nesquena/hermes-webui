@@ -17,26 +17,30 @@ WHAT IT CHECKS
   labels (a ~55-char spaced name and an unbroken one) x two focus paths (a real
   tap, and Tab from the composer), so twelve cases. For every case:
   - the status row is reachable and focusable while it carries a label;
-  - the focused label is actually readable: it wraps inside its own box and
-    nothing is clipped (scrollWidth/scrollHeight fit clientWidth/clientHeight);
-  - the Send button's rect stays fully inside the viewport, keeps its 44x44 tap
-    target, and its centre is hit-testable (nothing overlays it);
+  - the disclosure actually reveals the label: it is an out-of-flow bubble that
+    carries the whole value, wraps, and is bounded by the composer row;
+  - the row itself keeps its collapsed geometry — the reveal must not grow it
+    in place (that is the press-then-blur defect: the button moved between
+    pointer-up and click);
+  - the Send button's rect does not move across the reveal, stays fully inside
+    the viewport, keeps its 44x44 tap target, and its centre is hit-testable;
   - the document does not hide the overflow behind an unscrollable clip;
   - an ordinary send still works: the typed text reaches /api/chat/start.
 
-  Part 2 — reveal-then-send above 640px (the #7856 gate-certificate blocker).
-  Four schedules — 1440x900 click, 1920x1000 click, 800x900 click, 844x390 touch
-  — each: type the draft FIRST with the status collapsed, reveal the long
-  (~128-char) label, then press Send while the row still has focus, and require
-  the POST to carry the typed message. Both arms also require Send to stay
-  within SEND_STABILITY_PX of where it was pressed, because pointer-down on Send
-  blurs the row and a disclosure that resizes the composer row moves the button
-  out from under pointer-up: the click then lands on a container and nothing is
-  sent. Above 640px the disclosure is an out-of-flow bubble on
-  `.composer-footer::after`, capped with `100cqw` against the composer row.
-  The `lost-click` arm asserts only stability + delivery, so it passes on master
-  (where the row is not focusable); the `reveal` arm asserts the disclosure
-  itself and is expected to fail master for that new behavior.
+  Part 2 — reveal-then-send at every width (the #7856 gate-certificate
+  blockers). Six schedules — 1440x900 click, 1920x1000 click, 800x900 click,
+  844x390 touch, 320x700 touch, 360x740 touch — each: type the draft FIRST with
+  the status collapsed, reveal the long (~128-char) label, then press the
+  primary button while the row still has focus, and require the POST to carry
+  the typed message. Both arms also require Send to stay within
+  SEND_STABILITY_PX of where it was pressed, because pointer-down on Send blurs
+  the row and a disclosure that resizes the composer row moves the button out
+  from under pointer-up: the click then lands on a container and nothing is
+  sent. The disclosure is an out-of-flow bubble on `.composer-footer::after` at
+  every width, capped with `100cqw` against the composer row. The `lost-click`
+  arm asserts only stability + delivery, so it passes on master (where the row
+  is not focusable); the `reveal` arm asserts the disclosure itself and is
+  expected to fail master for that new behavior.
 
 SCOPE
   Agent-free, like tests/browser_smoke.py: the real server.py on an ephemeral
@@ -84,14 +88,19 @@ LABEL_DISCLOSURE = (
     "Production emergency guardrails review staging for the customer escalation"
     " handoff packet that arrives on the Tuesday morning bridge call"
 )
-# Above 640px the disclosure must not change the row's geometry, so the schedule
-# below is: type a draft, reveal the label, then press Send without touching the
-# input again. (desktop, wide desktop, tablet, phone landscape)
+# The disclosure must not change the row's geometry at ANY width, so the
+# schedule below is: type a draft, reveal the label, then press the primary
+# button without touching the input again. Desktop/tablet/landscape first, then
+# the two portrait phones the gate certificate lost the press on (320x700 and
+# 360x740, touch). On the portrait entries the reveal is a real tap on the
+# status row and the press is a real tap on the button.
 SEND_VIEWPORTS = (
     (1440, 900, False),
     (1920, 1000, False),
     (800, 900, False),
     (844, 390, True),
+    (320, 700, True),
+    (360, 740, True),
 )
 # The disclosure must keep Send within this many px of where the operator
 # pressed. Layout noise (a `cf-icons` stage flip, subpixel rounding) is smaller;
@@ -137,36 +146,6 @@ _SET_LABEL = """
 """
 
 # Geometry after focusing the row. Returns plain data for the assertion messages.
-_MEASURE = """
-() => {
-  const row = document.querySelector('.composer-status');
-  const send = document.querySelector('.send-btn') || document.querySelector('#btnSend');
-  const vw = window.innerWidth;
-  const r = row ? row.getBoundingClientRect() : null;
-  const s = send ? send.getBoundingClientRect() : null;
-  const cs = row ? getComputedStyle(row) : null;
-  let hitSendCentre = null;
-  if (send) {
-    const el = document.elementFromPoint((s.left + s.right) / 2, (s.top + s.bottom) / 2);
-    hitSendCentre = !!(el && (el === send || send.contains(el)));
-  }
-  return {
-    vw,
-    row: r ? {
-      left: r.left, right: r.right, width: r.width, height: r.height,
-      scrollWidth: row.scrollWidth, clientWidth: row.clientWidth,
-      scrollHeight: row.scrollHeight, clientHeight: row.clientHeight,
-    } : null,
-    send: s ? {left: s.left, right: s.right, width: s.width, height: s.height} : null,
-    hitSendCentre,
-    docScrollWidth: document.documentElement.scrollWidth,
-    focused: document.activeElement === row,
-    focusedStyleMaxWidth: cs ? cs.maxWidth : null,
-    whiteSpace: cs ? cs.whiteSpace : null,
-    text: row ? row.textContent : null,
-  };
-}
-"""
 
 _ACTIVE_IS_STATUS = """
 () => {
@@ -187,8 +166,8 @@ def _focus_by_tab(page, max_presses=25):
     return False
 
 
-# Geometry for the reveal-then-send schedule: the composer row, Send, and the
-# disclosure bubble that the desktop path renders on `::after`.
+# Geometry for the reveal: the composer row, Send, and the disclosure bubble the
+# footer renders on `::after` at every width.
 _MEASURE_SEND = """
 () => {
   const row = document.querySelector('.composer-status');
@@ -217,8 +196,12 @@ _MEASURE_SEND = """
     whiteSpace: row ? getComputedStyle(row).whiteSpace : null,
     rowScrollWidth: row ? row.scrollWidth : 0,
     rowClientWidth: row ? row.clientWidth : 0,
+    text: row ? row.textContent : null,
     bubble: after ? after.content : null,
     bubblePosition: after ? after.position : null,
+    bubbleMaxWidth: after ? parseFloat(after.maxWidth) : null,
+    bubbleWhiteSpace: after ? after.whiteSpace : null,
+    bubblePointerEvents: after ? after.pointerEvents : null,
     hitSendCentre: hitSendCentre,
     docScrollWidth: document.documentElement.scrollWidth,
     vw: window.innerWidth,
@@ -314,31 +297,23 @@ def _check_send_after_reveal(browser, width, height, touch, require_reveal):
             )
         elif after["tabindex"] != "0":
             fails.append(f"  [{tag}] the row is not in the tab order")
-        if width > 640:
-            # The desktop disclosure is an out-of-flow bubble: it must carry the
-            # whole label and must not be an in-flow box that resizes the row.
-            if after["bubblePosition"] != "absolute":
-                fails.append(
-                    f"  [{tag}] the disclosure is not an out-of-flow bubble"
-                    f" (position={after['bubblePosition']!r})"
-                )
-            if LABEL_DISCLOSURE not in str(after["bubble"]):
-                fails.append(
-                    f"  [{tag}] the focused disclosure does not carry the full"
-                    f" label: {str(after['bubble'])[:80]!r}"
-                )
-        else:
-            if after["whiteSpace"] != "normal":
-                fails.append(
-                    f"  [{tag}] the focused row still uses"
-                    f" white-space={after['whiteSpace']}; the label stays clipped"
-                )
-            if after["rowScrollWidth"] > after["rowClientWidth"] + 1:
-                fails.append(
-                    f"  [{tag}] the label is clipped horizontally:"
-                    f" scrollWidth={after['rowScrollWidth']:.0f}"
-                    f" > clientWidth={after['rowClientWidth']:.0f}"
-                )
+        # The disclosure is an out-of-flow bubble at every width: it must carry
+        # the whole label and must not be an in-flow box that resizes the row.
+        if after["bubblePosition"] != "absolute":
+            fails.append(
+                f"  [{tag}] the disclosure is not an out-of-flow bubble"
+                f" (position={after['bubblePosition']!r})"
+            )
+        if LABEL_DISCLOSURE not in str(after["bubble"]):
+            fails.append(
+                f"  [{tag}] the focused disclosure does not carry the full"
+                f" label: {str(after['bubble'])[:80]!r}"
+            )
+        if after["whiteSpace"] == "normal":
+            fails.append(
+                f"  [{tag}] the focused row expanded in place"
+                f" (white-space=normal); the disclosure must be out of flow"
+            )
 
     # The invariant both arms share: revealing the label must not move Send.
     send_before, send_after = before["send"], after["send"]
@@ -448,6 +423,8 @@ def _check(browser, width, height, label, label_name, focus_mode):
     if state != "ok":
         ctx.close()
         return [f"  [{tag}] could not establish the status label: {state}"]
+    _settle_composer_stages(page)
+    before = page.evaluate(_MEASURE_SEND)
 
     if focus_mode == "tap":
         # A real tap on the status row focuses it (the reveal path the report used).
@@ -462,7 +439,7 @@ def _check(browser, width, height, label, label_name, focus_mode):
             fails.append(f"  [{tag}] the status row is not reachable with Tab")
     page.wait_for_timeout(250)
 
-    geo = page.evaluate(_MEASURE)
+    geo = page.evaluate(_MEASURE_SEND)
     vw = geo["vw"]
     send = geo["send"]
     row = geo["row"]
@@ -470,29 +447,72 @@ def _check(browser, width, height, label, label_name, focus_mode):
     if not geo["focused"]:
         fails.append(
             f"  [{tag}] the row did not receive focus"
-            f" (focused={geo['focused']}, applied max-width={geo['focusedStyleMaxWidth']})"
+            f" (tabindex={geo['tabindex']!r})"
         )
     else:
-        # The disclosure must actually reveal the label: normal wrapping, and no
-        # content spilling past the box (which `overflow:hidden` would clip).
-        if geo["whiteSpace"] != "normal":
+        if geo["tabindex"] != "0":
+            fails.append(f"  [{tag}] the row is not in the tab order")
+        # The reveal is an out-of-flow bubble at EVERY width. It must carry the
+        # whole label, wrap, and stay bounded by the composer row; it must also
+        # be click-through so a press that starts on it cannot swallow the next
+        # Send tap.
+        if geo["bubblePosition"] != "absolute":
             fails.append(
-                f"  [{tag}] the focused row still uses white-space={geo['whiteSpace']};"
-                f" the label stays on one clipped line"
+                f"  [{tag}] the disclosure is not an out-of-flow bubble"
+                f" (position={geo['bubblePosition']!r}); an in-flow reveal"
+                f" moves Send between pointer-down and pointer-up"
             )
-        if row is not None:
-            if row["scrollWidth"] > row["clientWidth"] + 1:
-                fails.append(
-                    f"  [{tag}] the label is clipped horizontally:"
-                    f" scrollWidth={row['scrollWidth']:.0f} > clientWidth={row['clientWidth']:.0f}"
-                )
-            if row["scrollHeight"] > row["clientHeight"] + 1:
-                fails.append(
-                    f"  [{tag}] the label is clipped vertically:"
-                    f" scrollHeight={row['scrollHeight']:.0f} > clientHeight={row['clientHeight']:.0f}"
-                )
+        if label not in str(geo["bubble"]):
+            fails.append(
+                f"  [{tag}] the focused disclosure does not carry the full"
+                f" label: {str(geo['bubble'])[:80]!r}"
+            )
+        if geo["bubbleWhiteSpace"] != "normal":
+            fails.append(
+                f"  [{tag}] the disclosure does not wrap"
+                f" (white-space={geo['bubbleWhiteSpace']!r})"
+            )
+        if geo["bubblePointerEvents"] != "none":
+            fails.append(
+                f"  [{tag}] the disclosure is not click-through"
+                f" (pointer-events={geo['bubblePointerEvents']!r})"
+            )
+        if geo["bubbleMaxWidth"] is None or geo["bubbleMaxWidth"] > vw:
+            fails.append(
+                f"  [{tag}] the disclosure is not bounded by the row:"
+                f" max-width={geo['bubbleMaxWidth']!r} at a {vw}px viewport"
+            )
+        # The row itself must NOT grow: the reveal is out of flow, so its box
+        # keeps the collapsed ellipsized geometry.
+        if geo["whiteSpace"] == "normal":
+            fails.append(
+                f"  [{tag}] the focused row expanded in place"
+                f" (white-space=normal); the disclosure must be out of flow"
+            )
         if geo["text"] != label:
             fails.append(f"  [{tag}] the rendered label no longer matches the value")
+
+    # The invariant at every width: revealing the label must not move Send, and
+    # must not change the height of the row it lives in.
+    if before["send"] is not None and send is not None:
+        moved = {
+            edge: round(send[edge] - before["send"][edge], 2)
+            for edge in ("left", "top", "right", "bottom")
+            if abs(send[edge] - before["send"][edge]) > SEND_STABILITY_PX
+        }
+        if moved:
+            fails.append(
+                f"  [{tag}] revealing the label moved Send by {moved}px"
+                f" (collapsed={before['send']['left']:.0f},{before['send']['top']:.0f}"
+                f" revealed={send['left']:.0f},{send['top']:.0f})"
+            )
+    if before["row"] is not None and row is not None:
+        grew = round(row["height"] - before["row"]["height"], 2)
+        if abs(grew) > 0.5:
+            fails.append(
+                f"  [{tag}] the reveal grew the status row by {grew}px"
+                f" ({before['row']['height']:.1f} -> {row['height']:.1f})"
+            )
 
     if send is None:
         fails.append(f"  [{tag}] Send control not found")
@@ -526,6 +546,11 @@ def _check(browser, width, height, label, label_name, focus_mode):
         fails.append(
             f"  [{tag}] document scrollWidth={geo['docScrollWidth']}"
             f" exceeds the {vw}px viewport"
+        )
+    if geo["docScrollWidth"] > before["docScrollWidth"] + 1:
+        fails.append(
+            f"  [{tag}] the reveal widened the document:"
+            f" scrollWidth {before['docScrollWidth']} -> {geo['docScrollWidth']}"
         )
 
     # An ordinary send still works after the disclosure. Intercept the POST so
