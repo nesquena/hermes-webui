@@ -1843,6 +1843,9 @@ def _run_gateway_runs_api_streaming(
         # not terminal, so the settle below returns "continue" and the loop
         # reconnects /events with the card already up.
         _surface_status_approval(status)
+        # Same clarify reconciliation as cold reattach: the status's pending_controls
+        # is the live authority when /events cannot deliver the clarify.request.
+        _sync_gateway_run_clarify_from_status(session_id, run_id, status, put_gateway_event=put_gateway_event)
         action, value = _settle_by_status(status)
         if action == "continue":
             # Still running: reconnect and resume from the last seen event id,

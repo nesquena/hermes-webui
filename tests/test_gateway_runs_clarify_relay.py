@@ -499,3 +499,84 @@ def test_status_without_pending_controls_keeps_clarify_queue():
     gateway_chat._sync_gateway_run_clarify_from_status(
         SID, RUN, {"status": "running"}, put_gateway_event=lambda *a: None)
     assert clarify.gateway_run_prompt_ids(SID, RUN) == {"clar-a"}
+
+
+# ── live streaming watchdog (events endpoint down, run still live) ───────
+
+WD_SID = "sess-watchdog-harness"
+
+
+@pytest.fixture
+def _wd_session():
+    clarify.clear_pending(WD_SID)
+    yield WD_SID
+    clarify.clear_pending(WD_SID)
+
+
+def _watchdog(urlopen_script, statuses, seen):
+    """Drive the live streaming watchdog; ``seen`` records queued prompt ids at each probe."""
+    from tests import test_gateway_events_watchdog_7978 as wd
+
+    scripted = iter(statuses)
+
+    def status(*_a):
+        seen.append(clarify.gateway_run_prompt_ids(WD_SID, wd.RUN_ID))
+        return dict(next(scripted))
+
+    return wd.RUN_ID, wd.run_turn(
+        urlopen_script=urlopen_script, extra_patches=[(gateway_chat, "_get_gateway_run_status", status)])
+
+
+def _events_404(n):
+    from tests import test_gateway_events_watchdog_7978 as wd
+
+    return [wd._http_error(404) for _ in range(n)]
+
+
+def test_watchdog_status_restores_live_clarify_before_reconnect(_wd_session):
+    """Events 404 + status running with a parked clarify: the card is up while the
+    run and native waiter are still live, and re-polling does not duplicate it."""
+    seen = []
+    running = {"status": "running", "pending_controls": [_parked()]}
+    run, h = _watchdog(_events_404(3), [running, running, {"status": "completed", "output": "ok"}], seen)
+    assert seen[1] == {"clar-a"}  # mirrored from the first live status, before reconnecting
+    cards = [d for e, d in h["events"] if e == "clarify"]
+    assert len(cards) == 1
+    assert cards[0]["clarify_id"] == clarify.gateway_run_clarify_id(run, "clar-a", 3)
+    assert cards[0]["question"] == "Which one?"
+    assert clarify.gateway_run_prompt_ids(WD_SID, run) == set()  # terminal cleanup
+
+
+def test_watchdog_status_retires_settled_prompt_and_keeps_local_card(_wd_session):
+    local = clarify.submit_pending(WD_SID, {"question": "local?", "choices_offered": []})
+    seen = []
+    run, _h = _watchdog(_events_404(4), [
+        {"status": "running", "pending_controls": [_parked()]},
+        {"status": "running", "pending_controls": []},
+        {"status": "running"},  # no pending_controls: proves nothing, changes nothing
+        {"status": "completed", "output": "ok"},
+    ], seen)
+    assert seen[1:] == [{"clar-a"}, set(), set()]
+    assert clarify.pending_count(WD_SID) == 1
+    assert clarify.get_pending(WD_SID)["clarify_id"] == local.clarify_id
+    assert not local.event.is_set()
+
+
+def test_watchdog_no_pending_status_leaves_local_card_unchanged(_wd_session):
+    local = clarify.submit_pending(WD_SID, {"question": "local?", "choices_offered": []})
+    seen = []
+    _run, h = _watchdog(_events_404(2), [{"status": "running"}, {"status": "completed", "output": "ok"}], seen)
+    assert [e for e, _d in h["events"] if e == "clarify"] == []
+    assert clarify.get_pending(WD_SID)["clarify_id"] == local.clarify_id
+
+
+def test_watchdog_ordinary_event_delivery_surfaces_same_prompt(_wd_session):
+    """Control: /events delivers the clarify.request; one card with the same identity."""
+    from tests import test_gateway_events_watchdog_7978 as wd
+
+    frames = wd.sse_frame(0, _request()) + wd.sse_frame(1, {"event": "run.completed", "output": "ok"})
+    seen = []
+    run, h = _watchdog([wd.FakeSseResponse(frames)], [], seen)
+    cards = [d for e, d in h["events"] if e == "clarify"]
+    assert [c["clarify_id"] for c in cards] == [clarify.gateway_run_clarify_id(run, "clar-a", 3)]
+    assert seen == []
