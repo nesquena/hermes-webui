@@ -4397,6 +4397,60 @@ def _run_journal_visible_texts(session, stream_id: str | None) -> list[str]:
     return texts
 
 
+def _core_row_conflicts_with_pending_turn(row, session) -> bool:
+    """True when a core-synced user row carries explicit identity evidence
+    that belongs to a DIFFERENT turn than the session's pending turn.
+
+    Pure text equality is never ownership evidence (see the turn-journal
+    RFC's dedupe contract): an earlier turn that reused the identical prompt
+    must keep its own boundary. This predicate supplies the explicit
+    conflicting evidence that :func:`_core_transcript_holds_pending_turn`
+    rejects BEFORE the pending user may be suppressed or its predecessor
+    backfilled (#7167 review 2026-11-23). A row conflicts when it carries:
+
+    * a foreign ``_active_turn_token`` — both sides present and unequal; or
+    * a finite timestamp that differs from the pending turn's finite
+      ``pending_started_at`` (exact comparison, no whole-second rounding); or
+    * a conflicting ``_source`` or non-empty ``attachments`` payload.
+
+    Absent or non-finite values on either side prove nothing and are NOT
+    conflicts, so the identity-less legacy shapes keep their reuse
+    behaviour: the unstamped current-turn fixture, the non-finite pending
+    timestamp tolerance, and dead-stream sidecars that never persisted
+    ``pending_started_at``.
+    """
+    if not isinstance(row, dict):
+        return False
+    current_token = _current_turn_token(session)
+    row_token = row.get('_active_turn_token')
+    if current_token and row_token:
+        # An explicit token conflict is authoritative negative evidence.
+        return row_token != current_token
+    row_ts = _message_timestamp(row)
+    pending_raw = getattr(session, 'pending_started_at', None)
+    try:
+        pending_ts = None if pending_raw is None else float(pending_raw)
+    except (TypeError, ValueError):
+        pending_ts = None
+    if (
+        row_ts is not None
+        and math.isfinite(row_ts)
+        and pending_ts is not None
+        and math.isfinite(pending_ts)
+        and row_ts != pending_ts
+    ):
+        # Both timestamps are finite and distinct: the row is a different,
+        # older turn even though its text matches.
+        return True
+    if _source_conflicts(
+        row.get('_source'), getattr(session, 'pending_user_source', None)
+    ):
+        return True
+    return _attachments_conflict(
+        row.get('attachments'), getattr(session, 'pending_attachments', None)
+    )
+
+
 def _core_transcript_holds_pending_turn(session, stream_id: str | None, pending_text: str) -> bool:
     """True when the just-synced core transcript already contains this turn.
 
@@ -4407,12 +4461,17 @@ def _core_transcript_holds_pending_turn(session, stream_id: str | None, pending_
     RED finding 2). The proof here is deliberately narrow:
 
     * the LAST user row came from the core transcript,
+    * it carries no explicit conflicting owner/token/timestamp evidence
+      (:func:`_core_row_conflicts_with_pending_turn`),
     * its text equals the pending prompt, and
     * journaled visible output for THIS stream appears in an assistant/tool
       row AFTER it.
 
     An older same-text turn cannot satisfy the last condition because its
-    output is not this stream's journal output.
+    output is not this stream's journal output, and it cannot pass the
+    conflict check when it carries its own token or an earlier timestamp;
+    when neither proof is available the caller preserves the pending
+    boundary instead of assigning its metadata to history.
     """
     if not pending_text or not stream_id:
         return False
@@ -4427,6 +4486,11 @@ def _core_transcript_holds_pending_turn(session, stream_id: str | None, pending_
         return False
     user_row = messages[last_user_idx]
     if user_row.get('_from_core_transcript') is not True:
+        return False
+    if _core_row_conflicts_with_pending_turn(user_row, session):
+        # Reject explicit conflicting owner/token/timestamp evidence BEFORE
+        # the text/tail match can suppress the pending user turn or let the
+        # caller backfill the pending metadata onto this older row.
         return False
     if _normalize_journal_recovery_text(user_row.get('content')) != pending_text:
         return False
