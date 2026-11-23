@@ -41,6 +41,12 @@
 
 ### Fixed
 
+- **A full disk or quota now shows "Storage on the server is full" instead of "Internal server error" (#9169, closes #9167).** Thanks @angelusbr. When a write fails with no space left (ENOSPC) or over quota (EDQUOT), the server answers HTTP 507 with a message that says to free up space, and the chat shows it. Freeing space is enough; no restart is needed. `docs/troubleshooting.md` has the recovery steps.
+
+- **When Hermes Agent declines to claim an external memory provider while WebUI builds a session's agent, that refusal is now recorded (#9240, refs #9061).** Thanks @chhxbchhxb. WebUI already recorded its own cross-profile refusals, but not the Agent's, so the session's memory status read as normal although the provider was gone. Built-in memory is unaffected.
+
+- **Workspace git change counts include lines that start with `---` or `+++` inside a change (#9206, closes #9205).** Thanks @nurlanmnn. The added and removed line counts skipped every changed line beginning with `---` or `+++` (a YAML front-matter separator, an SQL comment, `++i;`), so a file could show fewer changes than it had. Now only each file's own `---`/`+++` header lines are skipped, and the counts cover the whole change even when a very large diff is cut short.
+
 - **A reply is no longer lost when the Agent shortens an old tool result to save space (#9286, refs #9233).** When the Agent's cold-cache pruning replaced an earlier tool output with a short placeholder, WebUI could no longer prove the new turn extended the saved conversation and refused to keep the reply. WebUI now restores its own full copy of that tool row before the check, so the reply is kept; any other difference is still refused as before.
 
 - **A public share page no longer hides part of a message (#9214).** Some messages contained text the page left out without any sign: an HTML comment, an attribute value the renderer drops, or angle-bracket text such as `git checkout <branch-name>` or a traceback's `File "<stdin>", line 1, in <module>`. Anyone reading the published snapshot's source could still see it. When the rendered message would leave out any of its words, the share page now shows that message as plain text, with a short note, so every word is visible. Messages the page shows in full render as before. A few formatting-only shapes also fall back to plain text although nothing in them is hidden; they're listed in the PR and tracked in #9267.
@@ -290,6 +296,8 @@
 
 ### Documentation
 
+- **The README now describes opening a session in a new tab (#9185).** Thanks @chhxbchhxb. Middle-click, or Ctrl/Cmd+click, a sidebar session row to open its `/session/<id>` link in a new tab; rows that belong to a profile other than the active one are refused, because a new tab would switch the shared profile cookie under the tab you came from.
+
 - **Documented the reverse-proxy basic-auth caveat for installed PWAs.** README, onboarding, and troubleshooting now explain that proxy basic auth can block the same-origin service-worker/shell update fetches an installed PWA needs (leaving it on a blank screen after an update), and give recovery steps — prefer WebUI's built-in password, or scope proxy auth so `sw.js`/manifest/shell requests complete. Thanks @rodboev. (#5673, #2781)
 
 - **Documented the `HERMES_WEBUI_*` environment variables and refreshed stale version/test/locale references.** README, ARCHITECTURE, TESTING, ROADMAP, SPRINTS, and the `.env` example files now describe the supported runtime env vars (host/port/state-dir/agent-dir/home) and no longer carry stale hardcoded version/test-count/locale figures. Thanks @mo7al876any. (#5536)
@@ -303,6 +311,10 @@
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Internal
+
+- **The context-length contract tests check behaviour again (#9254, closes #8900).** Thanks @chhxbchhxb. An earlier byte-for-byte revert of two test files also dropped later behavioural cases, which had degraded to source-string checks. They are back: the per-profile config re-read on every lookup, and safe handling of a null, empty or malformed `providers:` section.
+
+- **A test now pins that the profile secret-scope setter is inspected again when it is replaced (#9234, refs #9096).** Thanks @chhxbchhxb. Replacing `set_secret_scope` on the same Agent module (an Agent reload, or a plugin that wraps the setter) has to re-check whether the new setter accepts `profile_home`; nothing guarded that half of the cache before.
 
 - **The ledger retry-timer test no longer fails intermittently (#9287, closes #9269).** It counted live timers before the retry timer that had just fired had finished exiting; it now waits for that timer first.
 
