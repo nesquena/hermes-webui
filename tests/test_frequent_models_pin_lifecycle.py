@@ -10,19 +10,26 @@ whole pin allowance and new pins were refused.
 These tests drive the REAL ``delete_profile_api()`` — the ``hermes_cli``
 delegate AND the ImportError rmtree fallback — against a throwaway HERMES_HOME
 and a throwaway pin store.  The external CLI boundary is an isolated stand-in;
-no real profile, state directory or service is touched.  Rejected or failed
-deletes must leave the target store alone, and a cleanup failure must never be
-reported as a successful delete.
+no real profile, state directory or service is touched.  Rejected deletes must
+leave the target store alone.  A pin write for a home-less named profile (a tab
+still on a deleted profile) must be refused without recreating the store, and a
+pin-store cleanup failure after the delete already happened is reported as a
+partial success with a warning — never as a bare 403/400/500 — with the damaged
+store preserved and the profile-list cache refreshed regardless.
 """
 
+import json
 import shutil
 import sys
 import types
+from types import SimpleNamespace
+from urllib.parse import urlparse
 
 import pytest
 
 from api import model_preferences as mp
 from api import profiles as profiles
+from api import routes
 
 
 @pytest.fixture
@@ -159,6 +166,7 @@ def test_delete_without_hermes_cli_fallback_also_cleans_pins(env, monkeypatch):
 
 def test_rejected_deletes_leave_the_pin_store_untouched(env, monkeypatch):
     install_fake_cli(monkeypatch, delete_impl=_rmtree_profile(env))
+    profile_home(env, 'work').mkdir(parents=True)
     for i in range(mp.MAX_PINS):
         pin(env, 'work', f'model-{i}')
     before = store_file(env, 'work').read_bytes()
@@ -192,11 +200,52 @@ def test_missing_profile_in_fallback_delete_keeps_the_pin_store(
         env, monkeypatch):
     _block_cli_import(monkeypatch)
     # Store present, profile home absent: the fallback refuses before cleanup.
-    pin(env, 'work', 'model-a')
+    # The store is seeded directly because a pin write for a home-less named
+    # profile is itself refused (#8622) — that is the regression below.
+    store_dir(env, 'work').mkdir(parents=True)
+    store_file(env, 'work').write_text(
+        json.dumps({'pins': [{'model': 'model-a', 'provider': 'prov'}]}),
+        encoding='utf-8')
     with pytest.raises(ValueError):
         profiles.delete_profile_api('work')
     assert store_dir(env, 'work').is_dir()
     assert pins(env, 'work') == ['model-a']
+
+
+def test_a_pin_from_a_tab_on_a_deleted_profile_cannot_recreate_its_store(
+        env, monkeypatch):
+    """#8622 maintainer finding 2.1: the cookie is a valid NAME, not a live
+    profile.  A tab still on ``work`` after the delete must not resurrect
+    ``model_preferences/work/`` — pin AND unpin alike — while the default
+    profile, live named profiles and legal names keep working."""
+    install_fake_cli(monkeypatch, delete_impl=_rmtree_profile(env),
+                     create_impl=_mkdir_profile(env))
+    profiles.create_profile_api('work')
+    pin(env, 'work', 'model-a')
+    assert store_file(env, 'work').is_file()
+
+    assert profiles.delete_profile_api('work')['ok'] is True
+    assert not store_dir(env, 'work').exists()
+
+    # A pin from the stale tab is refused and recreates nothing.
+    with pytest.raises(mp.PreferencesError):
+        pin(env, 'work', 'model-b')
+    assert not store_dir(env, 'work').exists()
+    # An unpin from the same tab is refused the same way.
+    with pytest.raises(mp.PreferencesError):
+        mp.set_pin(env['state'], 'model-a', 'prov', False)
+    assert not store_dir(env, 'work').exists()
+    # A stale read sees nothing rather than the deleted profile's pins.
+    assert pins(env, 'work') == []
+
+    # A same-name recreate starts empty, and the ordinary/default paths still
+    # accept pins (no over-broad refusal).
+    profiles.create_profile_api('work')
+    assert pins(env, 'work') == []
+    pin(env, 'work', 'fresh-model')
+    assert pins(env, 'work') == ['fresh-model']
+    pin(env, 'default', 'default-model')
+    assert pins(env, 'default') == ['default-model']
 
 
 # ── Blast radius ─────────────────────────────────────────────────────────────
@@ -218,15 +267,63 @@ def test_other_profiles_and_the_default_store_survive_a_delete(
     assert (env['state'] / 'model_preferences.json').is_file()
 
 
-def test_pin_store_cleanup_failure_is_not_reported_as_success(env, monkeypatch):
+def test_cleanup_failure_reports_partial_success_and_keeps_the_store(
+        env, monkeypatch):
+    """#8622 maintainer finding 2.2: the profile is already gone, so a pin-store
+    cleanup failure is a PARTIAL success.  The route must answer 200 with a
+    warning (not 400/403/500), the damaged store must survive untouched, and
+    the profile-list cache must refresh so the deleted profile does not stay
+    listed until the cache expires."""
     install_fake_cli(monkeypatch, delete_impl=_rmtree_profile(env))
     profile_home(env, 'work').mkdir(parents=True)
     pin(env, 'work', 'model-a')
     # External damage: the store path is now a plain file, so removing the
-    # store fails. The delete must surface the error, not claim success.
+    # store fails with an OSError after the delete already happened.
     shutil.rmtree(store_dir(env, 'work'))
     store_dir(env, 'work').write_text('not a directory')
-    with pytest.raises(OSError):
+    # A stale list cache must not survive the failed cleanup.
+    profiles._LIST_PROFILES_CACHE = ([{'name': 'work'}], 9e18)
+
+    result = profiles.delete_profile_api('work')
+
+    assert result['ok'] is True, result
+    assert result['name'] == 'work'
+    assert result.get('warning'), result
+    assert not profile_home(env, 'work').exists()  # the delete DID happen
+    # No new data was deleted and the damaged store was preserved.
+    assert store_dir(env, 'work').read_text() == 'not a directory'
+    # The list cache was refreshed despite the cleanup failure.
+    assert profiles._LIST_PROFILES_CACHE is None
+
+
+def test_cleanup_permission_error_reports_partial_success_not_403(
+        env, monkeypatch):
+    """A real PermissionError during cleanup is a filesystem failure, not a
+    forbidden action: the delete already happened, so it must not surface as
+    the route's 403."""
+    install_fake_cli(monkeypatch, delete_impl=_rmtree_profile(env))
+    profile_home(env, 'work').mkdir(parents=True)
+    pin(env, 'work', 'model-a')
+
+    def denied(name):
+        raise PermissionError('read-only file system')
+
+    monkeypatch.setattr(mp, 'delete_profile_store', denied)
+    result = profiles.delete_profile_api('work')
+    assert result['ok'] is True and result.get('warning'), result
+    assert not profile_home(env, 'work').exists()
+
+
+def test_unexpected_cleanup_error_is_not_swallowed(env, monkeypatch):
+    install_fake_cli(monkeypatch, delete_impl=_rmtree_profile(env))
+    profile_home(env, 'work').mkdir(parents=True)
+    pin(env, 'work', 'model-a')
+
+    def boom(name):
+        raise RuntimeError('unexpected')
+
+    monkeypatch.setattr(mp, 'delete_profile_store', boom)
+    with pytest.raises(RuntimeError):
         profiles.delete_profile_api('work')
 
 
@@ -247,8 +344,11 @@ def test_pin_cleanup_refuses_symlinks_and_preserves_their_targets(
         store_dir(env, 'work').symlink_to(external, target_is_directory=True)
     sentinel = target / 'model_preferences.json'
     sentinel.write_text('unrelated data')
-    with pytest.raises(mp.PreferencesError):
-        profiles.delete_profile_api('work')
+    # The linked target is never traversed or deleted — the refusal is reported
+    # as a cleanup warning on an already-completed delete, not as success and
+    # not as a bare 403/400 failure.
+    result = profiles.delete_profile_api('work')
+    assert result['ok'] is True and result.get('warning'), result
     assert sentinel.read_text() == 'unrelated data'
 
 
@@ -258,3 +358,66 @@ def test_renamed_root_alias_keeps_default_pins(env, monkeypatch):
     with pytest.raises(ValueError):
         profiles.delete_profile_api('home')
     assert pins(env, 'default') == ['root-model']
+
+
+# ── Route contract: a cleanup failure is not a failed delete ────────────────
+
+def _post_profile_delete(monkeypatch, name):
+    """Drive the REAL POST /api/profile/delete route with stubbed transport."""
+    cap = {}
+
+    def _j(_handler, payload, status=200):
+        cap['j'] = (payload, status)
+        return True
+
+    def _bad(_handler, msg, code=400):
+        cap['bad'] = (msg, code)
+        return True
+
+    handler = SimpleNamespace(command='POST', headers={})
+    monkeypatch.setattr(routes, 'read_body', lambda _h: {'name': name})
+    monkeypatch.setattr(routes, '_check_csrf', lambda _h: True)
+    monkeypatch.setattr(routes, '_csrf_exempt_path', lambda _p: False)
+    monkeypatch.setattr(routes, '_guard_request_session_visibility',
+                        lambda *_a, **_k: True)
+    monkeypatch.setattr(routes, 'j', _j)
+    monkeypatch.setattr(routes, 'bad', _bad)
+    routes.handle_post(handler, urlparse('/api/profile/delete'))
+    return cap
+
+
+def test_delete_route_reports_a_cleanup_failure_as_partial_success(
+        env, monkeypatch):
+    install_fake_cli(monkeypatch, delete_impl=_rmtree_profile(env))
+    profile_home(env, 'work').mkdir(parents=True)
+    pin(env, 'work', 'model-a')
+    shutil.rmtree(store_dir(env, 'work'))
+    store_dir(env, 'work').write_text('not a directory')
+
+    cap = _post_profile_delete(monkeypatch, 'work')
+
+    # 200 + warning: the delete already happened, so the route must not answer
+    # 400 (PreferencesError), 500 (escaped OSError) or 403 (PermissionError) —
+    # any of those would claim the profile still exists when it does not.
+    assert 'bad' not in cap, cap
+    payload, status = cap['j']
+    assert status == 200
+    assert payload['ok'] is True and payload['name'] == 'work'
+    assert payload.get('warning'), payload
+    assert not profile_home(env, 'work').exists()
+
+
+def test_delete_route_keeps_the_403_for_a_delete_that_did_not_happen(
+        env, monkeypatch):
+    install_fake_cli(monkeypatch, delete_impl=_rmtree_profile(env))
+    profile_home(env, 'work').mkdir(parents=True)
+    pin(env, 'work', 'model-a')
+    monkeypatch.setattr(profiles, '_is_isolated_profile_mode', lambda: True)
+
+    cap = _post_profile_delete(monkeypatch, 'work')
+
+    # A refused delete (nothing was removed) stays a 403, and the pin store
+    # survives untouched.
+    assert 'j' not in cap
+    assert cap['bad'][1] == 403, cap
+    assert pins(env, 'work') == ['model-a']

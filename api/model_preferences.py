@@ -136,9 +136,16 @@ def read_pins(state_dir):
 
 
 @contextmanager
-def _locked_path(path):
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _locked_path(path, prepare=None):
     with _pin_lock:
+        # The liveness check and the directory creation share the store lock
+        # with ``delete_profile_store()`` (which rmtrees the store under this
+        # same lock): a check outside it could pass and then recreate the
+        # directory of a profile deleted in between, and a mkdir outside it
+        # would resurrect the store before any check could see it.
+        if prepare is not None:
+            prepare()
+        path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(path) + '.lock', os.O_CREAT | os.O_RDWR, 0o600)
         with os.fdopen(fd, 'a') as lock:
             try:
@@ -173,12 +180,43 @@ def _write_pins_path(path, pins):
             os.unlink(name)
 
 
+def _require_live_profile_store():
+    """Refuse a pin write whose named profile home no longer exists (#8622).
+
+    A browser tab left open on a deleted profile still sends that profile's
+    cookie: the request profile is a valid NAME, but the profile is gone.
+    Writing would recreate ``STATE_DIR/model_preferences/<owner>/`` — the very
+    store ``delete_profile_store()`` removed — and a same-name recreate would
+    then inherit the resurrected pins, filling the allowance with models that
+    may no longer exist.  Runs UNDER the store lock and BEFORE the directory is
+    created (see ``_locked_path``), so a delete that commits first can never be
+    undone by a late write.
+
+    Liveness is resolved through the repo's own profile resolver
+    (``api.profiles._resolve_named_profile_home``), the same resolver the
+    deletion path uses, so both agree on which homes exist.  An unresolvable
+    name fails closed.  The root alias maps to the shared 'default' store, whose
+    home (the Hermes root) always exists, so only named profiles are gated;
+    the default profile and every ordinary named profile keep working.
+    """
+    owner = _canonical_profile_owner(_request_profile())
+    if owner == 'default':
+        return
+    from api.profiles import _resolve_named_profile_home
+    try:
+        home = _resolve_named_profile_home(owner)
+    except ValueError:
+        raise PreferencesError('Unknown profile') from None
+    if not home.is_dir():
+        raise PreferencesError('Profile no longer exists')
+
+
 def set_pin(state_dir, model, provider, pinned):
     model, provider = _identity(model, provider)
     if not isinstance(pinned, bool):
         raise PreferencesError('pinned must be a boolean')
     path = _pins_file(state_dir)
-    with _locked_path(path):
+    with _locked_path(path, prepare=_require_live_profile_store):
         pins = _read_pins_path(path)
         entry = {'model': model, 'provider': provider}
         if pinned and entry not in pins:
@@ -203,9 +241,9 @@ def delete_profile_store(profile):
 
     Returns True when a store directory was removed, False when there was
     nothing to remove or the name is not a deletable named profile (the root
-    alias shares the 'default' store and can never be deleted).  A failing
-    removal raises: the caller must not report a successful delete when the
-    store survived.
+    alias shares the 'default' store and can never be deleted). A failing
+    removal raises so the caller can report a partial success: the profile
+    was deleted, but the separate store could not be removed.
     """
     name = profile.strip() if isinstance(profile, str) and profile.strip() else ''
     if not name or not _SAFE_ID.fullmatch(name) or name in ('.', '..'):

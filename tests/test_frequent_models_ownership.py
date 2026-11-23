@@ -38,6 +38,15 @@ PROVIDER = 'prov'
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
+    # Isolate the profile resolver too: the named-'work' pin write below must
+    # prove that profile's home exists against a throwaway home, never the real
+    # one (#8622 deleted-profile writes).
+    import api.profiles as profiles
+    home = tmp_path / 'hermes-home'
+    (home / 'profiles' / 'work').mkdir(parents=True)
+    monkeypatch.setattr(profiles, '_DEFAULT_HERMES_HOME', home)
+    monkeypatch.setattr(profiles, '_root_profile_name_cache', {'default'})
+    monkeypatch.setattr(profiles, '_root_profile_name_cache_loaded', True)
     monkeypatch.setattr(mp, '_state_dir', lambda: tmp_path)
     monkeypatch.setattr(mp, '_request_profile', lambda: 'default')
     mp._scan_cache.clear()

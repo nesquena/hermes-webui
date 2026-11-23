@@ -6,6 +6,15 @@ from api import model_preferences as mp
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
+    # Isolate the profile resolver too: a pin write for the named 'work'
+    # profile now proves that profile's home exists, and that check must read a
+    # throwaway home, never the real one (#8622 deleted-profile writes).
+    from api import profiles as profiles
+    home = tmp_path / 'hermes-home'
+    (home / 'profiles' / 'work').mkdir(parents=True)
+    monkeypatch.setattr(profiles, '_DEFAULT_HERMES_HOME', home)
+    monkeypatch.setattr(profiles, '_root_profile_name_cache', {'default'})
+    monkeypatch.setattr(profiles, '_root_profile_name_cache_loaded', True)
     monkeypatch.setattr(mp, '_state_dir', lambda: tmp_path)
     monkeypatch.setattr(mp, '_request_profile', lambda: 'default')
     mp._scan_cache.clear()

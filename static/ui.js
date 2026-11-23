@@ -6669,10 +6669,12 @@ function _focusModelPicker(dd){
 // cache below only mirrors the last server snapshot for rendering the picker
 // group; a profile switch or stale request is discarded via request-seq guard.
 let _modelFrequentCache=null;       // {profile,pins:[{model,provider}],usage:[{...}],limit,fetchedAt}
-let _modelFrequentRequestSeq=0;     // request-generation guard
+let _modelFrequentRequestSeq=0;     // request-generation guard (GETs)
 let _modelFrequentInFlight=false;   // dedupe overlapping GETs
 let _modelFrequentPendingSaves=0;   // in-flight POSTs own the cache while >0
 let _modelFrequentSaveChain=Promise.resolve(); // serialize pin mutations
+let _modelFrequentSaveSeq=0;        // a save checks ITS sequence, never a GET's
+let _modelFrequentSaveEpoch=0;      // bumped when every save starts and ends
 const _MODEL_FREQUENT_TTL_MS=30000; // small TTL, refreshed on open / re-open
 function _frequentProfileName(){return (typeof S!=='undefined'&&S&&S.activeProfile)||'default';}
 // Stable identity: strip ONLY the exact routing prefix `@<provider>:` when it
@@ -6707,37 +6709,51 @@ function _modelPreferencesAge(){
 }
 // Async load of server pin/usage state. Guards against late responses leaking
 // a prior profile or overwriting newer pin updates (seq is bumped on every
-// request AND on every local pin toggle). While a POST is in flight the cache
-// belongs to that save, so a stale GET snapshot is discarded instead of
-// overwriting a successful pin (maintainer finding 2, 2026-11-17).
+// request). A save owns the cache while it is pending: a GET drops its result
+// when a save was pending when the GET STARTED, or when the save epoch moved
+// while the GET was in flight. Without that, a GET that read the server before
+// the save committed could return after it and reinstall the stale snapshot
+// with a fresh timestamp, or a save could be discarded by the GET's sequence
+// bump — request-start order is not server-commit order (maintainer finding
+// 2b, 2026-11-24). The authoritative read a body-less save performs is part of
+// that save and bypasses the guard.
 async function _loadModelFrequentPrefs(opts){
   const authoritative=!!(opts&&opts.authoritative);
   const profile=_frequentProfileName();
-  if(_modelFrequentInFlight===profile) return;
+  // A post-commit read must supersede any ordinary refresh of this profile.
+  if(!authoritative&&_modelFrequentInFlight===profile) return false;
   _modelFrequentInFlight=profile;
   const seq=++_modelFrequentRequestSeq;
+  const savePending=_modelFrequentPendingSaves>0;
+  const saveEpoch=_modelFrequentSaveEpoch;
+  let accepted=false;
   try{
     const data=await api('/api/models/preferences',{timeoutToast:false});
-    if(seq!==_modelFrequentRequestSeq||profile!==_frequentProfileName()) return; // superseded/profile changed
-    if(!authoritative&&_modelFrequentPendingSaves>0) return; // a save owns the cache
-    if(!data) return;
-    if(data.profile&&data.profile!==profile) return; // profile switched mid-flight
+    if(seq!==_modelFrequentRequestSeq||profile!==_frequentProfileName()) return false;
+    if(!authoritative&&(savePending||saveEpoch!==_modelFrequentSaveEpoch)) return false;
+    if(!data||(data.profile&&data.profile!==profile)) return false;
     _modelFrequentCache={profile,pins:Array.isArray(data.pins)?data.pins:[],usage:Array.isArray(data.usage)?data.usage:[],limit:Number(data.limit)||6,fetchedAt:Date.now()};
+    accepted=true;
   }catch(_e){
     // Failures degrade gracefully: leave the prior cache (or none) in place and
     // let the picker render normal models. Known-absent endpoint -> no group.
   }finally{
     if(seq===_modelFrequentRequestSeq) _modelFrequentInFlight=false;
   }
-  if(typeof _refreshOpenFrequent==='function'){
+  if(accepted&&typeof _refreshOpenFrequent==='function'){
     try{_refreshOpenFrequent();}catch(_e){}
   }
+  return accepted;
 }
 // Toggle server pin state. Returns true on success (cached pins updated),
 // false on failure (UI reverts), or null when another request superseded it.
 // Mutations are SERIALISED: request-start order is not server-commit order, so
 // two overlapping stars could otherwise discard a successful save whose
 // response arrived after a later-started request (maintainer finding 2).
+// A save is also judged by its OWN sequence, never the shared GET sequence:
+// a refresh GET that starts after this POST must not discard it, and a GET
+// that read the server before the commit must not overwrite it afterwards —
+// the save epoch covers the GET side (maintainer finding 2b, 2026-11-24).
 async function _setModelPinned(model,provider,pinned){
   // #8622 (greptile P1, 2026-11-19): capture the OWNER at click time. The save
   // chain can start after a profile switch, and resolving the profile inside
@@ -6749,9 +6765,9 @@ async function _setModelPinned(model,provider,pinned){
   const work=async()=>{
     if(_frequentProfileName()!==ownerProfile) return null;
     const profile=ownerProfile;
-    const seq=++_modelFrequentRequestSeq;
-    _modelFrequentInFlight=false;
+    const saveSeq=++_modelFrequentSaveSeq;
     _modelFrequentPendingSaves+=1;
+    _modelFrequentSaveEpoch+=1; // a save is pending: overlapping GETs drop
     try{
       let updated;
       try{
@@ -6760,16 +6776,16 @@ async function _setModelPinned(model,provider,pinned){
         if(typeof showToast==='function') showToast((t('model_pin_failed')||'Failed to update pinned model')+': '+_e.message,4000,'error');
         return false;
       }
-      if(seq!==_modelFrequentRequestSeq||profile!==_frequentProfileName()) return null; // superseded
+      if(saveSeq!==_modelFrequentSaveSeq||profile!==_frequentProfileName()) return null; // superseded
       if(typeof updated==='object'&&updated){
         if(updated.profile&&updated.profile!==profile) return null; // profile switched
         _modelFrequentCache={profile:updated.profile||profile,pins:Array.isArray(updated.pins)?updated.pins:[],usage:Array.isArray(updated.usage)?updated.usage:[],limit:Number(updated.limit)||6,fetchedAt:Date.now()};
       }else{
-        // POST returned no body / wrapper: re-fetch authoritative state
-        // silently. This read bypasses the pending-save guard because it is
-        // part of THIS save.
-        await _loadModelFrequentPrefs({authoritative:true});
-        return _frequentIsPinned(model,provider);
+        // A body-less POST needs its own post-commit read, even if a refresh
+        // was already in flight. Never infer success from the old cache.
+        const loaded=await _loadModelFrequentPrefs({authoritative:true});
+        if(profile!==_frequentProfileName()) return null;
+        if(!loaded||_frequentIsPinned(model,provider)!==pinned) return false;
       }
       if(typeof _refreshOpenFrequent==='function'){
         try{_refreshOpenFrequent(_frequentModelKey(model,provider));}catch(_e){}
@@ -6777,6 +6793,7 @@ async function _setModelPinned(model,provider,pinned){
       return true;
     }finally{
       _modelFrequentPendingSaves-=1;
+      _modelFrequentSaveEpoch+=1; // the save settled: its outcome is authoritative
     }
   };
   const run=_modelFrequentSaveChain.then(work,work);

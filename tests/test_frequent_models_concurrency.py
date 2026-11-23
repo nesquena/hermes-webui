@@ -11,6 +11,12 @@ reimplementation — so they run in CI without a browser:
    cache must match the server's final state after both settle.
 3. A GET that started during a POST and returns an older snapshot must not
    discard the successful save.
+4. Both arrival orders of that overlap keep the pin: the GET is only started
+   AFTER the POST is confirmed on the wire (the old test started the GET
+   before the POST, so it never exercised the race), and the stale GET is
+   settled first or last.  A save is judged by its OWN sequence, never the
+   shared GET sequence; a GET drops its result when a save was pending when it
+   started or when the save epoch moved while it was in flight.
 """
 
 from __future__ import annotations
@@ -157,6 +163,151 @@ def test_overlapping_pin_saves_match_the_server_state():
 def test_get_during_pending_save_cannot_discard_it():
     out = _run(CASE_GET_RACE)
     assert out["pins"] == ["a"], out
+
+
+# Both orders of the REAL overlap: the refresh handler only runs once the POST
+# is confirmed on the wire, so the GET starts while the save is pending and
+# reads a snapshot taken before the commit.  Whichever response lands first,
+# the successful pin must survive in the cache (maintainer finding 2b).
+_ORDER_GET_FIRST = (
+    "releaseGet(); await new Promise((r) => setTimeout(r, 0)); releasePost();"
+)
+_ORDER_POST_FIRST = (
+    "releasePost(); await new Promise((r) => setTimeout(r, 0)); releaseGet();"
+)
+
+
+def _case_get_during_pending_save(order: str) -> str:
+    return """
+(async () => {
+  __hooks.cache = {profile: 'default', pins: [], usage: []};
+  const server = [];
+  let onWire; const postOnWire = new Promise((r) => { onWire = r; });
+  let releasePost = null;
+  let releaseGet = null;
+  apiImpl = (path, opts) => {
+    const method = (opts && opts.method) || 'GET';
+    if (method === 'POST') {
+      const body = JSON.parse(opts.body);
+      onWire();  // the POST is on the wire before the refresh is kicked
+      return new Promise((resolve) => {
+        releasePost = () => {
+          if (body.pinned) server.push(body.model);
+          resolve({profile: 'default',
+                  pins: server.map((m) => ({model: m, provider: 'p'})),
+                  usage: []});
+        };
+      });
+    }
+    // GET: the snapshot is read BEFORE the save commits (stale), and the
+    // response is released only when the case settles it.
+    const snapshot = server.map((m) => ({model: m, provider: 'p'}));
+    return new Promise((resolve) => {
+      releaseGet = () => resolve({profile: 'default', pins: snapshot, usage: []});
+    });
+  };
+  const save = __hooks.save('a', 'p', true);
+  await postOnWire;            // the save is pending; only now kick the refresh
+  const load = __hooks.load(); // the GET starts while the POST is pending
+  await new Promise((r) => setTimeout(r, 0));
+  __ORDER__;
+  await Promise.all([save, load]);
+  const out = {server,
+               pins: (__hooks.cache && __hooks.cache.pins || []).map((x) => x.model)};
+  console.log(JSON.stringify(out));
+})().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
+""".replace("__ORDER__", order)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for the frequent-model helper driver")
+def test_get_started_during_a_pending_save_returns_first_and_keeps_the_pin():
+    out = _run(_case_get_during_pending_save(_ORDER_GET_FIRST))
+    assert out["server"] == ["a"], out
+    assert out["pins"] == ["a"], out
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for the frequent-model helper driver")
+def test_get_started_during_a_pending_save_returns_last_and_keeps_the_pin():
+    out = _run(_case_get_during_pending_save(_ORDER_POST_FIRST))
+    assert out["server"] == ["a"], out
+    assert out["pins"] == ["a"], out
+
+
+CASE_NO_BODY_POST = """
+(async () => {
+  __hooks.cache = {profile: 'default', pins: [], usage: []};
+  const server = [];
+  let getCount = 0;
+  apiImpl = (path, opts) => {
+    const method = (opts && opts.method) || 'GET';
+    if (method === 'POST') {
+      const body = JSON.parse(opts.body);
+      if (body.pinned) server.push(body.model);
+      return;  // no body: the save must re-read authoritative state
+    }
+    getCount += 1;
+    return {profile: 'default',
+            pins: server.map((m) => ({model: m, provider: 'p'})),
+            usage: []};
+  };
+  const ok = await __hooks.save('a', 'p', true);
+  const out = {ok, getCount, server,
+               pins: (__hooks.cache && __hooks.cache.pins || []).map((x) => x.model)};
+  console.log(JSON.stringify(out));
+})().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for the frequent-model helper driver")
+def test_body_less_post_still_performs_its_authoritative_read():
+    out = _run(CASE_NO_BODY_POST)
+    assert out["ok"] is True, out
+    assert out["getCount"] == 1, out
+    assert out["pins"] == ["a"], out
+
+
+CASE_NO_BODY_WITH_REFRESH = """
+(async () => {
+  __hooks.cache = {profile: 'default', pins: [], usage: []};
+  const pin = {model: 'a', provider: 'p'};
+  let server = __PINNING__ ? [] : [pin];
+  __hooks.cache.pins = server.slice();
+  let postOnWire;
+  const postStarted = new Promise(resolve => { postOnWire = resolve; });
+  let finishPost, finishStale;
+  let reads = 0;
+  const snapshot = () => ({profile: 'default', pins: server.slice(), usage: []});
+  apiImpl = (_path, opts) => {
+    if(opts && opts.method === 'POST') {
+      const request = JSON.parse(opts.body);
+      return new Promise(resolve => {
+        finishPost = () => { server = request.pinned ? [pin] : []; resolve(); };
+        postOnWire();
+      });
+    }
+    const read = snapshot();
+    if(++reads === 1) return new Promise(resolve => { finishStale = () => resolve(read); });
+    return Promise.resolve(read);
+  };
+  const save = __hooks.save('a', 'p', __PINNING__);
+  await postStarted;
+  const stale = __hooks.load();
+  finishPost();
+  const ok = await save;
+  finishStale();
+  await stale;
+  console.log(JSON.stringify({ok, reads, actual: __hooks.cache.pins, expected: server}));
+})().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for the frequent-model helper driver")
+@pytest.mark.parametrize("pinned", [True, False])
+def test_body_less_save_refreshes_before_a_stale_get_returns(pinned):
+    out = _run(CASE_NO_BODY_WITH_REFRESH.replace("__PINNING__", json.dumps(pinned)))
+    assert out["actual"] == out["expected"], out
+    assert out["ok"] is True, out
+    assert out["reads"] == 2, out
 
 
 CASE_PROFILE_SWITCH = """
