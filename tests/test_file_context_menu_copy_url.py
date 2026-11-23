@@ -272,8 +272,11 @@ def test_listing_marks_only_regular_files_and_links_to_them(tmp_path):
 
     (tmp_path / "a.txt").write_text("x", encoding="utf-8")
     (tmp_path / "d").mkdir()
-    (tmp_path / "a-link").symlink_to("a.txt")
-    (tmp_path / "d-link").symlink_to("d")
+    try:
+        (tmp_path / "a-link").symlink_to("a.txt")
+        (tmp_path / "d-link").symlink_to("d")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
     flags = {e["name"]: e.get("is_regular") for e in list_dir(tmp_path, ".")}
     assert flags == {"a.txt": True, "a-link": True, "d": False, "d-link": False}
 
