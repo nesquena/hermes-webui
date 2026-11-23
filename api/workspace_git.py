@@ -1220,6 +1220,20 @@ def git_stash_and_checkout(
     }
 
 
+def _iter_lf_records(text: str):
+    """Yield the LF-delimited records of ``text`` one at a time (same records as
+    ``text.split("\\n")``) without building the whole list: the counts cover the
+    full patch, which can hold millions of lines."""
+    start = 0
+    while True:
+        end = text.find("\n", start)
+        if end < 0:
+            yield text[start:]
+            return
+        yield text[start:end]
+        start = end + 1
+
+
 def _diff_stats(diff_text: str) -> tuple[int, int]:
     additions = deletions = 0
     in_hunk = False
@@ -1227,7 +1241,7 @@ def _diff_stats(diff_text: str) -> tuple[int, int]:
     # NEL and U+2028/9, which turned changed content into phantom +/- records.
     # Every file header starts with "diff " (--git, --cc, --combined), so the
     # header state resets for combined diffs of unmerged paths too.
-    for line in diff_text.split("\n"):
+    for line in _iter_lf_records(diff_text):
         if line.startswith("diff "):
             in_hunk = False
             continue

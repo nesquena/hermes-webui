@@ -14,7 +14,7 @@ import subprocess
 
 import pytest
 
-from api.workspace_git import DIFF_SIZE_LIMIT, _diff_stats, git_diff
+from api.workspace_git import DIFF_SIZE_LIMIT, _diff_stats, _iter_lf_records, git_diff
 from tests.test_workspace_git import _commit_all, _git, _init_repo
 
 pytestmark = pytest.mark.usefixtures("isolated_host_git_config")
@@ -105,3 +105,14 @@ def test_too_large_diff_counts_the_whole_patch(tmp_path, eol):
     assert payload["too_large"] is True
     assert len(payload["diff"]) == DIFF_SIZE_LIMIT
     assert (payload["additions"], payload["deletions"]) == (rows, rows) == _numstat(repo, "--", "big.txt")
+
+
+@pytest.mark.parametrize("text", ["", "\n", "a", "a\n", "\n\na\n\nb", "x\r\ny\u2028z\n-q", "\n" * 5 + "tail"])
+def test_lf_record_iterator_matches_split(text):
+    assert list(_iter_lf_records(text)) == text.split("\n")
+
+
+def test_lf_record_iterator_is_lazy():
+    records = _iter_lf_records("first\n" + "x\n" * 1000)
+    assert next(records) == "first"
+    assert not isinstance(records, list)
