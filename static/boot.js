@@ -2769,7 +2769,10 @@ $('btnShareSession').onclick=async()=>{
         message:t('share_session_existing_confirm'),
         confirmLabel:t('share_session_copy_existing'),
         cancelLabel:t('share_session_refresh_snapshot'),
+        dismissIsNull:true,
       });
+      // Closing the dialog (×, Escape, backdrop) is not "Refresh snapshot": do nothing.
+      if(reuse===null) return;
       if(reuse){
         await _copyText(existing);
         showToast(t('share_session_link_copied'));
