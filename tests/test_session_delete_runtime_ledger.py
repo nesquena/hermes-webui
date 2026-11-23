@@ -179,10 +179,24 @@ def _install_home(monkeypatch, tmp_path):
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
 
+# The Agent's retirement fence, current location first, then the module Agents
+# shipped before the store refactor (see api.models._RETIREMENT_FENCE_MODULES).
+CURRENT_FENCE = "persistence.sqlite.conversation._store.retirement"
+LEGACY_FENCE = "hermes_state_mutation_retirement"
+
+
+def _hide_agent_fences(monkeypatch):
+    """No retirement fence importable, at either location, whatever Agent is active."""
+    monkeypatch.setitem(sys.modules, CURRENT_FENCE, None)
+    monkeypatch.setitem(sys.modules, LEGACY_FENCE, None)
+
+
 def _install_retirement_stub(monkeypatch, fn):
-    module = types.ModuleType("hermes_state_mutation_retirement")
+    """Make *fn* the only fence: a legacy-shaped stub, with the current location hidden."""
+    module = types.ModuleType(LEGACY_FENCE)
     module.retire_sessions = fn
-    monkeypatch.setitem(sys.modules, "hermes_state_mutation_retirement", module)
+    monkeypatch.setitem(sys.modules, CURRENT_FENCE, None)
+    monkeypatch.setitem(sys.modules, LEGACY_FENCE, module)
 
 
 def _agent_like_retirement(recorded):
@@ -293,7 +307,7 @@ def test_missing_retirement_helper_fails_closed(tmp_path, monkeypatch):
     finally:
         conn.close()
     _install_home(monkeypatch, tmp_path)
-    monkeypatch.setitem(sys.modules, "hermes_state_mutation_retirement", None)
+    _hide_agent_fences(monkeypatch)
 
     with pytest.raises(models.SessionDeleteRefused) as excinfo:
         models.delete_cli_session("sid")
@@ -338,7 +352,7 @@ def test_old_schema_without_ledger_deletes(tmp_path, monkeypatch):
         conn.close()
     _install_home(monkeypatch, tmp_path)
     # None makes any import of the helper raise ImportError: proving it is skipped.
-    monkeypatch.setitem(sys.modules, "hermes_state_mutation_retirement", None)
+    _hide_agent_fences(monkeypatch)
 
     assert models.delete_cli_session("sid") is True
 
@@ -365,7 +379,7 @@ def test_row_free_session_deletes_when_the_helper_is_missing(tmp_path, monkeypat
     finally:
         conn.close()
     _install_home(monkeypatch, tmp_path)
-    monkeypatch.setitem(sys.modules, "hermes_state_mutation_retirement", None)
+    _hide_agent_fences(monkeypatch)
 
     assert models.delete_cli_session("sid") is True
 
@@ -580,87 +594,189 @@ def test_manifest_failure_rolls_back_the_retirement(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# models-level: real Agent fence (skipped without hermes-agent)
+# models-level: the active Agent's real fence, at whichever location it ships
 # --------------------------------------------------------------------------
-def test_real_fence_clears_restrict_rows_and_keeps_receipts(tmp_path, monkeypatch):
-    pytest.importorskip("hermes_state_mutation_retirement")
-    # retire_sessions imports the rest of the Agent lazily; without its
-    # dependencies (ruamel via hermes_state_common) the fence cannot run here.
-    pytest.importorskip("tools.tool_result_storage")
+def _active_fence_or_skip():
+    import importlib.util
+
+    for name in (CURRENT_FENCE, LEGACY_FENCE):
+        try:
+            if importlib.util.find_spec(name) is not None:
+                return name
+        except (ImportError, ValueError):
+            continue
+    pytest.skip("the active Agent ships no session retirement fence")
+
+
+def test_fence_resolver_finds_the_active_agent_fence():
     import api.models as models
 
-    state_db, conn = _make_db(tmp_path)
-    try:
-        _seed_session(conn, "sid")
-        _seed_session(conn, "bystander")
-        _seed_admission(conn, "sid", "adm")
-        _seed_worker(conn, "sid", "exec", receipts=2)
-        _seed_admission(conn, "bystander", "adm-other")
-        conn.commit()
-    finally:
-        conn.close()
-    _install_home(monkeypatch, tmp_path)
+    name = _active_fence_or_skip()
+    fn, shape = models._agent_retirement_fence()
+    assert fn.__module__ == name
+    assert shape == ("media_root" if name == CURRENT_FENCE else "plain")
 
-    assert models.delete_cli_session("sid") is True
 
-    conn = sqlite3.connect(state_db)
-    try:
-        assert conn.execute("SELECT COUNT(*) FROM sessions WHERE id='sid'").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM worker_receipts").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM worker_executions").fetchone()[0] == 0
-        assert conn.execute(
-            "SELECT COUNT(*) FROM session_admissions WHERE target_session_id='sid'"
-        ).fetchone()[0] == 0
-        # The bystander keeps its own ledger row.
-        assert conn.execute(
-            "SELECT COUNT(*) FROM session_admissions WHERE target_session_id='bystander'"
-        ).fetchone()[0] == 1
-        keys = {row[0] for row in conn.execute("SELECT key FROM state_meta")}
-    finally:
-        conn.close()
-    fenced = {key for key in keys if key.startswith("gateway.retired_session.v1.")}
-    assert fenced == {"gateway.retired_session.v1.sid"}
+def test_fence_resolver_prefers_the_current_location(monkeypatch):
+    import api.models as models
+
+    def legacy(conn, session_ids, *, expiring=()):
+        raise AssertionError("legacy fence called")
+
+    def current(conn, session_ids, *, expiring=(), media_root):
+        raise AssertionError("current fence called")
+
+    for name, fn in ((LEGACY_FENCE, legacy), (CURRENT_FENCE, current)):
+        module = types.ModuleType(name)
+        module.retire_sessions = fn
+        monkeypatch.setitem(sys.modules, name, module)
+    assert models._agent_retirement_fence() == (current, "media_root")
+    monkeypatch.setitem(sys.modules, CURRENT_FENCE, None)
+    assert models._agent_retirement_fence() == (legacy, "plain")
+
+
+def _plain(conn, session_ids):
+    pass
+
+
+def _plain_expiring(conn, session_ids, *, expiring=()):
+    pass
+
+
+def _current(conn, session_ids, *, expiring=(), media_root):
+    pass
+
+
+def _current_defaulted(conn, session_ids, *, media_root=None):
+    pass
+
+
+def _extra_required(conn, session_ids, *, expiring=(), media_root, owner):
+    pass
+
+
+def _positional_root(conn, session_ids, media_root):
+    pass
+
+
+def _too_few(conn):
+    pass
 
 
 @pytest.mark.parametrize(
-    "seed,status,code",
+    "fence,shape",
     [
-        (_seed_admission, "queued", "session_busy"),
-        (_seed_admission, "started", "session_busy"),
-        (_seed_worker, "registered", "session_busy"),
-        (_seed_admission, "unknown", "unknown_execution"),
-        (_seed_worker, "unknown", "unknown_execution"),
+        (_plain, "plain"),
+        (_plain_expiring, "plain"),
+        (_current, "media_root"),
+        (_current_defaulted, "media_root"),
+        (_extra_required, None),
+        (_positional_root, None),
+        (_too_few, None),
     ],
 )
-def test_real_fence_refuses_live_work(tmp_path, monkeypatch, seed, status, code):
-    pytest.importorskip("hermes_state_mutation_retirement")
-    # retire_sessions imports the rest of the Agent lazily; without its
-    # dependencies (ruamel via hermes_state_common) the fence cannot run here.
-    pytest.importorskip("tools.tool_result_storage")
+def test_fence_call_shape_is_read_from_the_signature(fence, shape):
+    import api.models as models
+
+    assert models._retirement_fence_call(fence) == shape
+
+
+def test_fence_with_an_unsupported_signature_fails_closed(tmp_path, monkeypatch):
     import api.models as models
 
     state_db, conn = _make_db(tmp_path)
     try:
         _seed_session(conn, "sid")
-        if seed is _seed_admission:
-            _seed_admission(conn, "sid", "adm", status=status)
-        else:
-            _seed_worker(conn, "sid", "exec", status=status)
+        _seed_admission(conn, "sid", "adm")
         conn.commit()
     finally:
         conn.close()
     _install_home(monkeypatch, tmp_path)
 
+    def needs_more(conn, session_ids, *, owner):
+        raise AssertionError("must not be called")
+
+    _install_retirement_stub(monkeypatch, needs_more)
     with pytest.raises(models.SessionDeleteRefused) as excinfo:
         models.delete_cli_session("sid")
-    assert excinfo.value.code == code
+    assert excinfo.value.code == "runtime_ledger_unavailable"
 
-    conn = sqlite3.connect(state_db)
+
+def test_current_fence_gets_the_deleted_profiles_media_root(tmp_path, monkeypatch):
+    """The media root is resolved for the profile that owns the state.db."""
+    import api.models as models
+
+    state_db, conn = _make_db(tmp_path)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM state_meta").fetchone()[0] == 0
+        _seed_session(conn, "sid")
+        _seed_admission(conn, "sid", "adm")
+        conn.commit()
     finally:
         conn.close()
+    _install_home(monkeypatch, tmp_path)
+    recorded = []
+    agent_like = _agent_like_retirement(recorded)
+    calls = []
+
+    def current(conn, session_ids, *, expiring=(), media_root):
+        calls.append(media_root)
+        agent_like(conn, session_ids)
+
+    module = types.ModuleType(CURRENT_FENCE)
+    module.retire_sessions = current
+    monkeypatch.setitem(sys.modules, CURRENT_FENCE, module)
+    homes = []
+
+    def media_root_for(home):
+        homes.append(home)
+        return str(home / "native-inputs-root")
+
+    monkeypatch.setattr(models, "_agent_media_root", media_root_for)
+
+    assert models.delete_cli_session("sid") is True
+    assert homes == [tmp_path.resolve()]
+    assert calls == [str(tmp_path.resolve() / "native-inputs-root")]
+    assert recorded == ["sid"]
+
+
+@pytest.mark.parametrize("rows", [True, False])
+def test_current_fence_without_a_media_root_fails_closed(tmp_path, monkeypatch, rows):
+    import api.models as models
+
+    state_db, conn = _make_db(tmp_path)
+    try:
+        _seed_session(conn, "sid")
+        if rows:
+            _seed_admission(conn, "sid", "adm")
+        conn.commit()
+    finally:
+        conn.close()
+    _install_home(monkeypatch, tmp_path)
+
+    def current(conn, session_ids, *, expiring=(), media_root):
+        raise AssertionError("must not be called without a media root")
+
+    module = types.ModuleType(CURRENT_FENCE)
+    module.retire_sessions = current
+    monkeypatch.setitem(sys.modules, CURRENT_FENCE, module)
+    monkeypatch.setattr(models, "_agent_media_root", lambda home: None)
+
+    if rows:
+        with pytest.raises(models.SessionDeleteRefused) as excinfo:
+            models.delete_cli_session("sid")
+        assert excinfo.value.code == "runtime_ledger_unavailable"
+        conn = sqlite3.connect(state_db)
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+        finally:
+            conn.close()
+    else:
+        # Row-free: the unchanged degrade.
+        assert models.delete_cli_session("sid") is True
+
+
+# Real store, real runtime rows and the real fence on every Agent location:
+# tests/test_session_delete_real_agent_fence.py.
 
 
 # --------------------------------------------------------------------------

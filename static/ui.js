@@ -4512,6 +4512,7 @@ else _initMediaPlaybackObserver();
 setTimeout(_initMediaPlaybackObserver,0);
 
 // ── Ambient provider quota indicator (#1766) ────────────────────────────────
+let _providerQuotaLastStatus=null;
 // A provider switch can complete before an older account-quota request returns.
 // Only the newest request may update the composer; otherwise an old Codex result
 // can reappear while the active conversation uses another provider.
@@ -4524,26 +4525,105 @@ function _providerQuotaProfileKey(){
   return (typeof S!=='undefined'&&S&&S.activeProfile)?String(S.activeProfile):'';
 }
 
+// Number(null), Number('') and Number(false) are 0: a missing or rejected
+// measurement must hide, not render as $0.00 / 0%.
+function _isQuotaMeasurement(value){
+  return (typeof value==='number'||(typeof value==='string'&&value.trim()!==''))&&Number.isFinite(Number(value));
+}
 function _formatQuotaMoneyShort(value){
+  if(!_isQuotaMeasurement(value)) return '';
   const n=Number(value);
-  if(!Number.isFinite(n)) return '';
   if(Math.abs(n)>=100) return '$'+n.toFixed(0);
   if(Math.abs(n)>=10) return '$'+n.toFixed(1);
   return '$'+n.toFixed(2);
 }
 function _formatQuotaPercentShort(value){
+  if(!_isQuotaMeasurement(value)) return '';
   const n=Number(value);
-  if(!Number.isFinite(n)) return '';
   return Math.max(0,Math.min(100,n)).toFixed(0)+'%';
+}
+// Which account window the chip shows (Settings: quota_chip_window). The fixed modes pick by
+// the window's limit_window_seconds, never by list position: providers do not order windows.
+function _normalizeQuotaChipWindow(value){
+  return value==='shortest'||value==='longest'?value:'most_constrained';
+}
+function _quotaWindowSeconds(x){
+  return x&&_isQuotaMeasurement(x.limit_window_seconds)&&Number(x.limit_window_seconds)>0?Number(x.limit_window_seconds):null;
+}
+function _isAccountQuotaWindow(x){
+  const scope=typeof x.scope==='string'?x.scope.trim().toLowerCase():'';
+  return !scope||scope==='account';
+}
+function _selectQuotaChipWindow(windows){
+  const measured=windows.filter(x=>x&&_isQuotaMeasurement(x.remaining_percent));
+  if(!measured.length) return null;
+  // A model-only window (e.g. one model family's weekly cap) doesn't limit the
+  // account, so choose among account windows whenever there is one. The hover
+  // text still lists every window.
+  const account=measured.filter(_isAccountQuotaWindow);
+  const valid=account.length?account:measured;
+  const mode=_normalizeQuotaChipWindow(typeof window!=='undefined'?window._quotaChipWindow:undefined);
+  // Pick by duration only when every candidate window reports one. An untimed
+  // window can't be ordered, and skipping it could hide the depleted limit, so
+  // any gap falls back to the most constrained window.
+  if((mode==='shortest'||mode==='longest')&&valid.every(x=>_quotaWindowSeconds(x)!==null)){
+    return valid.reduce((best,x)=>{
+      const a=_quotaWindowSeconds(x),b=_quotaWindowSeconds(best);
+      return (mode==='shortest'?a<b:a>b)?x:best;
+    });
+  }
+  return valid.reduce((min,x)=>Number(x.remaining_percent)<Number(min.remaining_percent)?x:min);
+}
+// Time left until a window resets, e.g. "2h 14m" / "3d 5h"; '' when unknown or past.
+function _formatQuotaResetIn(value,now){
+  if(!value) return '';
+  const ms=new Date(value).getTime();
+  if(!Number.isFinite(ms)) return '';
+  const s=Math.round((ms-(typeof now==='number'?now:Date.now()))/1000);
+  if(s<=0) return '';
+  const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  if(d>0) return d+'d'+(h?' '+h+'h':'');
+  if(h>0) return h+'h'+(m?' '+m+'m':'');
+  return Math.max(1,m)+'m';
+}
+// Hover text: one line per account window (all periods), each with its remaining
+// share and time to reset when the provider reports one, then any detail lines.
+// With several windows, "▸ " marks the one the chip shows (`chosen`) and the other
+// window lines are indented to match.
+function _providerQuotaWindowLines(accountLimits,now,chosen){
+  const windows=accountLimits&&Array.isArray(accountLimits.windows)?accountLimits.windows:[];
+  const shown=windows.filter(w=>w&&_isQuotaMeasurement(w.remaining_percent));
+  const mark=chosen&&shown.length>1&&shown.includes(chosen);
+  const lines=[];
+  for(const w of shown){
+    const name=typeof w.label==='string'&&w.label.trim()?w.label.trim()+': ':'';
+    const reset=_formatQuotaResetIn(w.reset_at,now);
+    const prefix=mark?(w===chosen?'\u25B8 ':'\u2002 '):'';
+    lines.push(prefix+name+_formatQuotaPercentShort(w.remaining_percent)+' remaining'+(reset?' · resets in '+reset:''));
+  }
+  const details=accountLimits&&Array.isArray(accountLimits.details)?accountLimits.details:[];
+  for(const detail of details){
+    if(typeof detail==='string'&&detail.trim()) lines.push(detail.trim());
+  }
+  return lines;
 }
 function _providerQuotaIndicatorText(status){
   if(!status||status.status!=='available') return null;
   const provider=status.display_name||status.provider||'Provider';
   const accountLimits=status.account_limits||null;
   if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
-    const w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
-    const remaining=_formatQuotaPercentShort(w&&w.remaining_percent);
-    if(remaining) return {label:remaining, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+    // Multi-window providers (rolling/5-hour, weekly, monthly): by default the most
+    // constrained window, since the lowest remaining share is the limit hit first.
+    const w=_selectQuotaChipWindow(accountLimits.windows);
+    const remaining=w?_formatQuotaPercentShort(w.remaining_percent):'';
+    const windowLabel=w&&typeof w.label==='string'&&w.label.trim()?w.label.trim()+': ':'';
+    if(remaining){
+      const lines=_providerQuotaWindowLines(accountLimits,undefined,w);
+      const head=provider+' — '+(status.message||'Provider usage loaded');
+      // One window keeps the single-line form; several list every period on its own line.
+      if(lines.length<=1) return {label:remaining, title:head+' — '+(lines[0]||windowLabel+remaining+' remaining')};
+      return {label:remaining, title:head+'\n'+lines.join('\n')};
+    }
   }
   const quota=status.quota||null;
   if(quota){
@@ -4590,6 +4670,8 @@ function renderProviderQuotaIndicator(status){
     clearProviderQuotaIndicator();
     return;
   }
+  _providerQuotaLastStatus=status;
+  _initProviderQuotaTitleRefresh();
   label.textContent=text.label;
   chip.title=text.title;
   if(mobileLabel) mobileLabel.textContent=text.label;
@@ -4659,6 +4741,40 @@ window.addEventListener('visibilitychange',()=>{
     void refreshProviderQuotaIndicator(_currentQuotaProvider());
   }
 });
+// Reset countdowns are computed when the title is built; rebuild it on hover/focus
+// so "resets in" is current without waiting for the next quota fetch.
+function _refreshProviderQuotaTitle(){
+  const chip=$('providerQuotaChip');
+  if(!chip||chip.hidden||!_providerQuotaLastStatus) return;
+  const text=_providerQuotaIndicatorText(_providerQuotaLastStatus);
+  if(!text) return;
+  chip.title=text.title;
+  const mobileAction=$('composerMobileQuotaAction');
+  if(mobileAction) mobileAction.title=text.title;
+}
+// Bound lazily from renderProviderQuotaIndicator (hover only matters once the chip has drawn),
+// so this block runs no top-level DOM code. Both the desktop chip and the compact composer's
+// quota button refresh on hover / focus (CSS hides the chip in the compact layout).
+let _providerQuotaTitleRefreshBound=false;
+let _providerQuotaMobileTitleRefreshBound=false;
+function _initProviderQuotaTitleRefresh(){
+  if(!_providerQuotaTitleRefreshBound){
+    const chip=$('providerQuotaChip');
+    if(chip&&typeof chip.addEventListener==='function'){
+      chip.addEventListener('mouseenter',_refreshProviderQuotaTitle);
+      chip.addEventListener('focus',_refreshProviderQuotaTitle);
+      _providerQuotaTitleRefreshBound=true;
+    }
+  }
+  if(!_providerQuotaMobileTitleRefreshBound){
+    const mobileAction=$('composerMobileQuotaAction');
+    if(mobileAction&&typeof mobileAction.addEventListener==='function'){
+      mobileAction.addEventListener('mouseenter',_refreshProviderQuotaTitle);
+      mobileAction.addEventListener('focus',_refreshProviderQuotaTitle);
+      _providerQuotaMobileTitleRefreshBound=true;
+    }
+  }
+}
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
@@ -12231,9 +12347,9 @@ function showToast(msg,ms,type){
 // ── Shared app dialogs ───────────────────────────────────────────────────────
 // showConfirmDialog(opts) and showPromptDialog(opts) replace browser-native dialog calls
 // throughout the UI. Both return Promises and support: title, message, confirmLabel,
-// cancelLabel, danger (confirm only), placeholder/value/inputType (prompt only).
+// cancelLabel, dismissIsNull (confirm only: closing with ×, Escape or the backdrop resolves null, the cancel button false), danger (confirm only), placeholder/value/inputType (prompt only).
 
-const APP_DIALOG={resolve:null,kind:null,lastFocus:null};
+const APP_DIALOG={resolve:null,kind:null,lastFocus:null,dismissNull:false};
 let _appDialogBound=false;
 
 function _isAppDialogOpen(){
@@ -12256,12 +12372,19 @@ function _finishAppDialog(result, restoreFocus=true){
   APP_DIALOG.resolve=null;
   APP_DIALOG.kind=null;
   APP_DIALOG.lastFocus=null;
+  APP_DIALOG.dismissNull=false;
   if(overlay){overlay.style.display='none';overlay.setAttribute('aria-hidden','true');}
   if(dialog) dialog.setAttribute('role','dialog');
   if(input){input.value='';input.style.display='none';input.placeholder='';}
   if(confirmBtn){confirmBtn.classList.remove('danger');confirmBtn.textContent=t('dialog_confirm_btn');}
   if(restoreFocus&&lastFocus&&typeof lastFocus.focus==='function'){setTimeout(()=>lastFocus.focus(),0);}
   if(resolve) resolve(result);
+}
+
+// What closing the dialog without choosing a button resolves: null for a prompt, and for a confirm that
+// asked for it (opts.dismissIsNull), so a caller can tell a dismissal from the cancel button.
+function _appDialogDismissResult(){
+  return (APP_DIALOG.kind==='prompt'||APP_DIALOG.dismissNull)?null:false;
 }
 
 function _ensureAppDialogBindings(){
@@ -12273,11 +12396,11 @@ function _ensureAppDialogBindings(){
   const closeBtn=$('appDialogClose');
   if(overlay){
     overlay.addEventListener('click',e=>{
-      if(e.target===overlay) _finishAppDialog(APP_DIALOG.kind==='prompt'?null:false);
+      if(e.target===overlay) _finishAppDialog(_appDialogDismissResult());
     });
   }
   if(cancelBtn) cancelBtn.addEventListener('click',()=>_finishAppDialog(APP_DIALOG.kind==='prompt'?null:false));
-  if(closeBtn)  closeBtn.addEventListener('click',()=>_finishAppDialog(APP_DIALOG.kind==='prompt'?null:false));
+  if(closeBtn)  closeBtn.addEventListener('click',()=>_finishAppDialog(_appDialogDismissResult()));
   if(confirmBtn){
     confirmBtn.addEventListener('click',()=>{
       if(APP_DIALOG.kind==='prompt'){
@@ -12292,7 +12415,7 @@ function _ensureAppDialogBindings(){
     if(!_isAppDialogOpen()) return;
     if(e.key==='Escape'){
       e.preventDefault();
-      _finishAppDialog(APP_DIALOG.kind==='prompt'?null:false);
+      _finishAppDialog(_appDialogDismissResult());
       return;
     }
     if(e.key==='Enter'){
@@ -12301,7 +12424,9 @@ function _ensureAppDialogBindings(){
       const isTextarea=target&&target.tagName==='TEXTAREA';
       if(!isTextarea){
         e.preventDefault();
-        if(target===cancelBtn||target===closeBtn){
+        if(target===closeBtn){
+          _finishAppDialog(_appDialogDismissResult());
+        }else if(target===cancelBtn){
           _finishAppDialog(APP_DIALOG.kind==='prompt'?null:false);
         }else if(APP_DIALOG.kind==='prompt'){
           const input=$('appDialogInput');
@@ -12327,10 +12452,10 @@ function _ensureAppDialogBindings(){
 
 function showConfirmDialog(opts={}){
   _ensureAppDialogBindings();
-  if(APP_DIALOG.resolve) _finishAppDialog(false,false);
+  if(APP_DIALOG.resolve) _finishAppDialog(APP_DIALOG.dismissNull?null:false,false);
   const overlay=$('appDialogOverlay'),dialog=$('appDialog'),title=$('appDialogTitle'),
     desc=$('appDialogDesc'),input=$('appDialogInput'),cancelBtn=$('appDialogCancel'),confirmBtn=$('appDialogConfirm');
-  APP_DIALOG.resolve=null;APP_DIALOG.kind='confirm';APP_DIALOG.lastFocus=document.activeElement;
+  APP_DIALOG.resolve=null;APP_DIALOG.kind='confirm';APP_DIALOG.lastFocus=document.activeElement;APP_DIALOG.dismissNull=!!opts.dismissIsNull;
   if(title) title.textContent=opts.title||t('dialog_confirm_title');
   if(desc) desc.textContent=opts.message||'';
   if(input){input.style.display='none';input.value='';}
@@ -15012,6 +15137,7 @@ async function applyUpdates(opts){
   // #7293: true only on the re-send after the user explicitly confirmed
   // interrupting the WebUI agent runs that made the server refuse the update.
   const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);
+  const confirmedGateway=forceActiveRuns&&opts.confirmedGateway?opts.confirmedGateway:null;  // #8746
   const updateText=(key,fallback)=>(typeof _i18nUpdateText==='function'?_i18nUpdateText(key,fallback):fallback);
   const btn=$('btnApplyUpdate');
   const resetApplyButton=(delayMs)=>{
@@ -15052,11 +15178,12 @@ async function applyUpdates(opts){
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
       if(forceActiveRuns) _applyBody.force_active_runs=true;
+      if(confirmedGateway&&target==='agent') Object.assign(_applyBody,confirmedGateway);
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:300000});
       if(!res.ok){
         _showUpdateError(target,res);
         if(res.restart_blocked&&res.force_available){
-          _renderActiveRunsForceOffer(target,res,()=>applyUpdates({forceActiveRuns:true}));
+          _renderActiveRunsForceOffer(target,res,(gw)=>applyUpdates({forceActiveRuns:true,confirmedGateway:gw}));
         }
         resetApplyButton(0);
         return;
@@ -15111,9 +15238,9 @@ function _showUpdateError(target,res){
     clearLockBtn.style.display='inline-block';
   }
 }
-function _activeRunsUpdateText(key,count,fallback){
+function _activeRunsUpdateText(key,count,fallback,extra){
   if(typeof t==='function'){
-    const val=t(key,count);
+    const val=extra!==undefined?t(key,count,extra):(count!==undefined?t(key,count):t(key));
     if(val&&val!==key) return val;
   }
   return fallback;
@@ -15134,39 +15261,98 @@ function _renderActiveRunsForceOffer(target,res,resend){
   // way forward (on the conflict path its re-send also carries the hard reset).
   const legacyForceBtn=$('btnForceUpdate');
   if(legacyForceBtn) legacyForceBtn.style.display='none';
-  const rawCount=Number(res&&res.active_runs)||Number(res&&res.active_streams)||1;
-  const count=Math.max(1,Math.floor(rawCount));
-  const plural=count===1?'':'s';
-  const label=_activeRunsUpdateText('update_force_active_runs',count,'Update anyway (interrupts '+count+' run'+plural+')');
+  const agentTarget=target==='agent';
+  const total=Number(res&&res.active_runs)||Number(res&&res.active_streams)||1;
+  const w=(res&&res.webui_owned_runs!==undefined)?Number(res.webui_owned_runs):total;
+  const g=Number(res&&res.gateway_runs)||0;
+  const agentExternal=agentTarget&&Boolean(res)&&res.gateway_restart_managed===false;
+  const interruptedCount=agentExternal?w:total;
+  // #8746: the forced request carries the Gateway restart impact and the
+  // interrupted-run count this offer shows, so the server refuses again if the
+  // impact changed or more runs would be interrupted.
+  const confirmedGateway=(agentTarget&&res&&typeof res.gateway_restart_managed==='boolean')
+    ?{gateway_restart_managed:res.gateway_restart_managed,gateway_profile:res.gateway_profile,gateway_endpoint:res.gateway_endpoint,interrupted_runs:interruptedCount}
+    :null;
+  let label;
+  if(interruptedCount===0){
+    label=_activeRunsUpdateText('update_force_active_runs_no_runs',undefined,'Update anyway (interrupts nothing)');
+  }else{
+    const plural=interruptedCount===1?'':'s';
+    label=_activeRunsUpdateText('update_force_active_runs',interruptedCount,'Update anyway (interrupts '+interruptedCount+' run'+plural+')');
+  }
   const actions=document.createElement('div');
   actions.style.marginTop='6px';
   const btn=document.createElement('button');
   btn.type='button';
   btn.id='btnForceUpdateActiveRuns';
-  btn.className='update-btn';
-  btn.style.background='var(--error,#e05)';
-  btn.style.color='#fff';
-  btn.style.borderColor='var(--error,#e05)';
+  if(interruptedCount===0){
+    // #8746: a force that interrupts nothing is not a destructive action; the
+    // server refuses it again if the Gateway impact changes before the confirm.
+    btn.className='update-btn update-primary';
+  }else{
+    btn.className='update-btn';
+    btn.style.background='var(--error,#e05)';
+    btn.style.color='#fff';
+    btn.style.borderColor='var(--error,#e05)';
+  }
   btn.dataset.target=target;
   btn.textContent=label;
   btn.onclick=async()=>{
     if(btn.disabled) return;
+    // #8667: an Agent update also cycles the Gateway that executes the
+    // resumable runs, so its confirmation names both kinds of run. A WebUI
+    // update keeps the WebUI-only copy (#7293).
+    // #8746: qualify the Agent confirmation by Gateway lifecycle ownership.
+    // #8746: an external-Gateway-only refusal interrupts nothing, so its
+    // confirmation names the Gateway runs that keep running, not an interruption.
+    const nothingInterrupted=interruptedCount===0;
+    let confirmMessage;
+    if(nothingInterrupted){
+      const confirmMessageFallback=g+' Gateway run'+(g===1?' keeps':'s keep')+' running because the WebUI cannot restart this profile\'s Gateway. Forcing the update will not stop '+(g===1?'it':'them')+'.';
+      confirmMessage=_activeRunsUpdateText('update_force_active_runs_no_runs_message',g,confirmMessageFallback);
+    }else if(agentTarget){
+      if(g>0){
+        if(agentExternal){
+          const confirmMessageKey='update_force_active_runs_message_agent_external';
+          const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working, and '+g+' Gateway run'+(g===1?' keeps':'s keep')+' running because the WebUI cannot restart this profile\'s Gateway. Only the WebUI runs are saved as interrupted.';
+          confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback,g);
+        }else if(w===0){
+          // #8746: only Gateway runs are interrupted; do not name 0 WebUI runs.
+          const confirmMessageKey='update_force_active_runs_message_agent_gateway_only';
+          const confirmMessageFallback=g+' Gateway run'+(g===1?' is':'s are')+' still working. Updating the Agent also restarts the Gateway this profile uses and stops every run that Gateway is executing, including runs started from other profiles that use the same Gateway endpoint. Wait for '+(g===1?'it':'them')+' to finish if you can.';
+          confirmMessage=_activeRunsUpdateText(confirmMessageKey,g,confirmMessageFallback);
+        }else{
+          const confirmMessageKey='update_force_active_runs_message_agent';
+          const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working and '+g+' Gateway run'+(g===1?' is':'s are')+' running. Updating the Agent also restarts the Gateway this profile uses and stops every run that Gateway is executing, including runs started from other profiles that use the same Gateway endpoint. The WebUI runs are saved as interrupted. Wait for them to finish if you can.';
+          confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback,g);
+        }
+      }else{
+        const confirmMessageKey='update_force_active_runs_message_agent_webui_only';
+        const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working. The WebUI runs are saved as interrupted if you force the update.';
+        confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback);
+      }
+    }else{
+      const count=Math.max(1,Math.floor(total));
+      const confirmMessageKey='update_force_active_runs_message';
+      const confirmMessageFallback=count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.';
+      confirmMessage=_activeRunsUpdateText(confirmMessageKey,count,confirmMessageFallback);
+    }
     const confirmed=await showConfirmDialog({
-      title:_activeRunsUpdateText('update_force_active_runs_title',count,'Interrupt active runs?'),
-      message:_activeRunsUpdateText(
-        'update_force_active_runs_message',
-        count,
-        count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.'
-      ),
-      confirmLabel:_activeRunsUpdateText('update_force_active_runs_confirm',count,'Interrupt and update'),
-      danger:true,
+      title:nothingInterrupted
+        ?_activeRunsUpdateText('update_force_active_runs_no_runs_title',undefined,'Update the Agent now?')
+        :_activeRunsUpdateText('update_force_active_runs_title',interruptedCount,'Interrupt active runs?'),
+      message:confirmMessage,
+      confirmLabel:nothingInterrupted
+        ?_activeRunsUpdateText('update_force_active_runs_no_runs_confirm',undefined,'Update anyway')
+        :_activeRunsUpdateText('update_force_active_runs_confirm',interruptedCount,'Interrupt and update'),
+      danger:!nothingInterrupted,
       focusCancel:true,
     });
     if(!confirmed) return;
     btn.disabled=true;
     btn.textContent=_i18nUpdateText('update_updating','Updating\u2026');
     try{
-      await resend();
+      await resend(confirmedGateway);
     }finally{
       if(btn.isConnected){btn.disabled=false;btn.textContent=label;}
     }
@@ -15187,6 +15373,7 @@ async function applyClearUpdateLock(btn,opts){
   try{
     const _clearBody={target};
     if(forceActiveRuns) _clearBody.force_active_runs=true;
+    if(forceActiveRuns&&opts.confirmedGateway) Object.assign(_clearBody,opts.confirmedGateway);  // #8746
     const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify(_clearBody),timeoutMs:300000});
     if(res.ok){
       sessionStorage.removeItem('hermes-update-checked');
@@ -15206,7 +15393,7 @@ async function applyClearUpdateLock(btn,opts){
       if(errEl){errEl.textContent=msg;errEl.style.display='block';}
       else showToast(msg);
       if(res.restart_blocked&&res.force_available){
-        _renderActiveRunsForceOffer(target,res,()=>applyClearUpdateLock(btn,{forceActiveRuns:true}));
+        _renderActiveRunsForceOffer(target,res,(gw)=>applyClearUpdateLock(btn,{forceActiveRuns:true,confirmedGateway:gw}));
       }
     }
   }catch(e){
@@ -15341,12 +15528,13 @@ async function forceUpdate(btn,opts){
     const _ch=window._updateData?.[target]?.channel;
     if(_ch==='stable'||_ch==='experimental') _forceBody.channel=_ch;
     if(forceActiveRuns) _forceBody.force_active_runs=true;
+    if(forceActiveRuns&&opts.confirmedGateway) Object.assign(_forceBody,opts.confirmedGateway);  // #8746
     const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:300000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';btn.style.display='inline-block';
       if(res.restart_blocked&&res.force_available){
-        _renderActiveRunsForceOffer(target,res,()=>forceUpdate(btn,{forceActiveRuns:true}));
+        _renderActiveRunsForceOffer(target,res,(gw)=>forceUpdate(btn,{forceActiveRuns:true,confirmedGateway:gw}));
       }
       return;
     }
@@ -15913,8 +16101,9 @@ function _fmtDateSep(d){
   const todayStart=new Date();todayStart.setHours(0,0,0,0);
   const dStart=new Date(d);dStart.setHours(0,0,0,0);
   const diffDays=Math.round((todayStart-dStart)/86400000);
-  if(diffDays===0) return 'Today';
-  if(diffDays===1) return 'Yesterday';
+  // hwc: same strings as the sidebar day buckets, already in every locale.
+  if(diffDays===0) return t('session_time_bucket_today');
+  if(diffDays===1) return t('session_time_bucket_yesterday');
   if(diffDays>0 && diffDays<7) return dStart.toLocaleDateString([], {weekday:'long'});
   const opts={month:'short', day:'numeric'};
   if(todayStart.getFullYear()!==dStart.getFullYear()) opts.year='numeric';
@@ -27717,7 +27906,7 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // file from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
   if(!S.session)return;
@@ -27750,7 +27939,7 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // folder from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
   if(!S.session)return;
