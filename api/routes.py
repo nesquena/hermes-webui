@@ -21004,7 +21004,14 @@ def handle_post(handler, parsed) -> bool:
                 # the agent cache signature.
                 # #7776 Finding 2: capture the CLI source identity before the
                 # lock so the lock-held Session.load() cannot drop it on save.
-                _reasoning_cli_meta = _lookup_cli_session_metadata(session_id) or {}
+                # A native state.db row needs no sidebar projection. Other
+                # sources can still include legacy sidecars without markers.
+                _reasoning_cli_meta = {}
+                if (
+                    _session_requires_cli_metadata_lookup(reasoning_session)
+                    or _state_db_session_source(session_id) != "webui"
+                ):
+                    _reasoning_cli_meta = _lookup_cli_session_metadata(session_id) or {}
                 with _get_session_agent_lock(session_id):
                     # #7881: the resolve and the effort write hold the
                     # persistence lock every Session.save() of this id takes.
