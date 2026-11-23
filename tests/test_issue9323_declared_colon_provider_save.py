@@ -128,3 +128,57 @@ def test_undeclared_colon_provider_is_still_stripped():
     result = set_hermes_default_model("gpt-x", provider="openrouter:eu")
     assert result["provider"] == "openrouter", result
     assert _saved_model(path)["provider"] == "openrouter"
+
+
+# ── What the Agent resolves after the save ────────────────────────────────────
+# The save must leave the runtime where v0.52.741 left it: a switched-off declaration stays unresolvable, and an
+# enabled declaration resolves to its own record's endpoint and key. Both save routes are covered: the Settings
+# picker (provider only) and Main model options, which re-posts the pre-filled base URL.
+
+RECORD_KEY = "placeholder-record-key"
+BUILTIN_KEY = "placeholder-openrouter-key"
+RUNTIME_SHAPES = {
+    "name_alias": {"providers": {"eu": {"name": "openrouter:eu", "base_url": EU, "api_key": RECORD_KEY}}},
+    "name_alias_off": {
+        "providers": {"eu": {"name": "openrouter:eu", "base_url": EU, "api_key": RECORD_KEY, "enabled": False}}
+    },
+    "key_off": {"providers": {"openrouter:eu": {"base_url": EU, "api_key": RECORD_KEY, "enabled": False}}},
+    "key": {"providers": {"openrouter:eu": {"base_url": EU, "api_key": RECORD_KEY}}},
+}
+SAVE_ROUTES = {"picker": None, "model_options": {"base_url": EU}}
+
+
+def _runtime_after_save(monkeypatch, shape: str, route: str):
+    runtime_provider = pytest.importorskip("hermes_cli.runtime_provider")
+    from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+
+    path = _write_config(RUNTIME_SHAPES[shape])
+    home = path.parent
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_BASE_HOME", str(home))
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(path))
+    monkeypatch.setattr(config, "_cfg_path", getattr(config, "_cfg_path", None), raising=False)
+    for name in list(__import__("os").environ):
+        if name.endswith("_API_KEY") or name in ("OPENAI_BASE_URL", "OPENROUTER_BASE_URL"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("OPENROUTER_API_KEY", BUILTIN_KEY)
+
+    set_hermes_default_model("gpt-x", provider="openrouter:eu", advanced=SAVE_ROUTES[route])
+    return lambda: resolve_runtime_provider_with_anthropic_env_lock(runtime_provider.resolve_runtime_provider)
+
+
+@pytest.mark.parametrize("route", sorted(SAVE_ROUTES))
+@pytest.mark.parametrize("shape", ["name_alias_off", "key_off"])
+def test_switched_off_declaration_stays_unresolvable_after_save(monkeypatch, shape, route):
+    resolve = _runtime_after_save(monkeypatch, shape, route)
+    with pytest.raises(Exception):
+        resolve()
+
+
+@pytest.mark.parametrize("route", sorted(SAVE_ROUTES))
+@pytest.mark.parametrize("shape", ["name_alias", "key"])
+def test_enabled_declaration_resolves_to_its_own_record_after_save(monkeypatch, shape, route):
+    runtime = _runtime_after_save(monkeypatch, shape, route)()
+    assert (runtime.get("provider"), runtime.get("base_url"), runtime.get("api_key")) == (
+        "custom", EU, RECORD_KEY,
+    ), runtime
