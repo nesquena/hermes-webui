@@ -146,10 +146,10 @@ def test_agent_producer_emits_current_agent_notice_with_route_and_reason():
     assert len(payload["transition_id"]) == 16
 
 
-def test_agent_producer_prefers_provider_fallback_route_over_agent_attrs():
-    # If agent._provider_fallback_route is set, it wins even if agent attrs are desynced
-    agent = _FakeAgent(provider="desynced-provider", model="desynced-model")
-    agent._provider_fallback_route = ("opus", "anthropic")
+def test_agent_producer_prefers_live_agent_attrs_over_stale_fallback_route():
+    # Live agent attrs win over a stale route (rebound before callback, route set after)
+    agent = _FakeAgent(provider="anthropic", model="opus")
+    agent._provider_fallback_route = ("stale-model", "stale-provider")
     state = _noticed_state()
     current_notice = (
         "⚠️ Model fallback: gpt-4 via openai unavailable (provider failure); using opus via anthropic."
@@ -165,6 +165,22 @@ def test_agent_producer_prefers_provider_fallback_route_over_agent_attrs():
     assert payload is not None
     assert payload["to_provider"] == "anthropic"
     assert payload["to_model"] == "opus"
+
+    # Route attribute is still used when live attributes are empty
+    empty_agent = _FakeAgent(provider="", model="")
+    empty_agent._provider_fallback_route = ("opus", "anthropic")
+    empty_state = _noticed_state()
+    empty_payload = _maybe_emit_agent_fallback_event(
+        "lifecycle",
+        current_notice,
+        empty_agent,
+        "sess-1",
+        empty_state,
+        "stream-1",
+    )
+    assert empty_payload is not None
+    assert empty_payload["to_provider"] == "anthropic"
+    assert empty_payload["to_model"] == "opus"
 
 
 def test_agent_producer_cause_prefers_structured_cause_over_notice_reason():

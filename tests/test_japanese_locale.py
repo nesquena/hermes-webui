@@ -241,8 +241,9 @@ def test_japanese_label_is_japanese_script():
     script (kanji/hiragana/katakana), not transliterated 'Japanese'.
     """
     src = read(REPO / "static" / "i18n.js")
+    ja_block = extract_locale_block(src, "ja")
     # Find the ja locale's _label
-    m = re.search(r"\bja\s*:\s*\{[^{}]*?_label:\s*['\"]([^'\"]+)['\"]", src, re.DOTALL)
+    m = re.search(r"\b_label:\s*['\"]([^'\"]+)['\"]", ja_block)
     assert m, "ja locale _label not found"
     label = m.group(1)
     # CJK Unified Ideographs (kanji) U+4E00–U+9FFF

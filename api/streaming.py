@@ -1330,7 +1330,7 @@ def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
     k = str(kind or '').strip().lower()
     m = str(message or '').strip().lower()
     return (
-        k == 'lifecycle'
+        k in ('lifecycle', 'fallback')
         and (
             'rate limited' in m
             or 'switching to fallback' in m
@@ -3896,7 +3896,7 @@ def _fallback_transition_id(session_id, stream_id, from_provider, from_model, to
 
 
 _CURRENT_FALLBACK_NOTICE_RE = re.compile(
-    r'^[^\w]*model fallback:\s*.+?\bunavailable\s*\((.*?)\);\s*using\b',
+    r'^[^\w]*model fallback:\s*.+?\b(?:unavailable|could\s+not\s+respond)\s*\((.*?)\);\s*using\b',
     re.IGNORECASE,
 )
 
@@ -3909,7 +3909,7 @@ def _is_fallback_switch_notice(kind: str, message: str) -> bool:
     notices.
     """
     k = str(kind or '').strip().lower()
-    if k != 'lifecycle':
+    if k not in ('lifecycle', 'fallback'):
         return False
     m = str(message or '').strip()
     if 'switched to fallback model' in m.lower():
@@ -4054,18 +4054,18 @@ def _maybe_emit_agent_fallback_event(kind, message, agent, session_id, fallback_
         return None
     seq = int(fallback_state.get('seq') or 0) + 1
 
-    fb_route = getattr(agent, '_provider_fallback_route', None)
-    if (
-        isinstance(fb_route, tuple)
-        and len(fb_route) == 2
-        and isinstance(fb_route[0], str)
-        and isinstance(fb_route[1], str)
-    ):
-        to_model = fb_route[0]
-        to_provider = fb_route[1]
-    else:
-        to_provider = getattr(agent, 'provider', '') or ''
-        to_model = getattr(agent, 'model', '') or ''
+    to_provider = getattr(agent, 'provider', '') or ''
+    to_model = getattr(agent, 'model', '') or ''
+    if not (str(to_provider).strip() or str(to_model).strip()):
+        fb_route = getattr(agent, '_provider_fallback_route', None)
+        if (
+            isinstance(fb_route, tuple)
+            and len(fb_route) == 2
+            and isinstance(fb_route[0], str)
+            and isinstance(fb_route[1], str)
+        ):
+            to_model = fb_route[0]
+            to_provider = fb_route[1]
 
     cause = _agent_fallback_cause(agent)
     if not cause:

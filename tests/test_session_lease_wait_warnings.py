@@ -57,6 +57,12 @@ def test_session_lease_wait_classification(kind, text, expected):
     assert streaming._is_session_lease_wait_message(kind, text) is expected
 
 
+class _FakeAgent:
+    def __init__(self, provider="openai", model="gpt-4"):
+        self.provider = provider
+        self.model = model
+
+
 def _build_status_callback():
     """Extract ``_agent_status_callback`` from ``_run_agent_streaming`` and bind
     it to a recording ``put`` so the real relay logic is exercised."""
@@ -87,10 +93,20 @@ def _build_status_callback():
     ns = {
         "put": lambda event, data: events.append((event, data)),
         "session_id": "sid-1",
+        "stream_id": "stream-1",
+        "agent": _FakeAgent(),
+        "_fallback_state": {
+            "seq": 0,
+            "route_provider": "openai",
+            "route_model": "gpt-4",
+            "agent_fired": False,
+        },
         "_captured_terminal_error": [None],
         "_is_agent_compression_start_status": streaming._is_agent_compression_start_status,
         "_is_fallback_lifecycle_message": streaming._is_fallback_lifecycle_message,
+        "_is_fallback_switch_notice": streaming._is_fallback_switch_notice,
         "_is_session_lease_wait_message": streaming._is_session_lease_wait_message,
+        "_maybe_emit_agent_fallback_event": streaming._maybe_emit_agent_fallback_event,
     }
     exec(compile(module, "streaming_status_callback", "exec"), ns)
     return ns["_status_callback_scope"](), events
