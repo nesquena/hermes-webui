@@ -4075,7 +4075,8 @@ from api.helpers import (
     _sanitize_error,
     redact_session_data,
     public_session_projection,
-    apply_gateway_chat_controls,
+    public_session_projection_stable,
+    apply_session_projection_live,
     redaction_policy_fingerprint,
     strip_public_internal_fields,
     _redact_text,
@@ -13242,9 +13243,6 @@ _lineage_display_cache_lock = threading.Lock()
 # same session turned those repeats into 5-19 s spans in the journal.
 #
 # Validity is fail-closed, like _display_merge_cache:
-#   - only fully-loaded, inactive sessions (no active stream, no pending user
-#     message): an active session's in-memory tail runs ahead of its disk
-#     signature, so it always recomputes;
 #   - the sidecar's exact stat signature, captured BEFORE the session is
 #     loaded and re-verified when the key is built and again before the payload
 #     is published: the entry is bound to the generation the payload was
@@ -13263,22 +13261,76 @@ _lineage_display_cache_lock = threading.Lock()
 #   - the resolved (context_length, threshold_tokens) the payload carries, so a
 #     config refresh that only changes the window is not served from an entry
 #     keyed under the old values (#8990 review);
-#   - payloads carrying live-journal keys are never stored: they derive from
-#     files that are not part of the key.
-# Fields derived from a runtime authority no key can fingerprint are RECOMPUTED
+#   - a fingerprint of the payload's live metadata (every ``raw`` field but the
+#     transcript and the re-derived live keys). An ACTIVE or pending session is
+#     cacheable for exactly this reason: its in-memory runtime fields change
+#     the payload without moving any disk signature, so they are keyed instead
+#     of gating the cache off — the state that made the old "inactive sessions
+#     only" rule necessary (#8990) while it disabled the cache precisely
+#     during a turn, when the projection is polled hardest (#14515).
+#  Fields derived from a runtime authority no key can fingerprint are RECOMPUTED
 # on every response instead of being cached: memory_status and
-# regeneration_revision from live agent state, and the gateway-chat controls
-# from the current backend/override policy (_SESSION_PROJECTION_VOLATILE_KEYS,
-# apply_gateway_chat_controls). A store-time exclusion alone would leave an
+# regeneration_revision from live agent state, the live run journal keys
+# (runtime_journal, runtime_journal_snapshot) from their files, and the
+# gateway-chat controls from the current backend/override policy
+# (_SESSION_PROJECTION_VOLATILE_KEYS, public_session_projection_stable +
+# apply_session_projection_live). A store-time exclusion alone would leave an
 # entry published before the transition in place (#8990 review).
 _SESSION_PROJECTION_CACHE_MAX = 8
 _SESSION_PROJECTION_VOLATILE_KEYS = ("memory_status", "regeneration_revision")
-_SESSION_PROJECTION_UNCACHEABLE_KEYS = (
-    "runtime_journal",
-    "runtime_journal_snapshot",
+# Authority for these is the sidecar/state.db generation the key already
+# carries (transcript) or the live overlay every response re-derives (the
+# journal and the agent-state pair). Repr-ing the transcript would cost as much
+# as the projection it protects.
+_SESSION_PROJECTION_FINGERPRINT_OMIT = frozenset(
+    (
+        "messages",
+        "context_messages",
+        "runtime_journal",
+        "runtime_journal_snapshot",
+        *_SESSION_PROJECTION_VOLATILE_KEYS,
+    )
 )
+# A fingerprint past this bound means the payload carries metadata this shape
+# cannot key cheaply; refuse to cache that request instead of paying a
+# multi-second repr per poll. 2 MB of non-transcript metadata reprs in a few ms
+# (a 1500-message session measures 0.7 ms), so real sessions stay cached.
+_SESSION_PROJECTION_FINGERPRINT_MAX_CHARS = 2 * 1024 * 1024
 _session_projection_cache: "OrderedDict[tuple, dict]" = OrderedDict()
 _session_projection_cache_lock = threading.Lock()
+
+
+def _session_projection_live_fingerprint(raw, session=None) -> str | None:
+    """Return the non-transcript half of the payload as a stable string, or None.
+
+    Covers every ``raw`` field the payload carries apart from the transcript
+    (sidecar/state.db-signed) and the live keys (re-derived per response), plus
+    the in-memory fields that shape the transcript without moving a disk
+    signature: ``anchor_activity_scenes`` (hydrated onto the displayed rows) and
+    ``truncation_watermark`` (a merge input). A runtime field that moves
+    mid-turn — active_stream_id, pending_*, is_streaming, token counters,
+    todo_state, tool_calls — therefore invalidates the entry instead of being
+    served stale. None disables caching for the request.
+    """
+    if not isinstance(raw, dict):
+        return None
+    try:
+        text = "\x00".join(
+            f"{key}={value!r}"
+            for key, value in sorted(raw.items(), key=lambda item: str(item[0]))
+            if key not in _SESSION_PROJECTION_FINGERPRINT_OMIT
+        )
+        if session is not None:
+            scenes = getattr(session, "anchor_activity_scenes", None)
+            text += f"\x00anchor_activity_scenes={scenes!r}"
+            text += f"\x00truncation_watermark={getattr(session, 'truncation_watermark', None)!r}"
+    except Exception:
+        return None
+    if len(text) > _SESSION_PROJECTION_FINGERPRINT_MAX_CHARS:
+        return None
+    # Digest so the key holds a fixed-size string: the entry is compared on
+    # every poll and a multi-hundred-KB key would make dict lookups expensive.
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 # Marker for "this load path memoizes no display merge" (a full load merges on
@@ -13328,6 +13380,7 @@ def _session_projection_cache_key(
     pending_started_at,
     redact_enabled,
     redaction_policy,
+    live_fingerprint=None,
     display_generation=_PROJ_DISPLAY_GENERATION_UNSET,
 ):
     """Return the validity key for one projected payload, or None to skip caching.
@@ -13352,6 +13405,8 @@ def _session_projection_cache_key(
     if not sid or sidecar_sig is None or state_db_sig is None or redact_enabled is None:
         return None
     if redaction_policy is None:
+        return None
+    if live_fingerprint is None:
         return None
     if display_generation is None:
         # This load memoizes the merged transcript, and no entry is in force:
@@ -13379,6 +13434,10 @@ def _session_projection_cache_key(
         str(active_stream_id or ""),
         str(pending_started_at or ""),
         bool(redact_enabled),
+        # The payload's live metadata: everything the transcript signature does
+        # not cover, so an active turn's runtime fields key the entry instead of
+        # disabling the cache (#14515).
+        live_fingerprint,
         # The rotating redaction memo vouching for the policy this mask was
         # produced under. Held by reference in the key so its identity cannot be
         # recycled while a comparison depends on it.
@@ -17660,9 +17719,16 @@ def _handle_session_get(handler, parsed) -> bool:
         # (see _session_projection_cache) keys on a signature that provably
         # covers every row the payload was built from. Rows commit before the
         # debounced sidecar save, so the sidecar signature alone does not see
-        # them. Metadata-only and active sessions never populate that cache, so
-        # they skip both probes.
-        _proj_cache_allowed = bool(load_messages) and not _display_merge_session_is_active(s)
+        # them. Metadata-only loads never populate that cache, so they skip
+        # both probes. Active/pending sessions DO populate it (#14515): the
+        # runtime fields that move mid-turn are part of the key's
+        # live-metadata fingerprint, not a reason to bypass the cache. Two
+        # authorities the key cannot fingerprint stay fail-closed: a messaging
+        # session's rows come from the CLI transcript files, and a cancelled
+        # journal turn's rows are stamped from the in-memory tail.
+        _proj_cache_allowed = bool(
+            load_messages and _display_owner_positions is None and not is_messaging_session
+        )
         _proj_db_sig_before = (
             _state_db_session_signature(sid, _session_profile) if _proj_cache_allowed else None
         )
@@ -18152,6 +18218,7 @@ def _handle_session_get(handler, parsed) -> bool:
                 pending_started_at=getattr(s, "pending_started_at", None),
                 redact_enabled=_proj_redact_enabled,
                 redaction_policy=_proj_redaction_policy,
+                live_fingerprint=_session_projection_live_fingerprint(raw, s),
                 display_generation=(
                     _display_merge_generation(sid)
                     if _proj_cache_allowed and msg_limit is not None
@@ -18179,23 +18246,25 @@ def _handle_session_get(handler, parsed) -> bool:
                 # hit must not hand out the one the cached entry holds.
                 redact["todo_state"] = copy.deepcopy(redact["todo_state"])
         else:
-            redact = public_session_projection(raw)
-            if not any(_key in redact for _key in _SESSION_PROJECTION_UNCACHEABLE_KEYS):
-                # Validate the generation through publication: a save that
-                # landed while the payload was being projected means the body
-                # above is an older generation, so it must not be cached under
-                # the signature the next GET will read (#8990 review).
-                if (
-                    _proj_key is not None
-                    and _proj_sidecar_sig_before is not None
-                    and _sidecar_stat_signature(_proj_sidecar_path) == _proj_sidecar_sig_before
-                    and redaction_policy_fingerprint() == _proj_redaction_policy
-                ):
-                    _session_projection_cache_put(_proj_key, redact)
-        # Derived from process-level backend/override policy, which no sidecar
-        # key can fingerprint: recompute on every response, hit or miss, so a
-        # backend transition reaches the payload immediately (#8990 review).
-        apply_gateway_chat_controls(redact)
+            redact = public_session_projection_stable(raw)
+            # Validate the generation through publication: a save that
+            # landed while the payload was being projected means the body
+            # above is an older generation, so it must not be cached under
+            # the signature the next GET will read (#8990 review).
+            if (
+                _proj_key is not None
+                and _proj_sidecar_sig_before is not None
+                and _sidecar_stat_signature(_proj_sidecar_path) == _proj_sidecar_sig_before
+                and redaction_policy_fingerprint() == _proj_redaction_policy
+            ):
+                _session_projection_cache_put(_proj_key, redact)
+        # Re-derived on every response, hit or miss: the live run journal (its
+        # files move without touching the transcript) and the gateway-chat
+        # controls (process-level backend/override policy, which no sidecar key
+        # can fingerprint). Cached payloads never carry either, so a backend
+        # transition and a mid-turn journal update both reach the client
+        # immediately (#8990 review, #14515).
+        redact = apply_session_projection_live(redact, raw)
         _t5 = _time.monotonic()
         if _diag: _diag.stage("t5_after_redact")
         resp = j(handler, {"session": redact})

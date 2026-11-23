@@ -2143,13 +2143,71 @@ def apply_gateway_chat_controls(result: dict) -> dict:
     return result
 
 
+# Session-payload fields whose authority is NOT the sidecar/state.db
+# generation: the live run journal (files written by the agent loop) and the
+# gateway-chat controls (process-level backend/override policy). They are
+# re-derived from the request on every response, so a memoized payload never
+# carries them (#14515).
+SESSION_PROJECTION_LIVE_KEYS = (
+    "runtime_journal",
+    "runtime_journal_snapshot",
+    *GATEWAY_CHAT_CONTROL_KEYS,
+)
+
+
+def public_session_projection_stable(session_dict: dict) -> dict:
+    """Return the cacheable part of the public session payload.
+
+    This is the expensive half — the deep copy plus credential masking — minus
+    ``SESSION_PROJECTION_LIVE_KEYS``. Those keys derive from the live run
+    journal and the process-level gateway-chat policy, neither of which any
+    sidecar/state.db generation can fingerprint, so callers that memoize this
+    result must re-attach them from the current request
+    (``apply_session_projection_live``). It never mutates the input.
+    """
+    stable = redact_session_data(session_dict)
+    for key in SESSION_PROJECTION_LIVE_KEYS:
+        stable.pop(key, None)
+    return stable
+
+
+def apply_session_projection_live(result: dict, session_dict: dict) -> dict:
+    """Re-attach the live projection keys and the gateway-chat controls.
+
+    ``session_dict`` is the raw (unprojected) payload the response is built
+    from, so the live keys are masked by the same rules they get on a cache
+    miss. The result keeps ``session_dict``'s key order, which makes
+    ``stable + live`` byte-identical to a single-shot projection.
+    """
+    if not isinstance(result, dict):
+        return result
+    source = session_dict if isinstance(session_dict, dict) else {}
+    live = {key: source[key] for key in SESSION_PROJECTION_LIVE_KEYS if key in source}
+    projected = redact_session_data(live) if live else {}
+    merged = {}
+    for key in source:
+        if key in result:
+            merged[key] = result[key]
+        elif key in projected:
+            merged[key] = projected[key]
+    for key, value in result.items():
+        if key not in merged:
+            merged[key] = value
+    return apply_gateway_chat_controls(merged)
+
+
 def public_session_projection(session_dict: dict) -> dict:
     """Return a public session payload with redaction and alias stripping.
 
     Callers use this for every response/export/SSE session payload.  It never
-    mutates the in-memory session or the caller's dictionary.
+    mutates the in-memory session or the caller's dictionary. The payload is
+    the stable (cacheable) half plus the live keys re-derived from
+    ``session_dict``; GET /api/session memoizes the stable half and re-applies
+    the live half on every response.
     """
-    return apply_gateway_chat_controls(redact_session_data(session_dict))
+    return apply_session_projection_live(
+        public_session_projection_stable(session_dict), session_dict
+    )
 
 
 def strip_public_internal_fields(value, *, message_records: bool = False):

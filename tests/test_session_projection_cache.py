@@ -8,7 +8,10 @@ assert the properties the cache must have to be safe:
 
 1. an unchanged session reuses the projection and returns the same payload;
 2. any sidecar write invalidates the entry;
-3. an active/streaming session is never served from the cache;
+3. an active/streaming or pending session IS cached (that is the case #14515
+   measured at 2-5 s per poll) while its live journal keys and live metadata
+   stay fresh, and a changed active_stream_id / pending turn / anchor scene /
+   runtime counter invalidates the entry;
 4. the two live-state keys are refreshed on a hit instead of being frozen;
 5. the LRU is bounded and evicts oldest-first;
 6. state.db growth invalidates the entry even when the sidecar is untouched;
@@ -90,7 +93,7 @@ class _Env:
         self.db_sig = {"value": ("db", 1), "sequence": None}
         self.state_db_rows = {"value": []}
 
-        real_projection = helpers.public_session_projection
+        real_projection = helpers.public_session_projection_stable
 
         def _counting_projection(raw):
             self.projection_calls += 1
@@ -102,7 +105,7 @@ class _Env:
                 return next(sequence)
             return self.db_sig["value"]
 
-        monkeypatch.setattr(routes, "public_session_projection", _counting_projection)
+        monkeypatch.setattr(routes, "public_session_projection_stable", _counting_projection)
         monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda profile, handler: True)
         monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda session: None)
         monkeypatch.setattr(
@@ -176,6 +179,81 @@ def test_repeated_get_reuses_projection_and_returns_identical_payload(env):
     assert env.contents(second) == ["hello", "hi there"]
 
 
+def test_cache_hit_does_not_replay_the_transcript_redaction(env, monkeypatch):
+    """A hit re-masks only the live keys, never the transcript (#14515).
+
+    The whole point of the split: the deep copy + credential masking of the
+    messages must run once, and a poll must not redo it.
+    """
+    import api.helpers as helpers
+
+    calls = {"messages": 0}
+    real_redact_messages = helpers._redact_messages
+
+    def _counting_redact_messages(*args, **kwargs):
+        calls["messages"] += 1
+        return real_redact_messages(*args, **kwargs)
+
+    monkeypatch.setattr(helpers, "_redact_messages", _counting_redact_messages)
+
+    env.save("proj_expensive", ["one", "two"])
+    env.get("proj_expensive")
+    assert calls["messages"] >= 1
+
+    before = calls["messages"]
+    env.get("proj_expensive")
+    assert calls["messages"] == before, (
+        "a cache hit must not re-run the transcript redaction"
+    )
+
+
+def test_stable_projection_plus_live_keys_matches_the_public_projection(monkeypatch):
+    """The split is a refactor, not a behaviour change: same payload, same order."""
+    import api.helpers as helpers
+
+    session = {
+        "session_id": "split_id",
+        "title": "key sk-abcdef0123456789 in the title",
+        "messages": [
+            {"role": "user", "content": "my key is sk-abcdef0123456789",
+             "api_content": "internal replay alias"},
+            {"role": "assistant", "content": [{"type": "text", "text": "noted"}],
+             "tool_calls": [{"id": "c1", "function": {"name": "x", "arguments": "{}"}}]},
+        ],
+        "context_messages": [{"role": "system", "content": "sys"}],
+        "tool_calls": [{"id": "c1", "_source": "replay"}],
+        "todo_state": {"todos": [{"content": "do it", "status": "pending"}]},
+        "memory_status": {"level": "ok"},
+        "runtime_journal": {"run_id": "r1", "last_seq": 7},
+        "runtime_journal_snapshot": {
+            "messages": [{"role": "assistant", "content": "step"}],
+            "tool_calls": [],
+        },
+        "chat_via_gateway_session": True,
+        "chat_read_only_reason": "stale reason",
+        "chat_read_only_can_connect": True,
+        "workspace": "/tmp/workspace",
+    }
+
+    stable = helpers.public_session_projection_stable(session)
+    for key in helpers.SESSION_PROJECTION_LIVE_KEYS:
+        assert key not in stable, f"{key} must not be part of the cached half"
+
+    combined = helpers.apply_session_projection_live(dict(stable), session)
+    reference = helpers.public_session_projection(session)
+
+    assert combined == reference, "stable + live must equal the single-shot projection"
+    assert list(combined) == list(reference), (
+        "the split must not reorder the payload keys"
+    )
+    assert helpers.public_session_projection_stable(session) == stable, (
+        "the stable half must be deterministic"
+    )
+    assert session["messages"][0]["content"].endswith("sk-abcdef0123456789"), (
+        "the projection must never mutate its input"
+    )
+
+
 def test_sidecar_write_invalidates_projection(env):
     env.save("proj_write", ["first question", "first reply"])
     first = env.get("proj_write")
@@ -193,34 +271,153 @@ def test_sidecar_write_invalidates_projection(env):
                                         "a much longer second reply that changes the file size"]
 
 
-def test_active_session_is_never_served_from_cache(env):
+def _prime_live_run(monkeypatch, *, run_id="run-live-1", seq=1, snapshot_text=None):
+    """Make ``run_id`` a live run and expose a controllable journal + snapshot."""
+    import api.routes as routes
+
+    state = {
+        "summary": {
+            "session_id": "proj_stream",
+            "run_id": run_id,
+            "last_seq": seq,
+            "last_event_id": f"evt-{seq}",
+            "last_event": "tool_output",
+            "terminal": False,
+        },
+        "snapshot": {
+            "session_id": "proj_stream",
+            "run_id": run_id,
+            "messages": [{"role": "assistant", "content": snapshot_text or "step-1"}],
+            "tool_calls": [],
+            "last_seq": seq,
+        },
+    }
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: {run_id})
+    monkeypatch.setattr(routes, "find_run_summary", lambda stream_id: dict(state["summary"]))
+    monkeypatch.setattr(
+        routes,
+        "_run_journal_live_snapshot",
+        lambda stream_id, handler=None: dict(state["snapshot"]),
+    )
+    return state
+
+
+def test_active_turn_is_cached_and_carries_fresh_live_state(env, monkeypatch):
+    """An active turn must reuse the cached transcript AND see live state.
+
+    The journal keys (runtime_journal*, fresh chat controls) are re-derived from
+    the request on every response, so the expensive redaction can be memoized
+    during a turn — the case that polled it hardest (#14515).
+    """
     env.save("proj_stream", ["start"])
     env.get("proj_stream")
     assert env.projection_calls == 1
 
-    # The session is streaming: its in-memory tail runs ahead of its sidecar.
     session = env.models.get_session("proj_stream")
-    session.active_stream_id = "stream-live-1"
+    session.active_stream_id = "run-live-1"
+    session.pending_user_message = "do the thing"
+    session.pending_started_at = 1_700_000_100.0
     env.models.SESSIONS["proj_stream"] = session
+    state = _prime_live_run(monkeypatch, seq=1, snapshot_text="step-1")
 
-    env.get("proj_stream")
-    env.get("proj_stream")
-    assert env.projection_calls == 3, "an active session must recompute on every request"
+    first = env.get("proj_stream")
+    assert env.projection_calls == 2, "an active turn's first poll still projects"
+    assert first["runtime_journal"]["last_seq"] == 1
+    assert first["runtime_journal_snapshot"]["messages"][0]["content"] == "step-1"
+
+    # The run advances: the journal files move, no signature of the transcript.
+    state["summary"]["last_seq"] = 2
+    state["summary"]["last_event_id"] = "evt-2"
+    state["snapshot"]["messages"] = [{"role": "assistant", "content": "step-2"}]
+    state["snapshot"]["last_seq"] = 2
+
+    second = env.get("proj_stream")
+    assert env.projection_calls == 2, "an unchanged transcript must reuse the projection"
+    assert second["runtime_journal"]["last_seq"] == 2, (
+        "a cache hit during an active turn must carry the live journal, not the "
+        "one the entry was built from"
+    )
+    assert second["runtime_journal_snapshot"]["messages"][0]["content"] == "step-2", (
+        "a cache hit during an active turn must carry the live journal snapshot"
+    )
+    assert second["active_stream_id"] == "run-live-1"
+    assert _Env.contents(second) == ["start"]
+
+    # A different run is a different payload: the key carries active_stream_id.
+    session.active_stream_id = "run-live-2"
+    env.models.SESSIONS["proj_stream"] = session
+    _prime_live_run(monkeypatch, run_id="run-live-2", seq=3)
+    third = env.get("proj_stream")
+    assert env.projection_calls == 3, "a changed active_stream_id must not reuse the entry"
+    assert third["active_stream_id"] == "run-live-2"
 
 
-def test_pending_user_message_is_never_served_from_cache(env):
+def test_pending_turn_is_cached_but_keyed_on_its_identity(env):
+    """A pending turn reuses the transcript, and a new turn invalidates it."""
     env.save("proj_pending", ["start"])
 
-    # The session holds an unanswered turn: its projected payload depends on
-    # in-memory state, so even an unchanged request must recompute.
     session = env.models.get_session("proj_pending")
     session.pending_user_message = "waiting for the agent"
     session.pending_started_at = 1_700_000_100.0
     env.models.SESSIONS["proj_pending"] = session
 
-    env.get("proj_pending")
-    env.get("proj_pending")
-    assert env.projection_calls == 2, "a pending turn must never be served from the cache"
+    first = env.get("proj_pending")
+    assert env.projection_calls == 1
+    assert first["pending_user_message"] == "waiting for the agent"
+    assert first["pending_started_at"] == 1_700_000_100.0
+
+    second = env.get("proj_pending")
+    assert env.projection_calls == 1, "an unchanged pending turn must reuse the projection"
+    assert second["pending_user_message"] == "waiting for the agent"
+
+    # Same turn, but the pending prompt it carries is rewritten in memory.
+    session.pending_user_message = "waiting for the agent, edited"
+    env.models.SESSIONS["proj_pending"] = session
+    third = env.get("proj_pending")
+    assert env.projection_calls == 2, "live metadata is part of the cache key"
+    assert third["pending_user_message"] == "waiting for the agent, edited"
+
+    # A new turn (new pending_started_at) is a new payload.
+    session.pending_started_at = 1_700_000_200.0
+    env.models.SESSIONS["proj_pending"] = session
+    fourth = env.get("proj_pending")
+    assert env.projection_calls == 3, "a new pending turn must not reuse the entry"
+    assert fourth["pending_started_at"] == 1_700_000_200.0
+
+
+def test_live_runtime_counters_invalidate_the_projection(env):
+    """In-memory runtime fields that the payload carries are keyed, not frozen."""
+    env.save("proj_counters", ["hello"])
+    first = env.get("proj_counters")
+    assert env.projection_calls == 1
+    assert first["input_tokens"] == 0
+
+    session = env.models.get_session("proj_counters")
+    session.input_tokens = 4242
+    session.last_prompt_tokens = 4000
+    env.models.SESSIONS["proj_counters"] = session
+
+    second = env.get("proj_counters")
+    assert env.projection_calls == 2, (
+        "a token counter the payload carries must not be served from the cache"
+    )
+    assert second["input_tokens"] == 4242
+
+
+def test_live_anchor_scenes_invalidate_the_projection(env):
+    """In-memory scene energy hydrates the rows, so it must move the key."""
+    env.save("proj_scenes", ["hello"])
+    env.get("proj_scenes")
+    assert env.projection_calls == 1
+
+    session = env.models.get_session("proj_scenes")
+    session.anchor_activity_scenes = {"anchor-0": {"energy": "high"}}
+    env.models.SESSIONS["proj_scenes"] = session
+
+    env.get("proj_scenes")
+    assert env.projection_calls == 2, (
+        "anchor activity scenes hydrate the transcript, so they are part of the key"
+    )
 
 
 def test_volatile_keys_reflect_live_state_on_cache_hit(env):
