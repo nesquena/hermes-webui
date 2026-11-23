@@ -2273,6 +2273,7 @@ class Session:
             )
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         written_reasoning_effort = meta.get('reasoning_effort')
+        written_shrink_generation = meta.get('intentional_shrink_generation')
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
         # sidebar-poll freshness check never have to parse the full (250-480KB)
@@ -2572,6 +2573,14 @@ class Session:
         self._reasoning_effort_saved = written_reasoning_effort
         self._share_token_saved = self.share_token
         self._share_created_at_saved = self.share_created_at
+        # #9029: close the pending-shrink window once the truncated transcript
+        # has been persisted to disk. The clear is generation-guarded under
+        # LOCK so a marker stamped after this save started (or on another
+        # Session object for the same id) is untouched.
+        if isinstance(written_shrink_generation, str) and written_shrink_generation.strip():
+            with LOCK:
+                if getattr(self, 'intentional_shrink_generation', None) == written_shrink_generation:
+                    self._intentional_shrink_pending_count = None
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
@@ -6283,7 +6292,11 @@ def _inactive_cache_tail_needs_disk_check(cached) -> bool:
     return _last_non_tool_role(getattr(cached, 'messages', None) or []) == 'user'
 
 
-def _cache_has_stale_unsaved_user_tail(cached, disk_session) -> bool:
+def _cache_has_stale_unsaved_user_tail(
+    cached,
+    disk_session,
+    pending_shrink_snapshot: tuple[int, str, int] | None = None,
+) -> bool:
     """Return True when an inactive cached session has an unsaved user tail.
 
     A completed turn is saved to the sidecar before the browser reloads it.  In
@@ -6304,7 +6317,11 @@ def _cache_has_stale_unsaved_user_tail(cached, disk_session) -> bool:
     if _last_non_tool_role(disk_messages) != 'assistant':
         return False
     if len(cached_messages) < len(disk_messages):
-        snapshot = _pending_intentional_shrink_snapshot(cached)
+        snapshot = (
+            pending_shrink_snapshot
+            if pending_shrink_snapshot is not None
+            else _pending_intentional_shrink_snapshot(cached)
+        )
         if snapshot is not None:
             pending, _gen, _count = snapshot
             if len(disk_messages) <= pending:
@@ -7572,8 +7589,13 @@ def _resolve_session_once(
             if not allow_full_load:
                 raise _FullSessionResolveRequired
             try:
+                pre_load_shrink_snapshot = _pending_intentional_shrink_snapshot(cached)
                 disk_session = Session.load(sid)
-                if _cache_has_stale_unsaved_user_tail(cached, disk_session):
+                if _cache_has_stale_unsaved_user_tail(
+                    cached,
+                    disk_session,
+                    pending_shrink_snapshot=pre_load_shrink_snapshot,
+                ):
                     with LOCK:
                         SESSIONS[sid] = disk_session
                         if promote_cache:

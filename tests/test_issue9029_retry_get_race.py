@@ -401,3 +401,131 @@ def test_unsaved_user_tail_without_pending_shrink_still_reloads(tmp_path, monkey
         assert SESSIONS[sid] is reloaded
         assert SESSIONS[sid] is not cached
 
+
+@pytest.mark.parametrize("operation", [retry_last, undo_last], ids=["retry", "undo"])
+def test_get_load_before_save_keeps_the_shrink(tmp_path, monkeypatch, operation):
+    """The other arrival order: the GET loads the old sidecar first.
+
+    The GET is parked between ``Session.load`` and the stale-tail decision, the
+    retry/undo then lands its save and clears the pending marker, and only then
+    does the decision run. Snapshotting the marker at decision time reads "no
+    shrink" and replaces the shorter cache with the three-row copy the load read
+    earlier, so the next reader writes the removed reply back to disk.
+    """
+    session_dir = tmp_path / "sessions"
+    sid = f"issue9029-split-order-{operation.__name__}"
+    messages = [
+        _msg("user", "unanswered", 1.0, "u1"),
+        _msg("user", "retry-me", 2.0, "u2"),
+        _msg("assistant", "removed-reply", 3.0, "a1"),
+    ]
+    seed = Session(
+        session_id=sid,
+        title="issue 9029 split order",
+        workspace=str(session_dir.parent),
+        messages=messages,
+        context_messages=messages,
+    )
+    seed.save()
+    SESSIONS.clear()
+    cached = models.get_session(sid)
+    assert len(cached.messages) == 3
+
+    loaded = threading.Event()
+    released = threading.Event()
+    seen: dict = {}
+    threads: list = []
+    save_state = {"armed": False}
+    load_state = {"armed": False}
+    real_load = Session.load
+    real_save = Session.save
+
+    def load(cls, session_id, *args, **kwargs):
+        session = real_load(session_id, *args, **kwargs)
+        if load_state["armed"] and not load_state.get("fired") and session_id == sid:
+            load_state["fired"] = True
+            seen["disk_at_load"] = [row["content"] for row in session.messages]
+            loaded.set()
+            assert released.wait(WAIT), "the parked GET was never released"
+        return session
+
+    def save(self, *args, **kwargs):
+        if save_state["armed"] and self.session_id == sid:
+            save_state["armed"] = False
+            load_state["armed"] = True
+
+            def _get():
+                try:
+                    seen["session"] = models.get_session(sid)
+                except BaseException as exc:  # surfaced on the main thread
+                    seen["error"] = exc
+
+            thread = threading.Thread(target=_get, name="get-9029-split", daemon=True)
+            threads.append(thread)
+            thread.start()
+            assert loaded.wait(WAIT), "the GET never loaded the sidecar"
+            # The save lands; the caller (retry/undo) clears the marker right
+            # after save() returns -- the GET stays parked through both.
+            return real_save(self, *args, **kwargs)
+        return real_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "load", classmethod(load))
+    monkeypatch.setattr(Session, "save", save)
+    save_state["armed"] = True
+    try:
+        operation(sid)
+    finally:
+        save_state["armed"] = False
+        load_state["armed"] = False
+        released.set()
+        for thread in threads:
+            thread.join(WAIT)
+            assert not thread.is_alive(), "the parked GET never returned"
+
+    assert "error" not in seen, seen.get("error")
+    # The load read the pre-shrink file...
+    assert seen["disk_at_load"] == ["unanswered", "retry-me", "removed-reply"]
+    # ...but the decision ran after the shrink's own save cleared the marker, so
+    # it must keep the shorter cache instead of restoring the copy it loaded.
+    assert [row["content"] for row in seen["session"].messages] == ["unanswered"]
+    assert [row["content"] for row in _load_disk(session_dir, sid)] == ["unanswered"]
+
+    after = models.get_session(sid)
+    assert [row["content"] for row in after.messages] == ["unanswered"]
+    after.save()
+    assert [row["content"] for row in _load_disk(session_dir, sid)] == ["unanswered"]
+
+
+@pytest.mark.parametrize("keep", [0, 2], ids=["clear", "truncate"])
+def test_truncate_save_does_not_pin_the_cache_against_newer_disk(
+    tmp_path, monkeypatch, keep
+):
+    """The truncate/clear route's own save must end the pending-shrink window.
+
+    Those routes truncate and save, but nothing cleared the marker afterwards.
+    While the marker lived, ``_cached_session_lags_disk`` treated every sidecar
+    up to the pre-shrink snapshot as "older than the cache", so a genuinely
+    newer disk was not reloaded until it reached parity with the cache again.
+    """
+    session_dir = tmp_path / "sessions"
+    sid = f"issue9029-truncate-marker-{keep}"
+    cached = _seed_and_cache(session_dir, sid)
+    expected = [Q1, A1][:keep]
+
+    # /api/session/truncate and /api/session/clear both do exactly these two
+    # calls (truncate_session_at_keep + save).
+    truncate_session_at_keep(cached, keep)
+    cached.save()
+    # The in-flight window is over once the truncated transcript is persisted.
+    assert getattr(cached, "_intentional_shrink_pending_count", None) is None
+
+    # A real writer moves the sidecar past the truncated state.
+    writer = Session.load(sid)
+    writer.messages = list(writer.messages) + [_msg("assistant", "newer", 9.0, "n1")]
+    writer.save()
+
+    fresh = models.get_session(sid)
+    assert [row["content"] for row in fresh.messages] == expected + ["newer"]
+    with models.LOCK:
+        assert SESSIONS[sid] is fresh
+
