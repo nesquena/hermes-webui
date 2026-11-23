@@ -87,6 +87,18 @@ class TestResolveModelProviderPortalPriority:
 
 class TestSetDefaultModelPreservesAtPrefix:
 
+    def test_pinned_provider_group_is_saved_as_provider_id(self):
+        import yaml
+
+        result = set_hermes_default_model(
+            "meituan/longcat-2.5:free", provider="nous:meituan/longcat-2.5"
+        )
+
+        assert result == {"ok": True, "model": "meituan/longcat-2.5:free", "provider": "nous"}
+        saved = yaml.safe_load(config._get_config_path().read_text(encoding="utf-8"))
+        assert saved["model"]["provider"] == "nous"
+        assert saved["model"]["base_url"] == "https://router.nous.ai/v1"
+
     def test_at_nous_prefix_strips_to_bare_for_cli_compatibility(self, tmp_path, monkeypatch):
         """set_hermes_default_model must persist the RESOLVED bare/slash form, not the
         `@provider:` prefix. The `@provider:` syntax is a WebUI-internal routing hint;
