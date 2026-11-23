@@ -285,7 +285,7 @@ The on-disk locations below assume the default `~/.hermes/webui` state directory
 
 ## "Storage on the server is full" (HTTP 507) (#9167)
 
-**Symptom.** Sending a message, or any action that saves, fails with "Storage on the server is full. Free up space and try again." The request returns HTTP 507.
+**Symptom.** Sending a message, or another request that saves to the WebUI state, fails with "Storage on the server is full. Free up space and try again." The request returns HTTP 507. Some requests still report the full disk their own way: uploads answer with their own error, a few routes return their own 500, and a save that fails while a reply is streaming shows up as a stream error.
 
 **Cause.** A write hit `ENOSPC` (no space left on device) or `EDQUOT` (disk quota exceeded) on the filesystem that holds the WebUI state. Before this change it surfaced as a generic "Internal server error".
 

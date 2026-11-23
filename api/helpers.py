@@ -39,9 +39,6 @@ _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
 })
 
 
-# Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
-# connections often end this way when a browser tab sleeps, a phone switches
-# networks, or Tailscale leaves the socket half-closed.
 # Storage full (#9167): a write that hits ENOSPC/EDQUOT is not an internal bug, and the
 # user can fix it by freeing space. Report it instead of the generic 500.
 _STORAGE_FULL_ERRNOS = frozenset(
@@ -68,6 +65,9 @@ def send_server_error(handler, exc: BaseException | None) -> None:
         j(handler, {'error': 'Internal server error'}, status=500)
 
 
+# Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
+# connections often end this way when a browser tab sleeps, a phone switches
+# networks, or Tailscale leaves the socket half-closed.
 _CLIENT_DISCONNECT_ERRORS = (
     BrokenPipeError,
     ConnectionResetError,
