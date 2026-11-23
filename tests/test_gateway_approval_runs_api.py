@@ -1997,7 +1997,7 @@ def test_gateway_worker_marks_run_pending_before_runs_api_prelude():
 
 
 def test_start_chat_stream_marks_gateway_run_pending_before_thread_start(monkeypatch):
-    from api import gateway_chat, routes
+    from api import config, gateway_chat, routes, run_drain
 
     recorded = {}
     session = SimpleNamespace(
@@ -2043,18 +2043,28 @@ def test_start_chat_stream_marks_gateway_run_pending_before_thread_start(monkeyp
     monkeypatch.setattr(routes, "set_last_workspace", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(routes, "threading", SimpleNamespace(Thread=_FakeThread))
 
-    with patch("api.turn_journal.append_turn_journal_event", return_value={}):
-        response = routes._start_chat_stream_for_session(
-            session,
-            msg="hi",
-            attachments=[],
-            workspace="/tmp",
-            model="test-model",
-            external_runtime_owned=True,
-        )
+    # #8904: _FakeThread never runs the worker that unregisters the stream.
+    streams_before = set(config.STREAMS)
+    try:
+        with patch("api.turn_journal.append_turn_journal_event", return_value={}):
+            response = routes._start_chat_stream_for_session(
+                session,
+                msg="hi",
+                attachments=[],
+                workspace="/tmp",
+                model="test-model",
+                external_runtime_owned=True,
+            )
+    finally:
+        added_streams = set(config.STREAMS) - streams_before
+        for stream_id in added_streams:
+            for registry in vars(config).values():
+                if isinstance(registry, dict):
+                    registry.pop(stream_id, None)
 
     assert response["stream_id"] == recorded["stream_id"]
     assert gateway_chat.gateway_run_id_pending(recorded["stream_id"]) is False
+    assert not added_streams & {run["stream_id"] for run in run_drain.all_active_runs()}
 
 
 def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monkeypatch):

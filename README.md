@@ -220,6 +220,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 
 ### Sessions
 - Create, rename, duplicate, delete, search by title and message content
+- Middle-click (or Ctrl/Cmd+click) a sidebar session row to open that session's deep link (`/session/<id>`) in a new browser tab; the new tab boots directly on the session while the current tab keeps its place. Rows owned by a profile other than the active one are refused, because a new tab would switch the shared `hermes_profile` cookie and break the issuing tab's next chat/approval calls
 - Session actions via `⋯` dropdown per session — pin, move to project, archive, duplicate, delete
 - Pin/star sessions to the top of the sidebar (gold indicator)
 - Pinned-conversation limits apply separately to each session's owning profile; root/default aliases share a limit. Unpin an empty session before switching its profile through chat or `/goal`.
@@ -373,6 +374,13 @@ runner contract does not yet provide atomic goal replacement and kickoff; WebUI
 never substitutes local goal execution. `/goal status`, `pause`, `resume`, and
 `clear` delegate to the runner when supported. Legacy-direct and legacy-journal
 goal kickoff behavior is unchanged for supported routes. Normal runner chat supports provider-only model aliases.
+
+`/goal <text>` reads Hermes Agent's inline completion-contract lines (`outcome:`,
+`verification:`, `constraints:`, `boundaries:`, `stop when:`) into the goal's contract
+and keeps the first plain line(s) as the goal. `/goal gate …` is refused with HTTP 400
+(`error: unsupported_gate`) on every backend, without changing the goal or starting a run:
+gates rerun shell commands after every turn and WebUI has no rule yet for who may add them.
+Use `/goal -- <text>` for a goal that starts with a control word such as `gate` or `pause`.
 
 Server-initiated turns retain the pre-session stale-Agent-runtime barrier. It
 runs before loading the session; named-profile alias and Gateway routing happen
@@ -827,24 +835,24 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 Hermes WebUI is built with help from the open-source community. Every PR — whether merged directly, absorbed into a batch release, or salvaged from a larger proposal — shapes the project, and we're grateful to everyone who has taken the time to contribute.
 
 <!-- BEGIN GENERATED CONTRIBUTORS -->
-Over **468 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
+Over **497 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
 
 ### Top contributors (by PR count, including absorbed/batch-released work)
 
 | # | Contributor | PRs | First → latest release |
 |---|---|---:|---|
-| 1 | [@rodboev](https://github.com/rodboev) | 399 | `v0.51.223` → `v0.52.492` |
+| 1 | [@rodboev](https://github.com/rodboev) | 400 | `v0.51.223` → `v0.52.723` |
 | 2 | [@franksong2702](https://github.com/franksong2702) | 338 | `v0.49.3` → `v0.52.492` |
 | 3 | [@Michaelyklam](https://github.com/Michaelyklam) | 157 | `v0.50.240` → `v0.51.198` |
 | 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 155 | `v0.50.279` → `v0.52.458` |
-| 5 | [@webtecnica](https://github.com/webtecnica) | 91 | `v0.51.619` → `v0.52.492` |
+| 5 | [@webtecnica](https://github.com/webtecnica) | 103 | `v0.51.619` → `v0.52.727` |
 | 6 | [@bergeouss](https://github.com/bergeouss) | 80 | `v0.48.0` → `v0.51.703` |
-| 7 | [@AJV20](https://github.com/AJV20) | 57 | `v0.51.93` → `v0.51.346` |
-| 8 | [@happy5318](https://github.com/happy5318) | 56 | `v0.50.238` → `v0.52.492` |
-| 9 | [@starship-s](https://github.com/starship-s) | 55 | `v0.50.123` → `v0.52.492` |
-| 10 | [@dso2ng](https://github.com/dso2ng) | 43 | `v0.50.227` → `v0.51.578` |
+| 7 | [@chhxbchhxb](https://github.com/chhxbchhxb) | 69 | `v0.50.238` → `v0.52.724` |
+| 8 | [@AJV20](https://github.com/AJV20) | 57 | `v0.51.93` → `v0.51.346` |
+| 9 | [@happy5318](https://github.com/happy5318) | 56 | `v0.50.238` → `v0.52.667` |
+| 10 | [@starship-s](https://github.com/starship-s) | 56 | `v0.50.123` → `v0.52.544` |
 
-See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 468 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
+See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 497 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
 <!-- END GENERATED CONTRIBUTORS -->
 
 ### Notable contributions
