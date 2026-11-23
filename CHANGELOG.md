@@ -306,8 +306,6 @@
 
 ### Changed
 
-- **German reads as one consistent translation (#8787, @goetterbote2342).** The German interface now uses informal "du" throughout, uses the same word for the same thing everywhere (for example "Anbieter" for providers), and restores several messages whose meaning had drifted from the English. The quota-chip settings that were still in English are translated too.
-
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Internal
@@ -335,6 +333,12 @@
 - **Test suite reads static assets as UTF-8 so it runs on Windows.** 34 test files that opened `static/` assets without an explicit encoding now pass `encoding="utf-8"`, so the suite no longer fails under a non-UTF-8 default locale (Windows `cp1252`). Two method signatures over-matched by the encoding sweep were reverted. Assertions are unchanged. Thanks @mo7al876any. (#5537)
 
 - **Added regression coverage for messaging clear-watermark semantics.** New test locks the watermark behavior so a future change can't silently regress it. Thanks @rodboev. (#5589, #5572)
+
+## [v0.52.732] — 2026-11-23
+
+### Changed
+
+- **German reads as one consistent translation (#8787, @goetterbote2342).** The German interface now uses informal "du" throughout, uses the same word for the same thing everywhere (for example "Anbieter" for providers), and restores several messages whose meaning had drifted from the English. The quota-chip settings that were still in English are translated too.
 
 ## [v0.52.731] — 2026-11-22
 
