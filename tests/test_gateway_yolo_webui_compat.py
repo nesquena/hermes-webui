@@ -33,6 +33,23 @@ def _js_block(source, start_marker, end_marker):
     return source[start:source.index(end_marker, start)]
 
 
+def _yolo_view_js():
+    """#9101: the client's keyed YOLO view and its single writer.
+
+    YOLO writers (respondApproval's card projection, cmdYolo) apply the
+    server's answer through _applyYoloState(), which drops an answer that no
+    longer belongs to the open session/load. Harnesses that run a real writer
+    load the real applier and its module state, next to their own
+    `let _yoloEnabled` (the applier keeps that mirror current).
+    """
+    messages_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text()
+    return "\n".join([
+        "let _loadingSessionId=null;",
+        _js_block(messages_js, "let _yoloView =", "\n"),
+        _js_block(messages_js, "function _applyYoloState(", "\n// Fire-and-forget read"),
+    ])
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 def test_approval_card_yolo_resumes_current_prompt_with_one_webui_request():
     messages_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text()
@@ -51,6 +68,7 @@ def test_approval_card_yolo_resumes_current_prompt_with_one_webui_request():
         "let _approvalClearedOwner=null;",
         "let _approvalDisplayedOwner={sid:'browser-session',approvalId:'approval-1',runId:'run-1',mirrorToken:'mirror-1'};",
         "let _yoloEnabled=false;",
+        _yolo_view_js(),
         "const _approvalPendingBySession=new Map([['browser-session',{pending:{approval_id:'approval-1',run_id:'run-1',_gateway_mirror_token:'mirror-1'}}]]);",
         "const api=async(path,opts={})=>{calls.push([path,JSON.parse(opts.body||'{}')]);return {ok:true,yolo_enabled:true};};",
         "const $=()=>({disabled:false,classList:{contains:v=>v==='visible',add(){},remove(){}}});",
@@ -91,6 +109,7 @@ def test_approval_card_yolo_marks_skip_all_busy_while_request_is_pending():
         "const S={session:{session_id:'browser-session'}};",
         "let _loadSessionGeneration=1; let _approvalSessionId='browser-session'; let _approvalCurrentId='approval-1';",
         "let _approvalResponding=null; let _approvalClearedOwner=null; let _approvalDisplayedOwner={sid:'browser-session',approvalId:'approval-1',runId:'',mirrorToken:''}; let _yoloEnabled=false; let finishRequest;",
+        _yolo_view_js(),
         "const _approvalPendingBySession=new Map([['browser-session',{pending:{approval_id:'approval-1'}}]]);",
         "const api=async()=>await new Promise(resolve=>{finishRequest=resolve;});",
         "const t=k=>k; const showToast=()=>{}; const setStatus=()=>{}; const _updateYoloPill=()=>{};",
@@ -342,6 +361,7 @@ def test_approval_card_yolo_uses_authoritative_disabled_response():
         "let _approvalClearedOwner=null;",
         "let _approvalDisplayedOwner={sid:'browser-session',approvalId:'approval-1',runId:'',mirrorToken:''};",
         "let _yoloEnabled=true;",
+        _yolo_view_js(),
         "const _approvalPendingBySession=new Map([['browser-session',{pending:{approval_id:'approval-1'}}]]);",
         "const api=async()=>({ok:true,yolo_enabled:false});",
         "const $=()=>({disabled:false,classList:{contains:v=>v==='visible',add(){},remove(){}}});",
@@ -383,6 +403,7 @@ def test_failed_approval_relay_applies_authoritative_yolo_and_restores_card():
         "let _approvalClearedOwner=null;",
         "let _approvalDisplayedOwner={sid:'browser-session',approvalId:'approval-1',runId:'',mirrorToken:''};",
         "let _yoloEnabled=false;",
+        _yolo_view_js(),
         "const _approvalPendingBySession=new Map([['browser-session',{pending:{approval_id:'approval-1'}}]]);",
         "const api=async()=>{const e=new Error('relay failed');e.status=502;e.body=JSON.stringify({ok:false,error:'relay failed',yolo_enabled:true});throw e;};",
         "const $=()=>({disabled:false,classList:{contains:v=>v==='visible',add(){},remove(){}}});",
@@ -422,6 +443,7 @@ def test_yolo_command_resumes_visible_approval_through_same_atomic_action():
         "let _approvalSessionId='browser-session';",
         "let _approvalCurrentId='approval-1';",
         "let _yoloEnabled=false;",
+        _yolo_view_js(),
         "let atomicCalls=0;",
         "const api=async(path,opts={})=>{calls.push([path,opts]);return {yolo_enabled:false};};",
         "const toggleYoloFromApproval=async()=>{atomicCalls+=1;return true;};",
@@ -449,6 +471,7 @@ def test_yolo_command_uses_authoritative_post_response_state():
         "const S={session:{session_id:'browser-session'}};",
         "let _loadSessionGeneration=1;",
         "let _approvalSessionId=null; let _approvalCurrentId=null; let _yoloEnabled=false;",
+        _yolo_view_js(),
         "const api=async(path,opts={})=>{calls.push(path);return path.includes('?')?{yolo_enabled:false}:{ok:true,yolo_enabled:false};};",
         "const toggleYoloFromApproval=async()=>{throw new Error('card path must not run');};",
         "const $=()=>({classList:{contains:()=>false}});",
@@ -477,6 +500,7 @@ def test_yolo_command_applies_authoritative_state_from_failed_post():
         "const S={session:{session_id:'browser-session'}};",
         "let _loadSessionGeneration=1;",
         "let _approvalSessionId=null; let _approvalCurrentId=null; let _yoloEnabled=false;",
+        _yolo_view_js(),
         "const api=async(path)=>{if(path.includes('?'))return {yolo_enabled:false};const e=new Error('relay busy');e.body=JSON.stringify({error:'relay busy',yolo_enabled:true});throw e;};",
         "const toggleYoloFromApproval=async()=>{throw new Error('card path must not run');};",
         "const $=()=>({classList:{contains:()=>false}});",
@@ -1730,6 +1754,7 @@ def test_card_yolo_response_does_not_overwrite_switched_session_state():
             "let _approvalClearedOwner=null;",
             "let _approvalDisplayedOwner={sid:'old-session',approvalId:'approval-1',runId:'',mirrorToken:''};",
             "let _yoloEnabled=false;",
+            _yolo_view_js(),
             "const _approvalPendingBySession=new Map([['old-session',{pending:{approval_id:'approval-1'}}]]);",
             f"const api={api_source};",
             "const $=()=>({disabled:false,classList:{contains:v=>v==='visible',add(){},remove(){}}});",
@@ -1790,6 +1815,7 @@ def _run_card_yolo_owner_scenario(scenario):
         "let _loadSessionGeneration=1;",
         "let _approvalSessionId=ownerSid; let _approvalCurrentId=approvalId;",
         "let _approvalResponding=null; let _approvalClearedOwner=null; let _yoloEnabled=false;",
+        _yolo_view_js(),
         "let _approvalHideTimer=null; let _approvalVisibleSince=0; let _approvalSignature='owner-card';",
         "const initialPending=(scenario==='mirror-distinct-success'||scenario==='poll-cleared-success')?{approval_id:approvalId,run_id:'run-owner-1',_gateway_mirror_token:'mirror-owner-1'}:{approval_id:approvalId};",
         "let _approvalDisplayedOwner={sid:ownerSid,approvalId,runId:initialPending.run_id||'',mirrorToken:initialPending._gateway_mirror_token||''};",
@@ -1937,6 +1963,7 @@ def test_approval_reconciles_stale_transport_id_for_same_logical_approval():
         "let _approvalClearedOwner=null;",
         "let _approvalDisplayedOwner={sid:'browser-session',approvalId:'approval-1',runId:'run-1',mirrorToken:'mirror-1'};",
         "let _yoloEnabled=false;",
+        _yolo_view_js(),
         "const _approvalPendingBySession=new Map([['browser-session',{pending:{approval_id:'approval-1',request_id:'req-1',run_id:'run-1',_gateway_mirror_token:'mirror-1'}}]]);",
         "const api=async(path,opts={})=>{",
         " calls.push([path,opts.body?JSON.parse(opts.body):null]);",
@@ -1998,6 +2025,7 @@ def test_approval_never_auto_transfers_click_to_different_logical_approval():
         "let _approvalClearedOwner=null;",
         "let _approvalDisplayedOwner={sid:'browser-session',approvalId:'approval-1',runId:'run-1',mirrorToken:'mirror-1'};",
         "let _yoloEnabled=false;",
+        _yolo_view_js(),
         "const _approvalPendingBySession=new Map([['browser-session',{pending:{approval_id:'approval-1',run_id:'run-1',_gateway_mirror_token:'mirror-1'}}]]);",
         "const api=async(path,opts={})=>{",
         " calls.push([path,opts.body?JSON.parse(opts.body):null]);",
@@ -2056,6 +2084,7 @@ def test_identical_content_successor_with_distinct_request_id_is_not_answered():
         "let _approvalResponding=null;",
         "let _approvalClearedOwner=null;",
         "let _yoloEnabled=false;",
+        _yolo_view_js(),
         "const cardA={approval_id:'approval-1',command:'rm -rf /tmp/same',description:'identical retry',pattern_key:'p',pattern_keys:['p'],request_id:'req-a',run_id:'run-1',_gateway_mirror_token:'mirror-1'};",
         "let _approvalDisplayedOwner={sid:'browser-session',approvalId:'approval-1',runId:'run-1',mirrorToken:'mirror-1'};",
         "const _approvalPendingBySession=new Map([['browser-session',{pending:cardA}]]);",
@@ -2118,6 +2147,7 @@ def test_stale_transport_id_with_matching_request_id_is_still_adopted():
         "let _approvalResponding=null;",
         "let _approvalClearedOwner=null;",
         "let _yoloEnabled=false;",
+        _yolo_view_js(),
         "const cardA={approval_id:'approval-1',command:'rm -rf /tmp/same',description:'identical retry',pattern_key:'p',pattern_keys:['p'],request_id:'req-a',run_id:'run-1',_gateway_mirror_token:'mirror-1'};",
         "let _approvalDisplayedOwner={sid:'browser-session',approvalId:'approval-1',runId:'run-1',mirrorToken:'mirror-1'};",
         "const _approvalPendingBySession=new Map([['browser-session',{pending:cardA}]]);",
@@ -2180,6 +2210,7 @@ def test_identity_less_card_with_drifted_head_fails_closed():
         "let _approvalResponding=null;",
         "let _approvalClearedOwner=null;",
         "let _yoloEnabled=false;",
+        _yolo_view_js(),
         # The raw _pending shape: no request_id, no run_id, no mirror token.
         "const cardA={approval_id:'approval-1',command:'rm -rf /tmp/same',description:'identical retry',pattern_key:'p',pattern_keys:['p']};",
         "let _approvalDisplayedOwner={sid:'browser-session',approvalId:'approval-1',runId:'',mirrorToken:''};",
@@ -2243,6 +2274,7 @@ def test_identity_less_card_with_equal_transport_id_stays_answerable():
         "let _approvalResponding=null;",
         "let _approvalClearedOwner=null;",
         "let _yoloEnabled=false;",
+        _yolo_view_js(),
         "const cardA={approval_id:'gwlocal-mirrorless:abc',command:'rm -rf /tmp/same',description:'identical retry',pattern_key:'p',pattern_keys:['p']};",
         "let _approvalDisplayedOwner={sid:'browser-session',approvalId:'gwlocal-mirrorless:abc',runId:'',mirrorToken:''};",
         "const _approvalPendingBySession=new Map([['browser-session',{pending:cardA}]]);",
@@ -2300,6 +2332,7 @@ def test_equal_transport_id_short_circuit_blocks_respond_after_session_switch():
         "let S={session:{session_id:'session-a'}};",
         "let _loadSessionGeneration=1; let _approvalSessionId='session-a'; let _approvalCurrentId='approval-a';",
         "let _approvalResponding=null; let _approvalClearedOwner=null; let _yoloEnabled=false;",
+        _yolo_view_js(),
         "const _approvalPendingBySession=new Map([['session-a',{pending:{approval_id:'approval-a'}}]]);",
         "let _approvalDisplayedOwner={sid:'session-a',approvalId:'approval-a',runId:'',mirrorToken:''};",
         # The GET switches sessions mid-await but returns the same transport id.

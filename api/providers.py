@@ -62,6 +62,7 @@ from api.plugin_providers import (
     effective_provider_env_var,
     is_plugin_model_provider,
     plugin_model_provider_ids,
+    plugin_model_provider_is_oauth,
 )
 
 logger = logging.getLogger(__name__)
@@ -224,6 +225,10 @@ def _snapshot_payload(snapshot):
             "reset_at": _iso(getattr(window, "reset_at", None)),
             "detail": getattr(window, "detail", None),
             "limit_window_seconds": _number(getattr(window, "limit_window_seconds", None)),
+            # Whether the Agent reported a length at all, so the parent can tell a missing
+            # length (eligible for a nominal one) from a rejected one (stays untimed).
+            "limit_window_seconds_reported": getattr(window, "limit_window_seconds", None) is not None,
+            "scope": str(getattr(window, "scope", "") or "").strip().lower() or "account",
         })
     payload = {
         "provider": str(getattr(snapshot, "provider", "") or ""),
@@ -1747,10 +1752,12 @@ def _sanitize_opencode_go_quota(payload: Any) -> dict[str, Any] | None:
     quota = payload.get("quota", payload.get("data", payload.get("usage", payload)))
     if not isinstance(quota, dict):
         return None
-    # OpenCode documents the rolling window as five hours.
-    specs = (("rolling", "5-hour"), ("weekly", "Weekly"), ("monthly", "Monthly"))
+    # OpenCode documents the rolling window as five hours. The durations let the composer chip's
+    # fixed quota_chip_window choices (shortest / longest) order these windows; the API omits them.
+    # Monthly is nominal (30 days): it only has to sort after weekly.
+    specs = (("rolling", "5-hour", 5 * 3600), ("weekly", "Weekly", 7 * 86400), ("monthly", "Monthly", 30 * 86400))
     windows = []
-    for key, label in specs:
+    for key, label, seconds in specs:
         raw = quota.get(key)
         if not isinstance(raw, dict):
             continue
@@ -1763,6 +1770,7 @@ def _sanitize_opencode_go_quota(payload: Any) -> dict[str, Any] | None:
             "remaining_percent": 100.0 - used_percent,
             "reset_at": _usage_api_reset_at(raw.get("resetsAt")),
             "detail": _usage_api_status_detail(raw.get("status")),
+            "limit_window_seconds": seconds,
         })
     if not windows:
         return None
@@ -1779,9 +1787,11 @@ def _sanitize_commandcode_quota(payload: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict) or not isinstance(payload.get("windowLimits"), dict):
         return None
     windows = []
-    for key, label in (("fiveHour", "5-hour"), ("weekly", "Weekly")):
+    # Durations as for OpenCode Go: the API names the windows but omits their length.
+    for key, label, seconds in (("fiveHour", "5-hour", 5 * 3600), ("weekly", "Weekly", 7 * 86400)):
         window = _quota_window(payload["windowLimits"].get(key), label)
         if window:
+            window["limit_window_seconds"] = seconds
             windows.append(window)
     if not windows:
         return None
@@ -1866,14 +1876,36 @@ def _isoformat_utc(value: Any) -> str | None:
     return text or None
 
 
+# Anthropic's usage API names its windows but reports no length, so the composer chip's
+# shortest / longest choices could not order them. These nominal lengths cover only the
+# Agent's own labels for Anthropic (agent/account_usage.py) and apply only when a window
+# reports no length at all, so a length the Agent reports later always wins, and a length it
+# reports but that is invalid stays untimed. Any other label stays untimed too and keeps the
+# chip's most-constrained fallback.
+_ANTHROPIC_NOMINAL_WINDOW_SECONDS = {
+    "Current session": 5 * 3600,
+    "Current week": 7 * 86400,
+    "Opus week": 7 * 86400,
+    "Sonnet week": 7 * 86400,
+}
+
+
 def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
     if snapshot is None:
         return None
+    provider = str(getattr(snapshot, "provider", "") or "").strip().lower()
+    nominal_seconds = _ANTHROPIC_NOMINAL_WINDOW_SECONDS if provider == "anthropic" else {}
     windows: list[dict[str, Any]] = []
     for window in getattr(snapshot, "windows", ()) or ():
         label = str(getattr(window, "label", "") or "").strip()
         if not label:
             continue
+        raw_seconds = getattr(window, "limit_window_seconds", None)
+        limit_window_seconds = _quota_number(raw_seconds)
+        # Windows rebuilt from the probe worker carry whether a length was reported.
+        reported = getattr(window, "limit_window_seconds_reported", raw_seconds is not None)
+        if limit_window_seconds is None and not reported:
+            limit_window_seconds = nominal_seconds.get(label)
         used_percent = _quota_number(getattr(window, "used_percent", None))
         remaining_percent = None
         if used_percent is not None:
@@ -1884,7 +1916,10 @@ def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
             "remaining_percent": remaining_percent,
             "reset_at": _isoformat_utc(getattr(window, "reset_at", None)),
             "detail": str(getattr(window, "detail", "") or "").strip() or None,
-            "limit_window_seconds": _quota_number(getattr(window, "limit_window_seconds", None)),
+            "limit_window_seconds": limit_window_seconds,
+            # "model" windows cap one model family, not the account; older
+            # Agents carry no scope, which means account.
+            "scope": str(getattr(window, "scope", "") or "").strip().lower() or "account",
         })
 
     details = [
@@ -1976,6 +2011,8 @@ def _account_usage_payload_to_snapshot(payload: Any) -> Any:
             reset_at=window.get("reset_at"),
             detail=window.get("detail"),
             limit_window_seconds=window.get("limit_window_seconds"),
+            limit_window_seconds_reported=window.get("limit_window_seconds_reported") is True,
+            scope=window.get("scope"),
         )
         for window in (payload.get("windows") or ())
         if isinstance(window, dict)
@@ -2977,8 +3014,18 @@ def get_providers() -> dict[str, Any]:
             try:
                 from hermes_cli.auth import get_auth_status as _gas_plugin
                 _plugin_status = _gas_plugin(pid)
+                # OAuth-shaped plugins report configured=True once the profile is
+                # registered, even when nobody is signed in (#9105): only
+                # logged_in counts there, or needs_refresh (every token expired
+                # but the Agent can refresh one, so the account is usable).
+                # Other auth types keep configured.
                 if isinstance(_plugin_status, dict) and (
-                    _plugin_status.get("logged_in") or _plugin_status.get("configured")
+                    _plugin_status.get("logged_in")
+                    or _plugin_status.get("needs_refresh")
+                    or (
+                        _plugin_status.get("configured")
+                        and not plugin_model_provider_is_oauth(pid)
+                    )
                 ):
                     has_key = True
                     plugin_auth_status = _plugin_status
@@ -3441,6 +3488,10 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
                 if isinstance(provider_cfg, dict) and provider_cfg.get("api_key"):
                     del provider_cfg["api_key"]
                     changed = True
+                    if not provider_cfg:
+                        del providers_cfg[provider_id]
+                        if not providers_cfg:
+                            del cfg["providers"]
 
             # 2. Clean model.api_key — only if this provider is the active one
             model_cfg = cfg.get("model", {})

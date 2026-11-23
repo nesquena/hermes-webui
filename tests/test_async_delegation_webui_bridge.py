@@ -21,6 +21,7 @@ import pytest
 
 from api import background_process as bp
 from api import config as cfg
+from api import delegation_ledger_owner
 from api import process_event_utils as peu
 from api import streaming
 
@@ -484,7 +485,7 @@ def test_formatting_failure_stays_bounded_not_keep_legacy_retrying(monkeypatch):
     _install_fake_legacy_delivery_api(monkeypatch)
     calls = {"n": 0}
 
-    def _spy(process_registry, evt, *, keep_legacy_retrying=False):
+    def _spy(process_registry, evt, *, keep_legacy_retrying=False, claim=None):
         calls["n"] += 1
         calls["keep_legacy_retrying"] = keep_legacy_retrying
 
@@ -940,6 +941,12 @@ def test_delivered_or_legacy_event_is_not_scheduled_for_lease_retry(monkeypatch)
 def test_async_delivery_retry_uses_one_lossless_restore_sweep(monkeypatch):
     _reset_wakeup_state()
     delivery = _install_fake_durable_delivery_api(monkeypatch)
+    # Coalescing is under test, not ownership: per-call owner lookup I/O can make
+    # this loop outlast the 0.2s sweep on slow runners, and this fake restore
+    # (unlike the Agent's) re-offers every pending id on each sweep.
+    monkeypatch.setattr(
+        peu, "resolve_ledger_owner", lambda _evt: delegation_ledger_owner.LedgerOwner("missing")
+    )
     retry_queue = queue.Queue()
     cap = peu.LEGACY_ASYNC_DELIVERY_DEDUPE_MAX
     try:

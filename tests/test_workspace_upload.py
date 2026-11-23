@@ -726,7 +726,9 @@ class TestWorkspaceUploadArchive:
 
         The member cap (_MAX_ARCHIVE_MEMBERS = 10000) trips before the byte cap
         when an archive packs a huge number of tiny files. Verifies the archive
-        and any partial extraction are cleaned up.
+        and any partial extraction are cleaned up. Since #8823 the count is
+        prechecked before any member is written, so this returns quickly instead
+        of writing 10,000 files first (which raced the 10 s client timeout).
         """
         sid, ws = make_session_tracked(cleanup_test_sessions)
 
@@ -743,6 +745,7 @@ class TestWorkspaceUploadArchive:
         assert status == 200, f"Upload failed {status}: {result}"
         assert result["extracted"] is False
         assert "extract_error" in result
+        assert "too many files" in result["extract_error"]
         assert not (ws / "many.zip").exists()
         assert not (ws / "many").exists()
 
