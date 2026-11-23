@@ -82,6 +82,9 @@ function makeDeferred() {
 async function runScenario() {
   globalThis.window = globalThis;
   window._modelDropdownReady = null;
+  // Active-profile identity the catalog owner is armed for. The profile guard
+  // under test reads it through the same global the browser uses.
+  globalThis.S = { activeProfile: 'alpha' };
 
   // Stub the catalog hydration (populateModelDropdown + session reconcile in
   // boot.js). Each call creates a NEW deferred hydration, mirroring a real
@@ -89,10 +92,22 @@ async function runScenario() {
   // _hydrateModelDropdown tail: on failure the window._modelDropdownReady slot
   // is cleared so the next open retries instead of serving a dead promise.
   const hydrations = [];
+  // Promises installed straight into the owner slot (static/sessions.js does
+  // this on a profile-scoped catalog refresh). They are not hydration calls, so
+  // they never raise hydrations.length.
+  const installed = [];
   const _hydrateModelDropdown = () => {
     const defer = makeDeferred();
-    const wrapped = defer.promise.catch((err) => {
-      window._modelDropdownReady = null;
+    // Mirror the real `_hydrateModelDropdown` tail: a failure hands the slot
+    // back through the tracker with the identity check (`expectedCurrent`), so a
+    // late rejection cannot clear a NEWER owner.
+    let wrapped;
+    wrapped = defer.promise.catch((err) => {
+      if (typeof window._trackModelCatalogHydration === 'function') {
+        window._trackModelCatalogHydration(null, wrapped);
+      } else if (window._modelDropdownReady === wrapped) {
+        window._modelDropdownReady = null;
+      }
       throw err;
     });
     hydrations.push({ defer, promise: wrapped });
@@ -114,13 +129,65 @@ async function runScenario() {
     for (let i = 0; i < hydrations.length; i++) {
       if (hydrations[i].promise === ret) { hyd = i + 1; break; }
     }
-    trace.push({ label, hydCount: hydrations.length, returnedHyd: hyd });
+    trace.push({
+      label,
+      hydCount: hydrations.length,
+      returnedHyd: hyd,
+      returnedInstalled: installed.some((entry) => entry.promise === ret),
+      profile: S.activeProfile,
+    });
     // Flush microtasks so settle-trackers attached by the starters run.
     await Promise.resolve();
     await Promise.resolve();
   };
 
   for (const op of scenario.ops || []) {
+    if (op.profile) {
+      S.activeProfile = op.profile;
+      trace.push({
+        label: op.label,
+        hydCount: hydrations.length,
+        returnedHyd: 0,
+        returnedInstalled: false,
+        profile: S.activeProfile,
+      });
+      await Promise.resolve();
+      continue;
+    }
+    if (op.install === true) {
+      const entry = makeDeferred();
+      // Keep an already-handled view of the promise so a deliberate rejection
+      // below is never reported as unhandled while the tracker still sees the
+      // raw promise (identity comparisons depend on it).
+      entry.safe = entry.promise.catch(() => {});
+      installed.push(entry);
+      const ret = window._trackModelCatalogHydration(entry.promise);
+      trace.push({
+        label: op.label,
+        hydCount: hydrations.length,
+        returnedHyd: 0,
+        returnedInstalled: ret === entry.promise,
+        profile: S.activeProfile,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      continue;
+    }
+    if (op.rejectInstalled === true) {
+      const entry = installed[installed.length - 1];
+      entry.reject(new Error('catalog unavailable'));
+      await entry.safe;
+      trace.push({
+        label: op.label,
+        hydCount: hydrations.length,
+        returnedHyd: 0,
+        returnedInstalled: false,
+        profile: S.activeProfile,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      continue;
+    }
     if (op.settle === true || op.settle === false) {
       const h = hydrations[hydrations.length - 1];
       if (op.settle === true) h.defer.resolve({ ok: true });
@@ -289,5 +356,121 @@ def test_live_models_coalescing_and_sessions_hydration_tracking():
     # Runtime contract documentation
     doc = (ROOT / "docs" / "architecture" / "models-cache-invalidation.md").read_text(encoding="utf-8")
     assert "Client-side model picker hydration and live cache contract" in doc
+
+
+def _trace_by_label(trace):
+    return {entry["label"]: entry for entry in trace}
+
+
+def test_pending_installed_owner_after_settle_is_joined_not_bypassed(driver_path):
+    """Re-gate 2026-10-01: installing a pending hydration must reset the settled
+    flag.
+
+    Boot hydration A settles. `static/sessions.js:3219-3222` then installs a
+    pending profile-scoped refresh B through
+    `window._trackModelCatalogHydration(...)`. An immediate picker open must JOIN
+    B — the head cleared B and started C because the old settled flag was still
+    true, so B's response was superseded by a request the picker never asked
+    for.
+    """
+    trace = _run(
+        driver_path,
+        [
+            {"label": "boot-start", "boot": True},
+            {"label": "boot-settles", "settle": True},
+            {"label": "install-b", "install": True},
+            {"label": "open-while-b-pending", "boot": False},
+        ],
+    )
+    by_label = _trace_by_label(trace)
+    assert by_label["boot-settles"]["hydCount"] == 1
+    assert by_label["install-b"]["returnedInstalled"] is True
+    assert by_label["open-while-b-pending"]["hydCount"] == 1, (
+        "a newly installed pending owner must reset the settled state"
+    )
+    assert by_label["open-while-b-pending"]["returnedInstalled"] is True
+
+
+def test_previous_hydration_rejection_after_b_install_keeps_b(driver_path):
+    """Control: A's late rejection must not clear the newer owner B."""
+    trace = _run(
+        driver_path,
+        [
+            {"label": "boot-start", "boot": True},
+            {"label": "install-b", "install": True},
+            {"label": "boot-rejects", "settle": False},
+            {"label": "open", "boot": False},
+        ],
+    )
+    by_label = _trace_by_label(trace)
+    assert by_label["open"]["hydCount"] == 1
+    assert by_label["open"]["returnedInstalled"] is True
+
+
+def test_rejected_installed_owner_is_retried_on_next_open(driver_path):
+    """A rejected installed owner must not be served forever: retry on open."""
+    trace = _run(
+        driver_path,
+        [
+            {"label": "boot-start", "boot": True},
+            {"label": "boot-settles", "settle": True},
+            {"label": "install-b", "install": True},
+            {"label": "b-rejects", "rejectInstalled": True},
+            {"label": "open-after-b-failure", "boot": False},
+        ],
+    )
+    by_label = _trace_by_label(trace)
+    assert by_label["open-after-b-failure"]["hydCount"] == 2
+    assert by_label["open-after-b-failure"]["returnedHyd"] == 2
+
+
+def test_profile_change_invalidates_the_settled_catalog_owner(driver_path):
+    """The owner belongs to a profile: after a switch a settled snapshot of the
+    previous profile must not be served to the picker."""
+    trace = _run(
+        driver_path,
+        [
+            {"label": "boot-start", "boot": True},
+            {"label": "boot-settles", "settle": True},
+            {"label": "switch-to-beta", "profile": "beta"},
+            {"label": "open-after-switch", "boot": False},
+        ],
+    )
+    by_label = _trace_by_label(trace)
+    assert by_label["switch-to-beta"]["profile"] == "beta"
+    assert by_label["open-after-switch"]["hydCount"] == 2
+    assert by_label["open-after-switch"]["returnedHyd"] == 2
+
+
+def test_profile_change_while_pending_starts_a_new_owner(driver_path):
+    """A switch during the pending window must not let an open join the
+    previous profile's in-flight hydration."""
+    trace = _run(
+        driver_path,
+        [
+            {"label": "boot-start", "boot": True},
+            {"label": "switch-to-beta", "profile": "beta"},
+            {"label": "open-in-new-profile", "boot": False},
+        ],
+    )
+    by_label = _trace_by_label(trace)
+    assert by_label["open-in-new-profile"]["hydCount"] == 2
+    assert by_label["open-in-new-profile"]["returnedHyd"] == 2
+
+
+def test_same_profile_pending_open_still_joins(driver_path):
+    """Positive control: without a switch or a new install, the pending
+    hydration is still deduped (never refetch on every open)."""
+    trace = _run(
+        driver_path,
+        [
+            {"label": "boot-start", "boot": True},
+            {"label": "open-while-pending", "boot": False},
+        ],
+    )
+    by_label = _trace_by_label(trace)
+    assert by_label["open-while-pending"]["hydCount"] == 1
+    assert by_label["open-while-pending"]["returnedHyd"] == 1
+
 
 

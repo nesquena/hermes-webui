@@ -4540,6 +4540,12 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // added later, e.g. OpenRouter stealth/ox-alpha) and the composer picker
   // would report "No models found" for those until a hard refresh (#7227).
   let _modelCatalogHydrationSettled=false;
+  let _modelCatalogHydrationProfile=null;
+  // Profile the cached owner was armed for. The catalog is per-profile, so a
+  // cache armed under one profile must never be served to another.
+  const _catalogHydrationProfile=()=>{
+    try{ return (typeof S!=='undefined'&&S&&typeof S.activeProfile==='string')?S.activeProfile:null; }catch(_){ return null; }
+  };
   const _trackModelCatalogHydration=(next, expectedCurrent=undefined)=>{
     if(!next){
       if(expectedCurrent!==undefined && window._modelDropdownReady!==expectedCurrent){
@@ -4549,9 +4555,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       _modelCatalogHydrationSettled=false;
       return null;
     }
+    _modelCatalogHydrationSettled=false;
+    _modelCatalogHydrationProfile=_catalogHydrationProfile();
     Promise.resolve(next).then(
       ()=>{ if(window._modelDropdownReady===next) _modelCatalogHydrationSettled=true; },
-      ()=>{ if(window._modelDropdownReady===next) _modelCatalogHydrationSettled=false; }
+      ()=>{ if(window._modelDropdownReady===next){ _modelCatalogHydrationSettled=false; window._modelDropdownReady=null; } }
     );
     window._modelDropdownReady=next;
     return next;
@@ -4560,14 +4568,14 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     const ready=window._modelDropdownReady;
     // An in-flight hydration dedupes (boot + first open join it). A settled one
     // is dropped so opening the picker refetches the current /api/models payload.
-    if(ready&&typeof ready.then==='function'&&!_modelCatalogHydrationSettled) return ready;
+    if(ready&&typeof ready.then==='function'&&!_modelCatalogHydrationSettled&&_modelCatalogHydrationProfile===_catalogHydrationProfile()) return ready;
     window._modelDropdownReady=null;
     _modelCatalogHydrationSettled=false;
     return _trackModelCatalogHydration(_hydrateModelDropdown());
   };
   const _startBootModelDropdown=()=>{
     const ready=window._modelDropdownReady;
-    if(ready&&typeof ready.then==='function') return ready;
+    if(ready&&typeof ready.then==='function'&&_modelCatalogHydrationProfile===_catalogHydrationProfile()) return ready;
     return _trackModelCatalogHydration(
       _hydrateModelDropdown({redirectIfUnauth:_redirectBootModelDropdownIfUnauth})
     );

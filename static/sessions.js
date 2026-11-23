@@ -2719,6 +2719,7 @@ async function _switchProfileForSessionLoad(profile){
     }
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
     S.activeProfile=data.active||name;
+    if(typeof window!=='undefined'&&typeof window._trackModelCatalogHydration==='function') window._trackModelCatalogHydration(null);
     S.activeProfileIsDefault=!!data.is_default;
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();

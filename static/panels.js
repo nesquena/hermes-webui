@@ -7866,6 +7866,12 @@ async function switchToProfile(name) {
     if (typeof _clearEmptyComposerModelOverride === 'function') _clearEmptyComposerModelOverride();
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    // The model catalog owner is per-profile: drop the previous profile's
+    // hydration cache the instant the identity changes, so a picker opened
+    // during the awaited work below cannot join it.
+    if (typeof window !== 'undefined' && typeof window._trackModelCatalogHydration === 'function') {
+      window._trackModelCatalogHydration(null);
+    }
     if (typeof bumpModelDropdownRequestSeq === 'function') {
       bumpModelDropdownRequestSeq();
     } else if (typeof window !== 'undefined' && typeof window.bumpModelDropdownRequestSeq === 'function') {
