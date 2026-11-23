@@ -179,7 +179,7 @@ class TestRound6DefaultHonorsIsolationClamp:
         )
 
     def test_session_config_reads_pinned_config(
-        self, isolated_default_pinned, monkeypatch
+        self, isolated_default_pinned, monkeypatch, request
     ):
         """Config for the resolved 'default' home comes from the PINNED home.
 
@@ -195,6 +195,23 @@ class TestRound6DefaultHonorsIsolationClamp:
 
         env = isolated_default_pinned
         monkeypatch.setenv("HERMES_CONFIG_PATH", str(env["pinned"] / "config.yaml"))
+        # reload_config() rebinds the module's config-cache globals (_cfg_path/_cfg_mtime/
+        # _cfg_fingerprint) and refills _cfg_cache IN PLACE. monkeypatch only restores the env
+        # var, so without this the process cache kept pointing at this test's tmp config and a
+        # later get_config() saw path_changed and rebound config.cfg over another test's
+        # monkeypatched cfg (it flipped test_issue7193's eager save mode to deferred under the
+        # sequential full suite). Restore the cache CONTENTS in place (other code holds the same
+        # dict object) and snapshot the rebound globals, so teardown restores the exact pre-test
+        # cache state. The finalizer is registered after monkeypatch, so it runs first (LIFO).
+        _saved_cache = dict(cfg_mod._cfg_cache)
+
+        def _restore_cfg_cache():
+            cfg_mod._cfg_cache.clear()
+            cfg_mod._cfg_cache.update(_saved_cache)
+
+        request.addfinalizer(_restore_cfg_cache)
+        for _name in ("cfg", "_cfg_path", "_cfg_mtime", "_cfg_fingerprint"):
+            monkeypatch.setattr(cfg_mod, _name, getattr(cfg_mod, _name))
         cfg_mod.reload_config()
 
         home = workspace._resolve_profile_home_param("default")
