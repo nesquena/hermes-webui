@@ -99,6 +99,35 @@ class TestSetDefaultModelPreservesAtPrefix:
         assert saved["model"]["provider"] == "nous"
         assert saved["model"]["base_url"] == "https://router.nous.ai/v1"
 
+    @pytest.mark.parametrize("section", ["providers", "custom_providers"])
+    def test_config_declared_colon_provider_is_not_split(self, section):
+        import yaml
+
+        entry = {"base_url": "https://eu-proxy.example/v1", "api_key": "DUMMY_EU"}
+        if section == "providers":
+            declared = {"openrouter:eu": entry}
+        else:
+            declared = [{"name": "openrouter:eu", **entry}]
+        path = config._get_config_path()
+        path.write_text(
+            yaml.safe_dump(
+                {
+                    "model": {"provider": "openrouter:eu", "default": "gpt-x", "base_url": "https://eu-proxy.example/v1"},
+                    section: declared,
+                }
+            ),
+            encoding="utf-8",
+        )
+        config.cfg.clear()
+        config.cfg.update(yaml.safe_load(path.read_text(encoding="utf-8")))
+
+        result = set_hermes_default_model("gpt-x", provider="openrouter:eu")
+
+        assert result["provider"] == "openrouter:eu"
+        saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert saved["model"]["provider"] == "openrouter:eu"
+        assert saved["model"].get("base_url") != "https://openrouter.ai/api/v1"
+
     def test_at_nous_prefix_strips_to_bare_for_cli_compatibility(self, tmp_path, monkeypatch):
         """set_hermes_default_model must persist the RESOLVED bare/slash form, not the
         `@provider:` prefix. The `@provider:` syntax is a WebUI-internal routing hint;

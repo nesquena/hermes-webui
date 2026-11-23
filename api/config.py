@@ -7592,6 +7592,20 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         model_cfg["api_key"] = api_key
 
 
+def _provider_is_config_declared(provider_id: str, config_obj: dict) -> bool:
+    """True when *provider_id* names a provider declared in this profile's config.
+
+    A ``providers:`` or ``custom_providers`` entry may be named
+    ``<built-in>:<suffix>`` (e.g. ``openrouter:eu``). The Agent resolves that
+    name as its own endpoint, so a save must persist it verbatim instead of
+    splitting it into the built-in prefix. A lookup failure keeps it verbatim.
+    """
+    try:
+        return bool(_named_custom_provider_slug_for_provider(provider_id, config_obj))
+    except Exception:
+        return True
+
+
 def set_hermes_default_model(model_id: str, provider: str | None = None, advanced: dict | None = None) -> dict:
     """Persist the Hermes default model in config.yaml and reload runtime config."""
     selected_model = str(model_id or "").strip()
@@ -7624,6 +7638,7 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
             separator
             and model_pin
             and provider_prefix.lower() != "custom"
+            and not _provider_is_config_declared(requested_provider, config_data)
             and _is_known_model_provider(_resolve_provider_alias(provider_prefix))
         ):
             # The picker may send a built-in provider's pinned catalog group.
