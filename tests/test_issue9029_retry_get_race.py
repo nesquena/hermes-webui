@@ -529,3 +529,94 @@ def test_truncate_save_does_not_pin_the_cache_against_newer_disk(
     with models.LOCK:
         assert SESSIONS[sid] is fresh
 
+
+def test_owner_record_save_under_lock_does_not_block_on_the_clear(tmp_path, monkeypatch):
+    """A caller that already holds ``LOCK`` must not wait on it inside ``save``.
+
+    ``api/routes.py`` materializes the first-draft owner record with
+    ``draft_session.save(touch_updated_at=False, skip_index=True)`` while it
+    holds both the per-session persist lock and ``LOCK``. ``LOCK`` is a plain
+    ``threading.Lock``, so a save that re-acquires it to close the pending-shrink
+    window blocks on itself forever, and every request that needs ``LOCK`` with
+    it. The owner-record save skips the sidebar index for exactly that reason,
+    and the clear has to follow the same rule.
+
+    A fresh plain lock stands in for ``api.config.LOCK`` so that a regression
+    wedges only this test instead of every later acquisition in the session.
+    """
+    session_dir = tmp_path / "sessions"
+    sid = "issue9029-owner-record-under-lock"
+    monkeypatch.setattr(models, "LOCK", threading.Lock())
+    draft = Session(
+        session_id=sid,
+        title="owner record",
+        workspace=str(session_dir.parent),
+        messages=[],
+        context_messages=[],
+    )
+    # The state the reviewer asked about: a generation stamped on the object
+    # that this owner-record save then persists.
+    draft.intentional_shrink_generation = "generation-owner-record"
+    draft._intentional_shrink_pending_count = 4
+    finished = threading.Event()
+    errors: list = []
+
+    def _save_under_lock():
+        try:
+            with models._session_persist_lock(sid), models.LOCK:
+                draft.save(touch_updated_at=False, skip_index=True)
+        except BaseException as exc:  # surfaced on the test thread
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(
+        target=_save_under_lock, name="owner-record-9029", daemon=True
+    )
+    thread.start()
+    try:
+        assert finished.wait(WAIT), (
+            "Session.save(skip_index=True) blocked on LOCK while its caller held it"
+        )
+    finally:
+        thread.join(WAIT)
+    assert not errors, errors[0]
+    assert not thread.is_alive(), "the owner-record save never returned"
+    assert (session_dir / f"{sid}.json").exists()
+
+
+def test_generation_read_with_the_rows_it_describes(tmp_path, monkeypatch):
+    """The clear's token has to be read with the rows this save captured.
+
+    ``_save_locked`` captured the rows and only then read
+    ``intentional_shrink_generation``. A shrink landing between the two made the
+    save persist the OLD rows while clearing the NEW shrink's marker, so the next
+    reader reloaded the removed rows.
+    """
+    session_dir = tmp_path / "sessions"
+    sid = "issue9029-generation-with-rows"
+    cached = _seed_and_cache(session_dir, sid)
+    real_dedup = models._deduplicate_exact_stable_messages
+    state = {"armed": True}
+
+    def dedup(messages, *args, **kwargs):
+        if state["armed"]:
+            state["armed"] = False
+            # The shrink lands after the rows were handed to this save.
+            cached.messages = list(cached.messages)[:3]
+            cached.intentional_shrink_generation = "generation-mid-capture"
+            cached._intentional_shrink_pending_count = len(messages)
+        return real_dedup(messages, *args, **kwargs)
+
+    monkeypatch.setattr(models, "_deduplicate_exact_stable_messages", dedup)
+    cached.save()
+
+    # Control: this save persisted the rows it had captured (the old five).
+    assert len(_load_disk(session_dir, sid)) == 5
+    # The token travelled with those rows, so the sidecar neither claims the new
+    # generation nor the truncated transcript.
+    assert _raw_disk(session_dir, sid)["intentional_shrink_generation"] is None
+    # And the marker the late shrink stamped is still the pending authority.
+    assert cached.intentional_shrink_generation == "generation-mid-capture"
+    assert getattr(cached, "_intentional_shrink_pending_count", None) == 5
+
