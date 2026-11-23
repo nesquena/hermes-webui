@@ -74,6 +74,7 @@ _HARNESS = """\
 const vm = require('vm');
 
 const apiCalls = [];
+const queueEntries = [];
 let skillsPayload = [];
 const skillContentByName = {};
 // #7781 should-fix knob: make the /api/skills listing fetch reject.
@@ -163,6 +164,11 @@ const ctx = {
   history: { replaceState(){} },
   S: { session: { session_id: 'sess-1' }, pendingFiles: [], messages: [], toolCalls: [] },
   INFLIGHT: {},
+  queueSessionMessage(sid, payload) { queueEntries.push({ sid, payload }); },
+  updateQueueBadge(){},
+  _clearComposerAfterQueuedSelectionSend(){},
+  _clearQueueCardDisplay(){},
+  _queueRenderKeys: {},
   api: async (path, opts) => {
     apiCalls.push({ path, opts: opts || null });
     if (path === '/api/skills') {
@@ -188,6 +194,9 @@ const ctx = {
       }
       return { content: skillContentByName[name] || '' };
     }
+    if (path === '/api/chat/steer') {
+      return { accepted: true, fallback: null, stream_id: 'run-steer-1' };
+    }
     if (path === '/api/chat/start') {
       // Dispatch point reached and recorded (startCall in the runner reads the
       // captured body). Stop here instead of wiring the real SSE stream.
@@ -202,6 +211,8 @@ const ctx = {
   __resetApiCalls() { apiCalls.length = 0; },
   _refreshSessionSkillUsageForOwner(sid) { apiCalls.push({ path: '__skill_usage__', sid }); },
   __apiCalls() { return apiCalls; },
+  __resetQueue() { queueEntries.length = 0; },
+  __queueEntries() { return queueEntries; },
   __setComposer(text) { getEl('msg').value = text; },
   __composer() { const el = elementCache['msg']; return el ? el.value : null; },
   __failSkillsListing(v) { skillsListingShouldFail = !!v; },
@@ -315,6 +326,89 @@ vm.runInContext(__MESSAGES_JS__, ctx);
           thrown,
         };
       };
+      // #7781 [CORE] 2026-11-23: send() takes its busy/default-steer branch
+      // BEFORE the idle-path plugin resolver, so a picked '/ns:skill args'
+      // used to steer only the literal command. This runner drives that exact
+      // branch with a live stream and records the /api/chat/steer payload.
+      const runBusy = async (composerText, skills, contentMap, opts) => {
+        opts = opts || {};
+        __setComposer(composerText);
+        __setSkills(skills);
+        __clearSkillContent();
+        for (const k in (contentMap || {})) __setSkillContent(k, contentMap[k]);
+        __resetApiCalls();
+        __resetQueue();
+        __failSkillsListing(false);
+        S.session = { session_id: opts.sessionId || 'sess-1' };
+        S.messages = [];
+        INFLIGHT = {};
+        S.busy = true;
+        S.activeStreamId = 'run-steer-1';
+        window._defaultMessageMode = opts.mode || 'steer';
+        let thrown = null;
+        await send(opts.sendOptions || undefined).catch((e) => { thrown = String((e && e.message) || e); });
+        const steerCalls = __apiCalls().filter((c) => c && c.path === '/api/chat/steer');
+        const steerCall = steerCalls[steerCalls.length - 1];
+        const out = {
+          steerBody: steerCall ? JSON.parse(steerCall.opts.body) : null,
+          steerCalls: steerCalls.length,
+          contentFetches: __apiCalls()
+            .filter((c) => c && c.path.indexOf('/api/skills/content?name=') === 0)
+            .map((c) => c.path),
+          skillsFetches: __apiCalls().filter((c) => c && c.path === '/api/skills').length,
+          queueEntries: __queueEntries().map((e) => ({ sid: e.sid, text: e.payload && e.payload.text })),
+          composerAfter: __composer(),
+          usageRefreshes: __apiCalls()
+            .filter((c) => c && c.path === '__skill_usage__')
+            .map((c) => c.sid),
+          thrown,
+        };
+        S.busy = false;
+        S.activeStreamId = null;
+        window._defaultMessageMode = 'steer';
+        return out;
+      };
+      // Owner fence for the busy path: the skill fetches park the send, the
+      // user opens another chat with a draft, then the fetch settles. Nothing
+      // may be steered and the other chat's composer must survive.
+      const runBusyDeferredSwitch = async (composerText, skills, contentMap, opts) => {
+        __setComposer(composerText);
+        __setSkills(skills);
+        __clearSkillContent();
+        for (const k in (contentMap || {})) __setSkillContent(k, contentMap[k]);
+        __resetApiCalls();
+        __resetQueue();
+        __failSkillsListing(false);
+        S.session = { session_id: opts.ownerSid };
+        S.messages = [];
+        INFLIGHT = {};
+        S.busy = true;
+        S.activeStreamId = 'run-steer-1';
+        window._defaultMessageMode = 'steer';
+        __deferFetch(opts.defer || 'content');
+        let thrown = null;
+        const sendPromise = send(composerText).catch((e) => { thrown = String((e && e.message) || e); });
+        for (let i = 0; i < 200; i++) {
+          const reached = __apiCalls().some((c) => c && (opts.defer === 'listing'
+            ? c.path === '/api/skills'
+            : c.path.indexOf('/api/skills/content?name=') === 0));
+          if (reached) break;
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        __switchSession(opts.switchToSid, opts.draft);
+        __settleFetch('success');
+        await sendPromise;
+        const out = {
+          steerCalls: __apiCalls().filter((c) => c && c.path === '/api/chat/steer').length,
+          queueEntries: __queueEntries().map((e) => ({ sid: e.sid, text: e.payload && e.payload.text })),
+          composerAfter: __composer(),
+          thrown,
+        };
+        S.busy = false;
+        S.activeStreamId = null;
+        window._defaultMessageMode = 'steer';
+        return out;
+      };
       const _positive = await run('/demo:skill do X', [__PLUGIN_ROW__], { 'demo:skill': 'DEMO SKILL BODY' });
       const _negative = await run('/demo:skill', [__DIRECTORY_ROW__], {});
       // PR #7781 re-gate finding 1 controls: canonical underscore spelling
@@ -339,6 +433,23 @@ vm.runInContext(__MESSAGES_JS__, ctx);
       const _switchError = await runDeferredSwitch('/demo:skill do X', [__PLUGIN_ROW__], { 'demo:skill': 'DEMO SKILL BODY' }, { defer: 'content', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft', mode: 'error', errorMessage: 'content fetch failed' });
       const _switchListingFail = await runDeferredSwitch('/demo:skill do X', [__PLUGIN_ROW__], { 'demo:skill': 'DEMO SKILL BODY' }, { defer: 'listing', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft', mode: 'error', errorMessage: 'skills listing unavailable' });
       const _listingFailure = await runListingFailure('/demo:skill do X', [__PLUGIN_ROW__]);
+      // #7781 [CORE] 2026-11-23 busy/default-steer branch: the picked command
+      // must steer the skill directive + body (not the literal command), while
+      // literalSlash / unknown / core-command / queue controls keep master
+      // behaviour and a mid-fetch session switch stops before delivery.
+      const _busyPicked = await runBusy('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' });
+      // Full picker-entry -> busy steer chain: the entry the picker builds
+      // supplies the composer text, and that exact text must resolve while a
+      // stream is live (the maintainer's selected-picker -> busy consumer ask).
+      const _busyEntry = _buildSkillCommandEntry(__UNDERSCORE_ROW__);
+      const _busyEntryName = _busyEntry && _busyEntry.name;
+      const _busyPickedFromPicker = await runBusy('/' + _busyEntryName + ' do PICK', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' });
+      const _busyLiteral = await runBusy('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { sendOptions: { literalSlash: true } });
+      const _busyUnknown = await runBusy('/reviewdemo:missing do EXACT', [__UNDERSCORE_ROW__], {});
+      const _busyCore = await runBusy('/steer hello from core', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' });
+      const _busyQueue = await runBusy('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { mode: 'queue' });
+      const _busySwitchContent = await runBusyDeferredSwitch('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { defer: 'content', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft' });
+      const _busySwitchListing = await runBusyDeferredSwitch('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { defer: 'listing', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft' });
       return {
         positive: _positive,
         negative: _negative,
@@ -350,6 +461,14 @@ vm.runInContext(__MESSAGES_JS__, ctx);
         switchError: _switchError,
         switchListingFail: _switchListingFail,
         listingFailure: _listingFailure,
+        busyPicked: _busyPicked,
+        busyPickedFromPicker: { entryName: _busyEntryName, run: _busyPickedFromPicker },
+        busyLiteral: _busyLiteral,
+        busyUnknown: _busyUnknown,
+        busyCore: _busyCore,
+        busyQueue: _busyQueue,
+        busySwitchContent: _busySwitchContent,
+        busySwitchListing: _busySwitchListing,
       };
     })()`, ctx);
     process.stdout.write(JSON.stringify(result), () => process.exit(0));
@@ -563,3 +682,98 @@ def test_listing_failure_forwards_literal_text_like_master():
         "Plugin skill error" in str(m.get("content") or "")
         for m in result["messages"]
     ), result
+
+
+# ── #7781 review 2026-11-23: busy/default-steer delivery ────────────────────
+# ``send()`` takes its busy/default-steer branch (messages.js:1681-1758) and
+# returns before the idle-path plugin resolver (:1981-2038). A picked
+# ``/ns:skill args`` while a stream is live used to be steered as the literal
+# command, so the skill body never reached the model. These tests drive the
+# real busy branch and assert the ``/api/chat/steer`` consumer payload.
+
+
+def test_busy_steer_resolves_the_picker_entry_end_to_end():
+    """The maintainer's selected-picker -> busy steer-consumer chain: the
+    picker-built entry supplies the composer text, and the busy branch must
+    resolve that exact spelling into the steered skill payload."""
+    payload = _run_send_harness()["busyPickedFromPicker"]
+    assert payload["entryName"] == "reviewdemo:under_score", payload
+    result = payload["run"]
+    assert result["steerCalls"] == 1, result
+    text = result["steerBody"]["text"]
+    assert "UNDERSCORE SKILL BODY" in text, result
+    assert "do PICK" in text, result
+    assert "[FORCED SKILL CONTEXT: reviewdemo:under_score]" in text, result
+
+
+def test_busy_steer_resolves_plugin_skill_body():
+    """Selecting a plugin skill while busy must steer the directive + body,
+    keeping the typed instruction, and record usage on the owning session."""
+    result = _run_send_harness()["busyPicked"]
+    assert result["steerCalls"] == 1, result
+    body = result["steerBody"]
+    assert body["session_id"] == "sess-1", result
+    text = body["text"]
+    assert "UNDERSCORE SKILL BODY" in text, result
+    assert "do EXACT" in text, result
+    assert "[USER OVERRIDE]" in text, result
+    assert "You MUST follow the skill 'reviewdemo:under_score'" in text, result
+    assert "[FORCED SKILL CONTEXT: reviewdemo:under_score]" in text, result
+    # The content endpoint is consulted with the owning session id so the
+    # skill is recorded in that conversation's "Skills Used" list.
+    assert result["contentFetches"] == [
+        "/api/skills/content?name=reviewdemo%3Aunder_score&session_id=sess-1"
+    ], result
+    assert result["usageRefreshes"] == ["sess-1"], result
+    assert result["composerAfter"] == "", result
+
+
+def test_busy_steer_literal_slash_stays_verbatim():
+    result = _run_send_harness()["busyLiteral"]
+    assert result["steerCalls"] == 1, result
+    assert result["steerBody"]["text"] == "/reviewdemo:under_score do EXACT", result
+    assert result["contentFetches"] == [], result
+
+
+def test_busy_steer_unknown_qualified_name_stays_verbatim():
+    result = _run_send_harness()["busyUnknown"]
+    assert result["steerCalls"] == 1, result
+    assert result["steerBody"]["text"] == "/reviewdemo:missing do EXACT", result
+    assert result["contentFetches"] == [], result
+
+
+def test_busy_steer_keeps_busy_control_precedence():
+    """`/steer` stays a core busy-control command: its argument is steered
+    verbatim instead of being run through the plugin-skill resolver."""
+    result = _run_send_harness()["busyCore"]
+    assert result["steerCalls"] == 1, result
+    assert result["steerBody"]["text"] == "hello from core", result
+    assert result["contentFetches"] == [], result
+
+
+def test_busy_queue_keeps_the_literal_command_for_drain():
+    """Queue mode stays lossless: the queued entry carries the original
+    command text, and the drain re-enters the idle send() path where the
+    resolver attaches the skill body."""
+    result = _run_send_harness()["busyQueue"]
+    assert result["steerCalls"] == 0, result
+    assert result["queueEntries"] == [
+        {"sid": "sess-1", "text": "/reviewdemo:under_score do EXACT"}
+    ], result
+    assert result["contentFetches"] == [], result
+
+
+def test_busy_steer_session_switch_stops_before_delivery():
+    """The content fetch parks the send; the user opens chat B before it
+    settles. Nothing may be steered and chat B's draft must survive."""
+    result = _run_send_harness()["busySwitchContent"]
+    assert result["steerCalls"] == 0, result
+    assert result["composerAfter"] == "chat B draft", result
+    assert result["thrown"] is None, result
+
+
+def test_busy_steer_listing_session_switch_stops_before_delivery():
+    result = _run_send_harness()["busySwitchListing"]
+    assert result["steerCalls"] == 0, result
+    assert result["composerAfter"] == "chat B draft", result
+    assert result["thrown"] is None, result

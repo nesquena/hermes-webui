@@ -366,7 +366,12 @@ class TestFrontendWiring:
         assert "body:JSON.stringify({session_id:ownerSid,text:steerText})" in body, (
             "steer endpoint must receive the captured owner session id and attachment-enriched text"
         )
-        assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in body
+        # #7781: every draft/indicator/recovery surface now uses the SHORT
+        # restore text (``opts.restoreText``), which defaults to the submitted
+        # text — a busy plugin-skill steer passes the typed command while the
+        # wire payload carries the directive + skill body.
+        assert "const restoreMsg=String(opts&&opts.restoreText!=null?opts.restoreText:originalMsg).trim();" in body
+        assert "_clearComposerDraft(ownerSid,_steerRestoreText(restoreMsg,explicitSteer),pendingFilesSnapshot)" in body
         assert "if(_steerOwnerIsCurrent(ownerSid))" in body
         assert "S.pendingFiles=_remaining" in body, "accepted steer should clear the delivered files (by identity) after paths are injected"
 
@@ -396,8 +401,9 @@ class TestFrontendWiring:
         assert "_steerSetComposerStatusForOwner(ownerSid,t('uploading')||'Uploading…')" in steer_helpers
         assert "_steerSetComposerStatusForOwner(ownerSid,'')" in steer_helpers
         assert "function _steerIndicatorText" in steer_helpers
-        assert "_showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot))" in try_body, (
-            "visible steer indicator must use original text or a file-only display label, not attachment tool instructions"
+        assert "_showSteerIndicator(_steerIndicatorText(restoreMsg,pendingFilesSnapshot))" in try_body, (
+            "visible steer indicator must use the short restore text or a file-only display label, "
+            "not attachment tool instructions or the assembled skill payload"
         )
         assert "_showSteerIndicator(steerText)" not in try_body
 

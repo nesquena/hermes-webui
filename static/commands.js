@@ -1786,7 +1786,7 @@ function _showSteerIndicator(text){
   if(typeof scrollToBottom==='function') scrollToBottom();
 }
 
-function _showSteerRecovery(msg, explicitSteer, fallback) {
+function _showSteerRecovery(msg, explicitSteer, fallback, restoreText) {
   const inner = document.getElementById('msgInner');
   if (!inner) return;
   const old = inner.querySelector('.steer-recovery');
@@ -1806,13 +1806,15 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
       if(explicitSteer){
         const inp=$('msg');
         if(inp){
-          inp.value=String(msg||'').trim();
+          // #7781: the visible/restored text is the short command the user
+          // typed; `msg` may be the assembled skill payload.
+          inp.value=String(restoreText!=null?restoreText:msg||'').trim();
           if(typeof autoResize==='function')autoResize();
         }
       }
       void send({literalSlash:true}).catch(console.error);
     }else{
-      void _trySteer(msg, explicitSteer).catch(console.error);
+      void _trySteer(msg, explicitSteer, {restoreText:restoreText!=null?restoreText:undefined}).catch(console.error);
     }
   });
   el.appendChild(retryBtn);
@@ -2139,9 +2141,14 @@ async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot){
   return base?`${base}\n\n${note}`:note;
 }
 
-async function _trySteer(msg, explicitSteer){
+async function _trySteer(msg, explicitSteer, opts){
   let result=null;
   const originalMsg=String(msg||'').trim();
+  // #7781 review 2026-11-23: a plugin-qualified invocation steers the skill
+  // directive + body, but every draft/indicator/recovery surface must keep
+  // the SHORT command the user typed. Callers pass it as opts.restoreText;
+  // callers without opts keep the pre-existing behaviour unchanged.
+  const restoreMsg=String(opts&&opts.restoreText!=null?opts.restoreText:originalMsg).trim();
   const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
   const ownerStreamId=(typeof S!=='undefined'&&(S.activeStreamId||(S.session&&S.session.active_stream_id)))||null;
   const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
@@ -2157,12 +2164,12 @@ async function _trySteer(msg, explicitSteer){
     if(_steerOwnerIsCurrent(ownerSid)){
       const inp=$('msg');
       if(inp){
-        inp.value=_steerRestoreText(originalMsg,explicitSteer);
+        inp.value=_steerRestoreText(restoreMsg,explicitSteer);
         if(typeof autoResize==='function')autoResize();
       }
       if(typeof renderTray==='function')renderTray();
     }else{
-      await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
+      await _steerPersistDraftForOwner(ownerSid,restoreMsg,explicitSteer,pendingFilesSnapshot);
     }
     _steerSetComposerStatusForOwner(ownerSid,'');
     showToast(`${t('upload_failed')}${e&&e.message?e.message:e}`,3500);
@@ -2172,12 +2179,12 @@ async function _trySteer(msg, explicitSteer){
     if(_steerOwnerIsCurrent(ownerSid)){
       const inp=$('msg');
       if(inp){
-        inp.value=_steerRestoreText(originalMsg,explicitSteer);
+        inp.value=_steerRestoreText(restoreMsg,explicitSteer);
         if(typeof autoResize==='function')autoResize();
       }
       if(typeof renderTray==='function')renderTray();
     }else{
-      await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
+      await _steerPersistDraftForOwner(ownerSid,restoreMsg,explicitSteer,pendingFilesSnapshot);
     }
     showToast(t('cmd_steer_no_msg'));
     return false;
@@ -2209,9 +2216,9 @@ async function _trySteer(msg, explicitSteer){
     if(_steerDraftRevision(ownerSid)===inflight.rev){
       // No draft saved since submit: clear like an accepted steer (also drops a
       // debounced prefix of the submitted text).
-      if(typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
+      if(typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(restoreMsg,explicitSteer),pendingFilesSnapshot);
     }else{
-      _steerRetireOwnedDraft(ownerSid,{text:_steerRestoreText(originalMsg,explicitSteer),files:pendingFilesSnapshot,rev:_steerDraftRevision(ownerSid)});
+      _steerRetireOwnedDraft(ownerSid,{text:_steerRestoreText(restoreMsg,explicitSteer),files:pendingFilesSnapshot,rev:_steerDraftRevision(ownerSid)});
     }
     return true;
   }
@@ -2227,7 +2234,7 @@ async function _trySteer(msg, explicitSteer){
       acc.push(steerText);
       _steerAcceptedBySid.set(ownerSid,acc);
     }
-    if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
+    if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(restoreMsg,explicitSteer),pendingFilesSnapshot);
     // Show a transient steer indicator in the chat (NOT in S.messages — it must
     // survive the done event's S.messages=d.session.messages replacement).
     // The indicator self-removes when the turn completes (done/cancel/error
@@ -2241,7 +2248,7 @@ async function _trySteer(msg, explicitSteer){
         const _remaining=S.pendingFiles.filter(f=>!_delivered.has(f));
         if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
       }
-      _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
+      _showSteerIndicator(_steerIndicatorText(restoreMsg,pendingFilesSnapshot));
     }
     showToast(t('cmd_steer_delivered'),2500);
     return true;
@@ -2249,14 +2256,16 @@ async function _trySteer(msg, explicitSteer){
   if(result&&result.fallback==='gateway_steer_queued'&&typeof queueSessionMessage==='function'){
     _steerUploadCache=null;
     queueSessionMessage(ownerSid,{
-      text:originalMsg,
+      // #7781: keep the SHORT command so the queue drain re-enters send()'s
+      // idle resolver and attaches the skill body losslessly.
+      text:restoreMsg,
       files:pendingFilesSnapshot,
       model:ownerModelState.model,
       model_provider:ownerModelState.model_provider,
       profile:ownerProfile,
     });
     if(typeof updateQueueBadge==='function')updateQueueBadge(ownerSid);
-    if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
+    if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(restoreMsg,explicitSteer),pendingFilesSnapshot);
     if(_steerOwnerIsCurrent(ownerSid)&&typeof S!=='undefined'&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length&&pendingFilesSnapshot.length){
       const _queued=new Set(pendingFilesSnapshot);
       const _remaining=S.pendingFiles.filter(f=>!_queued.has(f));
@@ -2271,7 +2280,7 @@ async function _trySteer(msg, explicitSteer){
   const fallbackCode = result && result.fallback;
   const deadRunFallback = _steerFallbackIsDeadRun(fallbackCode);
   const applyCurrentFailure = !deadRunFallback||_steerOwnerStreamIsCurrent(ownerSid,ownerStreamId);
-  const restoreText=_steerRestoreText(originalMsg,explicitSteer);
+  const restoreText=_steerRestoreText(restoreMsg,explicitSteer);
   // A draft saved or typed during the request is newer than the steer: keep it.
   let restored=_steerDraftRevision(ownerSid)===inflight.rev;
   if(_steerOwnerIsCurrent(ownerSid)&&applyCurrentFailure){
@@ -2284,7 +2293,7 @@ async function _trySteer(msg, explicitSteer){
     }
     if(typeof renderTray==='function')renderTray();
   }else if(restored){
-    await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
+    await _steerPersistDraftForOwner(ownerSid,restoreMsg,explicitSteer,pendingFilesSnapshot);
   }
   if(uncertain){
     // rev identifies the restored draft itself; later saves are newer drafts.
@@ -2297,7 +2306,7 @@ async function _trySteer(msg, explicitSteer){
   }
   const clearedDeadRun=deadRunFallback&&_steerClearCurrentOwnerDeadRun(ownerSid,ownerStreamId);
   if(!deadRunFallback||applyCurrentFailure)showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
-  if(_steerOwnerIsCurrent(ownerSid)&&(!deadRunFallback||clearedDeadRun)) _showSteerRecovery(originalMsg, explicitSteer, fallbackCode);
+  if(_steerOwnerIsCurrent(ownerSid)&&(!deadRunFallback||clearedDeadRun)) _showSteerRecovery(originalMsg, explicitSteer, fallbackCode, restoreMsg);
   return false;
 }
 

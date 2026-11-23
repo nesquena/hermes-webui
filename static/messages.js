@@ -1317,6 +1317,42 @@ function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
   return true;
 }
 
+// #7781 review 2026-11-23: resolve one plugin-qualified slash name against
+// /api/skills and return {name, content} for the registered plugin skill, or
+// null when the name does not match a plugin row — including a listing outage,
+// where callers must fall through to master's literal-text behaviour. A
+// matched row whose content is unreadable THROWS so each caller decides how to
+// surface it: the idle send() path answers with a "Plugin skill error" bubble,
+// the busy steer path keeps the composer intact instead.
+async function _loadPluginSkillForCommand(cmdName, sessionId){
+  const name=String(cmdName||'');
+  if(!name||name.indexOf(':')<0) return null;
+  let match=null;
+  try{
+    const data=await api('/api/skills');
+    match=(Array.isArray(data&&data.skills)?data.skills:[])
+      .find(s=>String(s.name||'').toLowerCase()===name.toLowerCase()&&s.source==='plugin')||null;
+  }catch(e){match=null;}
+  if(!match) return null;
+  const detail=await api('/api/skills/content?name='+encodeURIComponent(match.name)
+    +(sessionId?`&session_id=${encodeURIComponent(sessionId)}`:''));
+  const content=detail&&typeof detail.content==='string'?detail.content.trim():'';
+  if(!content) throw new Error(`Skill \`${match.name}\` has no readable content.`);
+  if(sessionId&&typeof _refreshSessionSkillUsageForOwner==='function'){
+    void _refreshSessionSkillUsageForOwner(sessionId);
+  }
+  return {name:match.name,content};
+}
+
+// Same directive/context shape the idle send() path assembles, so a busy
+// steer and a queued-then-drained send present the skill identically.
+function _buildPluginSkillSteerPayload(resolved,args){
+  const directive=`[USER OVERRIDE] You MUST follow the skill '${resolved.name}' content provided below before responding to the next message.`;
+  const block=`[FORCED SKILL CONTEXT: ${resolved.name}]\n${resolved.content}\n[/FORCED SKILL CONTEXT]`;
+  const tail=String(args||'').trim();
+  return `${directive}\n\n${block}${tail?`\n\n${tail}`:''}`;
+}
+
 function _runOptionalPreStartUiStep(label, fn){
   try{
     return typeof fn==='function'?fn():undefined;
@@ -1712,10 +1748,45 @@ async function send(){
         // TTL) — on master the loop continued on the next turn, so steering it
         // here is a step back. A continuation falls through to the queue
         // branches, which carry the token.
+        //
+        // #7781 review 2026-11-23 [CORE]: a plugin-qualified slash picked from
+        // the autocomplete is a SKILL INVOCATION, not chat text. This busy
+        // branch returns before send()'s idle-path plugin resolver (:1981),
+        // so without the block below the literal command was steered into the
+        // running turn and the skill body never reached the model. The
+        // busy-control commands were intercepted above (their precedence is
+        // unchanged) and literalSlash keeps master's verbatim behaviour.
+        let _busySteerPayload=text;
+        let _busySteerRestoreText=text;
+        if(!literalSlash&&text.startsWith('/')){
+          const _busyCmd=typeof parseCommand==='function'&&parseCommand(text);
+          if(_busyCmd&&String(_busyCmd.name||'').indexOf(':')>=0){
+            // Owner fence: snapshot the issuing session before the first
+            // await. A send that resumes after the user switched chats must
+            // not steer into, or clear the composer of, the other chat.
+            const _busyOwnerSid=S.session&&S.session.session_id||null;
+            let _busyResolved=null;
+            let _busySkillError=null;
+            try{
+              _busyResolved=await _loadPluginSkillForCommand(_busyCmd.name,_busyOwnerSid);
+            }catch(e){_busySkillError=e;}
+            if((S.session&&S.session.session_id||null)!==_busyOwnerSid){hideCmdDropdown();return;}
+            if(_busySkillError){
+              // Nothing was steered: keep the command in the composer so the
+              // user can retry once the skill content is readable again.
+              showToast(`Plugin skill error: ${_busySkillError&&_busySkillError.message||_busySkillError}`,3500);
+              hideCmdDropdown();
+              return;
+            }
+            if(_busyResolved){
+              _busySteerPayload=_buildPluginSkillSteerPayload(_busyResolved,_busyCmd.args);
+            }
+          }
+        }
         $('msg').value='';autoResize();
         // Do NOT clear pendingFiles yet — _trySteer uploads with clearPending=false,
         // and a failed steer must keep staged files available for the user's next explicit action.
-        await _trySteer(text, /*explicitSteer=*/false);
+        await _trySteer(_busySteerPayload, /*explicitSteer=*/false, {restoreText:_busySteerRestoreText});
         // _trySteer clears staged files only after /api/chat/steer accepts, and
         // only when the visible session still matches the captured owner sid.
       } else if(defaultMessageMode==='interrupt'){

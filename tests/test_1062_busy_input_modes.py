@@ -329,7 +329,10 @@ class TestSendBusyBranchDispatch:
         branch_end = MESSAGES_JS.find("} else if(defaultMessageMode==='interrupt')", steer_idx)
         assert branch_end > steer_idx, "busy steer branch end not found"
         branch = MESSAGES_JS[steer_idx:branch_end]
-        assert "await _trySteer(text, /*explicitSteer=*/false)" in branch
+        # #7781: the steer payload is the resolved plugin-skill directive when
+        # the composer text is a qualified skill invocation, and the typed
+        # text otherwise; the restore text always stays the short command.
+        assert "await _trySteer(_busySteerPayload, /*explicitSteer=*/false, {restoreText:_busySteerRestoreText})" in branch
         assert "_trySteer captures the owner session/files before awaiting uploads" in branch
         assert "_trySteer clears staged files only after /api/chat/steer accepts" in branch
         assert "_clearComposerDraft(S.session.session_id,text" not in branch
@@ -338,7 +341,7 @@ class TestSendBusyBranchDispatch:
         failure_idx = try_body.find("// Do not fall back to interrupt")
         clear_idx = try_body.find("S.pendingFiles=_remaining", accepted_idx)
         assert accepted_idx >= 0 and clear_idx > accepted_idx
-        assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in try_body
+        assert "_clearComposerDraft(ownerSid,_steerRestoreText(restoreMsg,explicitSteer),pendingFilesSnapshot)" in try_body
         assert failure_idx > clear_idx, "failed steer must leave staged files intact"
 
     def test_reentrant_send_does_not_queue_staged_files_while_steer_uploads(self):
