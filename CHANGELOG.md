@@ -27,6 +27,12 @@
 
 ### Security
 
+- **Closing the "already shared" dialog no longer refreshes the public share (#9260, @JayPokale, fixes #9259).** When a chat already had a public link, dismissing the dialog with ×, Escape or a click outside it counted as "Refresh snapshot", so backing out republished every message added since the last share. Now only the "Refresh snapshot" button refreshes the snapshot; dismissing the dialog does nothing.
+
+- **A switched-off provider entry no longer routes a model or supplies its address (#9248, @chhxbchhxb, refs #8954).** With two spellings of one built-in provider in `providers` (for example `OpenAI` with `enabled: false` and `openai`), and the switched-off one listing the chat's model, WebUI picked that entry's `base_url` while Hermes Agent authenticated with the enabled entry's key. So the enabled entry's key went to the switched-off entry's address. The model lookup now skips switched-off entries, so the chat routes as if that entry didn't list the model. Enabled entries, the `enabled` default and its string forms, `custom:` entries and the active-provider guard are unchanged.
+
+- **A provider entry with its own endpoint keeps its key on that endpoint when WebUI looks up a model's context window (#9262, refs #8822).** When a `providers` entry for a built-in provider such as Anthropic, Novita or OpenAI Codex declares its own endpoint (`api`, `url` or `base_url`, the shape Hermes Agent's own config migration writes), the Agent uses that entry's key only with that endpoint. WebUI's context-window lookup could still send the key to the provider's own metadata host when you reloaded a conversation, switched model or started a chat. It now asks only the entry's own endpoint, and otherwise uses the catalog or default context window. An entry without an endpoint of its own is unchanged. Standalone installs without the Agent now also recognise the `chatgpt`, `chatgpt-codex`, `novita-ai` and `novitaai` provider names.
+
 - **A malformed passkey response is refused with 400/401, never a server error.** Registering or signing in with a
   crafted passkey response, for example one whose declared credential ID is longer than the real one, could make the
   CBOR reader raise an unexpected error and answer `500 Internal server error`. Every malformed registration or login
@@ -34,6 +40,20 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **Saving a default model from a provider's pinned model group in Settings no longer breaks every later chat (#9304, fixes #9300).** The picker can send the group's id (for example `nous:meituan/longcat-2.5`) as the provider; it was written into `config.yaml` unchanged, and the WebUI and the CLI then refused every turn with an unknown-provider error until the file was edited by hand. The save now keeps only the provider (`nous`), and a provider your config declares under a name with a colon (for example `openrouter:eu`) is kept as is. Thanks @zhangkom.
+
+- **A full disk or quota now shows "Storage on the server is full" instead of "Internal server error" (#9169, closes #9167).** Thanks @angelusbr. When a write fails with no space left (ENOSPC) or over quota (EDQUOT), the server answers HTTP 507 with a message that says to free up space, and the chat shows it. Freeing space is enough; no restart is needed. `docs/troubleshooting.md` has the recovery steps.
+
+- **When Hermes Agent declines to claim an external memory provider while WebUI builds a session's agent, that refusal is now recorded (#9240, refs #9061).** Thanks @chhxbchhxb. WebUI already recorded its own cross-profile refusals, but not the Agent's, so the session's memory status read as normal although the provider was gone. Built-in memory is unaffected.
+
+- **Workspace git change counts include lines that start with `---` or `+++` inside a change (#9206, closes #9205).** Thanks @nurlanmnn. The added and removed line counts skipped every changed line beginning with `---` or `+++` (a YAML front-matter separator, an SQL comment, `++i;`), so a file could show fewer changes than it had. Now only each file's own `---`/`+++` header lines are skipped, and the counts cover the whole change even when a very large diff is cut short.
+
+- **A reply is no longer lost when the Agent shortens an old tool result to save space (#9286, refs #9233).** When the Agent's cold-cache pruning replaced an earlier tool output with a short placeholder, WebUI could no longer prove the new turn extended the saved conversation and refused to keep the reply. WebUI now restores its own full copy of that tool row before the check, so the reply is kept; any other difference is still refused as before.
+
+- **A public share page no longer hides part of a message (#9214).** Some messages contained text the page left out without any sign: an HTML comment, an attribute value the renderer drops, or angle-bracket text such as `git checkout <branch-name>` or a traceback's `File "<stdin>", line 1, in <module>`. Anyone reading the published snapshot's source could still see it. When the rendered message would leave out any of its words, the share page now shows that message as plain text, with a short note, so every word is visible. Messages the page shows in full render as before. A few formatting-only shapes also fall back to plain text although nothing in them is hidden; they're listed in the PR and tracked in #9267.
+
+- **The gateway-sync reset test runs on newer Hermes Agent versions too (#9261, closes #9258).** Both cases of the test that checks a reset conversation stays separate from its reopened parent failed against current Agents, because their fixture used storage calls newer Agents no longer have. The fixture now writes rows with `append_message`, ends the parent session through whichever reset call the installed Agent provides, and checks that the reset took effect.
 
 - **Memory and skill changes can no longer land in the wrong profile after a switch in another tab (#9216, part of #9077).** The active profile is shared across tabs, so an open Memory editor or skill list could still show one profile's data after another tab switched profile, and saving or toggling then wrote into the profile now active. The server now refuses such a write with a clear message, nothing is saved, and the Memory editor keeps your text so you can copy it. Skill toggles show an error and reload the list for the active profile.
 
@@ -278,6 +298,8 @@
 
 ### Documentation
 
+- **The README now describes opening a session in a new tab (#9185).** Thanks @chhxbchhxb. Middle-click, or Ctrl/Cmd+click, a sidebar session row to open its `/session/<id>` link in a new tab; rows that belong to a profile other than the active one are refused, because a new tab would switch the shared profile cookie under the tab you came from.
+
 - **Documented the reverse-proxy basic-auth caveat for installed PWAs.** README, onboarding, and troubleshooting now explain that proxy basic auth can block the same-origin service-worker/shell update fetches an installed PWA needs (leaving it on a blank screen after an update), and give recovery steps — prefer WebUI's built-in password, or scope proxy auth so `sw.js`/manifest/shell requests complete. Thanks @rodboev. (#5673, #2781)
 
 - **Documented the `HERMES_WEBUI_*` environment variables and refreshed stale version/test/locale references.** README, ARCHITECTURE, TESTING, ROADMAP, SPRINTS, and the `.env` example files now describe the supported runtime env vars (host/port/state-dir/agent-dir/home) and no longer carry stale hardcoded version/test-count/locale figures. Thanks @mo7al876any. (#5536)
@@ -286,11 +308,13 @@
 
 ### Changed
 
-- **German reads as one consistent translation (#8787, @goetterbote2342).** The German interface now uses informal "du" throughout, uses the same word for the same thing everywhere (for example "Anbieter" for providers), and restores several messages whose meaning had drifted from the English. The quota-chip settings that were still in English are translated too.
-
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Internal
+
+- **The context-length contract tests check behaviour again (#9254, closes #8900).** Thanks @chhxbchhxb. An earlier byte-for-byte revert of two test files also dropped later behavioural cases, which had degraded to source-string checks. They are back: the per-profile config re-read on every lookup, and safe handling of a null, empty or malformed `providers:` section.
+
+- **A test now pins that the profile secret-scope setter is inspected again when it is replaced (#9234, refs #9096).** Thanks @chhxbchhxb. Replacing `set_secret_scope` on the same Agent module (an Agent reload, or a plugin that wraps the setter) has to re-check whether the new setter accepts `profile_home`; nothing guarded that half of the cache before.
 
 - **The ledger retry-timer test no longer fails intermittently (#9287, closes #9269).** It counted live timers before the retry timer that had just fired had finished exiting; it now waits for that timer first.
 
@@ -311,6 +335,12 @@
 - **Test suite reads static assets as UTF-8 so it runs on Windows.** 34 test files that opened `static/` assets without an explicit encoding now pass `encoding="utf-8"`, so the suite no longer fails under a non-UTF-8 default locale (Windows `cp1252`). Two method signatures over-matched by the encoding sweep were reverted. Assertions are unchanged. Thanks @mo7al876any. (#5537)
 
 - **Added regression coverage for messaging clear-watermark semantics.** New test locks the watermark behavior so a future change can't silently regress it. Thanks @rodboev. (#5589, #5572)
+
+## [v0.52.732] — 2026-11-23
+
+### Changed
+
+- **German reads as one consistent translation (#8787, @goetterbote2342).** The German interface now uses informal "du" throughout, uses the same word for the same thing everywhere (for example "Anbieter" for providers), and restores several messages whose meaning had drifted from the English. The quota-chip settings that were still in English are translated too.
 
 ## [v0.52.731] — 2026-11-22
 
