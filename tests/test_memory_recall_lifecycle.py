@@ -61,11 +61,16 @@ def isolated(tmp_path, monkeypatch):
         config.STREAM_PARTIAL_TEXT, config.STREAM_REASONING_TEXT, config.STREAM_LIVE_TOOL_CALLS,
         config.ACTIVE_RUNS, config.SESSION_AGENT_LOCKS,
     )
-    for registry in shared:
-        registry.clear()
+    def _clear():
+        for registry in shared:
+            registry.clear()
+        # A cached fake agent from an earlier test would run this test's turn.
+        with config.SESSION_AGENT_CACHE_LOCK:
+            config.SESSION_AGENT_CACHE.clear()
+
+    _clear()
     yield tmp_path
-    for registry in shared:
-        registry.clear()
+    _clear()
 
 
 def _pending_session(*, history=(), session_id=SID, parent=None):
