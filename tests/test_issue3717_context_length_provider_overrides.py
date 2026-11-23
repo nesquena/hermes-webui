@@ -158,6 +158,9 @@ def test_route_resolver_uses_named_custom_provider_base_url(monkeypatch):
     assert calls[-1]["config_context_length"] == 888000
     assert calls[-1]["base_url"] == "https://zenmux.example/v1"
     assert calls[-1]["provider"] == "custom:zenmux"
+    # The configured custom-provider records still reach the Agent resolver
+    # (content, not list identity): without them it cannot see their models.
+    assert calls[-1]["custom_providers"] == custom_providers
     # A shared URL/model does not grant the sibling's metadata or credential.
     # Content and owner isolation matter; the raw list's identity does not.
     assert calls[-1]["api_key"] == "synthetic-zenmux-key"
