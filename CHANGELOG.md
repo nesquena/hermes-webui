@@ -27,6 +27,8 @@
 
 ### Security
 
+- **A named profile's Skills panel no longer shows another profile's external skill folders (#7842, @Notaloop763).** The skills list, skill view, linked files and the on/off toggle used to take the external skill folders (`skills.external_dirs`) from the profile the server started with, whichever profile made the request. So a named profile could list, open and toggle skills that were configured only for another profile. Each request now reads those folders from its own profile's `config.yaml`, with variables resolved for that profile. A missing or broken profile config lists no external folders and never hides the profile's own skills.
+
 - **Closing the "already shared" dialog no longer refreshes the public share (#9260, @JayPokale, fixes #9259).** When a chat already had a public link, dismissing the dialog with ×, Escape or a click outside it counted as "Refresh snapshot", so backing out republished every message added since the last share. Now only the "Refresh snapshot" button refreshes the snapshot; dismissing the dialog does nothing.
 
 - **A switched-off provider entry no longer routes a model or supplies its address (#9248, @chhxbchhxb, refs #8954).** With two spellings of one built-in provider in `providers` (for example `OpenAI` with `enabled: false` and `openai`), and the switched-off one listing the chat's model, WebUI picked that entry's `base_url` while Hermes Agent authenticated with the enabled entry's key. So the enabled entry's key went to the switched-off entry's address. The model lookup now skips switched-off entries, so the chat routes as if that entry didn't list the model. Enabled entries, the `enabled` default and its string forms, `custom:` entries and the active-provider guard are unchanged.
