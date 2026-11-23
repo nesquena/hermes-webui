@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -48,10 +49,17 @@ def test_shared_gateway_endpoints_warn_including_other_profiles(monkeypatch):
         gateway_chat, "gateway_run_durably_resumable", lambda stream_id: True
     )
 
-    # Endpoints compartilhados: alpha e beta resolvem par idêntico
-    ep_alpha = gateway_chat._gateway_endpoint_for_profile("alpha")
-    ep_beta = gateway_chat._gateway_endpoint_for_profile("beta")
-    assert ep_alpha == ep_beta
+    # Shared listener: alpha and beta route through one Gateway process
+    # (same scheme/host/port) on their own /p/<profile> paths.
+    url_alpha = urlsplit(gateway_chat._gateway_endpoint_for_profile("alpha")[0])
+    url_beta = urlsplit(gateway_chat._gateway_endpoint_for_profile("beta")[0])
+    assert (url_alpha.scheme, url_alpha.hostname, url_alpha.port) == (
+        url_beta.scheme,
+        url_beta.hostname,
+        url_beta.port,
+    )
+    assert url_alpha.path == "/p/alpha"
+    assert url_beta.path == "/p/beta"
 
     with cfg.ACTIVE_RUNS_LOCK:
         old_active = dict(cfg.ACTIVE_RUNS)
