@@ -161,6 +161,91 @@ function runCase(name){
       toolCopies: rows.filter(row=>row.role === 'tool').length,
     };
   }
+  if(name.indexOf('render_')===0){
+    // Drive the REAL settled renderers end-to-end over a fake DOM: the
+    // compact renderer must spare substantive interim segments, its inline
+    // twin (transparent branch) must keep folding them.
+    const compact=name.indexOf('_compact')!==-1;
+    const targetName=compact?'_renderSettledAnchorSceneForMessage':'_renderSettledAnchorSceneTransparentForMessage';
+    eval(extractFn(uiSrc,targetName));
+    function mkSeg(text){
+      const classes=new Set();
+      const attrs={};
+      return {
+        dataset:{rawText:text},
+        hidden:false,
+        classList:{add:(c)=>classes.add(c),remove:(c)=>classes.delete(c),contains:(c)=>classes.has(c)},
+        getAttribute:(n)=>(n in attrs?attrs[n]:null),
+        setAttribute:(n,v)=>{attrs[n]=String(v);},
+        removeAttribute:(n)=>{delete attrs[n];},
+      };
+    }
+    const segSubstantive=mkSeg(SUBSTANTIVE);
+    const segShort=mkSeg(SHORT);
+    const segs=[segSubstantive,segShort];
+    const blocks={
+      querySelectorAll(sel){
+        if(sel.indexOf('.assistant-segment[data-msg-idx]')!==-1) return segs;
+        return [];
+      },
+      insertBefore:(n)=>n,
+      appendChild:(n)=>n,
+    };
+    const group={
+      classList:{contains:()=>false,add:()=>{},remove:()=>{}},
+      setAttribute:()=>{},
+      removeAttribute:()=>{},
+      _deferredWorklogRows:null,
+    };
+    const turn={
+      querySelectorAll:()=>[],
+      setAttribute:()=>{},
+      removeAttribute:()=>{},
+      getAttribute:()=>null,
+      classList:{contains:()=>false,add:()=>{},remove:()=>{}},
+    };
+    const scene=buildScene();
+    const message={role:'assistant',content:SUBSTANTIVE,_anchor_activity_scene:scene,_anchor_stream_id:'st-1',_turnDuration:12};
+    const segment={dataset:{},closest:()=>turn,parentElement:blocks,setAttribute:()=>{},removeAttribute:()=>{},getAttribute:()=>null,classList:{add:()=>{},contains:()=>false,remove:()=>{}}};
+    global._assistantTurnBlocks=()=>blocks;
+    global.S={session:{session_id:'test-session'},activeStreamId:null};
+    global._anchorSceneSceneHasWorklogWorthyRows=()=>true;
+    global._anchorSceneRowsForRendering=(sc)=>sc.activity_rows;
+    global.isTransparentStream=()=>!compact;
+    global.isCompactWorklogMode=()=>compact;
+    global._shouldKeepSettledWorklogOpenForStreamSettle=()=>false;
+    global._readActivityDisclosureState=()=>undefined;
+    global._copyActivityDisclosureState=()=>{};
+    global._anchorSceneHasErroredTerminalState=()=>false;
+    global._anchorSceneWorklogGroup=()=>group;
+    global._renderAnchorSceneRowsIntoWorklog=()=>true;
+    global._anchorSceneLastNonTerminalWorkRowIndex=()=>-1;
+    global._assistantAnchorSceneFinalAnswerText=()=>FINAL;
+    global.msgContent=()=>FINAL;
+    global._transparentRevealKey=()=>'reveal-key';
+    global._transparentRevealedTurns=new Set();
+    global._TRANSPARENT_SETTLED_ROW_CAP=30;
+    global._TRANSPARENT_SETTLED_ROW_CAP_SLACK=10;
+    global._anchorSceneTransparentNodeForRow=()=>({setAttribute:()=>{}});
+    global._syncTransparentEventControls=()=>{};
+    let returned=null;
+    let threw=null;
+    try{
+      returned=compact
+        ?_renderSettledAnchorSceneForMessage(message,segment,2)
+        :_renderSettledAnchorSceneTransparentForMessage(message,segment,2);
+    }catch(err){
+      threw=String((err&&err.message)||err);
+    }
+    const folded=(seg)=>!!(seg.hidden||seg.getAttribute('aria-hidden')==='true'||seg.classList.contains('assistant-segment-worklog-source'));
+    return {
+      target:targetName,
+      threw,
+      returned:returned===null?null:!!returned,
+      substantiveFolded:folded(segSubstantive),
+      shortFolded:folded(segShort),
+    };
+  }
   throw new Error('unknown case: ' + name);
 }
 
@@ -325,16 +410,60 @@ def test_content_part_rows_mark_inline_visibility():
     assert "if(part.type!=='text') row._inline_prose_visible=false" in src[second:second + 500]
 
 
+def _js_function_body(source: str, name: str) -> str:
+    """Slice a top-level `function name(...){...}` out of ui.js by brace
+    matching — precise scoping without regex or nearby-context guesses."""
+    start = source.index(f"function {name}(")
+    brace = source.index("{", start)
+    depth = 0
+    for i in range(brace, len(source)):
+        if source[i] == "{":
+            depth += 1
+        elif source[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : i + 1]
+    raise AssertionError(f"{name} body did not close")
+
+
 def test_settled_rail_install_spares_substantive_segments():
-    """The rail-install loop in _renderSettledAnchorSceneForMessage must skip
-    substantive segments; its inline twin (the transparent branch loop) must
-    stay untouched."""
+    """The rail-install guard must live in _renderSettledAnchorSceneForMessage
+    and NOWHERE else. Its inline twin (_renderSettledAnchorSceneTransparentForMessage)
+    contains the same fold-loop text, so a short-context grep cannot tell the
+    two apart — scope the assertion to each function body. The twin keeps
+    folding every segment (the transparent rail owns the copies)."""
     source = _ui_js_source()
     anchor = "_interimProseIsSubstantive(segText)"
     assert source.count(anchor) == 1
-    i = source.index(anchor)
-    loop_start = source.rindex("if(Number.isFinite(idx)&&idx<rawIdx){", 0, i)
-    window = source[loop_start:i + 400]
-    assert window.index(anchor) < window.index(
+    target = _js_function_body(source, "_renderSettledAnchorSceneForMessage")
+    twin = _js_function_body(source, "_renderSettledAnchorSceneTransparentForMessage")
+    assert anchor in target, "guard is not inside the settled compact renderer"
+    assert "_interimProseIsSubstantive" not in twin, "guard leaked into the transparent twin"
+    # The guard runs before the fold, inside the rawIdx loop.
+    assert target.index(anchor) < target.index(
         "node.classList.add('assistant-segment-worklog-source')"
     )
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for the substantive interim prose driver")
+def test_settled_compact_renderer_spares_substantive_segment():
+    """Drives the REAL settled compact renderer end-to-end over a fake DOM:
+    a substantive interim segment must stay visible (its rail row is dropped),
+    while short narration keeps folding behind the rail."""
+    data = _run_scenario("render_settled_compact")
+    assert data["threw"] is None, data["threw"]
+    assert data["returned"] is True
+    assert data["substantiveFolded"] is False
+    assert data["shortFolded"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for the substantive interim prose driver")
+def test_transparent_twin_still_folds_substantive_segment():
+    """The inline twin must keep folding every segment — the transparent rail
+    owns the copies (chronological contract), so the guard has no business
+    there. This is the red side of a guard mis-landed into the twin."""
+    data = _run_scenario("render_settled_transparent")
+    assert data["threw"] is None, data["threw"]
+    assert data["returned"] is True
+    assert data["substantiveFolded"] is True
+    assert data["shortFolded"] is True
