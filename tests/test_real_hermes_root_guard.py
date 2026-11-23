@@ -431,7 +431,8 @@ def test_agent_dir_override_only_for_a_failed_native_root_link(tmp_path, failed,
 def test_session_points_agent_discovery_at_the_real_checkout_when_the_link_fails():
     """#9087 clause 5: without symlink privilege the LOCALAPPDATA Agent link fails, and in-process discovery loses
     the only checkout the Agent's Windows native root reads. The session must fall back to the real checkout
-    through HERMES_WEBUI_AGENT_DIR (the explicit, highest-priority candidate), or skip with a clear message."""
+    through HERMES_WEBUI_AGENT_DIR (the explicit, highest-priority candidate), or skip with a clear message.
+    The equality is required only when the session chose the fallback, because an explicit operator choice wins."""
     conftest = _conftest_module()
     sources = {rel: src for src, rel in conftest._HOME_DIR_LINKS}
     if _AGENT_LINK_REL not in set(conftest._LINK_FAILED):
@@ -441,7 +442,8 @@ def test_session_points_agent_discovery_at_the_real_checkout_when_the_link_fails
         pytest.skip("no Agent checkout at the LOCALAPPDATA layout on this machine")
     assert os.environ.get("HERMES_WEBUI_AGENT_DIR"), \
         "a failed Agent link must fall back to HERMES_WEBUI_AGENT_DIR, not silently lose discovery"
-    assert os.path.realpath(os.environ["HERMES_WEBUI_AGENT_DIR"]) == os.path.realpath(src)
+    if getattr(conftest, "_agent_override", None) is not None:
+        assert os.path.realpath(os.environ["HERMES_WEBUI_AGENT_DIR"]) == os.path.realpath(src)
 
 
 def test_the_guard_failure_reaches_pytests_summary_line(tmp_path):
