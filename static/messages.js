@@ -3260,7 +3260,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(Array.isArray(content)){
       try{
         content=content.map(part=>{
-          if(part&&typeof part==='object') return part.text||part.content||part.input_text||'';
+          if(part&&typeof part==='object'){
+            return part.text||part.content||part.input_text||(part.type==='output_text'&&part.output_text)||'';
+          }
           return String(part||'');
         }).join('\n');
       }catch(_){ content=''; }
@@ -3284,6 +3286,26 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _anchorSceneMessageHasContentToolUse(message){
     return !!(message&&Array.isArray(message.content)&&message.content.some(part=>part&&typeof part==='object'&&part.type==='tool_use'));
+  }
+  // #8571 review: the ONE rule shared with the settled rail-row drop and the
+  // inline-segment fold. A prose row's text is already rendered inline (so the
+  // settled Compact rail must drop it) iff its owning message is substantive as
+  // a whole AND the row text is contained in the visible inline body. Reuse
+  // the renderer's text projection (including the separators between parts).
+  function _anchorSceneMessageShowsTextInline(message, rowText){
+    const content=message&&message.content;
+    let inline=Array.isArray(content)
+      ?content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n')
+      :typeof content==='string'?content:'';
+    if(typeof window!=='undefined'&&typeof window._extractInlineThinkingFromContentForRender==='function'){
+      inline=window._extractInlineThinkingFromContentForRender(inline,'').content;
+    }
+    const substantive=(typeof _interimProseIsSubstantive==='function')
+      ?_interimProseIsSubstantive(inline)
+      :inline.trim().length>=200;
+    if(!substantive) return false;
+    const a=_anchorSceneCleanText(rowText), b=_anchorSceneCleanText(inline);
+    return !!a && b.includes(a);
   }
   function _anchorSceneFinalAnswerText(message){
     if(!_anchorSceneMessageHasContentToolUse(message)) return _anchorSceneMessageText(message);
@@ -3659,8 +3681,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(_anchorSceneCleanText(text)){
           const row=_anchorSceneProseRow(text,rows.length,messageIndex);
           // msgContent() keeps `type==='text'` only; input_text/output_text
-          // rows have no inline copy either.
-          if(part.type!=='text') row._inline_prose_visible=false;
+          // rows have no inline copy either. A `type==='text'` row is inline
+          // only when the WHOLE message is substantive (#8571: two sub-200
+          // parts of one substantive message must both drop from the rail, and
+          // a short-narration message keeps its rows).
+          row._inline_prose_visible=part.type==='text'&&_anchorSceneMessageShowsTextInline(message,text);
           rows.push(row);
         }
         continue;
@@ -3780,7 +3805,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(row.role==='tool') contentToolRows.push(row);
         }
       }else if(_anchorSceneCleanText(text)){
-        pool.push({..._anchorSceneProseRow(text,0,idx),_phase:2,_encounter:encounter++});
+        const plainRow=_anchorSceneProseRow(text,0,idx);
+        // #8571: a no-tool_use message's whole-text row is inline only when it
+        // is all `type==='text'` and substantive; a mixed text+input_text part
+        // keeps its rail row because msgContent() drops the non-text parts.
+        plainRow._inline_prose_visible=_anchorSceneMessageShowsTextInline(message,text);
+        pool.push({...plainRow,_phase:2,_encounter:encounter++});
       }
       const reasoning=_anchorSceneMessageReasoningText(message);
       if(_anchorSceneCleanText(reasoning)&&_anchorSceneTextKey(reasoning)!==_anchorSceneTextKey(text)){

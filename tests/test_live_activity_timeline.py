@@ -95,7 +95,10 @@ def test_settled_final_answer_segment_is_not_folded_into_worklog():
 
     assert "hasVisibleText&&isTurnFinalAssistant" in helper
     assert "return false;" in helper
-    assert "{isTurnFinalAssistant}" in render_fn
+    assert "isTurnFinalAssistant" in render_fn
+    # #8571: the settled fold also consults the SAME turn's final visible content
+    # so a long interim that repeats the answer folds instead of doubling.
+    assert "turnFinalVisibleContent:assistantTurnFinalVisibleContentByRawIdx.get(rawIdx)" in render_fn
     assert "assistant-segment-worklog-source" in render_fn
 
 

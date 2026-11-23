@@ -15467,10 +15467,18 @@ function _assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, vis
   if(m._live&&hasVisibleText&&isTurnFinalAssistant) return false;
   // Substantive interim prose stays visible inline (see
   // _interimProseIsSubstantive); short narration keeps folding as before.
+  // #8571 review: if that prose ALSO repeats the turn's final answer (the Agent
+  // reused an earlier long reply as the final answer), it must fold instead —
+  // the answer already shows inline, so sparing the interim copy paints it
+  // twice. Scoped to the SAME turn's final content (opts.turnFinalVisibleContent),
+  // never a cross-turn match, and using the same matcher as the #6948 dedup.
   // The typeof guard keeps sliced test drivers without the helper on the
   // conservative (fold) branch.
+  const turnFinalVisibleContent=opts&&opts.turnFinalVisibleContent?String(opts.turnFinalVisibleContent):'';
   if(m._live&&hasVisibleText&&typeof _interimProseIsSubstantive==='function'
-     &&_interimProseIsSubstantive(visibleText)) return false;
+     &&_interimProseIsSubstantive(visibleText)
+     &&!(turnFinalVisibleContent&&typeof _anchorSceneProseDuplicatesFinalAnswer==='function'
+         &&_anchorSceneProseDuplicatesFinalAnswer(visibleText,turnFinalVisibleContent))) return false;
   if(m._live) return true;
   if(hasVisibleText&&m._anchor_activity_scene) return false;
   if(hasVisibleText&&isTurnFinalAssistant) return false;
@@ -17409,14 +17417,22 @@ function _anchorSceneRowsForRendering(scene, opts){
     // inline segment stays folded, so the rail is still its only home.
     // Transparent Stream keeps every prose row (chronological contract) and
     // the LIVE render keeps them (the open live rail is the streaming surface).
-    // A row explicitly marked NOT inline-visible (a bare string / input_text /
-    // output_text content part, which msgContent() drops) must keep its rail
-    // row: dropping it would erase the only rendered copy of that prose.
+    // #8571 review: the drop is driven by the SAME whole-message rule the
+    // segment fold uses. A row explicitly marked inline-visible
+    // (_inline_prose_visible===true, set server/client from its owning
+    // message's real inline body) drops regardless of its own length, so two
+    // sub-200 parts of one substantive message are not repeated when the rail
+    // expands. A row marked NOT inline-visible (===false — a bare string /
+    // input_text / output_text part, or scene-only prose with no inline
+    // message) keeps its rail row: dropping it would erase the only copy.
+    // Unmarked rows (hand-built scenes, legacy) fall back to the row-level
+    // substantive test so short narration still keeps its row.
     if(settled&&row.role==='prose'&&row.kind==='process_prose'
        &&row._inline_prose_visible!==false
        &&typeof chatActivityMode==='function'&&chatActivityMode()==='compact_worklog'
-       &&typeof _interimProseIsSubstantive==='function'
-       &&_interimProseIsSubstantive(text)) continue;
+       &&(row._inline_prose_visible===true
+          ||(typeof _interimProseIsSubstantive==='function'
+             &&_interimProseIsSubstantive(text)))) continue;
     const key=keyFor(row);
     if(byKey.has(key)){
       const index=byKey.get(key);
@@ -19171,10 +19187,17 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
     const idx=Number(node.getAttribute('data-msg-idx'));
     if(Number.isFinite(idx)&&idx<rawIdx){
       // Substantive prose segments stay visible (their rail row is dropped);
-      // content-less segments and short narration keep folding.
+      // content-less segments and short narration keep folding. #8571 review:
+      // a substantive segment whose text ALSO repeats the turn's final answer
+      // must fold — its rail row is already dropped by the #6948 dedup, so
+      // sparing it inline paints the reused answer twice. Use the SAME matcher
+      // as the #6948 row dedup so the segment and the row never disagree, and
+      // scope it to THIS scene's final_answer (never a cross-turn text match).
       const segText=String((node.dataset&&node.dataset.rawText)||'').trim();
       if(typeof _interimProseIsSubstantive==='function'
-         &&_interimProseIsSubstantive(segText)) return;
+         &&_interimProseIsSubstantive(segText)
+         &&!(typeof _anchorSceneProseDuplicatesFinalAnswer==='function'
+             &&_anchorSceneProseDuplicatesFinalAnswer(segText,String((scene&&scene.final_answer)||'')))) return;
       node.classList.add('assistant-segment-worklog-source');
       node.setAttribute('aria-hidden','true');
       node.hidden=true;
@@ -22617,7 +22640,7 @@ function renderMessages(options){
     seg.dataset.rawText=String(content).trim();
     if(m._activityBurstId!==undefined&&m._activityBurstId!==null) seg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
     if(Number.isFinite(Number(m._liveSegmentSeq))) seg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));
-    const messageBelongsInWorklog=!S.busy&&isCompactWorklogMode()&&_assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, displayContent, {isTurnFinalAssistant});
+    const messageBelongsInWorklog=!S.busy&&isCompactWorklogMode()&&_assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, displayContent, {isTurnFinalAssistant, turnFinalVisibleContent:assistantTurnFinalVisibleContentByRawIdx.get(rawIdx)});
     if(messageBelongsInWorklog){
       seg.classList.add('assistant-segment-worklog-source');
       seg.setAttribute('aria-hidden','true');

@@ -67,6 +67,13 @@ const SUBSTANTIVE = 'Full inventory of the sixteen auxiliary slots, grouped by '
   + 'weekly call volume so the reader can weigh the tradeoffs unaided.';
 const SHORT = 'Checking the current config first.';
 const FINAL = 'Done - the list is above.';
+// A DISTINCT substantive interim prose (not the final answer). Used to prove the
+// final-answer guard only folds a segment that repeats the answer, never a
+// genuinely different substantive interim.
+const SUBSTANTIVE2 = 'A separate rollout checklist enumerating every dependency pin, '
+  + 'the owner of each upgrade, the scheduled window, and the rollback plan should '
+  + 'the canary regress during the nightly window, including exact commands and the '
+  + 'on-call contact for each stage of the migration.';
 
 function makeMessage(text, extra){
   const m = {
@@ -123,8 +130,13 @@ function runCase(name){
     const m = makeMessage(text, live ? {_live: true} : {});
     const rawIdx = 2;
     const idxs = new Set([rawIdx]);
+    // #8571: the SAME turn's final visible content. `_dupfinal` makes the
+    // interim repeat the answer; `_distinctfinal` makes it a different string.
+    let turnFinalVisibleContent;
+    if(name.indexOf('_dupfinal') !== -1) turnFinalVisibleContent = text;
+    else if(name.indexOf('_distinctfinal') !== -1) turnFinalVisibleContent = FINAL;
     const belongs = _assistantMessageBelongsInWorklog(
-      m, rawIdx, idxs, text, {isTurnFinalAssistant: turnFinal},
+      m, rawIdx, idxs, text, {isTurnFinalAssistant: turnFinal, turnFinalVisibleContent},
     );
     return { belongs: !!belongs, textLen: text.trim().length };
   }
@@ -160,6 +172,94 @@ function runCase(name){
       finalInline: inline.includes('The document is ready.'),
       toolCopies: rows.filter(row=>row.role === 'tool').length,
     };
+  }
+  if(name === 'reloaded_split_compact'){
+    // #8571 review case 2 (text doubled): one message whose two text parts are
+    // each <200 chars but >=200 together. The inline segment stays visible, so
+    // BOTH rail rows must drop (the message owns them inline). Count each part
+    // separately across the scene and the filtered rail.
+    const {message, text1, text2} = __RELOADED__;
+    const scene = message._anchor_activity_scene;
+    eval(extractFn(uiSrc, 'msgContent'));
+    eval(extractFn(uiSrc, '_anchorSceneProseMatchesFinalAnswer'));
+    eval(extractFn(uiSrc, '_anchorSceneProseDuplicatesFinalAnswer'));
+    const rows = _anchorSceneRowsForRendering(scene, {settled:true});
+    const countText = (items, t)=>items.filter(row=>row.role === 'prose' && row.text.trim() === t).length;
+    return {
+      scene1: countText(scene.activity_rows, text1),
+      scene2: countText(scene.activity_rows, text2),
+      rail1: countText(rows, text1),
+      rail2: countText(rows, text2),
+      toolRows: rows.filter(row=>row.role === 'tool').length,
+    };
+  }
+  if(name==='render_final_dup_compact'){
+    // #8571 review case 1: an interim segment whose text EQUALS the turn's
+    // final answer must fold (its rail row is dropped by #6948), so the page
+    // shows the answer once. A DISTINCT substantive interim must still stay
+    // visible inline. Drive the REAL settled compact renderer over a fake DOM.
+    eval(extractFn(uiSrc,'_renderSettledAnchorSceneForMessage'));
+    // Real final-answer matchers so the guard uses the same rule as the #6948
+    // rail-row dedup (never a self-referential stub).
+    eval(extractFn(uiSrc,'_anchorSceneProseMatchesFinalAnswer'));
+    eval(extractFn(uiSrc,'_anchorSceneProseDuplicatesFinalAnswer'));
+    function mkSeg(text){
+      const classes=new Set(); const attrs={};
+      return {
+        dataset:{rawText:text}, hidden:false,
+        classList:{add:(c)=>classes.add(c),remove:(c)=>classes.delete(c),contains:(c)=>classes.has(c)},
+        getAttribute:(n)=>(n in attrs?attrs[n]:null),
+        setAttribute:(n,v)=>{attrs[n]=String(v);}, removeAttribute:(n)=>{delete attrs[n];},
+      };
+    }
+    const segInterimFinal=mkSeg(SUBSTANTIVE); // text == final_answer
+    const segOther=mkSeg(SUBSTANTIVE2);        // distinct substantive interim
+    const segs=[segInterimFinal,segOther];
+    const blocks={
+      querySelectorAll(sel){ if(sel.indexOf('.assistant-segment[data-msg-idx]')!==-1) return segs; return []; },
+      insertBefore:(n)=>n, appendChild:(n)=>n,
+    };
+    const group={classList:{contains:()=>false,add:()=>{},remove:()=>{}},setAttribute:()=>{},removeAttribute:()=>{},_deferredWorklogRows:null};
+    const turn={querySelectorAll:()=>[],setAttribute:()=>{},removeAttribute:()=>{},getAttribute:()=>null,classList:{contains:()=>false,add:()=>{},remove:()=>{}}};
+    const scene={version:'activity_scene_v1',mode:'compact_worklog',final_answer:SUBSTANTIVE,
+      activity_rows:[
+        {role:'prose',kind:'process_prose',source_event_type:'settled_message',text:SUBSTANTIVE,local_id:'prose-interim-final',row_id:'row-interim-final'},
+        {role:'prose',kind:'process_prose',source_event_type:'settled_message',text:SUBSTANTIVE2,local_id:'prose-other',row_id:'row-other'},
+        {role:'tool',kind:'tool_completed',source_event_type:'tool_complete',text:'',tool_call_id:'tool-1',tool:{id:'tool-1',name:'clarify'},row_id:'row-tool-1'},
+      ]};
+    const message={role:'assistant',content:SUBSTANTIVE,_anchor_activity_scene:scene,_anchor_stream_id:'st-1',_turnDuration:12};
+    const segment={dataset:{},closest:()=>turn,parentElement:blocks,setAttribute:()=>{},removeAttribute:()=>{},getAttribute:()=>null,classList:{add:()=>{},contains:()=>false,remove:()=>{}}};
+    global.window={_chatActivityDisplayMode:'compact_worklog'};
+    global._anchorSceneToolRowLogicalKey=(row)=>String((row&&row.tool_call_id)||(row&&row.row_id)||'');
+    global._anchorSceneMergeToolRows=(existing)=>existing;
+    global._assistantTurnBlocks=()=>blocks;
+    global.S={session:{session_id:'test-session'},activeStreamId:null};
+    global._anchorSceneSceneHasWorklogWorthyRows=()=>true;
+    global._anchorSceneRowsForRendering=(sc)=>sc.activity_rows;
+    global.isTransparentStream=()=>false;
+    global.isCompactWorklogMode=()=>true;
+    global._shouldKeepSettledWorklogOpenForStreamSettle=()=>false;
+    global._readActivityDisclosureState=()=>undefined;
+    global._copyActivityDisclosureState=()=>{};
+    global._anchorSceneHasErroredTerminalState=()=>false;
+    global._anchorSceneWorklogGroup=()=>group;
+    global._renderAnchorSceneRowsIntoWorklog=()=>true;
+    global._anchorSceneLastNonTerminalWorkRowIndex=()=>-1;
+    global._assistantAnchorSceneFinalAnswerText=()=>SUBSTANTIVE;
+    global.msgContent=()=>SUBSTANTIVE;
+    global._transparentRevealKey=()=>'reveal-key';
+    global._transparentRevealedTurns=new Set();
+    global._TRANSPARENT_SETTLED_ROW_CAP=30;
+    global._TRANSPARENT_SETTLED_ROW_CAP_SLACK=10;
+    global._anchorSceneTransparentNodeForRow=()=>({setAttribute:()=>{}});
+    global._syncTransparentEventControls=()=>{};
+    let threw=null;
+    try{ _renderSettledAnchorSceneForMessage(message,segment,2); }
+    catch(err){ threw=String((err&&err.message)||err); }
+    const folded=(seg)=>!!(seg.hidden||seg.getAttribute('aria-hidden')==='true'||seg.classList.contains('assistant-segment-worklog-source'));
+    return { target:'_renderSettledAnchorSceneForMessage', threw,
+      interimEqualsFinalFolded: folded(segInterimFinal),
+      distinctSubstantiveFolded: folded(segOther) };
   }
   if(name.indexOf('render_')===0){
     // Drive the REAL settled renderers end-to-end over a fake DOM: the
@@ -467,3 +567,215 @@ def test_transparent_twin_still_folds_substantive_segment():
     assert data["returned"] is True
     assert data["substantiveFolded"] is True
     assert data["shortFolded"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for the substantive interim prose driver")
+def test_settled_compact_interim_equal_to_final_folds():
+    """#8571 review case 1: an interim segment whose text EQUALS the turn's
+    final answer must fold behind the rail (its prose row is already dropped by
+    the #6948 dedup), so a long reply the Agent reused as the final answer is
+    not painted twice inline after settle. Drives the REAL settled compact
+    renderer over a fake DOM."""
+    data = _run_scenario("render_final_dup_compact")
+    assert data["threw"] is None, data["threw"]
+    # The interim copy that repeats the answer must fold.
+    assert data["interimEqualsFinalFolded"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for the substantive interim prose driver")
+def test_settled_compact_distinct_substantive_interim_stays_inline():
+    """Control for the final-answer guard: a substantive interim whose text is
+    NOT the final answer must still stay visible inline (the exemption only
+    steps aside for a true answer duplicate)."""
+    data = _run_scenario("render_final_dup_compact")
+    assert data["threw"] is None, data["threw"]
+    assert data["distinctSubstantiveFolded"] is False
+
+
+def test_settled_compact_split_text_parts_not_duplicated_in_rail():
+    """#8571 review case 2 (text doubled): a message whose two text parts are
+    each <200 chars (170 + 157) but >=200 together renders its segment inline,
+    so expanding the settled Compact rail must NOT repeat either part. Both
+    rail rows drop because their owning message is substantive as a whole —
+    the same whole-message rule the inline-segment fold uses."""
+    from api import routes
+
+    text1 = "A" * 170
+    text2 = "B" * 157
+    assert len(text1) < 200 and len(text2) < 200 and (len(text1) + len(text2)) >= 200
+    interim = {
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": text1},
+            {"type": "tool_use", "id": "t1", "name": "read_file", "input": {}},
+            {"type": "text", "text": text2},
+        ],
+    }
+    final = {"role": "assistant", "content": [{"type": "text", "text": "final answer here"}]}
+    messages = [{"role": "user", "content": "go"}, interim, final]
+    ref = routes._assistant_anchor_scene_message_ref(final)
+    records = {
+        ref: {
+            "message_ref": ref,
+            "message_index": 2,
+            "stream_id": "s",
+            "scene": {"version": "activity_scene_v1", "mode": "compact_worklog", "activity_rows": []},
+        }
+    }
+    reloaded = routes._hydrate_anchor_activity_scenes(messages, records)[2]
+    out = _run_scenario(
+        "reloaded_split_compact", {"message": reloaded, "text1": text1, "text2": text2}
+    )
+    # Both parts survive in the scene (produced from the interim message) ...
+    assert out["scene1"] == 1
+    assert out["scene2"] == 1
+    # ... but neither is repeated in the rail: the inline segment owns them.
+    assert out["rail1"] == 0
+    assert out["rail2"] == 0
+    assert out["toolRows"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for the substantive interim prose driver")
+@pytest.mark.parametrize("content", ["A" * 200, "🙂" * 100], ids=["plain-string", "utf16-threshold"])
+def test_settled_compact_plain_string_prose_does_not_repeat_in_the_rail(content):
+    from api import routes
+
+    interim = {"role": "assistant", "content": content}
+    final = {
+        "role": "assistant",
+        "content": [{"type": "tool_use", "id": "read-1", "name": "read_file", "input": {}},
+                    {"type": "text", "text": "The document is ready."}],
+    }
+    ref = routes._assistant_anchor_scene_message_ref(final)
+    records = {
+        ref: {
+            "message_ref": ref,
+            "message_index": 2,
+            "stream_id": "example-stream",
+            "scene": {"version": "activity_scene_v1", "mode": "compact_worklog", "activity_rows": []},
+        },
+    }
+    reloaded = routes._hydrate_anchor_activity_scenes(
+        [{"role": "user", "content": "Inspect the document."}, interim, final], records,
+    )[2]
+    out = _run_scenario("reloaded_compact", {"message": reloaded, "text": content})
+    assert out["hydratedCopies"] == 1  # The turn still owns the recorded prose.
+    assert out["toolCopies"] == 1
+    assert _run_scenario("belongs_live_interim_substantive")["belongs"] is False
+    assert out["railCopies"] == 0  # The substantive string is already inline.
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for the substantive interim prose driver")
+def test_settled_compact_scene_only_prose_kept_in_rail():
+    """#8571 review case 2 (text lost): prose saved only in the scene, with no
+    inline message carrying it, must keep its rail row — it is the only rendered
+    copy, so dropping it as an 'inline duplicate' erases it entirely."""
+    from api import routes
+
+    text = "The archived rollout notes record which document entries were complete and which still needed work. " * 4
+    text = text.strip()
+    assert len(text) >= 200
+    message = {"role": "assistant", "content": [{"type": "text", "text": "short final only"}]}
+    messages = [{"role": "user", "content": "Inspect."}, message]
+    ref = routes._assistant_anchor_scene_message_ref(message)
+    rows = [{"role": "prose", "kind": "process_prose", "row_id": "scene-only", "text": text}]
+    records = {
+        ref: {
+            "message_ref": ref,
+            "message_index": 1,
+            "stream_id": "s",
+            "scene": {"version": "activity_scene_v1", "mode": "compact_worklog", "activity_rows": rows},
+        }
+    }
+    reloaded = routes._hydrate_anchor_activity_scenes(messages, records)[1]
+    out = _run_scenario("reloaded_compact", {"message": reloaded, "text": text})
+    assert out["hydratedCopies"] == 1
+    assert out["inlineCopy"] is False  # msgContent never shows the scene-only prose
+    assert out["railCopies"] == 1  # ... so the rail keeps the only copy
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for the substantive interim prose driver")
+def test_settled_compact_input_text_no_tool_use_kept_in_rail():
+    """#8571 review case 2 (text lost, plain-text path): an interim assistant
+    message with only an ``input_text`` part (no ``tool_use``) builds its row
+    through the plain-text path. ``msgContent()`` drops the part, so the row is
+    the only copy and must stay in the rail even though it is 200+ chars."""
+    from api import routes
+
+    text = "The migration ledger tracks which document entries were complete and which still needed work. " * 4
+    text = text.strip()
+    assert len(text) >= 200
+    interim = {"role": "assistant", "content": [{"type": "input_text", "input_text": text}]}
+    final = {"role": "assistant", "content": [{"type": "text", "text": "final answer here"}]}
+    messages = [{"role": "user", "content": "go"}, interim, final]
+    ref = routes._assistant_anchor_scene_message_ref(final)
+    records = {
+        ref: {
+            "message_ref": ref,
+            "message_index": 2,
+            "stream_id": "s",
+            "scene": {"version": "activity_scene_v1", "mode": "compact_worklog", "activity_rows": []},
+        }
+    }
+    reloaded = routes._hydrate_anchor_activity_scenes(messages, records)[2]
+    out = _run_scenario("reloaded_compact", {"message": reloaded, "text": text})
+    assert out["inlineCopy"] is False  # input_text never reaches msgContent
+    assert out["railCopies"] == 1  # ... so the rail keeps the only copy
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for the substantive interim prose driver")
+def test_live_interim_substantive_that_repeats_turn_final_folds():
+    """#8571 review case 1 (live/settle projection): a substantive live interim
+    whose text equals the SAME turn's final answer must fold (belongs in the
+    worklog), not stay visible — the answer already renders inline, so sparing
+    the interim copy paints it twice. Drives the REAL
+    _assistantMessageBelongsInWorklog."""
+    data = _run_scenario("belongs_live_dupfinal")
+    assert data["textLen"] >= 200
+    assert data["belongs"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for the substantive interim prose driver")
+def test_live_interim_substantive_distinct_from_turn_final_stays():
+    """Control: a substantive live interim whose text is NOT the turn's final
+    answer keeps the substantive exemption and stays visible inline."""
+    data = _run_scenario("belongs_live_distinctfinal")
+    assert data["textLen"] >= 200
+    assert data["belongs"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for the substantive interim prose driver")
+def test_settled_compact_mixed_text_input_text_no_tool_use_kept_in_rail():
+    """#8571 review case 2 (text lost, mixed): an interim message with a short
+    ``text`` part plus a long ``input_text`` part (no ``tool_use``) builds one
+    whole-message row through the plain-text path. ``msgContent()`` renders only
+    the short text part, so the row carries the only copy of the input_text and
+    must stay in the rail (Master shows it in the rail)."""
+    from api import routes
+
+    lead = "Short lead sentence."
+    long_input = "The migration ledger tracks which document entries were complete and which still needed work. " * 4
+    long_input = long_input.strip()
+    assert len(long_input) >= 200
+    interim = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": lead}, {"type": "input_text", "input_text": long_input}],
+    }
+    final = {"role": "assistant", "content": [{"type": "text", "text": "final answer here"}]}
+    messages = [{"role": "user", "content": "go"}, interim, final]
+    whole = routes._anchor_scene_message_text(interim)
+    ref = routes._assistant_anchor_scene_message_ref(final)
+    records = {
+        ref: {
+            "message_ref": ref,
+            "message_index": 2,
+            "stream_id": "s",
+            "scene": {"version": "activity_scene_v1", "mode": "compact_worklog", "activity_rows": []},
+        }
+    }
+    reloaded = routes._hydrate_anchor_activity_scenes(messages, records)[2]
+    out = _run_scenario("reloaded_compact", {"message": reloaded, "text": whole})
+    # The input_text part never reaches msgContent, so the whole-message row is
+    # the only copy of it and must survive in the rail.
+    assert out["inlineCopy"] is False
+    assert out["railCopies"] == 1
