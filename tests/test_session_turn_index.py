@@ -126,6 +126,40 @@ def test_preview_redacts_complete_credentials_before_truncation(monkeypatch, pre
     assert len(preview) <= 80
 
 
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "password=supersecretvalue-123456",
+        "export password=supersecretvalue-654321",
+        "api_key: supersecretvalue-abcdef",
+    ],
+    ids=["password", "export-password", "api-key-yaml"],
+)
+def test_preview_redacts_line_starting_secrets_across_whitespace_collapse(monkeypatch, assignment):
+    monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
+    secret = assignment.split("=", 1)[-1].split(":", 1)[-1].strip()
+    text = f"first line\n{assignment} trailing text"
+
+    preview = routes._session_turn_index([{"role": "user", "content": text}])["turns"][0]["preview"]
+
+    # Collapsing newlines before redacting defeats line-start-anchored
+    # redactor patterns: the raw text is redacted first, and the normalized
+    # text again, so a later-line secret never reaches the preview.
+    assert secret not in preview
+    assert preview.startswith("first line ")
+    assert "..." in preview
+    assert len(preview) <= 80
+
+
+def test_preview_line_starting_secrets_pass_through_when_redaction_is_disabled(monkeypatch):
+    monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": False})
+    text = "first line\npassword=supersecretvalue-123456 trailing text"
+
+    preview = routes._session_turn_index([{"role": "user", "content": text}])["turns"][0]["preview"]
+
+    assert preview == "first line password=supersecretvalue-123456 trailing text"[:80]
+
+
 def _session_fixture(monkeypatch, tmp_path, messages):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()

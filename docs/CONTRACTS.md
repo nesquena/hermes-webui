@@ -148,10 +148,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
   current contract for the lightweight `GET /api/session/turns` index: the
   visible-user-row turn definition over the authoritative merged transcript,
   the per-turn wire fields (`k`, `msg_idx`, `ts`, `preview`, `n_msgs`), the
-  fixed normalize → redact → truncate preview order, the ignored windowing
-  parameters, and the shared cross-profile 404/409 gates including
-  foreign-session synthesis. Start here before changing session routing, the
-  turn index payload, or session preview redaction (#9048).
+  fixed redact → normalize → redact again → truncate preview order, the
+  ignored windowing parameters, and the shared cross-profile 404/409 gates
+  including foreign-session synthesis. Start here before changing session
+  routing, the turn index payload, or session preview redaction (#9048).
 
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,

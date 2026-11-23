@@ -17470,7 +17470,11 @@ def _session_turn_index(messages):
     for k, start in enumerate(starts):
         message = messages[start]
         text = _session_search_message_text(message)
-        preview = _redact_text(re.sub(r"\s+", " ", text).strip())[:80]
+        # Line-start-anchored redactor patterns only match while the original
+        # newlines are intact (#9048 gate review): redact the raw text first,
+        # normalize whitespace, then redact again so split
+        # Authorization:<ws>Bearer headers are still recognized.
+        preview = _redact_text(re.sub(r"\s+", " ", _redact_text(text)).strip())[:80]
         timestamp = message.get("timestamp")
         try:
             timestamp = float(timestamp) if timestamp is not None else None

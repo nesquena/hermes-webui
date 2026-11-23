@@ -37,10 +37,10 @@ Each entry in `turns` carries:
   transcript state; a live session may grow between the two calls).
 - `ts` — the user row's `timestamp` as a float, or `null` when absent or
   non-numeric.
-- `preview` — the user row's text, whitespace-normalized to single spaces,
-  redacted, and truncated to at most 80 characters. For list-shaped content,
-  only the `type: "text"` parts are joined; images and other parts are
-  ignored.
+- `preview` — the user row's text, redacted, whitespace-normalized to single
+  spaces, redacted a second time, and truncated to at most 80 characters. For
+  list-shaped content, only the `type: "text"` parts are joined; images and
+  other parts are ignored.
 - `n_msgs` — the number of merged rows inside this turn after the user row
   itself, up to the next visible user row or the end of the transcript.
 
@@ -52,12 +52,18 @@ model resolution.
 ## Preview redaction
 
 The preview is safety-sensitive because it samples user content. The
-normalization, redaction, and truncation order is fixed:
+redaction, normalization, and truncation order is fixed:
 
-1. Whitespace normalization (space, tab, newline) to single spaces, so split
-   `Authorization:<whitespace>Bearer <token>` headers are still recognized.
-2. `_redact_text` redaction, honoring the `api_redact_enabled` setting.
-3. Truncation to 80 characters.
+1. `_redact_text` redaction of the raw text, honoring the
+   `api_redact_enabled` setting. Line-start-anchored patterns (for example a
+   `password=...` value at the start of a later line) still see the original
+   newlines here.
+2. Whitespace normalization (space, tab, newline) to single spaces, so split
+   Authorization headers with whitespace before the Bearer keyword are still
+   recognized.
+3. A second `_redact_text` pass on the normalized text, catching headers the
+   first pass skipped because their whitespace split the pattern.
+4. Truncation to 80 characters.
 
 Redaction runs before truncation so a cut in the middle of a credential can
 never leak a usable fragment in the preview.
