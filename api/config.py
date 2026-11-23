@@ -7592,20 +7592,62 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         model_cfg["api_key"] = api_key
 
 
+def _declared_provider_names(config_obj: object) -> set[str]:
+    """Lower-cased provider names a config declares, switched-off records included.
+
+    Every native ``providers:`` mapping key and record ``name``, and every
+    ``custom_providers`` ``name``. The Agent routes a provider id through a
+    native record by its key or by its ``name`` (#9323), so both are
+    declarations. Whether a record is switched off decides routing, not whether
+    the name is declared.
+    """
+    names: set[str] = set()
+    if not isinstance(config_obj, dict):
+        return names
+
+    def _add(value: object) -> None:
+        if isinstance(value, str) and value.strip():
+            names.add(value.strip().lower())
+
+    native = config_obj.get("providers")
+    if isinstance(native, dict):
+        for key, record in native.items():
+            _add(key)
+            if isinstance(record, dict):
+                _add(record.get("name"))
+    legacy = config_obj.get("custom_providers")
+    if isinstance(legacy, list):
+        for record in legacy:
+            if isinstance(record, dict):
+                _add(record.get("name"))
+    return names
+
+
 def _provider_is_config_declared(provider_id: str, config_obj: dict) -> bool:
     """True when *provider_id* names a provider declared in this profile's config.
 
     A ``providers:`` or ``custom_providers`` entry may be named
-    ``<built-in>:<suffix>`` (e.g. ``openrouter:eu``). The Agent resolves that
-    name as its own endpoint, so a save must persist it verbatim instead of
-    splitting it into the built-in prefix. Both the raw file this save loaded and
-    the runtime config count: a name given as a ``${VAR}`` reference matches only
-    once expanded. A lookup failure keeps it verbatim.
+    ``<built-in>:<suffix>`` (e.g. ``openrouter:eu``), as its native mapping key
+    or as a record's ``name``. The Agent resolves that name as its own
+    endpoint, so a save must persist it verbatim instead of splitting it into
+    the built-in prefix. A switched-off record still declares its name: it is
+    kept as written so the Agent refuses it, not rewritten to the public
+    built-in (#9323). Both the raw file this save loaded and the runtime config
+    count: a name given as a ``${VAR}`` reference matches only once expanded.
+    A lookup failure keeps it verbatim.
     """
+    wanted = str(provider_id or "").strip().lower()
+    if not wanted:
+        return False
     try:
-        return bool(
+        if (
             _named_custom_provider_slug_for_provider(provider_id, config_obj)
             or _named_custom_provider_slug_for_provider(provider_id, cfg)
+        ):
+            return True
+        return any(
+            wanted in _declared_provider_names(source)
+            for source in (config_obj, _expand_env_vars(config_obj), cfg)
         )
     except Exception:
         return True
