@@ -140,6 +140,9 @@ function clearTimeout(){}
 function setTimeout(cb){ cb(); return 1; }
 function _deferClearProgrammaticScroll(){}
 function requestAnimationFrame(cb){ cb(); }
+// Module state the extracted clamp / compensation wrapper touch.
+let _blankViewportRecoveryToken = 0;
+let _blankViewportRecoveryApplied = 0;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{});
 console.log(JSON.stringify({scrollHistory}));
@@ -191,6 +194,9 @@ function clearTimeout(){}
 function setTimeout(cb){ cb(); return 1; }
 function _deferClearProgrammaticScroll(){}
 function requestAnimationFrame(cb){ cb(); }
+// Module state the extracted clamp / compensation wrapper touch.
+let _blankViewportRecoveryToken = 0;
+let _blankViewportRecoveryApplied = 0;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{});
 console.log(JSON.stringify({scrollHistory}));
@@ -234,6 +240,9 @@ function clearTimeout(){}
 function setTimeout(cb){ cb(); return 1; }
 function _deferClearProgrammaticScroll(){}
 function requestAnimationFrame(cb){ cb(); }
+// Module state the extracted clamp / compensation wrapper touch.
+let _blankViewportRecoveryToken = 0;
+let _blankViewportRecoveryApplied = 0;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{});
 console.log(JSON.stringify({scrollTopMutated}));

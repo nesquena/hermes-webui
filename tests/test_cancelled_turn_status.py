@@ -219,7 +219,9 @@ class TestCancelledTurnPersistenceGuards:
         assert "const _applyCancelSessionPayload=(sessionPayload)=>" in block
         assert "const _cancelSessionPayload=_cancelData&&typeof _cancelData.session==='object'?_cancelData.session:null;" in block
         assert "if(_applyCancelSessionPayload(_cancelSessionPayload)) return;" in block
-        assert "const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);" in block
+        # #7310/#7625: the HTTP fallback is a bounded tail now — the full
+        # transcript was being re-walked/re-redacted on every cancel recovery.
+        assert "const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);" in block
         assert block.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;") < block.index("const data=await api("), (
             "Cancel handler must apply the terminal SSE session payload before falling back "
             "to /api/session so captured _partial reasoning/tool rows are visible immediately."

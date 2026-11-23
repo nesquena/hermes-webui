@@ -535,10 +535,202 @@ def test_openai_voice_placeholder_in_panels():
 def test_play_openai_tts_exists_in_ui_js():
     src = (STATIC_DIR / "ui.js").read_text(encoding="utf-8")
     assert 'function _playOpenaiTts(text, btn)' in src
-    assert "body:JSON.stringify({text:text, engine:'openai'})" in src
+    # Chunked streaming playback: requests are sent per chunk, not as one blob.
+    assert "text:chunks[i]" in src
+    assert "engine:'openai'" in src
+    # Each chunk request pins the profile that owns the playback, so a
+    # mid-playback profile switch cannot speak A's text under B's credentials.
+    assert "playbackProfile=(S&&S.activeProfile)||'default';" in src
+    # #7529 (maintainer finding, SILENT): the profile must ALWAYS be sent,
+    # including 'default'. S.activeProfile starts as 'default' and _handle_tts
+    # rejects only an explicit mismatch, so a request with NO profile field is
+    # accepted under whichever profile happens to be active — starting playback
+    # in the default profile and switching to a named one leaked the rest of the
+    # reply into the named profile's TTS config and key.
+    assert "profile:playbackProfile||'default'" in src
+    # The old omission is exactly what must NOT come back.
+    assert "playbackProfile!=='default'" not in src
+
+
+def test_every_tts_request_body_pins_the_profile():
+    """#7529 (SHOULD-FIX): every /api/tts request must carry the profile.
+
+    The shared scheduler this PR adds can hold a request for up to 2s and
+    re-send it after a 429, where master sent immediately. A profile switch
+    during that window must not move the request to the new profile, so the
+    profile has to be captured at request-build time on EVERY path: the openai
+    chunk stream, the elevenlabs one-shot, the edge chunk stream, and the three
+    voice-mode branches in boot.js.
+    """
+    ui = (STATIC_DIR / "ui.js").read_text(encoding="utf-8")
+    boot = (STATIC_DIR / "boot.js").read_text(encoding="utf-8")
+    import re
+
+    # Every JSON body that sets an engine must also set a profile.
+    bodies = []
+    for src in (ui, boot):
+        for m in re.finditer(r"JSON\.stringify\(\{(.{0,400}?)\}\)", src, re.S):
+            blob = m.group(1)
+            if "engine" in blob:
+                bodies.append((src is boot, blob))
+    assert bodies, "no engine-bearing TTS bodies found — the probe is broken"
+    missing = [b for from_boot, b in bodies if "profile" not in b]
+    assert not missing, (
+        "these /api/tts request bodies omit the profile, so a profile switch "
+        "while the shared scheduler holds or retries them sends them under the "
+        "new profile (#7529): " + repr(missing)
+    )
+
+
+def test_default_to_named_profile_switch_keeps_the_original_profile():
+    """#7529: the default -> named switch is the case that leaked.
+
+    The captured profile is 'default' at playback start. The old code dropped
+    it precisely in that case (it omitted anything equal to 'default'), which
+    is why the leak was invisible until a switch happened.
+    """
+    src = (STATIC_DIR / "ui.js").read_text(encoding="utf-8")
+    # The capture must default to 'default' rather than to a falsy value that
+    # the sender then omits.
+    assert "playbackProfile=(S&&S.activeProfile)||'default';" in src
+    # And the sender must forward it unconditionally.
+    assert "profile:playbackProfile||'default'" in src
+
+
+# ── Playback profile ownership (#7529 maintainer finding, SILENT) ───────────
+#
+# Chunked OpenAI TTS sends one request per chunk, so a playback that started
+# under profile A keeps issuing requests after the user switches to profile B.
+# The chunk ownership gate only guards the generation, which survives the
+# switch, so the remainder of A's reply was synthesized with B's provider and
+# credentials. The handler now rejects an explicitly CLAIMED profile that no
+# longer matches the active one, before the limiter or config access.
+
+
+def _profile_guard_sentinel_limiter():
+    """A limiter stand-in that fails loudly if the handler ever reaches it."""
+
+    class _Tripwire:
+        def _boom(self, *_a, **_kw):  # pragma: no cover - fail-fast guard
+            raise AssertionError("reached the rate limiter for a mismatched profile")
+
+        __getattr__ = _boom
+
+    return _Tripwire()
+
+
+def test_tts_chunk_profile_mismatch_returns_409_before_limiter(monkeypatch):
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "beta")
+    # Tripwire: touching the limiter means the guard is misplaced.
+    monkeypatch.setattr(
+        routes._handle_tts, "_tts_limiter", None, raising=False
+    )
+    monkeypatch.setattr(
+        routes._handle_tts, "_tts_limiter", _profile_guard_sentinel_limiter(), raising=True
+    )
+    h = _post({"text": "streaming remainder", "engine": "openai", "profile": "alpha"},
+              client="10.83.0.1")
+    routes._handle_tts(h, None)
+
+    assert h.status == 409
+    assert "profile" in (h.payload() or {}).get("error", "").lower()
+
+
+def test_tts_chunk_profile_match_is_accepted(monkeypatch):
+    import api.profiles as profiles
+    import api.onboarding as onboarding
+
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "beta")
+
+    def _fake_urlopen(req, timeout=0):
+        return _StreamOnceResponse([b"audio-openai"])
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr(onboarding, "_load_env_file", lambda *_a, **_k: {})
+    monkeypatch.setattr(routes, "_tts_open", lambda req, **kw: _fake_urlopen(req))
+    h = _post({"text": "still mine", "engine": "openai", "profile": "beta"},
+              client="10.83.0.2")
+    routes._handle_tts(h, None)
+    assert h.status == 200
+
+
+def test_tts_omitted_profile_still_accepted(monkeypatch):
+    """Legacy direct callers that omit `profile` must keep working."""
+    import api.onboarding as onboarding
+
+    def _fake_urlopen(req, timeout=0):
+        return _StreamOnceResponse([b"audio-openai"])
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr(onboarding, "_load_env_file", lambda *_a, **_k: {})
+    monkeypatch.setattr(routes, "_tts_open", lambda req, **kw: _fake_urlopen(req))
+    h = _post({"text": "no profile field", "engine": "openai"}, client="10.83.0.3")
+    routes._handle_tts(h, None)
+    assert h.status == 200
+
+
+def test_tts_empty_or_blank_profile_is_not_a_claim(monkeypatch):
+    """A blank profile claim is "no claim", not a mismatch."""
+    import api.onboarding as onboarding
+
+    def _fake_urlopen(req, timeout=0):
+        return _StreamOnceResponse([b"audio-openai"])
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr(onboarding, "_load_env_file", lambda *_a, **_k: {})
+    monkeypatch.setattr(routes, "_tts_open", lambda req, **kw: _fake_urlopen(req))
+    h = _post({"text": "blank profile", "engine": "openai", "profile": "   "}, client="10.83.0.4")
+    routes._handle_tts(h, None)
+    assert h.status == 200
+
+
+def test_tts_default_profile_alias_matches_root(monkeypatch):
+    """`default` must match a renamed root profile, per _profiles_match.
+
+    The production server resolves the real root alias through
+    `list_profiles_api()`; this test pins the alias relationship directly so
+    it validates the guard's use of `_profiles_match` rather than the local
+    machine's profile table.
+    """
+    import api.profiles as profiles
+    import api.onboarding as onboarding
+
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "kinni")
+    monkeypatch.setattr(profiles, "_is_root_profile",
+                        lambda n: n in ("default", "kinni"))
+
+    def _fake_urlopen(req, timeout=0):
+        return _StreamOnceResponse([b"audio-openai"])
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr(onboarding, "_load_env_file", lambda *_a, **_k: {})
+    monkeypatch.setattr(routes, "_tts_open", lambda req, **kw: _fake_urlopen(req))
+    h = _post({"text": "root alias", "engine": "openai", "profile": "default"},
+              client="10.83.0.5")
+    routes._handle_tts(h, None)
+    assert h.status == 200
+
+
+def test_tts_unrelated_profile_still_rejected(monkeypatch):
+    """A genuinely different profile stays rejected even with the root alias in play."""
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "kinni")
+    monkeypatch.setattr(profiles, "_is_root_profile",
+                        lambda n: n in ("default", "kinni"))
+    h = _post({"text": "other profile", "engine": "openai", "profile": "alpha"},
+              client="10.83.0.6")
+    routes._handle_tts(h, None)
+    assert h.status == 409
 
 
 def test_boot_js_handles_openai_engine():
     src = (STATIC_DIR / "boot.js").read_text(encoding="utf-8")
     assert 'if(engine==="openai")' in src
-    assert "body: JSON.stringify({text: clean, engine: 'openai'})" in src
+    # #7529: the voice-mode openai branch pins the captured profile, so a switch
+    # while the shared scheduler holds or retries the request cannot move it to
+    # the new profile. (The body used to omit the profile entirely.)
+    assert "body: JSON.stringify({text: clean, engine: 'openai', profile: _ttsProfile})" in src
+    assert "const _ttsProfile=(S&&S.activeProfile)||'default';" in src

@@ -27,9 +27,14 @@ try:
         _gateway_queues,
         _gateway_notify_cbs,
         _lock,
-        _ApprovalEntry,
-        submit_pending,
     )
+    # _ApprovalEntry moved out of tools.approval into tools.approval_gateway_wait
+    # (#9008). Import it from the new home and fall back to the old one so the
+    # module still imports against older agent checkouts.
+    try:
+        from tools.approval_gateway_wait import _ApprovalEntry
+    except ImportError:
+        from tools.approval import _ApprovalEntry
     # has_pending and pop_pending were removed from tools.approval when the
     # agent renamed has_pending -> has_blocking_approval (gateway queue check)
     # and removed the polling-mode pop_pending. Routes now check _pending
@@ -600,6 +605,85 @@ class TestApprovalHTTPEndpoints:
                 r._pending.pop(sid, None)
                 r._gateway_queues.pop(sid, None)
                 _STREAM_RUN_IDS.pop(stream_id, None)
+
+    def test_identity_v1_non_head_run_approval_settles_exact_producer(self, monkeypatch):
+        """A relayed non-head run approval must wake only its own parked waiter."""
+        from api import route_approvals as ra
+        from api import routes as r
+
+        sid = f"identity-v1-non-head-{uuid.uuid4().hex[:8]}"
+        run_id = f"run-identity-v1-{uuid.uuid4().hex[:8]}"
+        head = {
+            "approval_id": "head-approval",
+            "run_id": run_id,
+            "command": "head command",
+            "_gateway_agent_identity_v1": True,
+        }
+        target = {
+            "approval_id": "target-approval",
+            "run_id": run_id,
+            "command": "target command",
+            "_gateway_agent_identity_v1": True,
+        }
+        head_entry = _ApprovalEntry(dict(head))
+        target_entry = _ApprovalEntry(dict(target))
+        captured = {}
+        relays = []
+
+        def fake_j(_handler, data, status=200, extra_headers=None):
+            captured.update(payload=data, status=status)
+            return data
+
+        def fake_respond(_self, got_run_id, got_approval_id, choice):
+            relays.append((got_run_id, got_approval_id, choice))
+            return {"resolved": 1}
+
+        monkeypatch.setattr(r, "j", fake_j)
+        monkeypatch.setattr("api.runner_client.HttpRunnerClient.respond_approval", fake_respond)
+        monkeypatch.setattr(
+            "api.config.gateway_supports_approval_identity_v1", lambda *_args: True
+        )
+        with _lock:
+            r._pending.pop(sid, None)
+            r._gateway_queues[sid] = [head_entry, target_entry]
+        try:
+            ra.submit_gateway_pending_mirror(sid, dict(target_entry.data))
+            mirror = ra.gateway_pending_mirror(
+                sid, approval_id=target["approval_id"], run_id=run_id
+            )
+            assert mirror is not None
+
+            r._handle_approval_respond(
+                object(),
+                {
+                    "session_id": sid,
+                    "choice": "deny",
+                    "approval_id": target["approval_id"],
+                    "run_id": run_id,
+                    "mirror_token": mirror[ra._GATEWAY_MIRROR_TOKEN],
+                },
+            )
+
+            assert captured == {
+                "payload": {"ok": True, "choice": "deny", "relayed": True},
+                "status": 200,
+            }
+            assert relays == [(run_id, target["approval_id"], "deny")]
+            assert target_entry.event.is_set()
+            assert target_entry.result == "deny"
+            assert not head_entry.event.is_set()
+            with _lock:
+                assert r._gateway_queues[sid] == [head_entry]
+            for _ in range(2):
+                with _lock:
+                    ra.reconcile_gateway_pending_mirror_locked(sid)
+                assert ra.gateway_pending_mirror(
+                    sid, approval_id=target["approval_id"], run_id=run_id
+                ) is None
+        finally:
+            with _lock:
+                r._pending.pop(sid, None)
+                r._gateway_queues.pop(sid, None)
 
     def test_gateway_mirror_without_run_id_with_one_producer_resolves_exactly(self, monkeypatch):
         """A no-run mirror retires only after its exact local producer resolves."""
