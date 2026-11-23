@@ -3345,7 +3345,7 @@ async function loadSession(sid){
   const journalStreamId=String(journalInflight?.streamId||'').trim();
   if(INFLIGHT[sid]){
     _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
-    const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);
+    let inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);
     S.toolCalls=[];
     // Switching between active sessions should rebuild the live worklog from
     // this session's INFLIGHT snapshot, not leave prior-session rows in place.
@@ -3362,6 +3362,11 @@ async function loadSession(sid){
     if (!_isCurrentLoad()) {
       _rearmActiveSessionStream();
       return;
+    }
+    // Saved rows borrowed for this view must not enter the stream accumulator.
+    if(inflightMessages===INFLIGHT[sid].messages
+      &&inflightMessages.filter(m=>m&&m.role==='assistant'&&m._live).length>1){
+      inflightMessages=inflightMessages.map(m=>m&&{...m});
     }
     const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages,S.session);
     // Drop the settled answer only after a live row can take it over.
@@ -5459,10 +5464,96 @@ function _inflightTailTurnUser(inflight){
     const msg=list[i];
     if(!msg) continue;
     if(String(msg.role||'')==='user') return msg;
-    if(String(msg.role||'')==='tool') continue;
+    if(String(msg.role||'')==='tool'||msg._reconciledLiveSegment===true) continue;
     return null;
   }
   return null;
+}
+
+// The current turn's user row as the LOADED TRANSCRIPT holds it. The
+// in-flight record can be assistant-only (the real HTTP journal projection
+// clears `messages` whenever last_assistant_text is present), so a
+// multi-segment live tail cannot read its turn user from the tail; this
+// resolver reads it from the base transcript instead, with the SAME
+// identity rules the single-segment witness path uses: the strict tail
+// scan first, then the active-turn identity (the `_active_turn_user`
+// marker, the server `_active_turn_token`, or a timestamp precision-matched
+// to `pending_started_at`). Text alone never proves the turn — an earlier
+// turn repeating the same words keeps its own row. Returns null when the
+// loaded transcript holds no row for the pending prompt, so callers stay
+// conservative instead of swallowing older content.
+function _loadedTranscriptTurnUser(baseMessages,session){
+  const list=Array.isArray(baseMessages)?baseMessages:[];
+  if(!list.length) return null;
+  const pendingText=String(session&&session.pending_user_message||'').trim();
+  if(!pendingText) return null;
+  const _matches=(row)=>(row&&String(row.role||'')==='user')
+    &&(typeof _sameTranscriptMessage==='function'
+      ? !!_sameTranscriptMessage(row,{role:'user',content:pendingText})
+      : false);
+  const tail=typeof _pendingCurrentTailUserMessage==='function'?_pendingCurrentTailUserMessage(list):null;
+  if(_matches(tail)) return tail;
+  const active=typeof _pendingActiveTurnUserMessage==='function'?_pendingActiveTurnUserMessage(list,session):null;
+  if(_matches(active)) return active;
+  return null;
+}
+
+// Reconcile a multi-segment live tail against the saved assistant rows of
+// the SAME turn, one segment at a time (#6649 maintainer review 2026-11-22).
+// Each segment keeps the FULLER copy exactly once: when a saved row starts
+// with the live text (an old cached prefix) the live row is backfilled with
+// the saved text, so the caller's drop-and-replace keeps the fuller copy;
+// when the live text is a strict extension of the saved copy the live row
+// is progress and stays; identical and compact-equal rows collapse onto the
+// saved copy. Walk saved rows forward so matching cannot swap occurrences.
+// Keep saved-only rows before the next matched segment (or before the
+// remaining live suffix), not after the newest content.
+// Caller must have proven current-turn ownership BEFORE calling this: the
+// reconciliation moves saved text into live rows and authorizes the drop.
+function _reconcileLiveSegmentsWithSavedRows(baseMessages,inflight,liveMessages){
+  const list=Array.isArray(baseMessages)?baseMessages:[];
+  const live=Array.isArray(liveMessages)?liveMessages:[];
+  let start=-1;
+  for(let i=list.length-1;i>=0;i--){
+    if(list[i]&&list[i].role==='user'){start=i;break;}
+  }
+  const saved=[];
+  for(let i=start+1;i<list.length;i++){
+    const msg=list[i];
+    if(!msg||msg.role!=='assistant'||msg._live) continue;
+    const text=_messageComparableText(msg);
+    saved.push({row:msg,text,compact:_compactTranscriptText(text)});
+  }
+  if(!saved.length) return;
+  const positions=new Map(inflight.map((row,idx)=>[row,idx]));
+  const insertions=[];
+  let cursor=0;
+  let lastMatch=-1;
+  const preserve=(position,end)=>{
+    if(end>cursor) insertions.push([position,saved.slice(cursor,end).map(({row})=>({...row,_reconciledLiveSegment:true}))]);
+  };
+  for(const segment of live){
+    const liveText=_messageComparableText(segment);
+    if(!liveText) continue;
+    const compact=_compactTranscriptText(liveText);
+    let idx=saved.findIndex((entry,i)=>i>=cursor&&entry.compact===compact);
+    if(idx<0) idx=saved.findIndex(({text},i)=>i>=cursor&&text&&(
+      text.startsWith(liveText)||liveText.startsWith(text)
+    ));
+    if(idx<0) continue;
+    const {row,text}=saved[idx];
+    lastMatch=positions.get(segment);
+    preserve(lastMatch,idx);
+    cursor=idx+1;
+    segment._reconciledLiveSegment=true;
+    if(!liveText.startsWith(text)||liveText===text) segment.content=row.content;
+  }
+  const suffix=live.find(row=>positions.get(row)>lastMatch);
+  preserve(suffix?positions.get(suffix):inflight.length,saved.length);
+  for(let i=insertions.length-1;i>=0;i--){
+    const [position,rows]=insertions[i];
+    inflight.splice(position,0,...rows);
+  }
 }
 
 // Supply the missing prompt before deduping a multi-segment journal reply, so
@@ -5495,10 +5586,22 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages,session){
     // persisted tail is not provably the current turn's own superseded copy.
     const persistedTextMulti=_currentTurnAssistantText(baseMessages);
     if(persistedTextMulti){
-      const turnUserMulti=_inflightTailTurnUser(inflight);
+      // #6649 maintainer review 2026-11-22: an assistant-only in-flight
+      // record (the journal projection clears user rows) leaves
+      // `_inflightTailTurnUser` empty, and bailing out here kept the saved
+      // segments AND appended the live segments — a stale prefix of an
+      // already-saved segment then rendered twice. Take the current user
+      // from the loaded transcript instead, prove the turn with the same
+      // identity rule the single-segment path uses, and reconcile saved
+      // and live segments one by one: keep the fuller copy of each
+      // segment once and keep any additional segments. Without identity
+      // the branch stays conservative and returns false.
+      let turnUserMulti=_inflightTailTurnUser(inflight);
+      if(!turnUserMulti) turnUserMulti=_loadedTranscriptTurnUser(baseMessages,session);
       if(!turnUserMulti||!_hasInflightTailUserDuplicate(baseMessages,turnUserMulti)){
         return false;
       }
+      _reconcileLiveSegmentsWithSavedRows(baseMessages,inflight,liveMessages);
     }
     return liveMessages.some(m=>!!_messageComparableText(m));
   }
@@ -5600,18 +5703,7 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages,session){
     // 空 pending text → 无东西可恢复；否则走既有的 materialize 分支。
     const _pendingText=String(session&&session.pending_user_message||'').trim();
     if(_alreadyInBase&&_pendingText){
-      const _witness=(()=>{
-        const list=baseMessages;
-        const _matches=(row)=>(row&&String(row.role||'')==='user')
-          &&(typeof _sameTranscriptMessage==='function'
-            ? !!_sameTranscriptMessage(row,{role:'user',content:_pendingText})
-            : false);
-        const tail=typeof _pendingCurrentTailUserMessage==='function'?_pendingCurrentTailUserMessage(list):null;
-        if(_matches(tail)) return tail;
-        const active=typeof _pendingActiveTurnUserMessage==='function'?_pendingActiveTurnUserMessage(list,session):null;
-        if(_matches(active)) return active;
-        return null;
-      })();
+      const _witness=_loadedTranscriptTurnUser(baseMessages,session);
       if(_witness) turnUser=_witness;
     }else if(!_alreadyInBase){
       const recovered=_assistantOnlySnapshotUserTurn(session, inflight);
@@ -5705,6 +5797,19 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages,session){
       live._progressBeyondPersisted=true;
       return true;
     }
+    // Recorded limitation (#6649 maintainer review 2026-11-22, smaller
+    // point): two or more saved text rows for the current turn plus ONE
+    // live row that runs them together WITHOUT blank lines (the server
+    // records split points at every tool call, so this needs an old cached
+    // in-flight record) matches none of the branches above — neither text
+    // is a prefix of the other and compact equality only absorbs whitespace
+    // differences, not a missing separator ('A.\n\nB.' vs 'A.B.'). The live
+    // row is then reconciled to the persisted text and flagged superseded:
+    // the saved rows stay the visible copy and the un-separated live text
+    // stays hidden until the turn finishes. The newest text is not lost
+    // from the transcript, only not shown as a second row. Pinned by
+    // tests/test_6649_review_20261122_recovery_duplicates.py::
+    // test_rare_concatenated_live_prefix_shape_is_recorded.
     live.content = persistedText;
     live._supersededBySettled = true;
     return false;
@@ -5765,7 +5870,8 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages, turnOwnerSta
   }
   if(firstLiveIdx<0) return base;
   let start=firstLiveIdx;
-  if(firstLiveIdx>0&&inflight[firstLiveIdx-1]&&inflight[firstLiveIdx-1].role==='user') start=firstLiveIdx-1;
+  while(start>0&&inflight[start-1]?._reconciledLiveSegment===true) start--;
+  if(start>0&&inflight[start-1]&&inflight[start-1].role==='user') start--;
   const tail=inflight.slice(start).filter(m=>m&&m.role&&!m._supersededBySettled);
   const merged=[...base];
   const windowed=typeof _oldestIdx==='number'&&_oldestIdx>0;
@@ -5817,7 +5923,18 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages, turnOwnerSta
         boundary=_currentUserBoundary(merged);
         continue;
       }
-      if(_hasCurrentTailUserDuplicate(merged,candidate)) continue;
+      // #6649 maintainer review 2026-11-22: the single-segment policy now
+      // KEEPS the saved assistant row of the current turn, so the strict
+      // tail scan in _hasCurrentTailUserDuplicate stops at that settled
+      // row and reports "no current user" — the prompt was then placed a
+      // second time on every paginated loadSession (master shows one).
+      // The inflight duplicate check walks past the completed assistant and
+      // proves turn identity (shared id, active-turn token/marker, or
+      // precision-matched start stamp), the same identity-aware rule the
+      // neighbouring non-windowed branch below already uses. A genuinely
+      // different adjacent turn keeps its own identity and is never
+      // swallowed by text alone.
+      if(_hasInflightTailUserDuplicate(merged,candidate)) continue;
       placeRecoveredPrompt(candidate,turnStart);
       boundary=_currentUserBoundary(merged);
       continue;
@@ -5829,6 +5946,13 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages, turnOwnerSta
     // enough; an earlier turn may have sent the same words.
     if(isUser&&tailIdx===promptTailIdx&&(merged.includes(candidate)
       ||(ownerStart&&merged.some(m=>_recoveredPromptCopyForTurn(m,candidate,ownerStart))))) continue;
+    // This occurrence has already been matched (or explicitly preserved).
+    // A second text-only comparison could erase a genuinely repeated segment.
+    if(!isUser&&candidate._reconciledLiveSegment===true){
+      const {_reconciledLiveSegment,...row}=candidate;
+      merged.push(row);
+      continue;
+    }
     const duplicate=isUser
       ? _hasInflightTailUserDuplicate(merged,candidate)
       : merged.some((existing,idx)=>(boundary<0||idx>boundary)&&_sameTranscriptMessage(existing,candidate));

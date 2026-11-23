@@ -854,7 +854,7 @@ assert.strictEqual(inflight.toolCalls[0].activitySegmentSeq, 1);
 def test_load_session_rebuilds_live_tail_before_snapshot_fallback():
     body = _function_body(SESSIONS_JS, "loadSession")
     ensure_pos = body.find("_ensureInflightLiveAssistantMessage(INFLIGHT[sid]);")
-    inflight_pos = body.find("const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);")
+    inflight_pos = body.find("let inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);")
     prepare_pos = body.find("_prepareRunningLiveTail(S.messages,inflightMessages,S.session);")
     drop_assistant_pos = body.find("S.messages=_dropCurrentTurnAssistantMessages(S.messages);")
     # Prefix match: the call may pass the optional turn-owner argument (#8698).
