@@ -43,7 +43,7 @@
 
 - **When Hermes Agent declines to claim an external memory provider while WebUI builds a session's agent, that refusal is now recorded (#9240, refs #9061).** Thanks @chhxbchhxb. WebUI already recorded its own cross-profile refusals, but not the Agent's, so the session's memory status read as normal although the provider was gone. Built-in memory is unaffected.
 
-- **Workspace git change counts include lines that start with `---` or `+++` inside a change (#9206, closes #9205).** Thanks @nurlanmnn. The added and removed line counts skipped every changed line beginning with `---` or `+++` (a YAML front-matter separator, an SQL comment, `++i;`), so a file could show fewer changes than it had. Now only each file's own `---`/`+++` header lines are skipped.
+- **Workspace git change counts include lines that start with `---` or `+++` inside a change (#9206, closes #9205).** Thanks @nurlanmnn. The added and removed line counts skipped every changed line beginning with `---` or `+++` (a YAML front-matter separator, an SQL comment, `++i;`), so a file could show fewer changes than it had. Now only each file's own `---`/`+++` header lines are skipped, and the counts cover the whole change even when a very large diff is cut short.
 
 - **A reply is no longer lost when the Agent shortens an old tool result to save space (#9286, refs #9233).** When the Agent's cold-cache pruning replaced an earlier tool output with a short placeholder, WebUI could no longer prove the new turn extended the saved conversation and refused to keep the reply. WebUI now restores its own full copy of that tool row before the check, so the reply is kept; any other difference is still refused as before.
 
