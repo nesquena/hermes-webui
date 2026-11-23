@@ -1013,22 +1013,54 @@ def _entry_pool_exhausted_reason(entry):
 # optimisation, never load-bearing: any failure leaves that row's windows empty, which
 # is exactly the shape the pool had before it existed.
 _POOL_USAGE_PROBE_TIMEOUT_SECONDS = 3.0
+# The probe batch stops waiting this much before the request deadline so the snapshot
+# can still be assembled and joined; without it the batch ends exactly at the deadline
+# and the join (which then has no time left) races with it.
+_POOL_USAGE_PROBE_JOIN_MARGIN_SECONDS = 0.1
 _POOL_USAGE_CACHE_TTL_SECONDS = 60.0
 _POOL_USAGE_CACHE_MAX_ENTRIES = 128
 # (monotonic timestamp, result-or-None) keyed by credential identity. Failures are cached
 # too: a dead endpoint must not be re-probed once per request per credential.
-_POOL_USAGE_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
+_POOL_USAGE_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, Any] | None]] = {}
 _POOL_USAGE_CACHE_LOCK = threading.Lock()
 
 
-def _pool_usage_cache_key(provider_id: str, entry, index: int) -> str:
-    """Cache key for one credential: its id, else its label, else its position.
+def _pool_usage_cache_scope() -> str:
+    """Active profile home for the usage cache.
 
-    Never derived from the token: a digest of a secret is still key material, and the
-    index is enough to keep two unlabelled entries apart.
+    Credential ids are not unique across profiles — a cloned profile copies
+    ``auth.json``, so its entries carry the same ids — and every other
+    credential/pool cache in this module already carries the profile
+    (``_account_usage_cache_key`` stores the home, ``_CREDENTIAL_POOL_CACHE`` in
+    api.config is keyed by the profile's auth-store path, the account-usage probe
+    workers are keyed by home). Without it, one profile is served the other's
+    windows for the whole TTL.
     """
-    identity = _entry_value(entry, "id", "label") or _safe_entry_label(entry, index)
-    return str(provider_id) + ":" + str(identity)
+    try:
+        return str(_get_hermes_home())
+    except Exception:  # noqa: BLE001 - a broken profile lookup must not break the cache
+        return ""
+
+
+def _pool_usage_cache_key(provider_id: str, entry, index: int, scope: str | None = None) -> tuple[str, str, str]:
+    """(profile home, provider, credential identity) for one credential's probe result.
+
+    The identity is the entry id. An entry without one uses its position: two id-less
+    entries are not the same credential even when they carry the same label (or none),
+    and an id-less entry must never answer for an id-carrying one. Identity prefixes
+    keep an id from colliding with a label. Never derived from the token: a digest of
+    a secret is still key material.
+
+    ``scope`` is the profile home resolved on the request thread. It must be passed
+    down to a probe worker: the profile is per-request thread-local, so a worker
+    resolving it itself would key (and read) the wrong profile's cache.
+    """
+    entry_id = _entry_value(entry, "id")
+    if entry_id:
+        identity = "id:" + str(entry_id)
+    else:
+        identity = "index:%d:%s" % (index, _entry_value(entry, "label") or "")
+    return (scope if scope is not None else _pool_usage_cache_scope(), str(provider_id), identity)
 
 
 def _opencode_go_usage_url(entry) -> str:
@@ -1062,12 +1094,31 @@ def _opencode_go_pool_plan_name(payload: Any) -> str | None:
     return None
 
 
-def _probe_pool_credential_usage(provider, entry) -> dict[str, Any] | None:
+def _pool_deadline_remaining(deadline: float | None) -> float | None:
+    """Seconds left before ``deadline``; None when the caller set no deadline."""
+    if deadline is None:
+        return None
+    return deadline - time.monotonic()
+
+
+def _pool_deadline_wait(deadline: float | None) -> float | None:
+    """``wait``/``result`` timeout for ``deadline``, clamped at zero.
+
+    Never a negative number: for threading primitives a negative timeout means "wait
+    forever", which would turn an already-expired deadline into an unbounded block.
+    """
+    remaining = _pool_deadline_remaining(deadline)
+    return None if remaining is None else max(0.0, remaining)
+
+
+def _probe_pool_credential_usage(provider, entry, *, timeout: float | None = None) -> dict[str, Any] | None:
     """One credential's plan usage: ``{"plan": str|None, "windows": [...]}``, or None.
 
     Only opencode-go answers this; every failure (missing token, non-200, timeout,
     non-JSON, unrecognised body) is a None so a probe can never fail the quota endpoint.
-    The token is used in the request header only — never logged, returned or cached.
+    ``timeout`` is the caller's share of the request deadline, so a probe started late
+    cannot outlive the response. The token is used in the request header only — never
+    logged, returned or cached.
     """
     if str(provider or "").strip().lower() != "opencode-go":
         return None
@@ -1087,7 +1138,10 @@ def _probe_pool_credential_usage(provider, entry) -> dict[str, Any] | None:
         },
     )
     try:
-        with _BEARER_QUOTA_OPENER.open(req, timeout=_POOL_USAGE_PROBE_TIMEOUT_SECONDS) as resp:
+        with _BEARER_QUOTA_OPENER.open(
+            req,
+            timeout=timeout if timeout is not None else _POOL_USAGE_PROBE_TIMEOUT_SECONDS,
+        ) as resp:
             raw = resp.read(_PROVIDER_QUOTA_MAX_BYTES + 1)
         if len(raw) > _PROVIDER_QUOTA_MAX_BYTES:
             return None
@@ -1103,36 +1157,50 @@ def _probe_pool_credential_usage(provider, entry) -> dict[str, Any] | None:
     return {"plan": _opencode_go_pool_plan_name(payload), "windows": sanitized["windows"]}
 
 
-def _cached_pool_credential_usage(provider, entry, index: int) -> dict[str, Any] | None:
-    """``_probe_pool_credential_usage`` behind a 60 s per-credential TTL cache."""
-    key = _pool_usage_cache_key(str(provider or "").strip().lower(), entry, index)
-    now = time.monotonic()
+def _cached_pool_credential_usage(provider, entry, index: int, *, refresh: bool = False, deadline: float | None = None, cache_scope: str | None = None) -> dict[str, Any] | None:
+    """``_probe_pool_credential_usage`` behind a 60 s per-credential TTL cache.
+
+    ``refresh`` skips the cache read — cached *failures* included, so a credential
+    fixed a second ago is re-probed instead of being reported empty for the rest of
+    the TTL. The fresh answer is stored with its own timestamp, so the next
+    non-refresh read sees it rather than the superseded value.
+    """
+    key = _pool_usage_cache_key(str(provider or "").strip().lower(), entry, index, cache_scope)
+    remaining = _pool_deadline_remaining(deadline)
+    if remaining is not None and remaining <= 0:
+        return None
+    if not refresh:
+        now = time.monotonic()
+        with _POOL_USAGE_CACHE_LOCK:
+            cached = _POOL_USAGE_CACHE.get(key)
+            if cached is not None and (now - cached[0]) < _POOL_USAGE_CACHE_TTL_SECONDS:
+                return cached[1]
+    result = _probe_pool_credential_usage(provider, entry, timeout=remaining)
     with _POOL_USAGE_CACHE_LOCK:
-        cached = _POOL_USAGE_CACHE.get(key)
-        if cached is not None and (now - cached[0]) < _POOL_USAGE_CACHE_TTL_SECONDS:
-            return cached[1]
-    result = _probe_pool_credential_usage(provider, entry)
-    with _POOL_USAGE_CACHE_LOCK:
+        stamp = time.monotonic()
         if len(_POOL_USAGE_CACHE) >= _POOL_USAGE_CACHE_MAX_ENTRIES:
             stale = [
                 cached_key
-                for cached_key, (stamp, _value) in _POOL_USAGE_CACHE.items()
-                if (now - stamp) >= _POOL_USAGE_CACHE_TTL_SECONDS
+                for cached_key, (cached_at, _value) in _POOL_USAGE_CACHE.items()
+                if (stamp - cached_at) >= _POOL_USAGE_CACHE_TTL_SECONDS
             ]
             for cached_key in stale or list(_POOL_USAGE_CACHE):
                 _POOL_USAGE_CACHE.pop(cached_key, None)
-        _POOL_USAGE_CACHE[key] = (now, result)
+        _POOL_USAGE_CACHE[key] = (stamp, result)
     return result
 
 
-def _pool_row_usage(provider, entry, index: int, fallback_label=None):
+def _pool_row_usage(provider, entry, index: int, fallback_label=None, *, refresh: bool = False, deadline: float | None = None, cache_scope: str | None = None):
     """(plan, windows) for one pool row; empty when the probe is unsupported or failed.
 
     A successful probe names the plan: the response's own plan/account name when it
     carries one, else the credential label (the live endpoint reports no tier).
     """
     try:
-        usage = _cached_pool_credential_usage(provider, entry, index)
+        usage = _cached_pool_credential_usage(
+            provider, entry, index,
+            refresh=refresh, deadline=deadline, cache_scope=cache_scope,
+        )
     except Exception:  # noqa: BLE001 - defensive: the snapshot must always build
         usage = None
     if not isinstance(usage, dict):
@@ -1147,13 +1215,59 @@ def _pool_row_usage(provider, entry, index: int, fallback_label=None):
     return plan or None, windows
 
 
-def _local_pool_snapshot(provider):
+def _probe_pool_usage_rows(provider, probe_items, *, refresh: bool, deadline: float | None, cache_scope: str | None = None) -> dict[int, tuple]:
+    """Probe every credential concurrently, under one shared deadline.
+
+    Serial probes made the endpoint's worst case N x the probe timeout before it could
+    even fetch the aggregate. Here the whole batch starts together and is joined by
+    ``deadline``; a future that times out or raises is recorded as a failure, so its
+    row still exists — a credential never vanishes because its probe was slow. The
+    orphaned threads of a timed-out batch are not waited on: each probe's own socket
+    timeout bounds it.
+    """
+    if not probe_items:
+        return {}
+    from concurrent.futures import ThreadPoolExecutor, wait
+
+    results: dict[int, tuple] = {}
+    executor = ThreadPoolExecutor(
+        max_workers=len(probe_items), thread_name_prefix="quota-pool-probe",
+    )
+    try:
+        futures = {
+            executor.submit(
+                _pool_row_usage, provider, entry, index, label,
+                refresh=refresh, deadline=deadline, cache_scope=cache_scope,
+            ): index
+            for index, entry, label in probe_items
+        }
+        wait_for = _pool_deadline_wait(deadline)
+        if wait_for is not None:
+            wait_for = max(0.0, wait_for - _POOL_USAGE_PROBE_JOIN_MARGIN_SECONDS)
+        done, pending = wait(futures, timeout=wait_for)
+        for future in done:
+            try:
+                results[futures[future]] = future.result()
+            except Exception:  # noqa: BLE001 - one probe must never break the batch
+                results[futures[future]] = (None, [])
+        for future in pending:
+            future.cancel()
+            results[futures[future]] = (None, [])
+    finally:
+        executor.shutdown(wait=False)
+    return results
+
+
+def _local_pool_snapshot(provider, *, refresh: bool = False, deadline: float | None = None):
     """Pool snapshot from local auth.json entries.
 
     Rows are local-state driven; for opencode-go each credential additionally carries
     its own plan usage windows (60 s cached probe). A failed probe leaves that row with
     ``plan: None`` and ``windows: []`` exactly as before, so the probe is never
     load-bearing.
+
+    ``refresh`` re-probes every credential instead of answering from the cache, and
+    ``deadline`` (a monotonic instant) bounds the whole batch, not each probe.
 
     Returns a SimpleNamespace compatible with _serialize_account_usage_snapshot,
     or None if the provider has no pool or no entries.
@@ -1169,17 +1283,28 @@ def _local_pool_snapshot(provider):
     available_count = 0
     exhausted_count = 0
     dead_count = 0
+    # Resolved here, on the request thread: probes run in worker threads that do not
+    # inherit the request's thread-local profile.
+    cache_scope = _pool_usage_cache_scope()
     # One credential needs no breakdown: its windows are the aggregate card's windows,
     # and a probe would only duplicate them (and cost a request on the common path).
     probe_pool_usage = (
         str(provider or "").strip().lower() == "opencode-go" and len(entries) > 1
     )
+    row_meta = []
+    probe_items = []
     for index, entry in enumerate(entries, start=1):
         label = _safe_entry_label(entry, index)
         entry_status = str(_entry_value(entry, "last_status") or "").strip().lower()
-        plan, windows = None, []
+        row_meta.append((index, entry, label, entry_status))
         if probe_pool_usage and entry_status != "dead":
-            plan, windows = _pool_row_usage(provider, entry, index, label)
+            probe_items.append((index, entry, label))
+    probed = _probe_pool_usage_rows(
+        provider, probe_items,
+        refresh=refresh, deadline=deadline, cache_scope=cache_scope,
+    )
+    for index, entry, label, entry_status in row_meta:
+        plan, windows = probed.get(index, (None, []))
         if entry_status == "dead":
             dead_count += 1
             rows.append({
@@ -1996,7 +2121,7 @@ def _usage_api_quota_schema_recognized(provider: str, payload: Any) -> bool:
     return isinstance(limits, dict) and any(isinstance(limits.get(key), dict) for key in ("fiveHour", "weekly"))
 
 
-def _fetch_bearer_quota(url: str, api_key: str) -> Any:
+def _fetch_bearer_quota(url: str, api_key: str, *, timeout: float | None = None) -> Any:
     req = urllib.request.Request(
         url, headers={
             "Authorization": f"Bearer {api_key}", "Accept": "application/json",
@@ -2005,7 +2130,10 @@ def _fetch_bearer_quota(url: str, api_key: str) -> Any:
             "User-Agent": "curl/8.5.0",
         },
     )
-    with _BEARER_QUOTA_OPENER.open(req, timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS) as resp:
+    with _BEARER_QUOTA_OPENER.open(
+        req,
+        timeout=max(0.05, timeout) if timeout is not None else _PROVIDER_QUOTA_TIMEOUT_SECONDS,
+    ) as resp:
         raw = resp.read(_PROVIDER_QUOTA_MAX_BYTES + 1)
     if len(raw) > _PROVIDER_QUOTA_MAX_BYTES:
         raise ValueError("quota response too large")
@@ -2628,6 +2756,26 @@ def _provider_account_usage_status(provider: str, display_name: str, *, refresh:
     }
 
 
+def _quota_deadline_result(future, deadline: float, executor=None):
+    """Result of the aggregate usage call, never waited for past the shared deadline.
+
+    Re-raises the call's own exception so an ``HTTPError`` keeps its status handling,
+    and turns a deadline miss into ``TimeoutError``, which the caller treats as a
+    transient failure. The executor is never joined: a call still running at the
+    deadline is abandoned (its own socket timeout bounds it) rather than delaying the
+    response.
+    """
+    from concurrent.futures import TimeoutError as FutureTimeoutError
+
+    try:
+        return future.result(timeout=_pool_deadline_wait(deadline))
+    except FutureTimeoutError:
+        raise TimeoutError("quota aggregate call exceeded the request deadline") from None
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=False)
+
+
 def _provider_quota_payload(provider_id: str | None = None, *, refresh: bool = False) -> dict[str, Any]:
     """Return sanitized quota/rate-limit status for the active provider.
 
@@ -2712,11 +2860,36 @@ def _provider_quota_payload(provider_id: str | None = None, *, refresh: bool = F
                 "message": "OpenRouter quota status is temporarily unavailable.",
             }
 
-    local_snapshot = _local_pool_snapshot(provider)
+    # opencode-go probes every credential at its own /usage endpoint, and those probes
+    # are independent of the aggregate usage call. The pool snapshot is read here, on
+    # the request thread, because the credential store is resolved through per-request
+    # thread-local profile state a worker thread would not see; the aggregate call only
+    # needs the key resolved below, so it runs alongside. One deadline covers both: the
+    # panel waits for the slower of the two, never for their sum.
+    deadline = time.monotonic() + _PROVIDER_QUOTA_TIMEOUT_SECONDS
+    local_snapshot = None
+    aggregate_executor = None
+    aggregate_future = None
+
     if provider in _USAGE_API_QUOTA_PROVIDERS:
         api_key = _get_provider_api_key(provider)
         if not api_key and provider == "commandcode-anthropic":
             api_key = _get_provider_api_key("commandcode")
+        if api_key:
+            from concurrent.futures import ThreadPoolExecutor
+
+            url = _OPENCODE_GO_QUOTA_URL if provider == "opencode-go" else f"{_COMMANDCODE_API_URL}/alpha/billing/credits"
+            aggregate_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="quota-aggregate")
+            aggregate_future = aggregate_executor.submit(
+                _fetch_bearer_quota, url, api_key,
+                timeout=_pool_deadline_remaining(deadline),
+            )
+        if provider == "opencode-go":
+            local_snapshot = _local_pool_snapshot(provider, refresh=refresh, deadline=deadline)
+        else:
+            # Only the opencode-go path caches a probe result, so there is nothing for
+            # ``refresh`` to bypass here and the historical one-argument call shape holds.
+            local_snapshot = _local_pool_snapshot(provider)
         if not api_key and local_snapshot is None:
             return {
                 "ok": False, "provider": provider, "display_name": display_name,
@@ -2733,10 +2906,9 @@ def _provider_quota_payload(provider_id: str | None = None, *, refresh: bool = F
         definitive = False
         pool_limits = _serialize_account_usage_snapshot(local_snapshot)
         if api_key:
-            url = _OPENCODE_GO_QUOTA_URL if provider == "opencode-go" else f"{_COMMANDCODE_API_URL}/alpha/billing/credits"
             account_limits = None
             try:
-                payload = _fetch_bearer_quota(url, api_key)
+                payload = _quota_deadline_result(aggregate_future, deadline, aggregate_executor)
                 account_limits = _sanitize_opencode_go_quota(payload) if provider == "opencode-go" else _sanitize_commandcode_quota(payload)
                 definitive = not account_limits and _usage_api_quota_schema_recognized(provider, payload)
             except urllib.error.HTTPError as exc:
@@ -2780,6 +2952,10 @@ def _provider_quota_payload(provider_id: str | None = None, *, refresh: bool = F
                 "account_limits": pool_limits,
                 "message": message,
             }
+
+    else:
+        # Providers outside the usage-API set answer from local pool state only.
+        local_snapshot = _local_pool_snapshot(provider)
 
     if local_snapshot is not None:
         account_limits = _serialize_account_usage_snapshot(local_snapshot)
@@ -2846,15 +3022,18 @@ def _provider_quota_credential_entries(account_limits: Any) -> list[dict[str, An
 
 
 def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False) -> dict[str, Any]:
-    """Return the quota payload, plus per-credential windows when a pool has several.
+    """Return the quota payload, plus per-credential windows for a pooled opencode-go.
 
     A provider with one configured credential answers exactly as before: the existing
     top-level window is the whole payload and older clients keep working. With several
     credentials, ``credentials`` lists one entry per credential (same window fields) so
     the sidebar chip can keep showing the aggregate while the panel shows every plan.
+
+    Only opencode-go is widened: it is the one provider whose pool rows carry a probed
+    window each. Every other provider keeps its exact previous payload shape.
     """
     result = _provider_quota_payload(provider_id, refresh=refresh)
-    if isinstance(result, dict):
+    if isinstance(result, dict) and str(result.get("provider") or "").strip().lower() == "opencode-go":
         entries = _provider_quota_credential_entries(result.get("account_limits"))
         if len(entries) > 1:
             result["credentials"] = entries

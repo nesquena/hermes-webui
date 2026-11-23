@@ -9,6 +9,7 @@ panel can show every plan. One credential must answer exactly as before.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -106,14 +107,36 @@ def _fresh_caches():
     providers._POOL_USAGE_CACHE.clear()
 
 
-def _quota(monkeypatch, tmp_path, *, pool_payloads, responses, key=_AGGREGATE_KEY):
+def _idless_entry(label, token, *, status="ok"):
+    """A credential-pool entry the auth store never gave an id."""
+    entry = {
+        "runtime_api_key": token,
+        "last_status": status,
+    }
+    if label:
+        entry["label"] = label
+    return entry
+
+
+def _quota(
+    monkeypatch,
+    tmp_path,
+    *,
+    pool_payloads,
+    responses,
+    key=_AGGREGATE_KEY,
+    provider="opencode-go",
+    refresh=False,
+    home=None,
+    opener=None,
+):
     """Run get_provider_quota() for opencode-go with a pinned pool and probe responses."""
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: home or tmp_path)
     for env_var in _ENV_KEYS:
         monkeypatch.delenv(env_var, raising=False)
     if key:
         monkeypatch.setenv("OPENCODE_GO_API_KEY", key)
-    old_cfg, old_mtime = _with_config(model={"provider": "opencode-go"})
+    old_cfg, old_mtime = _with_config(model={"provider": provider})
     import api.providers as providers
 
     real_env_var_for = providers._provider_env_var_for
@@ -122,7 +145,10 @@ def _quota(monkeypatch, tmp_path, *, pool_payloads, responses, key=_AGGREGATE_KE
         lambda pid: "OPENCODE_GO_API_KEY" if pid == "opencode-go" else real_env_var_for(pid),
     )
     calls = []
-    monkeypatch.setattr(providers, "_BEARER_QUOTA_OPENER", SimpleNamespace(open=_opener(responses, calls)))
+    monkeypatch.setattr(
+        providers, "_BEARER_QUOTA_OPENER",
+        SimpleNamespace(open=opener or _opener(responses, calls)),
+    )
     if isinstance(pool_payloads, Exception):
         def _fail(_provider):
             raise pool_payloads
@@ -131,7 +157,7 @@ def _quota(monkeypatch, tmp_path, *, pool_payloads, responses, key=_AGGREGATE_KE
     else:
         monkeypatch.setattr(providers, "_pool_entry_payloads", lambda _provider: list(pool_payloads))
     try:
-        result = providers.get_provider_quota()
+        result = providers.get_provider_quota(refresh=refresh)
     finally:
         _restore_config(old_cfg, old_mtime)
     return result, calls
@@ -264,3 +290,185 @@ def test_probe_results_are_cached_per_credential(monkeypatch, tmp_path):
     assert len(calls) == 2, "both credentials probed once"
     assert first.pool["credentials"][0]["windows"] == second.pool["credentials"][0]["windows"]
     assert len(second.pool["credentials"][0]["windows"]) == 2
+
+
+def test_cached_windows_are_scoped_to_the_active_profile(monkeypatch, tmp_path):
+    """A cloned profile copies auth.json, so entry ids repeat: the cache must not."""
+    payloads = [_entry("primary", _CRED_A), _entry("backup", _CRED_B)]
+    first, _first_calls = _quota(
+        monkeypatch, tmp_path, home=tmp_path / "profile-a",
+        pool_payloads=payloads,
+        responses={
+            "Bearer " + _AGGREGATE_KEY: _AGGREGATE_RESPONSE,
+            "Bearer " + _CRED_A: _CRED_A_RESPONSE,
+            "Bearer " + _CRED_B: _CRED_B_RESPONSE,
+        },
+    )
+    assert [w["remaining_percent"] for w in first["credentials"][0]["windows"]] == [60.0, 30.0]
+
+    # Same entry ids (the copied auth.json), different usage behind them.
+    changed_a = {"usage": {"rolling": {"percent": 95, "status": "ok"}}}
+    second, second_calls = _quota(
+        monkeypatch, tmp_path, home=tmp_path / "profile-b",
+        pool_payloads=payloads,
+        responses={
+            "Bearer " + _AGGREGATE_KEY: _AGGREGATE_RESPONSE,
+            "Bearer " + _CRED_A: changed_a,
+            "Bearer " + _CRED_B: _CRED_B_RESPONSE,
+        },
+    )
+
+    assert [w["remaining_percent"] for w in second["credentials"][0]["windows"]] == [5.0]
+    pool_calls = [c for c in second_calls if c["authorization"] != "Bearer " + _AGGREGATE_KEY]
+    assert len(pool_calls) == 2, "profile B probed its own credentials instead of reusing A's"
+
+
+def test_two_id_less_entries_do_not_share_a_cached_probe(monkeypatch, tmp_path):
+    """Entries with no id are distinct credentials even when their label matches."""
+    payloads = [_idless_entry("shared", _CRED_A), _idless_entry("shared", _CRED_B)]
+    result, calls = _quota(
+        monkeypatch, tmp_path,
+        pool_payloads=payloads,
+        responses={
+            "Bearer " + _AGGREGATE_KEY: _AGGREGATE_RESPONSE,
+            "Bearer " + _CRED_A: _CRED_A_RESPONSE,
+            "Bearer " + _CRED_B: _CRED_B_RESPONSE,
+        },
+    )
+
+    first, second = result["credentials"]
+    assert [w["remaining_percent"] for w in first["windows"]] == [60.0, 30.0]
+    assert [w["remaining_percent"] for w in second["windows"]] == [90.0]
+    pool_calls = [c for c in calls if c["authorization"] != "Bearer " + _AGGREGATE_KEY]
+    assert len(pool_calls) == 2
+
+
+def test_an_id_less_entry_does_not_collide_with_a_labelled_one(monkeypatch, tmp_path):
+    """An entry id and a label are different namespaces, even for the same string."""
+    payloads = [
+        {"id": "shared", "label": "alpha", "runtime_api_key": _CRED_A, "last_status": "ok"},
+        _idless_entry("shared", _CRED_B),
+    ]
+    result, _calls = _quota(
+        monkeypatch, tmp_path,
+        pool_payloads=payloads,
+        responses={
+            "Bearer " + _AGGREGATE_KEY: _AGGREGATE_RESPONSE,
+            "Bearer " + _CRED_A: _CRED_A_RESPONSE,
+            "Bearer " + _CRED_B: _CRED_B_RESPONSE,
+        },
+    )
+
+    first, second = result["credentials"]
+    assert [w["remaining_percent"] for w in first["windows"]] == [60.0, 30.0]
+    assert [w["remaining_percent"] for w in second["windows"]] == [90.0]
+
+
+def test_refresh_reprobes_windows_and_a_fixed_credential(monkeypatch, tmp_path):
+    """refresh=True must bypass the cache read, cached failures included."""
+    payloads = [_entry("primary", _CRED_A), _entry("backup", _CRED_B)]
+    first, _first_calls = _quota(
+        monkeypatch, tmp_path,
+        pool_payloads=payloads,
+        responses={
+            "Bearer " + _AGGREGATE_KEY: _AGGREGATE_RESPONSE,
+            "Bearer " + _CRED_A: _CRED_A_RESPONSE,
+            # _CRED_B raises: its empty row is cached as a failure.
+        },
+    )
+    assert [w["remaining_percent"] for w in first["credentials"][0]["windows"]] == [60.0, 30.0]
+    assert first["credentials"][1]["windows"] == []
+
+    changed_a = {"usage": {"rolling": {"percent": 95, "status": "ok"}}}
+    second, second_calls = _quota(
+        monkeypatch, tmp_path, refresh=True,
+        pool_payloads=payloads,
+        responses={
+            "Bearer " + _AGGREGATE_KEY: _AGGREGATE_RESPONSE,
+            "Bearer " + _CRED_A: changed_a,
+            "Bearer " + _CRED_B: _CRED_B_RESPONSE,
+        },
+    )
+    pool_calls = [c for c in second_calls if c["authorization"] != "Bearer " + _AGGREGATE_KEY]
+    assert len(pool_calls) == 2, "refresh re-probed both credentials"
+    assert [w["remaining_percent"] for w in second["credentials"][0]["windows"]] == [5.0]
+    assert [w["remaining_percent"] for w in second["credentials"][1]["windows"]] == [90.0]
+
+    # The refreshed values replaced the cached ones: a plain read sees them, not the
+    # superseded payload and not the stale failure.
+    third, third_calls = _quota(
+        monkeypatch, tmp_path,
+        pool_payloads=payloads,
+        responses={"Bearer " + _AGGREGATE_KEY: _AGGREGATE_RESPONSE},
+    )
+    assert [w["remaining_percent"] for w in third["credentials"][0]["windows"]] == [5.0]
+    assert [w["remaining_percent"] for w in third["credentials"][1]["windows"]] == [90.0]
+    assert [c for c in third_calls if c["authorization"] != "Bearer " + _AGGREGATE_KEY] == []
+
+
+def test_probes_run_concurrently_under_one_shared_deadline(monkeypatch, tmp_path):
+    """Five slow credentials must overlap: the endpoint waits ~once, not five times."""
+    tokens = ["concurrent-credential-" + str(index) for index in range(1, 6)]
+
+    def slow_opener(req, timeout=None):
+        if req.headers.get("Authorization") == "Bearer " + _AGGREGATE_KEY:
+            return _FakeResponse(json.dumps(_AGGREGATE_RESPONSE).encode("utf-8"))
+        time.sleep(0.4)
+        return _FakeResponse(json.dumps({"usage": {"weekly": {"percent": 10}}}).encode("utf-8"))
+
+    started = time.monotonic()
+    result, _calls = _quota(
+        monkeypatch, tmp_path,
+        pool_payloads=[_entry("c" + str(i), token) for i, token in enumerate(tokens, 1)],
+        responses={},
+        opener=slow_opener,
+    )
+    elapsed = time.monotonic() - started
+
+    assert [len(row["windows"]) for row in result["credentials"]] == [1] * 5
+    # Serial probing costs 5 x 0.4 s = 2.0 s; one shared deadline costs ~0.4 s.
+    assert elapsed < 1.2, "probes did not overlap (%.2fs for five 0.4s probes)" % elapsed
+
+
+def test_a_timed_out_probe_still_yields_its_row_as_a_failure(monkeypatch, tmp_path):
+    """The shared deadline bounds the endpoint and a slow credential keeps its row."""
+    import api.providers as providers
+
+    monkeypatch.setattr(providers, "_PROVIDER_QUOTA_TIMEOUT_SECONDS", 0.25)
+
+    def uneven_opener(req, timeout=None):
+        auth = req.headers.get("Authorization")
+        if auth == "Bearer " + _AGGREGATE_KEY:
+            return _FakeResponse(json.dumps(_AGGREGATE_RESPONSE).encode("utf-8"))
+        if auth == "Bearer " + _CRED_A:
+            time.sleep(0.6)  # outlives the deadline
+            return _FakeResponse(json.dumps(_CRED_A_RESPONSE).encode("utf-8"))
+        return _FakeResponse(json.dumps(_CRED_B_RESPONSE).encode("utf-8"))
+
+    started = time.monotonic()
+    result, _calls = _quota(
+        monkeypatch, tmp_path,
+        pool_payloads=[_entry("primary", _CRED_A), _entry("backup", _CRED_B)],
+        responses={},
+        opener=uneven_opener,
+    )
+    elapsed = time.monotonic() - started
+
+    assert [row["label"] for row in result["credentials"]] == ["primary", "backup"]
+    assert result["credentials"][0]["windows"] == [], "a timed-out probe is a failure row"
+    assert [w["remaining_percent"] for w in result["credentials"][1]["windows"]] == [90.0]
+    assert elapsed < 0.6, "the deadline, not the slow probe, bounded the endpoint"
+
+
+def test_non_opencode_go_multi_credential_pool_keeps_its_payload_shape(monkeypatch, tmp_path):
+    """Only opencode-go is widened: other pools keep the pre-PR payload."""
+    result, calls = _quota(
+        monkeypatch, tmp_path, provider="zai", key=None,
+        pool_payloads=[_entry("primary", _CRED_A), _entry("backup", _CRED_B)],
+        responses={},
+    )
+
+    assert result["provider"] == "zai"
+    assert "credentials" not in result
+    assert len(result["account_limits"]["pool"]["credentials"]) == 2
+    assert calls == []

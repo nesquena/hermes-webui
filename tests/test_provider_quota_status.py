@@ -189,7 +189,9 @@ def test_commandcode_quota_exposes_sanitized_windows(monkeypatch, tmp_path):
     def fake_urlopen(req, timeout):
         assert req.full_url == "https://api.commandcode.ai/alpha/billing/credits"
         assert req.headers["Authorization"] == "Bearer private-commandcode-key"
-        assert timeout == 3.0
+        # The aggregate call shares the request deadline with the pool probes, so it
+        # gets what is left of the 3 s budget rather than a fresh one.
+        assert 2.5 < timeout <= 3.0
         return _FakeResponse(json.dumps({
             "credits": {"monthlyCredits": 7, "purchasedCredits": 2, "freeCredits": 1, "secret": "no"},
             "windowLimits": {
@@ -199,7 +201,7 @@ def test_commandcode_quota_exposes_sanitized_windows(monkeypatch, tmp_path):
         }).encode())
 
     _patch_bearer_quota_open(monkeypatch, providers, fake_urlopen)
-    monkeypatch.setattr(providers, "_local_pool_snapshot", lambda pid: None)
+    monkeypatch.setattr(providers, "_local_pool_snapshot", lambda pid, **_options: None)
     try:
         result = providers.get_provider_quota()
     finally:
@@ -228,7 +230,7 @@ def test_opencode_go_quota_accepts_triple_window_response(monkeypatch, tmp_path)
         }}).encode())
 
     _patch_bearer_quota_open(monkeypatch, providers, fake_urlopen)
-    monkeypatch.setattr(providers, "_local_pool_snapshot", lambda pid: None)
+    monkeypatch.setattr(providers, "_local_pool_snapshot", lambda pid, **_options: None)
     try:
         result = providers.get_provider_quota()
     finally:
@@ -284,7 +286,7 @@ def _usage_api_quota(monkeypatch, tmp_path, provider, urlopen, *, key="private-u
     )
     _patch_bearer_quota_open(monkeypatch, providers, urlopen)
     if pool is not _REAL_POOL:
-        monkeypatch.setattr(providers, "_local_pool_snapshot", lambda pid: pool)
+        monkeypatch.setattr(providers, "_local_pool_snapshot", lambda pid, **_options: pool)
     try:
         return providers.get_provider_quota()
     finally:
@@ -650,7 +652,7 @@ def test_commandcode_anthropic_uses_the_commandcode_key_and_endpoint(monkeypatch
         providers, "_provider_env_var_for",
         lambda pid: {"commandcode": "COMMANDCODE_API_KEY", "commandcode-anthropic": None}.get(pid, real_env_var_for(pid)),
     )
-    monkeypatch.setattr(providers, "_local_pool_snapshot", lambda pid: None)
+    monkeypatch.setattr(providers, "_local_pool_snapshot", lambda pid, **_options: None)
 
     def fake_urlopen(req, timeout):
         assert req.full_url == "https://api.commandcode.ai/alpha/billing/credits"
