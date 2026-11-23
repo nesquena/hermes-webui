@@ -571,6 +571,10 @@ def _failed(label, reason):
     return f"Message not sent in {label}: {reason}. {SAVED}"
 
 
+def _failed_rotated(label, reason):
+    return f"Message not sent in {label}: {reason}."
+
+
 def _deleted(label):
     return f"Message not sent: {label} no longer exists, so your text was not saved."
 
@@ -587,9 +591,12 @@ def test_start_error_reason_loses_its_trailing_full_stops():
     assert _toasts(result) == [[_failed("\u201cChat A\u201d", "Upstream refused"), None, "error"]]
 
 
-def test_start_session_rotated_after_switch_uses_the_generic_failure_notice():
+def test_start_session_rotated_after_switch_does_not_claim_where_the_text_was_saved():
+    # The server keeps a compressed chat's draft with its continuation, which
+    # may already hold a draft of its own: the notice makes no "saved" claim.
     result = _run(switchAt="start", start="409-rotated")
-    assert _toasts(result) == [[_failed("\u201cChat A\u201d", "boom"), None, "error"]]
+    assert _toasts(result) == [[_failed_rotated("\u201cChat A\u201d", "boom"), None, "error"]]
+    assert SAVED not in _toasts(result)[0][0]
 
 
 def test_start_404_after_switch_says_the_text_was_not_saved():
@@ -822,14 +829,25 @@ def test_control_slash_sends_without_a_switch_start_where_master_starts_them(sce
 
 
 
-# Codex r11: a 409 session_rotated restores into the continuation. When the
-# user already moved there and staged a file with an empty composer, that file
-# stays staged next to the restored one (the helper replaces the tray with what
-# it is given, so the caller hands it both).
-def test_rotated_restore_keeps_a_file_staged_on_the_continuation():
-    result = _run(switchAt="start", switchKind="continuation", start="409-rotated", files=True)
-    assert _named(result, "_restoreComposerDraftAfterFailedSend") == [["hello", "A2"]]
-    assert _named(result, "restore.files") == [["A2", ["newer.txt", "f.txt"]]]
+# A rotation restores for the issuing chat exactly as master does, wherever the
+# user is (the server keeps a compressed chat's draft with its continuation).
+# Files staged on an on-screen continuation stay its own; they are not merged.
+@pytest.mark.parametrize("kind", ["plain", "continuation", "chain", "cleared", "loading"])
+def test_rotated_restore_is_for_the_issuing_chat_as_on_master(kind):
+    scenario = {"switchAt": "start", "start": "409-rotated", "files": True}
+    if kind != "plain":
+        scenario["switchKind"] = kind
+    result = _run(**scenario)
+    assert _named(result, "_restoreComposerDraftAfterFailedSend") == [["hello", "A"]], kind
+    assert _named(result, "restore.files") == [["A", ["f.txt"]]], kind
+
+
+def test_rotated_failure_leaves_the_on_screen_continuation_and_its_staged_files_alone():
+    result = _run(switchAt="start", switchKind="continuation", start="409-rotated", files=True,
+                  a2Text="my own words", a2Staged=[{"name": "f.txt"}])
+    assert result["composer"] == "my own words"
+    assert _named(result, "restore.files") == [["A", ["f.txt"]]]
+    assert _toasts(result) == [[_failed_rotated("\u201cChat A\u201d", "boom"), None, "error"]]
 
 
 def test_rotated_restore_to_a_continuation_off_screen_passes_only_the_snapshot():
@@ -842,41 +860,3 @@ def test_failed_start_restore_into_the_issuing_chat_passes_only_the_snapshot():
     """B's staged files are B's: a failure for A never hands them to A's draft."""
     result = _run(switchAt="start", start="500", files=True, bStaged=True)
     assert _named(result, "restore.files") == [["A", ["f.txt"]]]
-
-
-def test_rotated_restore_does_not_duplicate_a_file_reselected_on_the_continuation():
-    """Codex r12: the same file picked again on A2 is a new File object; it is the same file (name, size, mtime)."""
-    result = _run(switchAt="start", switchKind="continuation", start="409-rotated", files=True,
-                  a2Staged=[{"name": "f.txt"}])
-    assert _named(result, "restore.files") == [["A2", ["f.txt"]]]
-
-
-@pytest.mark.parametrize("other", [{"size": 9}, {"lastModified": 7}], ids=["other-size", "other-mtime"])
-def test_rotated_restore_keeps_a_different_file_with_the_same_name(other):
-    result = _run(switchAt="start", switchKind="continuation", start="409-rotated", files=True,
-                  a2Staged=[{"name": "f.txt", **other}])
-    assert _named(result, "restore.files") == [["A2", ["f.txt", "f.txt"]]]
-
-
-# RM gate F2: the continuation is on screen but the user already typed there.
-# Restoring into it would be skipped (the helper never clobbers typed text) and
-# A's text saved nowhere, while the toast says it was saved. It stays A's draft.
-def test_rotated_restore_onto_a_continuation_with_typed_text_keeps_the_text_on_the_issuing_chat():
-    result = _run(switchAt="start", switchKind="continuation", start="409-rotated", files=True,
-                  a2Text="my own words")
-    assert _named(result, "_restoreComposerDraftAfterFailedSend") == [["hello", "A"]]
-    assert _named(result, "restore.files") == [["A", ["f.txt"]]]
-    assert result["composer"] == "my own words"
-    assert _toasts(result)[0][0].endswith("Your text is saved there as a draft.")
-
-
-# RM gate F1: the continuation is off screen and may hold its own saved draft;
-# the failed text is never written over it.
-def test_rotated_restore_never_targets_an_off_screen_continuation():
-    for kind in ("plain", "chain", "cleared", "loading"):
-        scenario = {"switchAt": "start", "start": "409-rotated"}
-        if kind != "plain":
-            scenario["switchKind"] = kind
-        result = _run(**scenario)
-        targets = [args[1] for args in _named(result, "_restoreComposerDraftAfterFailedSend")]
-        assert "A2" not in targets, (kind, targets)

@@ -2274,8 +2274,7 @@ async function send(){
     const errMsg=String((e&&e.message)||'');
     // #9237: the user switched chats while /api/chat/start was in flight. The
     // failure belongs to activeSid: settle its optimistic state by id and keep
-    // the text as its draft (the continuation's after a compression rotation,
-    // none for a deleted chat). Never clear, navigate or annotate the chat now
+    // the text as its draft, as master does (none for a deleted chat). Never clear, navigate or annotate the chat now
     // on screen. A chat that is still running takes master's queue-and-reload
     // branch below instead, on screen or not.
     if(!_isSessionCurrentPane(activeSid)&&!/session already has an active stream/i.test(errMsg)){
@@ -2283,33 +2282,23 @@ async function send(){
       if(typeof clearInflightState==='function') clearInflightState(activeSid);
       if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
       const deleted=!!(e&&e.status===404);
-      let draftSid=activeSid;
+      // A compression rotation is no exception: the text is restored for
+      // activeSid exactly as on master (the server keeps a compressed chat's
+      // draft with its continuation). Its notice does not claim where the text
+      // was saved, because that continuation may already hold a draft.
+      let rotated=false;
       try{
         const body=e&&e.status===409?JSON.parse(e.body||'{}'):null;
-        const cont=(body&&body.code==='session_rotated'&&typeof body.continuation_session_id==='string')?body.continuation_session_id:'';
-        // Restore into the continuation only when it is on screen with an
-        // empty composer. Otherwise the text stays A's own draft, as on master:
-        // writing it to the continuation would replace that chat's saved draft
-        // (off screen) or be dropped behind its typed text (on screen).
-        if(cont&&_isSessionCurrentPane(cont)){
-          const _contInp=$('msg');
-          if(_contInp&&!String(_contInp.value||'').trim()) draftSid=cont;
-        }
+        rotated=!!(body&&body.code==='session_rotated');
       }catch(_){ }
-      // A rotation can name a continuation the user already moved to: files
-      // staged there after this send stay staged next to the restored ones.
-      let restoreFiles=_failedSendFilesSnapshot;
-      if(_isSessionCurrentPane(draftSid)&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length){
-        const staged=S.pendingFiles;
-        // Same test as addFiles(): a file reselected there is the same file.
-        const same=(p,f)=>p&&(p._origName||p.name)===(f._origName||f.name)&&p.size===f.size&&p.lastModified===f.lastModified;
-        restoreFiles=staged.concat((restoreFiles||[]).filter(f=>f&&!staged.some(p=>same(p,f))));
-      }
-      if(!deleted) _restoreComposerDraftAfterFailedSend(_failedSendDraftText, restoreFiles, draftSid, _composerDraftClearPromise, _goalContinuationId);
+      if(!deleted) _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId);
       const owner=_sendOwnerLabel(_ownerTitle);
       if(_sendOwnerIsNewChat(_ownerTitle,_ownerHadMessages)) showToast(t('send_offscreen_new_chat'),null,'error');
-      else showToast(deleted?t('send_offscreen_deleted',owner)
-        :t('send_offscreen_failed',owner,(errMsg||'request failed').replace(/[\s.]+$/,'')),null,'error');
+      else{
+        const reason=(errMsg||'request failed').replace(/[\s.]+$/,'');
+        showToast(deleted?t('send_offscreen_deleted',owner)
+          :t(rotated?'send_offscreen_failed_rotated':'send_offscreen_failed',owner,reason),null,'error');
+      }
       if(typeof renderSessionList==='function') void renderSessionList();
       return;
     }
