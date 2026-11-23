@@ -199,13 +199,13 @@ def _check_against_raw_resolver(tmp_path, ws):
     finally:
         sock.close()
     session = SimpleNamespace(workspace=str(ws))
-    for name, res in zip(names, results):
+    for name, res in zip(names, results, strict=True):
         served = _file_raw_target(session, "no-such-session", name) is not None
         assert res["offered"] is served, (name, rows[name], res)
         assert res["toasts"] == [], (name, res)
-    offered = {n for n, r in zip(names, results) if r["offered"]}
+    offered = {n for n, r in zip(names, results, strict=True) if r["offered"]}
     assert offered == {"notes-link", "notes.txt", "page.html"}
-    assert dict(zip(names, results))["page.html"] == _copied(BASE + "page.html&inline=1")
+    assert dict(zip(names, results, strict=True))["page.html"] == _copied(BASE + "page.html&inline=1")
 
 
 def _http(path, body=None):
@@ -256,7 +256,7 @@ def _check_live_rows(sid):
 
     results = _run_menu([{"item": r} for r in rows])
     seen = {}
-    for row, res in zip(rows, results):
+    for row, res in zip(rows, results, strict=True):
         status, body = _http("/api/file/raw?session_id=" + urllib.parse.quote(sid)
                              + "&path=" + urllib.parse.quote(row["path"], safe=""))
         seen[row["name"]] = (res["offered"], status)
