@@ -41,6 +41,8 @@
 
 ### Fixed
 
+- **Switching chats while a message is still being sent no longer hands that message to the chat you switched to (#9284, refs #9237).** The turn now stays with the chat that sent it, with that chat's model, workspace and profile, and the chat you moved to is left as it was. If the send then fails to start after you have moved away, its text is saved in its own chat as a draft and a short notice names that chat. When the chat was compressed into a continuation meanwhile, the text is restored exactly as before and the notice names the chat without saying where the text went. A chat that is still busy queues the message and takes you back to it, as before, and sending while you stay on the chat is unchanged.
+
 - **Saving a default model from a provider's pinned model group in Settings no longer breaks every later chat (#9304, fixes #9300).** The picker can send the group's id (for example `nous:meituan/longcat-2.5`) as the provider; it was written into `config.yaml` unchanged, and the WebUI and the CLI then refused every turn with an unknown-provider error until the file was edited by hand. The save now keeps only the provider (`nous`), and a provider your config declares under a name with a colon (for example `openrouter:eu`) is kept as is. Thanks @zhangkom.
 
 - **A full disk or quota now shows "Storage on the server is full" instead of "Internal server error" (#9169, closes #9167).** Thanks @angelusbr. When a write fails with no space left (ENOSPC) or over quota (EDQUOT), the server answers HTTP 507 with a message that says to free up space, and the chat shows it. Freeing space is enough; no restart is needed. `docs/troubleshooting.md` has the recovery steps.
