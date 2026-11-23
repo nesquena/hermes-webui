@@ -3508,10 +3508,12 @@
        #btnWorkspacePanelToggle), and a hidden invoker strands focus on <body>. */
     #profileChipWrap{display:none!important;}
     .composer-left{gap:4px;}
-    .composer-footer .composer-left > .composer-model-wrap,
-    .composer-footer.cf-burger .composer-left > .composer-model-wrap{display:inline-flex!important;}
-    .composer-footer .composer-left > .composer-reasoning-wrap.is-available,
-    .composer-footer.cf-burger .composer-left > .composer-reasoning-wrap.is-available{display:inline-flex!important;}
+    /* Scoped to the non-burger footer and to controls the user has not hidden
+       in Settings: `.composer-control-hidden` carries display:none!important
+       from a non-media rule, so an unscoped `!important` here would resurrect a
+       control the user switched off. */
+    .composer-footer:not(.cf-burger) .composer-left > .composer-model-wrap:not(.composer-control-hidden){display:inline-flex!important;}
+    .composer-footer:not(.cf-burger) .composer-left > .composer-reasoning-wrap.is-available:not(.composer-control-hidden){display:inline-flex!important;}
     /* Saved prompts is a desktop-only composer affordance — too much for the
        narrow mobile composer (Nathan 2026-06-09). Hide the button + popup. */
     #btnSavedPrompts,.saved-prompts-popup{display:none!important;}
