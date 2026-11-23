@@ -18393,7 +18393,7 @@ def _handle_session_get(handler, parsed) -> bool:
         for _key in ("parent_session_id", "relationship_type", "active"):
             if getattr(synth, _key, None) is not None:
                 sess[_key] = getattr(synth, _key)
-        attach_todo_state(sess, display_msgs)
+        attach_todo_state(sess, msgs)
         sess = _merge_cli_sidebar_metadata(sess, cli_meta)
         return j(handler, {"session": public_session_projection(sess)})
 

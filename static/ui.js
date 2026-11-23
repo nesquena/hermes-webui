@@ -20605,7 +20605,7 @@ function _isContextCompactionText(text, m){
   const s=String(text||'').replace(/^\s+/,'');
   const low=s.toLowerCase();
   const hasFlag=!!(m&&m._compressed_summary);
-  if(low.startsWith('[context compaction')||low.startsWith('context compaction')) return true;
+  if(low.startsWith('[context compaction')) return true; if(low.startsWith('context compaction')) return hasFlag;
   if(!low.startsWith('[prior context')) return false;
   const close=s.indexOf(']');
   if(close===-1) return false;

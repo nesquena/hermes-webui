@@ -77,7 +77,11 @@ from api.helpers import (
     _is_client_disconnect_error,
     _as_client_disconnect,
 )
-from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
+from api.compression_anchor import (
+    is_context_compression_marker,
+    is_folded_compaction_carrier,
+    visible_messages_for_anchor,
+)
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.gateway_chat import WEBUI_LOCAL_CHAT_BACKEND
 from api.metering import meter
@@ -9704,7 +9708,11 @@ def _deduplicate_context_messages(messages, protected_rows=None):
             if marker_key in seen:
                 continue
             seen.add(marker_key)
-            if isinstance(msg, dict) and msg.get('role') != 'assistant':
+            if (
+                isinstance(msg, dict)
+                and msg.get('role') != 'assistant'
+                and not is_folded_compaction_carrier(msg)
+            ):
                 msg = copy.deepcopy(msg)
                 msg['role'] = 'assistant'
             deduped.append(msg)

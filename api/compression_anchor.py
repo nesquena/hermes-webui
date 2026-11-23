@@ -156,6 +156,21 @@ def is_compaction_handoff_carrier(message):
     return text.startswith("context compaction") or COMPACTION_HANDOFF_DELIMITER_PREFIX in text
 
 
+def is_folded_compaction_carrier(message) -> bool:
+    """Return true when *message* is a folded compaction carrier.
+
+    A folded carrier is a message whose role is set and not ``tool`` and whose
+    marker text starts with ``COMPACTION_HANDOFF_HEADER_PREFIX``
+    (``[prior context``).
+    """
+    if not isinstance(message, dict):
+        return False
+    role = message.get("role")
+    if not role or role == "tool":
+        return False
+    return _marker_text(message).startswith(COMPACTION_HANDOFF_HEADER_PREFIX)
+
+
 def _find_ascii_case_insensitive(needle: str, text: str) -> int:
     """Return the start index of needle in text using ASCII case-insensitive matching, or -1."""
     match = re.search(re.escape(needle), text, flags=re.IGNORECASE | re.ASCII)
@@ -227,9 +242,6 @@ def _compaction_carrier_envelope_decision(content_text: str) -> tuple[str, str]:
     if delimiter_idx >= 0:
         head = after_close[:delimiter_idx].strip()
         if not head:
-            return _CARRIER_PROVEN_SYNTHETIC, ""
-        low_head = head.lower()
-        if low_head.startswith(COMPACTION_PROMPT_CARD_PREFIX) or low_head.startswith("context compaction"):
             return _CARRIER_PROVEN_SYNTHETIC, ""
         return _CARRIER_AUTHENTIC_REMAINDER, head
 
