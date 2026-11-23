@@ -2769,7 +2769,10 @@ $('btnShareSession').onclick=async()=>{
         message:t('share_session_existing_confirm'),
         confirmLabel:t('share_session_copy_existing'),
         cancelLabel:t('share_session_refresh_snapshot'),
+        dismissIsNull:true,
       });
+      // Closing the dialog (×, Escape, backdrop) is not "Refresh snapshot": do nothing.
+      if(reuse===null) return;
       if(reuse){
         await _copyText(existing);
         showToast(t('share_session_link_copied'));
@@ -4002,6 +4005,9 @@ function _applyComposerFooterVisibilitySettings(){
     // when buttons are visible (Greptile feedback).
     _divider.classList.toggle('composer-control-hidden',_allLeftHidden);
   }
+  // #9101: hide_composer_yolo hides the YOLO pill only while YOLO is off
+  // (while it is on, the pill shrinks to its ⚡ icon).
+  if(typeof _updateYoloPill==='function') _updateYoloPill();
 }
 window._applyComposerFooterVisibilitySettings=_applyComposerFooterVisibilitySettings;
 
