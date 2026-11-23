@@ -29,6 +29,10 @@
 
 - **Closing the "already shared" dialog no longer refreshes the public share (#9260, @JayPokale, fixes #9259).** When a chat already had a public link, dismissing the dialog with ×, Escape or a click outside it counted as "Refresh snapshot", so backing out republished every message added since the last share. Now only the "Refresh snapshot" button refreshes the snapshot; dismissing the dialog does nothing.
 
+- **A switched-off provider entry no longer routes a model or supplies its address (#9248, @chhxbchhxb, refs #8954).** With two spellings of one built-in provider in `providers` (for example `OpenAI` with `enabled: false` and `openai`), and the switched-off one listing the chat's model, WebUI picked that entry's `base_url` while Hermes Agent authenticated with the enabled entry's key. So the enabled entry's key went to the switched-off entry's address. The model lookup now skips switched-off entries, so the chat routes as if that entry didn't list the model. Enabled entries, the `enabled` default and its string forms, `custom:` entries and the active-provider guard are unchanged.
+
+- **A provider entry with its own endpoint keeps its key on that endpoint when WebUI looks up a model's context window (#9262, refs #8822).** When a `providers` entry for a built-in provider such as Anthropic, Novita or OpenAI Codex declares its own endpoint (`api`, `url` or `base_url`, the shape Hermes Agent's own config migration writes), the Agent uses that entry's key only with that endpoint. WebUI's context-window lookup could still send the key to the provider's own metadata host when you reloaded a conversation, switched model or started a chat. It now asks only the entry's own endpoint, and otherwise uses the catalog or default context window. An entry without an endpoint of its own is unchanged. Standalone installs without the Agent now also recognise the `chatgpt`, `chatgpt-codex`, `novita-ai` and `novitaai` provider names.
+
 - **A malformed passkey response is refused with 400/401, never a server error.** Registering or signing in with a
   crafted passkey response, for example one whose declared credential ID is longer than the real one, could make the
   CBOR reader raise an unexpected error and answer `500 Internal server error`. Every malformed registration or login
@@ -36,6 +40,12 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **A reply is no longer lost when the Agent shortens an old tool result to save space (#9286, refs #9233).** When the Agent's cold-cache pruning replaced an earlier tool output with a short placeholder, WebUI could no longer prove the new turn extended the saved conversation and refused to keep the reply. WebUI now restores its own full copy of that tool row before the check, so the reply is kept; any other difference is still refused as before.
+
+- **A public share page no longer hides part of a message (#9214).** Some messages contained text the page left out without any sign: an HTML comment, an attribute value the renderer drops, or angle-bracket text such as `git checkout <branch-name>` or a traceback's `File "<stdin>", line 1, in <module>`. Anyone reading the published snapshot's source could still see it. When the rendered message would leave out any of its words, the share page now shows that message as plain text, with a short note, so every word is visible. Messages the page shows in full render as before. A few formatting-only shapes also fall back to plain text although nothing in them is hidden; they're listed in the PR and tracked in #9267.
+
+- **The gateway-sync reset test runs on newer Hermes Agent versions too (#9261, closes #9258).** Both cases of the test that checks a reset conversation stays separate from its reopened parent failed against current Agents, because their fixture used storage calls newer Agents no longer have. The fixture now writes rows with `append_message`, ends the parent session through whichever reset call the installed Agent provides, and checks that the reset took effect.
 
 - **Memory and skill changes can no longer land in the wrong profile after a switch in another tab (#9216, part of #9077).** The active profile is shared across tabs, so an open Memory editor or skill list could still show one profile's data after another tab switched profile, and saving or toggling then wrote into the profile now active. The server now refuses such a write with a clear message, nothing is saved, and the Memory editor keeps your text so you can copy it. Skill toggles show an error and reload the list for the active profile.
 
