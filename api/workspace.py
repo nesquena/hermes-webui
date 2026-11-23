@@ -1329,15 +1329,78 @@ _DIR_FD_OK = os.open in getattr(os, "supports_dir_fd", set())
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_BINARY = getattr(os, "O_BINARY", 0)
+# Linux. O_PATH does not require read permission on the directory, rejects a
+# swapped-in symlink when combined with O_DIRECTORY (ENOTDIR, because O_PATH
+# alone would return the link), and is a valid dir_fd for the next openat.
+# Absent on macOS and BSD.
+_O_PATH = getattr(os, "O_PATH", 0)
 
 
-def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
+def _open_target_pathname(target: Path, *, want_dir: bool, expose_permission: bool) -> int:
+    """Plain pathname open used where openat is unavailable or cannot search.
+
+    ``O_NOFOLLOW`` still applies to the final component, so a leaf swapped for
+    a symlink is not followed. Ancestors are followed, matching a normal open.
+    """
+    flags = (
+        os.O_RDONLY
+        | (_O_DIRECTORY if want_dir else _O_BINARY)
+        | _O_NOFOLLOW
+    )
+    try:
+        return os.open(str(target), flags)
+    except PermissionError:
+        if expose_permission:
+            raise
+        raise FileNotFoundError(f"Not found: {target}") from None
+    except OSError:
+        raise FileNotFoundError(f"Not found: {target}") from None
+
+
+def _anchored_component_flags(*, is_last: bool, want_dir: bool) -> int:
+    """Flags for one path component.
+
+    Intermediate directories are search-only where ``O_PATH`` exists: entering
+    a ``0711`` or ``0311`` directory does not require read permission. The
+    descriptor returned to the caller stays a normal read open, including a
+    readable directory when ``want_dir`` is set, so workspace callers that
+    list or read through the fd do not change.
+    """
+    if not is_last and _O_PATH:
+        return _O_PATH | _O_DIRECTORY | _O_NOFOLLOW
+    want_directory = (not is_last) or want_dir
+    return (
+        os.O_RDONLY
+        | _O_NOFOLLOW
+        | (_O_DIRECTORY if want_directory else _O_BINARY)
+    )
+
+
+def open_anchored_fd(
+    workspace: Path,
+    target: Path,
+    *,
+    want_dir: bool,
+    plain_fallback: bool = False,
+    expose_permission: bool = False,
+) -> int:
     """Open ``target`` race-safely and return an owned file descriptor.
 
     ``target`` must be the symlink-resolved path returned by safe_resolve_ws()
     (i.e. already verified to live under the workspace). Raises FileNotFoundError
-    if a component is missing / wrong-type, or ValueError if a component was
-    swapped to a symlink (escape attempt). Caller owns and must close the fd.
+    if a component is missing, the wrong type, or was swapped to a symlink, and
+    ValueError if ``target`` is not under ``workspace``. Caller owns and must
+    close the fd.
+
+    ``plain_fallback`` is for platforms without ``O_PATH``. If an ancestor open
+    fails with PermissionError, reopen the canonical ``target`` by pathname so
+    a search-only parent is never worse than a plain open. A symlink (ELOOP /
+    ENOTDIR) still becomes FileNotFoundError and does not take that path.
+
+    ``expose_permission`` lets PermissionError on the leaf propagate, and also
+    on an ancestor when ``O_PATH`` is available (that failure is a real search
+    denial, not a missing read bit). Workspace callers leave this off and keep
+    receiving FileNotFoundError for every open error.
     """
     root_resolved = workspace.resolve()
     # Relative, symlink-free component list (resolve() already collapsed any links).
@@ -1350,43 +1413,70 @@ def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
         # Windows / no openat: fall back to a plain pathname open. No new race
         # protection, but no regression vs the prior path-based behaviour, and
         # symlink creation needs admin on Windows anyway.
-        flags = (
-            os.O_RDONLY
-            | (_O_DIRECTORY if want_dir else _O_BINARY)
-            | _O_NOFOLLOW
+        return _open_target_pathname(
+            target, want_dir=want_dir, expose_permission=expose_permission,
         )
-        try:
-            return os.open(str(target), flags)
-        except OSError:
-            raise FileNotFoundError(f"Not found: {target}") from None
 
     # Open the (trusted) workspace root. root_resolved is canonical (resolve()
     # collapsed any symlinks to REACH it, e.g. macOS /tmp -> /private/tmp), so its
     # final component is legitimately a real directory — O_NOFOLLOW here only fires
     # if the root itself was raced into a symlink after resolve() (escape attempt).
-    fd = os.open(str(root_resolved), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
+    # A file open only uses the root as a dir_fd, so on Linux it is search-only
+    # too: a 0311 media root or workspace can still be entered. want_dir keeps
+    # the readable directory open because that fd is what the caller reads.
+    search_only_root = bool(_O_PATH) and not want_dir and bool(rel_parts)
+    root_flags = (
+        (_O_PATH | _O_DIRECTORY | _O_NOFOLLOW)
+        if search_only_root
+        else (os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
+    )
+    try:
+        fd = os.open(str(root_resolved), root_flags)
+    except PermissionError:
+        # Without O_PATH the root open demands read permission. A plain open of
+        # the canonical file only needs search, which is the pre-walk behaviour.
+        if plain_fallback and not _O_PATH:
+            return _open_target_pathname(
+                target, want_dir=want_dir, expose_permission=expose_permission,
+            )
+        raise
+    except OSError:
+        # Root raced to a symlink (ENOTDIR / ELOOP) or otherwise unusable.
+        # FileNotFoundError, not a bare OSError, so the HTTP layer stays 404.
+        raise FileNotFoundError(f"Not found: {target}") from None
     try:
         for i, part in enumerate(rel_parts):
             is_last = i == len(rel_parts) - 1
-            want_directory = (not is_last) or want_dir
-            flags = (
-                os.O_RDONLY
-                | _O_NOFOLLOW
-                | (_O_DIRECTORY if want_directory else _O_BINARY)
-            )
+            flags = _anchored_component_flags(is_last=is_last, want_dir=want_dir)
             try:
                 nfd = os.open(part, flags, dir_fd=fd)
+            except PermissionError:
+                if not is_last and not _O_PATH and plain_fallback:
+                    os.close(fd)
+                    fd = -1
+                    return _open_target_pathname(
+                        target, want_dir=want_dir, expose_permission=expose_permission,
+                    )
+                # Leaf: the file exists but cannot be read (mode 000, or a
+                # Windows sharing violation). Ancestor with O_PATH: search
+                # itself was denied. Both must stay PermissionError when the
+                # caller distinguishes 403 from 404. Workspace callers do not.
+                if expose_permission and (is_last or _O_PATH):
+                    raise
+                raise FileNotFoundError(f"Not found: {target}") from None
             except OSError:
-                # ELOOP (component is a symlink — swapped in) or missing/wrong type.
+                # ELOOP / ENOTDIR (component is a symlink — swapped in) or
+                # missing / wrong type. Never a 500 at the HTTP layer.
                 raise FileNotFoundError(f"Not found: {target}") from None
             os.close(fd)
             fd = nfd
         return fd
     except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         raise
 
 
