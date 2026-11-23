@@ -98,6 +98,21 @@ unread bodies close the connection. Apply native CSRF headers for browser
 writes. Do not retry a mutation blindly: reload on 412 and show the current
 state. Successful mutations return the canonical state and a new ETag.
 
+An editor may group a prepared image and configuration into one Save action.
+The image upload and JSON patch remain separate mutations: send the upload
+first, then use its returned ETag for the patch. A successful image upload is
+not evidence that the subsequent name/activation patch succeeded. Report
+partial or unknown outcomes, retain the unsaved draft, and require an explicit
+fresh read before another mutation after a conflict or transport failure.
+Refreshing capabilities must not silently replace a typed draft.
+
+Validate the public bootstrap independently from management responses; never
+add private config/capabilities to initial HTML to reuse a management validator.
+The optional editor can refresh the shell once after a complete Save because
+core owns initial title/PWA/notification metadata. Such navigation must be
+declared by the extension and disclosed before Save.
+
+
 JSON accepts only `enabled` (boolean), `instance_name` (string, trimmed,
 at most 80 characters, strictly UTF-8 encodable, no C0/DEL controls), `manages_instance_name` (boolean),
 or the standalone `{"action":"reset"}`. Uploading does not enable branding

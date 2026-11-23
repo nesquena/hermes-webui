@@ -335,18 +335,18 @@ _SAVE_DRIVER = r"""
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 
-function extractFunc(name) {
+function extractFunc(name, text = src) {
   const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
-  const start = src.search(re);
+  const start = text.search(re);
   if (start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{', start);
+  let i = text.indexOf('{', start);
   let depth = 1; i++;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}') depth--;
+  while (depth > 0 && i < text.length) {
+    if (text[i] === '{') depth++;
+    else if (text[i] === '}') depth--;
     i++;
   }
-  return src.slice(start, i);
+  return text.slice(start, i);
 }
 
 // saveSettings() reads every control through $('settingsX') with an
@@ -411,6 +411,8 @@ const _enqueueSettingsPost = async ({ method, body }) => {
 
 // Parens matter: a bare `async function f(){}` declaration evaluates to
 // undefined as the eval completion value.
+// The native save path now calls this ui.js helper; keep the real implementation.
+const _normalizeQuotaChipWindow = eval('(' + extractFunc('_normalizeQuotaChipWindow', fs.readFileSync('static/ui.js', 'utf8')) + ')');
 const _saveSettingsFn = eval('(' + extractFunc('saveSettings') + ')');
 
 (async () => {
