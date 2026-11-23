@@ -2241,6 +2241,16 @@ def test_settlement_reports_first_projected_mismatch(caplog):
         )
         assert settled == raw
         assert detail in caplog.text
+        fail_closed_logs = [
+            record for record in caplog.records
+            if record.levelname == "INFO"
+            and (
+                "Projected history not a strict exact prefix and no verified "
+                "tail-merge: failing closed, keeping raw pre-turn context "
+                "(3 rows)"
+            ) in record.getMessage()
+        ]
+        assert len(fail_closed_logs) == 1
         assert "private-" not in caplog.text
 
     caplog.clear()
@@ -2249,3 +2259,4 @@ def test_settlement_reports_first_projected_mismatch(caplog):
     )
     assert settled == raw + [reply]
     assert "projected_len=" not in caplog.text
+    assert "failing closed, keeping raw pre-turn context" not in caplog.text
