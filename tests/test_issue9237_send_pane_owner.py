@@ -123,7 +123,7 @@ function doSwitch(){
   if(SC.switchKind === 'continuation'){
     // The user opened A's compression continuation A2 and staged a new file
     // there with an empty composer before A's start answered.
-    input.value = '';
+    input.value = SC.a2Text || '';
     S.session = {session_id:'A2', workspace:'/a', profile:'pa', model:'model-a', model_provider:'prov-a',
                  title:'Chat A'};
     S.messages = [];
@@ -489,11 +489,13 @@ def test_start_error_after_switch_does_not_add_an_error_bubble_to_the_new_pane()
     assert _named(result, "_restoreComposerDraftAfterFailedSend") == [["hello", "A"]]
 
 
-def test_start_session_rotated_after_switch_keeps_the_draft_on_the_continuation():
+def test_start_session_rotated_after_switch_keeps_the_draft_on_the_issuing_chat():
+    """The continuation A2 is off screen: the text stays A's own draft (as on master); A2's saved draft is not
+    replaced."""
     result = _run(switchAt="start", start="409-rotated")
     _assert_b_untouched(result)
     _assert_owner_settled(result)
-    assert _named(result, "_restoreComposerDraftAfterFailedSend") == [["hello", "A2"]]
+    assert _named(result, "_restoreComposerDraftAfterFailedSend") == [["hello", "A"]]
 
 
 # ── controls: no switch keeps today's behaviour ────────────────────────────
@@ -683,7 +685,7 @@ def test_a_never_started_chat_start_failure_says_it_is_not_in_the_list(owner_tit
     _assert_owner_settled(result)
     assert _toasts(result) == [[NEW_CHAT, None, "error"]]
     # What is persisted does not change.
-    restored = {"404": [], "409-rotated": [["hello", "A2"]]}.get(start, [["hello", "A"]])
+    restored = {"404": []}.get(start, [["hello", "A"]])
     assert _named(result, "_restoreComposerDraftAfterFailedSend") == restored
 
 
@@ -831,9 +833,9 @@ def test_rotated_restore_keeps_a_file_staged_on_the_continuation():
 
 
 def test_rotated_restore_to_a_continuation_off_screen_passes_only_the_snapshot():
-    """On B with b.txt staged, a rotation to A2 (not on screen) hands A2 only A's file."""
+    """On B with b.txt staged, a rotation to A2 (not on screen) keeps A's text and file as A's draft."""
     result = _run(switchAt="start", start="409-rotated", files=True, bStaged=True)
-    assert _named(result, "restore.files") == [["A2", ["f.txt"]]]
+    assert _named(result, "restore.files") == [["A", ["f.txt"]]]
 
 
 def test_failed_start_restore_into_the_issuing_chat_passes_only_the_snapshot():
@@ -854,3 +856,27 @@ def test_rotated_restore_keeps_a_different_file_with_the_same_name(other):
     result = _run(switchAt="start", switchKind="continuation", start="409-rotated", files=True,
                   a2Staged=[{"name": "f.txt", **other}])
     assert _named(result, "restore.files") == [["A2", ["f.txt", "f.txt"]]]
+
+
+# RM gate F2: the continuation is on screen but the user already typed there.
+# Restoring into it would be skipped (the helper never clobbers typed text) and
+# A's text saved nowhere, while the toast says it was saved. It stays A's draft.
+def test_rotated_restore_onto_a_continuation_with_typed_text_keeps_the_text_on_the_issuing_chat():
+    result = _run(switchAt="start", switchKind="continuation", start="409-rotated", files=True,
+                  a2Text="my own words")
+    assert _named(result, "_restoreComposerDraftAfterFailedSend") == [["hello", "A"]]
+    assert _named(result, "restore.files") == [["A", ["f.txt"]]]
+    assert result["composer"] == "my own words"
+    assert _toasts(result)[0][0].endswith("Your text is saved there as a draft.")
+
+
+# RM gate F1: the continuation is off screen and may hold its own saved draft;
+# the failed text is never written over it.
+def test_rotated_restore_never_targets_an_off_screen_continuation():
+    for kind in ("plain", "chain", "cleared", "loading"):
+        scenario = {"switchAt": "start", "start": "409-rotated"}
+        if kind != "plain":
+            scenario["switchKind"] = kind
+        result = _run(**scenario)
+        targets = [args[1] for args in _named(result, "_restoreComposerDraftAfterFailedSend")]
+        assert "A2" not in targets, (kind, targets)

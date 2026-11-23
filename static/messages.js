@@ -2286,7 +2286,15 @@ async function send(){
       let draftSid=activeSid;
       try{
         const body=e&&e.status===409?JSON.parse(e.body||'{}'):null;
-        if(body&&body.code==='session_rotated'&&typeof body.continuation_session_id==='string'&&body.continuation_session_id) draftSid=body.continuation_session_id;
+        const cont=(body&&body.code==='session_rotated'&&typeof body.continuation_session_id==='string')?body.continuation_session_id:'';
+        // Restore into the continuation only when it is on screen with an
+        // empty composer. Otherwise the text stays A's own draft, as on master:
+        // writing it to the continuation would replace that chat's saved draft
+        // (off screen) or be dropped behind its typed text (on screen).
+        if(cont&&_isSessionCurrentPane(cont)){
+          const _contInp=$('msg');
+          if(_contInp&&!String(_contInp.value||'').trim()) draftSid=cont;
+        }
       }catch(_){ }
       // A rotation can name a continuation the user already moved to: files
       // staged there after this send stay staged next to the restored ones.

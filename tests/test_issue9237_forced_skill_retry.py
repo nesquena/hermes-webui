@@ -375,7 +375,9 @@ def test_off_screen_conflict_keeps_a_newer_draft_saved_in_the_issuing_chat(skill
 
 @pytest.mark.parametrize("start", ["500", "409-rotated"])
 def test_off_screen_failure_restores_the_text_without_the_skill_as_master(start):
-    target = "A2" if start == "409-rotated" else "A"
+    # A rotation whose continuation is off screen keeps the text as A's own
+    # draft (as on master), so the retry is from A in both cases.
+    target = "A"
     result = _run(*_fail_off_screen(start), _open(target), _send())
     _first, retry = result["starts"]
     assert retry["session_id"] == target
