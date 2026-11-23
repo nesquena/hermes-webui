@@ -87,6 +87,41 @@ def test_parallel_docs_qualify_shared_connections_and_waiting():
     assert wait in disable_step
 
 
+def test_reload_reports_runtime_unavailable_only_for_a_failed_import():
+    """The two reload messages the troubleshooting notes separate.
+
+    ``MCP runtime unavailable`` is raised from the import of the Agent's MCP
+    runtime; a missing optional ``mcp`` extra leaves that import working and
+    ends the reload with ``No MCP servers connected`` instead.
+    """
+    commands = _repo_text("api/commands.py")
+    import_failure, _, after_import = commands.partition(
+        'raise RuntimeError("MCP runtime unavailable") from exc'
+    )
+    assert after_import, "the import guard no longer raises MCP runtime unavailable"
+    assert 'logger.warning("Failed to import MCP runtime for /reload-mcp"' in (
+        import_failure.rpartition("except Exception as exc:")[2]
+    )
+    # The empty-connection message is produced after discovery, not by the guard.
+    assert 'lines.append("No MCP servers connected")' in after_import
+
+
+def test_parallel_docs_blame_the_missing_extra_for_an_empty_reload():
+    section = " ".join(_parallel_section().split())
+    empty, _, runtime_unavailable = section.partition(
+        "If reload reports `MCP runtime unavailable` instead"
+    )
+    assert runtime_unavailable, "the MCP runtime unavailable note moved or was dropped"
+    assert "If reload ends with `No MCP servers connected`" in empty
+    assert (
+        "Install the Agent's `mcp` extra in the runtime that serves WebUI, restart "
+        "WebUI, then reload with the profile selected" in empty
+    )
+    # The extra belongs to the empty-reload causes, not to the import failure.
+    assert "optional extra" not in runtime_unavailable
+    assert "read that as a missing Agent MCP runtime" not in section
+
+
 def test_parallel_docs_require_the_profile_homes_config_path():
     section = " ".join(_parallel_section().split())
     assert (

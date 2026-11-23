@@ -327,20 +327,27 @@ profile and on every profile that shares one of its servers. On older Agents
 without profile-scoped MCP, reload reconnects MCP servers process-wide, so the
 same single-profile conditions apply.
 
-MCP support is an optional extra on a minimal Hermes Agent install; a full
-install and the Docker image already include it. If reload reports
-`MCP runtime unavailable`, read that as a missing Agent MCP runtime rather than
-a config problem, and check the Hermes Agent installation using
-[Troubleshooting](troubleshooting.md). Docker users should also check the Agent
-source mount and dependency setup in the [Docker guide](docker.md).
-
 If reload ends with `No MCP servers connected`, or `parallel` stays
 **Configured** in **MCP Servers** after reload finishes, the config was read but
-no connection came up. Check that the entry is under `mcp_servers` in the file
-diagnostics reports for the selected profile, that it is not disabled, and that
-the host running Hermes can reach `https://search.parallel.ai/mcp`. Then reload
-again with the same profile selected: a server that failed to connect stays
-configured, and the next reload of its own profile retries it.
+no connection came up. Check these causes:
+
+- MCP support is an optional extra on a minimal Hermes Agent install; a full
+  install and the Docker image already include it. Without that extra,
+  discovery connects nothing and reload reports exactly this message however
+  the config reads. Install the Agent's `mcp` extra in the runtime that serves
+  WebUI, restart WebUI, then reload with the profile selected.
+- The entry is under `mcp_servers` in the file diagnostics reports for the
+  selected profile, and it is not disabled.
+- The host running Hermes can reach `https://search.parallel.ai/mcp`.
+
+Then reload again with the same profile selected: a server that failed to
+connect stays configured, and the next reload of its own profile retries it.
+
+If reload reports `MCP runtime unavailable` instead, WebUI could not import the
+Agent's MCP runtime at all. Read that as a broken or incomplete Agent
+installation rather than a config problem, and check it using
+[Troubleshooting](troubleshooting.md). Docker users should also check the Agent
+source mount and dependency setup in the [Docker guide](docker.md).
 
 ## When to file an issue
 
