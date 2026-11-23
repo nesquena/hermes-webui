@@ -131,6 +131,78 @@ class TestResolveImageInputMode:
         ) == "native"
 
 
+class TestProviderQualifiedSessionModel:
+    """#9196: gateway sessions store the model as ``@provider:model``.
+
+    The request body strips that prefix through ``_gateway_model_field()``, but
+    image routing used to receive the raw string. The capability lookup then
+    searched for a model literally named ``@custom:mygateway:my-vision-model``,
+    missed the ``supports_vision`` entry and returned the wrong verdict.
+    ``_resolve_image_input_mode`` must normalise the session model the same way
+    (``_parse_provider_qualified_model_id``) so every caller is covered.
+    """
+
+    @requires_agent_routing
+    def test_prefixed_model_reaches_capability_lookup_unprefixed(self, monkeypatch):
+        """The lookup hook must see the bare model name, not the route hint."""
+        import agent.image_routing as image_routing
+
+        seen_models: list[str] = []
+        real_lookup = image_routing._lookup_supports_vision
+
+        def spy(provider, model, cfg=None, **kwargs):
+            seen_models.append(model)
+            return real_lookup(provider, model, cfg, **kwargs)
+
+        monkeypatch.setattr(image_routing, "_lookup_supports_vision", spy)
+        cfg = _cfg_with_provider_vision("mygateway", "my-vision-model", True)
+        assert _resolve_image_input_mode(
+            cfg,
+            "custom:mygateway",
+            "@custom:mygateway:my-vision-model",
+            requested_provider="custom:mygateway",
+        ) == "native"
+        assert seen_models, "capability lookup was never consulted"
+        assert set(seen_models) == {"my-vision-model"}
+
+    @requires_agent_routing
+    def test_prefixed_text_only_model_routes_text_like_bare(self):
+        """A config-known text-only model must not gain native images by being
+        stored with a provider prefix: the carve-out for unknown models is only
+        sound while the capability lookup actually finds the entry."""
+        cfg = _cfg_with_provider_vision("mygateway", "my-text-model", False)
+        bare = _resolve_image_input_mode(
+            cfg, "custom:mygateway", "my-text-model",
+            requested_provider="custom:mygateway",
+        )
+        prefixed = _resolve_image_input_mode(
+            cfg, "custom:mygateway", "@custom:mygateway:my-text-model",
+            requested_provider="custom:mygateway",
+        )
+        assert bare == "text"
+        assert prefixed == bare
+
+    @requires_agent_routing
+    def test_prefixed_model_matches_bare_with_explicit_auxiliary_vision(self):
+        """Parity fence: an explicit ``auxiliary.vision`` backend is a documented
+        text signal for the MAIN model (agent/image_routing.py), so the prefix
+        must not change that verdict either. Normalising the model must never
+        bypass the explicit-signal rule."""
+        cfg = _cfg_with_provider_vision("mygateway", "my-vision-model", True)
+        cfg["auxiliary"] = {
+            "vision": {"provider": "custom:mygateway", "model": "other-vision-model"}
+        }
+        bare = _resolve_image_input_mode(
+            cfg, "custom:mygateway", "my-vision-model",
+            requested_provider="custom:mygateway",
+        )
+        prefixed = _resolve_image_input_mode(
+            cfg, "custom:mygateway", "@custom:mygateway:my-vision-model",
+            requested_provider="custom:mygateway",
+        )
+        assert bare == prefixed
+
+
 # ── _build_native_multimodal_message forwarding ─────────────────────────────
 
 def _normalized_attachments(img_path: Path) -> list:
