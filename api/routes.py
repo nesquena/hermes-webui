@@ -21653,10 +21653,22 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, str(e))
             s.workspace = new_ws
             if "model" in body or "model_provider" in body:
+                requested_provider = None
+                if "model_provider" in body:
+                    # #9314: session writes use the same normalisation as the
+                    # default-model save. A picker group id such as
+                    # `nous:meituan/longcat-2.5` must be stored as `nous`; a
+                    # provider the config declares under a colon name is kept
+                    # verbatim (splitting it would re-route the session).
+                    from api.config import normalize_provider_for_persistence
+
+                    requested_provider = normalize_provider_for_persistence(
+                        body.get("model_provider")
+                    )
                 changed = _invalidate_session_route_state_if_changed(
                     s,
                     model=body.get("model", s.model),
-                    provider=body.get("model_provider") if "model_provider" in body else None,
+                    provider=requested_provider,
                     provider_specified="model_provider" in body,
                 )
                 if changed:

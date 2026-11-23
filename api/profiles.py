@@ -3353,7 +3353,13 @@ def _write_model_defaults_to_config(
     if default_model:
         model_section['default'] = default_model
     if model_provider:
-        model_section['provider'] = model_provider
+        # #9314: the profile form sends the picker's group id
+        # (`nous:meituan/longcat-2.5`). Persist the provider only, exactly as
+        # the default-model save does; a provider this profile's config
+        # declares under a colon name is kept verbatim.
+        from api.config import normalize_provider_for_persistence
+
+        model_section['provider'] = normalize_provider_for_persistence(model_provider, cfg)
     cfg['model'] = model_section
     _atomic_write_text(config_path, _yaml.dump(cfg, default_flow_style=False, allow_unicode=True), encoding='utf-8')
 
@@ -3376,7 +3382,13 @@ def create_profile_api(name: str, clone_from: str = None,
     if clone_from is not None and not _is_root_profile(clone_from):
         _validate_profile_name(clone_from)
     default_model, model_provider = _split_webui_provider_model_value(default_model, model_provider)
-    _validate_profile_model_selection(default_model, model_provider)
+    # #9314: validate the provider the profile will actually store. A picker
+    # group id (`nous:meituan/longcat-2.5`) names no catalog provider, so the
+    # selection check would reject a save whose stored value is `nous`.
+    from api.config import normalize_provider_for_persistence
+
+    stored_provider = normalize_provider_for_persistence(model_provider)
+    _validate_profile_model_selection(default_model, stored_provider)
 
     try:
         from hermes_cli.profiles import create_profile
@@ -3431,7 +3443,7 @@ def create_profile_api(name: str, clone_from: str = None,
         _write_api_key_to_dotenv(
             profile_path,
             api_key=api_key,
-            model_provider=model_provider,
+            model_provider=stored_provider,
         )
     _write_model_defaults_to_config(
         profile_path,

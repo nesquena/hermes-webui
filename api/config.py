@@ -7611,6 +7611,86 @@ def _provider_is_config_declared(provider_id: str, config_obj: dict) -> bool:
         return True
 
 
+def _is_undeclared_pinned_provider(provider_id: object, config_obj: dict) -> bool:
+    """True when *provider_id* is a ``<built-in>:<suffix>`` name this config does not declare.
+
+    That shape is what the Settings picker sends for a catalog group whose
+    provider is not the active one: the suffix is the model pin (``nous`` +
+    ``meituan/longcat-2.5``). The Agent has no provider registered under the
+    full string, so persisting it makes every turn fail with
+    ``invalid_provider`` (#9300/#9304). A name the config declares under a
+    colon (``openrouter:eu``) is a real provider and is NOT reported here:
+    splitting it would re-route traffic to another endpoint and key (#9314).
+    ``custom:*`` ids are multi-segment by design and are never split.
+    """
+    raw = str(provider_id or "").strip()
+    prefix, separator, pin = raw.partition(":")
+    return bool(
+        separator
+        and pin
+        and prefix.strip().lower() != "custom"
+        and not _provider_is_config_declared(raw, config_obj)
+        and _is_known_model_provider(_resolve_provider_alias(prefix.strip()))
+    )
+
+
+def _model_id_carries_provider_pin(model_id: object, pin: str) -> bool:
+    """True when *pin* names *model_id* (the picker's ``<provider>:<model>`` group id).
+
+    A genuine picker pin always names the model that was selected: the dropdown
+    hands over both from the same option, so the suffix is the model id, with
+    an optional tag (``:free``) or wrapped in the ``@provider:`` route hint. A
+    suffix that names something else is a stale/broken provider value, not a
+    pin (#9314).
+    """
+    model = str(model_id or "").strip().lower()
+    if model.startswith("@"):
+        parsed = _parse_provider_qualified_model_id(model)
+        if parsed and str(parsed[0] or "").strip():
+            model = str(parsed[0]).strip()
+    pin = str(pin or "").strip().lower()
+    if not pin or not model:
+        return False
+    return (
+        model == pin
+        or model.startswith(pin + ":")
+        or model.startswith(pin + "/")
+    )
+
+
+def _undeclared_provider_error(provider_id: str, builtin: str) -> str:
+    """Message for a broken ``<built-in>:<suffix>`` provider a save would write (#9314)."""
+    return (
+        f"Provider '{provider_id}' is not declared in this profile's config, so every "
+        f"chat turn fails with the Agent's invalid_provider error. Open Settings → "
+        f"Main model options, select the model again and Save (the provider becomes "
+        f"'{builtin}'), or declare '{provider_id}' under providers: in config.yaml."
+    )
+
+
+def normalize_provider_for_persistence(
+    provider: object,
+    config_obj: dict | None = None,
+) -> str:
+    """Return *provider* the way the WebUI must persist it (#9304/#9314).
+
+    The Settings picker sends a catalog group id, ``<built-in>:<model-pin>``
+    (e.g. ``nous:meituan/longcat-2.5``). The Agent does not register such a
+    provider, so storing it makes every turn fail with ``invalid_provider``;
+    only the built-in provider is kept. A name this profile's config declares
+    with a colon (``providers:`` / ``custom_providers``, also through a
+    ``${VAR}``) is a real provider and is returned verbatim, and so is any name
+    whose lookup fails (fail safe) — splitting those would re-route traffic to
+    another endpoint with another key (#9314). ``custom:*`` ids, model ids and
+    empty values pass through unchanged.
+    """
+    raw = str(provider or "").strip()
+    config_data = config_obj if isinstance(config_obj, dict) else cfg
+    if _is_undeclared_pinned_provider(raw, config_data):
+        return raw.partition(":")[0].strip()
+    return raw
+
+
 def set_hermes_default_model(model_id: str, provider: str | None = None, advanced: dict | None = None) -> dict:
     """Persist the Hermes default model in config.yaml and reload runtime config."""
     selected_model = str(model_id or "").strip()
@@ -7642,10 +7722,17 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         if (
             separator
             and model_pin
-            and provider_prefix.lower() != "custom"
-            and not _provider_is_config_declared(requested_provider, config_data)
-            and _is_known_model_provider(_resolve_provider_alias(provider_prefix))
+            and _is_undeclared_pinned_provider(requested_provider, config_data)
         ):
+            if not _model_id_carries_provider_pin(selected_model, model_pin):
+                # #9314: an undeclared ``<built-in>:<suffix>`` whose suffix is
+                # NOT the selected model is a stale/broken provider written by
+                # hand (or before exp-v0.52.742), not a picker pin. Splitting it
+                # here would hide the breakage and could re-route traffic, so
+                # name it and leave the config untouched.
+                raise ValueError(
+                    _undeclared_provider_error(requested_provider, provider_prefix)
+                )
             # The picker may send a built-in provider's pinned catalog group.
             # Keep the provider selection without persisting its model pin.
             requested_provider = provider_prefix
@@ -7665,6 +7752,17 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         # matcher — see `static/panels.js` (#895).
         persisted_model = str(resolved_model or selected_model).strip()
         persisted_provider = str(requested_provider or resolved_provider or previous_provider or "").strip()
+        if _is_undeclared_pinned_provider(persisted_provider, config_data):
+            # #9314: the config already holds `<built-in>:<suffix>` and this
+            # save would write it back unchanged, so the next turn keeps failing
+            # with the Agent's generic `invalid_provider` error. Name the value
+            # instead of answering ok; one explicit Save in Settings → Main
+            # model options goes through the normalisation above and repairs it.
+            raise ValueError(
+                _undeclared_provider_error(
+                    persisted_provider, persisted_provider.partition(":")[0].strip()
+                )
+            )
         provider_override_won = bool(requested_provider and requested_provider != str(resolved_provider or "").strip())
         # Never persist the bogus ``local`` value — see #1384. The auto-detect
         # block in ``_build_available_models_uncached`` was rewriting unknown
