@@ -70,8 +70,9 @@ function t(key, ...args) {{
   if (value === undefined) return key;
   return value.replace('{{0}}', String(args[0] === undefined ? '' : args[0]));
 }}
-// The renderer's tooltip formatter; the real one is exercised separately by
-// test_done_tooltip_uses_the_real_formatter.
+// The renderer's tooltip formatter, stubbed: the render harness only needs to
+// see that the fragment calls it with the stored timestamp. The real formatter
+// is executed separately by test_done_tooltip_formats_an_epoch_zero_timestamp.
 function _formatSessionDoneTime(ms) {{ return (ms === 0 || ms) ? 'a while ago' : 'unknown'; }}
 
 const out = [];
@@ -168,7 +169,6 @@ def _run_formatters(cases):
             "_localDayOrdinal",
             "_sessionCalendarBoundaries",
             "_formatSessionDate",
-            "_formatSessionTimeAgo",
             "_formatRelativeSessionTime",
             "_formatSessionDoneTime",
         )
@@ -213,8 +213,8 @@ def test_done_tooltip_formats_an_epoch_zero_timestamp():
     assert "1970" in out[0]["done"], out
     # The activity-time formatter keeps treating 0 as "no timestamp": other
     # callers rely on that (`_sessionTimestampMs` returns 0 for a row without
-    # one), so the done tooltip gets its own presence check instead of
-    # loosening the shared one.
+    # one), so the done tooltip opts in with `allowZero` instead of the shared
+    # guard being loosened for everyone.
     assert out[0]["relative"] == "unknown", out
 
 

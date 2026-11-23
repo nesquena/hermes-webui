@@ -9327,12 +9327,13 @@ function _formatSessionDate(timestampMs, nowMs) {
   return date.toLocaleDateString(undefined, options);
 }
 
-function _formatRelativeSessionTime(timestampMs, nowMs) {
-  if (!timestampMs) return t('session_time_unknown');
-  return _formatSessionTimeAgo(timestampMs, nowMs);
-}
-
-function _formatSessionTimeAgo(timestampMs, nowMs) {
+// `opts.allowZero`: `done_at` is stored in epoch seconds, so a stored 0 is a
+// real timestamp and the done badge must format it. The activity-time callers
+// pass no opts and keep "0 means missing" (`_sessionTimestampMs` returns 0 for
+// a row with no timestamp), so presence stays the caller's decision instead of
+// the shared formatter loosening its guard for everyone.
+function _formatRelativeSessionTime(timestampMs, nowMs, opts) {
+  if (!timestampMs && !(opts && opts.allowZero)) return t('session_time_unknown');
   nowMs = nowMs || _serverNowMs();
   const diffMs = Math.max(0, nowMs - timestampMs);
   const minute = 60 * 1000;
@@ -9354,18 +9355,16 @@ function _formatSessionTimeAgo(timestampMs, nowMs) {
   return _formatSessionDate(timestampMs, nowMs);
 }
 
-// A `done_at` of 0 is a valid epoch timestamp, so the done badge's tooltip
-// cannot use `_formatRelativeSessionTime`'s "0 means missing" check (correct
-// for the activity-time callers, where `_sessionTimestampMs` returns 0 for a
-// row with no timestamp). Presence is decided here; the relative formatting is
-// the same function those callers use, so the wording never diverges.
+// A `done_at` of 0 is a valid epoch timestamp, so presence is decided here
+// (never with truthiness) and the formatting is delegated to the shared
+// relative formatter with `allowZero`, so the wording cannot diverge.
 function _formatSessionDoneTime(timestampMs, nowMs) {
   const value = Number(timestampMs);
   if (timestampMs === null || timestampMs === undefined || timestampMs === ''
       || !Number.isFinite(value) || value < 0) {
     return t('session_time_unknown');
   }
-  return _formatSessionTimeAgo(value, nowMs);
+  return _formatRelativeSessionTime(value, nowMs, {allowZero: true});
 }
 
 function _sessionTimeBucketLabel(timestampMs, nowMs) {

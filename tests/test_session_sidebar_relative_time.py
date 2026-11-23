@@ -25,21 +25,19 @@ def _extract_function(source: str, name: str) -> str:
     raise AssertionError(f"Could not extract {name}")
 
 
+EXTRACTED_FUNCTIONS = (
+    "_sessionTimestampMs",
+    "_localDayOrdinal",
+    "_sessionCalendarBoundaries",
+    "_formatSessionDate",
+    "_formatRelativeSessionTime",
+    "_sessionTimeBucketLabel",
+)
+
+
 def _run_session_time_case(script_body: str) -> dict:
     functions = "\n\n".join(
-        _extract_function(SESSIONS_JS, name)
-        for name in (
-            "_sessionTimestampMs",
-            "_localDayOrdinal",
-            "_sessionCalendarBoundaries",
-            "_formatSessionDate",
-            # `_formatRelativeSessionTime` delegates the formatting itself to
-            # `_formatSessionTimeAgo` (so the done-badge tooltip can format a
-            # zero timestamp while this helper keeps treating 0 as missing).
-            "_formatSessionTimeAgo",
-            "_formatRelativeSessionTime",
-            "_sessionTimeBucketLabel",
-        )
+        _extract_function(SESSIONS_JS, name) for name in EXTRACTED_FUNCTIONS
     )
     script = textwrap.dedent(
         f"""
@@ -182,3 +180,50 @@ def test_german_relative_time_translations_interpolate_numbers():
     assert "session_time_minutes_ago: 'Vor {n} Minuten'" not in I18N_JS
     assert "session_time_hours_ago: 'Vor {n} Stunden'" not in I18N_JS
     assert "session_time_days_ago: 'Vor {n} Tagen'" not in I18N_JS
+
+
+# Every other top-level helper these files are allowed to call from inside an
+# extracted function: JS builtins, the harness's `t()`, and the field readers
+# that live outside the extraction list on purpose.
+_ALLOWED_OUTSIDE_CALLS = {
+    "Date",
+    "Math",
+    "Number",
+    "String",
+    "JSON",
+    "Object",
+    "Array",
+    "t",
+    "renderSessionListFromCache",
+    "_serverNowMs",
+    "_serverTzOptions",
+    "_formatSessionDoneTime",
+    "_repaintSidebarForBackgroundChurn",
+}
+
+
+def test_extracted_helpers_only_call_helpers_the_harness_defines():
+    """A helper that delegates to a function the harness does not extract dies.
+
+    The node harness defines exactly `EXTRACTED_FUNCTIONS` plus `t()`; a call to
+    anything else throws `ReferenceError` and the whole suite goes red — which
+    is how splitting `_formatRelativeSessionTime` broke the upstream
+    `test_issue1144_session_time_sync.py` (it extracts its own list). Keep each
+    extracted body self-contained, or add the callee to both lists.
+    """
+    import re
+
+    known = set(EXTRACTED_FUNCTIONS) | _ALLOWED_OUTSIDE_CALLS
+    offenders = []
+    for name in EXTRACTED_FUNCTIONS:
+        body = _extract_function(SESSIONS_JS, name)
+        body = re.sub(r"//[^\n]*", "", body)  # comments are not calls
+        for callee in re.findall(r"(?<![\w.$])([A-Za-z_$][\w$]*)\s*\(", body):
+            if callee in {"function", "if", "for", "while", "switch", "catch", "return"}:
+                continue
+            if callee not in known:
+                offenders.append(f"{name} -> {callee}")
+    assert not offenders, (
+        "extracted helpers call helpers the node harness never defines "
+        f"(add them to EXTRACTED_FUNCTIONS or inline them): {offenders}"
+    )
