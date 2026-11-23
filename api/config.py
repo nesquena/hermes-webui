@@ -7598,10 +7598,15 @@ def _provider_is_config_declared(provider_id: str, config_obj: dict) -> bool:
     A ``providers:`` or ``custom_providers`` entry may be named
     ``<built-in>:<suffix>`` (e.g. ``openrouter:eu``). The Agent resolves that
     name as its own endpoint, so a save must persist it verbatim instead of
-    splitting it into the built-in prefix. A lookup failure keeps it verbatim.
+    splitting it into the built-in prefix. Both the raw file this save loaded and
+    the runtime config count: a name given as a ``${VAR}`` reference matches only
+    once expanded. A lookup failure keeps it verbatim.
     """
     try:
-        return bool(_named_custom_provider_slug_for_provider(provider_id, config_obj))
+        return bool(
+            _named_custom_provider_slug_for_provider(provider_id, config_obj)
+            or _named_custom_provider_slug_for_provider(provider_id, cfg)
+        )
     except Exception:
         return True
 
