@@ -1,12 +1,20 @@
 """Inline edit of a user message keeps a visible caret and text selection.
 
-The Geist Contrast light check resolves the real stylesheet cascade and
-computes WCAG contrast from those authored colors. It does not launch
-Chromium. Playwright is not installed for the project test interpreter,
-so there is no browser harness to drive here.
+The cascade checks resolve authored colors from the stylesheet. The Chromium
+regression selects the inline editor and reads the computed ::selection color
+from headless Chromium. Playwright is not installed for the project test
+interpreter; the test drives the headless shell directly.
 """
+import html
+import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
+
+import pytest
 
 CSS = (Path(__file__).resolve().parents[1] / "static" / "style.css").read_text(encoding="utf-8")
 _CSS_NO_COMMENTS = re.sub(r"/\*.*?\*/", "", CSS, flags=re.S)
@@ -282,3 +290,181 @@ def test_touch_width_uses_the_same_edit_selection():
                     break
         else:
             raise AssertionError("unbalanced @media")
+
+
+_CHROME_GLOB = "chromium_headless_shell-*"
+_CHROME_RELATIVE = Path("chrome-headless-shell-linux64") / "chrome-headless-shell"
+_SELECTION_FIXTURE = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="__CSS_URI__">
+</head>
+<body>
+<section id="geist-contrast-light">
+  <div class="msg-row" data-role="user" data-editing="1">
+    <textarea class="msg-edit-area">Geist Contrast light</textarea>
+  </div>
+</section>
+<section id="default-light">
+  <div class="msg-row" data-role="user" data-editing="1">
+    <textarea class="msg-edit-area">Default light</textarea>
+  </div>
+</section>
+<section id="default-dark">
+  <div class="msg-row" data-role="user" data-editing="1">
+    <textarea class="msg-edit-area">Default dark</textarea>
+  </div>
+</section>
+<pre id="probe">UNSET</pre>
+<script>
+function readSelection(id, skin, dark) {
+  const root = document.documentElement;
+  root.classList.toggle("dark", dark);
+  if (skin) root.setAttribute("data-skin", skin);
+  else root.removeAttribute("data-skin");
+  const area = document.getElementById(id).querySelector("textarea.msg-edit-area");
+  area.focus();
+  area.setSelectionRange(0, area.value.length);
+  const selectedChars = area.selectionEnd - area.selectionStart;
+  const pseudo = getComputedStyle(area, "::selection");
+  const own = getComputedStyle(area);
+  const tokens = getComputedStyle(root);
+  return {
+    id: id,
+    innerWidth: window.innerWidth,
+    selectedChars: selectedChars,
+    valueLength: area.value.length,
+    active: document.activeElement === area,
+    tag: area.tagName,
+    className: area.className,
+    role: area.parentElement.getAttribute("data-role"),
+    editing: area.parentElement.getAttribute("data-editing"),
+    color: pseudo.color,
+    backgroundColor: pseudo.backgroundColor,
+    fontSize: own.fontSize,
+    fontWeight: own.fontWeight,
+    strong: tokens.getPropertyValue("--strong").trim(),
+    bg: tokens.getPropertyValue("--bg").trim()
+  };
+}
+const rows = [
+  readSelection("geist-contrast-light", "geist-contrast", false),
+  readSelection("default-light", null, false),
+  readSelection("default-dark", null, true)
+];
+document.getElementById("probe").textContent = JSON.stringify(rows);
+</script>
+</body>
+</html>
+"""
+
+
+def _chrome_shell() -> Path | None:
+    env = os.environ.get("CHROME_HEADLESS_SHELL")
+    if env and Path(env).is_file():
+        return Path(env)
+    found = shutil.which("chrome-headless-shell")
+    if found:
+        return Path(found)
+    roots = []
+    browsers = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if browsers:
+        roots.append(Path(browsers))
+    roots.append(Path.home() / ".cache" / "ms-playwright")
+    for root in roots:
+        matches = sorted(root.glob(_CHROME_GLOB + "/" + str(_CHROME_RELATIVE)))
+        if matches:
+            return matches[-1]
+    return None
+
+
+def _rgb_hex(value: str) -> str:
+    match = re.fullmatch(r"rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", value.strip())
+    assert match, f"expected an opaque rgb() color, got {value!r}"
+    channels = tuple(int(channel) for channel in match.groups())
+    assert all(0 <= channel <= 255 for channel in channels)
+    return "#{:02x}{:02x}{:02x}".format(*channels)
+
+
+def _chromium_selection(width: int) -> dict[str, dict]:
+    chrome = _chrome_shell()
+    if chrome is None:
+        pytest.skip("chrome-headless-shell is not installed")
+    css_uri = (Path(__file__).resolve().parents[1] / "static" / "style.css").as_uri()
+    with tempfile.TemporaryDirectory() as tmp:
+        page = Path(tmp) / "edit-selection.html"
+        page.write_text(_SELECTION_FIXTURE.replace("__CSS_URI__", css_uri), encoding="utf-8")
+        proc = subprocess.run(
+            [
+                str(chrome),
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--headless",
+                f"--window-size={width},800",
+                "--dump-dom",
+                page.as_uri(),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    assert proc.returncode == 0, proc.stderr[-500:]
+    match = re.search(r'<pre id="probe">([^<]*)</pre>', proc.stdout)
+    assert match, "Chromium did not return the selection probe"
+    payload = html.unescape(match.group(1)).strip()
+    assert payload != "UNSET"
+    rows = json.loads(payload)
+    return {row["id"]: row for row in rows}
+
+
+def _assert_real_edit_selection(row: dict, width: int) -> tuple[str, str]:
+    assert row["innerWidth"] == width
+    assert row["tag"] == "TEXTAREA"
+    assert row["className"] == "msg-edit-area"
+    assert row["role"] == "user"
+    assert row["editing"] == "1"
+    assert row["active"] is True
+    assert row["valueLength"] >= 1
+    assert row["selectedChars"] == row["valueLength"]
+    assert row["fontSize"] == "14px"
+    assert row["fontWeight"] == "400"
+    return _rgb_hex(row["color"]), _rgb_hex(row["backgroundColor"])
+
+
+def test_chromium_inline_edit_selection_computed_colors():
+    """Chromium selects the inline editor and returns the used ::selection colors.
+
+    Geist Contrast light must be the strong pair, white on black. Default light
+    keeps gold on white, default dark keeps the page background, and a 390px
+    width on the default skin does not take the Geist pair.
+    """
+    desktop = _chromium_selection(1100)
+    touch = _chromium_selection(390)
+
+    geist_fg, geist_bg = _assert_real_edit_selection(desktop["geist-contrast-light"], 1100)
+    assert _normalize_color(desktop["geist-contrast-light"]["strong"]) == "#000000"
+    assert _normalize_color(desktop["geist-contrast-light"]["bg"]) == "#ffffff"
+    assert geist_bg == "#000000"
+    assert geist_fg == "#ffffff"
+    assert geist_bg == _normalize_color(desktop["geist-contrast-light"]["strong"])
+    assert geist_fg == _normalize_color(desktop["geist-contrast-light"]["bg"])
+    assert {geist_fg, geist_bg} != {"#0070f3", "#111111"}
+    assert _contrast(geist_fg, geist_bg) >= 4.5
+
+    light_fg, light_bg = _assert_real_edit_selection(desktop["default-light"], 1100)
+    assert light_bg == "#ffffff"
+    assert light_fg == "#b8860b"
+    assert light_fg != light_bg
+
+    dark_fg, dark_bg = _assert_real_edit_selection(desktop["default-dark"], 1100)
+    assert dark_fg == "#0d0d1a"
+    assert dark_bg == "#fff8dc"
+    assert _contrast(dark_fg, dark_bg) >= 4.5
+
+    touch_fg, touch_bg = _assert_real_edit_selection(touch["default-light"], 390)
+    assert touch_bg == "#ffffff"
+    assert touch_fg == "#b8860b"
+    assert (touch_fg, touch_bg) == (light_fg, light_bg)
+    assert (touch_fg, touch_bg) != ("#ffffff", "#000000")
