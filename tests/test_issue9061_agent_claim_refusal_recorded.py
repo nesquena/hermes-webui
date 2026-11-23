@@ -5,9 +5,10 @@
 False as well — but it did not append the provider to ``_construction_refusals``,
 while the guard's own cross-profile refusal does.
 ``construct_profile_scoped_agent`` reads that list once the constructor has
-returned (it decides ``MEMORY_OFF_PROVIDER_SHARED_INSTANCE`` and whether the
-build is cacheable), so a construction whose provider the AGENT dropped used to
-answer "memory ok" and was cached, although its provider was gone.
+returned (it decides ``MEMORY_OFF_PROVIDER_SHARED_INSTANCE``), so a
+construction whose provider the AGENT dropped used to answer "memory ok"
+although its provider was gone. Whether the build is cached does not depend on
+this list.
 
 The advisor could only reach this by claiming before the guard was installed,
 which production does not do; recording the provider name there closes it.

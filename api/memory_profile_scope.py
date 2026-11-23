@@ -1065,8 +1065,9 @@ def _claim_for_profile(
                 # #9061 (item 2): the Agent dropped the provider and keeps built-in
                 # memory. Record the refusal for the construction in progress, the
                 # same way the guard's own refusal below does; without it the caller
-                # reads an empty list once the constructor has returned and caches
-                # an agent whose provider is gone.
+                # reads an empty list once the constructor has returned and reports
+                # memory as ok although the provider is gone. (Caching does not read
+                # this list.)
                 refusals = _construction_refusals.get()
                 if refusals is not None:
                     refusals.append(getattr(provider, "name", "?"))
