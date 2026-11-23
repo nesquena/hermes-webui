@@ -11085,6 +11085,11 @@ def _dedupe_replayed_context_messages(
                 len(previous_context), len(_tail_merge_current),
             )
             return list(previous_context) + _tail_merge_current, _tail_merge_protected
+        logger.info(
+            "Projected history not a strict exact prefix and no verified tail-merge: "
+            "failing closed, keeping raw pre-turn context (%d rows)",
+            len(previous_context),
+        )
         return list(previous_context), None
     if not _messages_have_prefix(
         result_messages,
