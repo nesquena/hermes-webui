@@ -39,6 +39,8 @@
 
 ### Fixed
 
+- **A reply is no longer lost when the Agent shortens an old tool result to save space (#9286, refs #9233).** When the Agent's cold-cache pruning replaced an earlier tool output with a short placeholder, WebUI could no longer prove the new turn extended the saved conversation and refused to keep the reply. WebUI now restores its own full copy of that tool row before the check, so the reply is kept; any other difference is still refused as before.
+
 - **A public share page no longer hides part of a message (#9214).** Some messages contained text the page left out without any sign: an HTML comment, an attribute value the renderer drops, or angle-bracket text such as `git checkout <branch-name>` or a traceback's `File "<stdin>", line 1, in <module>`. Anyone reading the published snapshot's source could still see it. When the rendered message would leave out any of its words, the share page now shows that message as plain text, with a short note, so every word is visible. Messages the page shows in full render as before. A few formatting-only shapes also fall back to plain text although nothing in them is hidden; they're listed in the PR and tracked in #9267.
 
 - **The gateway-sync reset test runs on newer Hermes Agent versions too (#9261, closes #9258).** Both cases of the test that checks a reset conversation stays separate from its reopened parent failed against current Agents, because their fixture used storage calls newer Agents no longer have. The fixture now writes rows with `append_message`, ends the parent session through whichever reset call the installed Agent provides, and checks that the reset took effect.
