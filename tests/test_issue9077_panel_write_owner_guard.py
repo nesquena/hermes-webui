@@ -325,7 +325,9 @@ async function api(path, opts){
 }
 function conflict(){
   const e = new Error("This panel was loaded for profile 'default', but the active profile is now 'beta'.");
-  e.status = 409; return e;
+  e.status = 409;
+  e.body = JSON.stringify({error: e.message, code: 'profile_mismatch'});
+  return e;
 }
 function t(k){ return k === 'error_prefix' ? 'Error: ' : k; }
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
@@ -372,7 +374,7 @@ def _run_client(body: str, *, stub_load_memory: bool = False) -> dict:
     return json.loads(result.stdout)
 
 
-def test_toggle_sends_the_server_reported_owner_and_reloads_on_409():
+def test_toggle_sends_the_server_reported_owner_and_reloads_on_profile_mismatch():
     out = _run_client(r"""
 // The list was served for 'default' although this tab thinks 'beta' is active.
 replies['/api/skills'] = { skills:[{ name:'race-skill', disabled:false }], profile:'default' };
@@ -397,6 +399,28 @@ console.log(JSON.stringify({ sent: toggle.body, status: calls.status, toasts: ca
     assert out["skillsGets"] >= 2, "the stale list must be reloaded after the 409"
     assert out["owner"] == "beta"
     assert out["second"]["expected_profile"] == "beta"
+
+
+def test_toggle_config_conflict_keeps_the_current_skills_list():
+    out = _run_client(r"""
+replies['/api/skills'] = { skills:[{ name:'race-skill', disabled:false }], profile:'default' };
+await loadSkills();
+const error = new Error("Could not disable skill 'race-skill' in config.yaml");
+error.status = 409;
+error.body = JSON.stringify({error: error.message});
+replies['/api/skills/toggle'] = error;
+clickToggle(mountedToggles()[0]); await settle();
+console.log(JSON.stringify({
+  skillsGets: calls.api.filter(c => c.path === '/api/skills').length,
+  skill: _skillsData[0],
+  status: calls.status,
+  toasts: calls.toasts,
+}));
+""")
+    assert out["skillsGets"] == 1, "a config conflict should keep the current list"
+    assert out["skill"] == {"name": "race-skill", "disabled": False}
+    assert any("Could not disable skill 'race-skill' in config.yaml" in message
+               for message in out["status"] + [toast[0] for toast in out["toasts"]])
 
 
 def test_rows_still_shown_after_the_cached_list_is_cleared_keep_their_owner():
