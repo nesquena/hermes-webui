@@ -72,6 +72,7 @@ const listeners = {{}};
 const S = {{pendingFiles: []}};
 let renderCount = 0;
 let lastStatus = '';
+let lastStatusType = '';
 let preventDefaultCount = 0;
 class File extends Blob {{
   constructor(parts, name, options={{}}) {{
@@ -97,7 +98,7 @@ const context = {{
     }}
     renderCount += 1;
   }},
-  setStatus: (text) => {{ lastStatus = text; }},
+  setStatus: (text, type) => {{ lastStatus = text; lastStatusType = type || ''; }},
   t: (key) => key === 'image_pasted' ? 'Image pasted: ' : key,
 }};
 vm.createContext(context);
@@ -112,6 +113,7 @@ console.log(JSON.stringify({{
   pendingCount: S.pendingFiles.length,
   renderCount,
   lastStatus,
+  lastStatusType,
   preventDefaultCount,
 }}));
 """
@@ -127,6 +129,7 @@ def test_null_getasfile_item_is_not_fabricated_into_a_file():
     assert result["pendingCount"] == 0, result
     assert result["renderCount"] == 0, "addFiles must not be called with no real files"
     assert FAKE_NULL_BYTES not in result["pendingSizes"], result["pendingSizes"]
+    assert result["lastStatusType"] == "error", result["lastStatusType"]
 
 
 def test_all_null_items_surface_a_visible_failure_status():
@@ -141,6 +144,8 @@ def test_all_null_items_surface_a_visible_failure_status():
     # Harness `t()` returns the key verbatim for unknown keys, so the exact
     # expectation is the i18n key itself.
     assert result["lastStatus"] == "image_paste_failed", result["lastStatus"]
+    # The failure must surface as an 'error' toast, not the inferred default.
+    assert result["lastStatusType"] == "error", result["lastStatusType"]
 
 
 def test_mixed_null_and_real_items_attach_only_the_real_one():

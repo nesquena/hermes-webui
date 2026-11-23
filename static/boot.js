@@ -3341,7 +3341,7 @@ $('msg').addEventListener('paste',e=>{
       addFiles(files);
       setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));
     }else{
-      setStatus(t('image_paste_failed'));
+      setStatus(t('image_paste_failed'),'error');
     }
     return;
   }
