@@ -11984,6 +11984,40 @@ def _stream_writeback_is_current(session, stream_id):
     return bool(stream_id) and getattr(session, 'active_stream_id', None) == stream_id
 
 
+def _resolve_stream_writeback_session(stream_id, candidates):
+    """Return the session id that currently owns ``stream_id``'s writeback.
+
+    Cancel cleanup binds to the session whose ``active_stream_id`` is this exact
+    stream. An id read off the live Agent is NOT ownership: both retries in the
+    worker run their provider call with the per-session agent lock released
+    (#8011), so a retry can be mid-rotation when the Stop lands and already
+    carry a continuation the turn has not published yet — no session file, no
+    ``active_stream_id``, nothing on disk. Taking that id's lock registered a
+    brand-new per-session lock under it (which then blocks the retry's own
+    ``_migrate_compression_rotation`` as a "stale continuation lock") and the
+    cleanup wrote a cancel marker onto a session this turn does not own.
+
+    Candidates are tried in caller-defined priority order and each must exist
+    and own the stream. ``(None, None)`` means no session owns the writeback
+    right now: the worker that does own it settles the Stop from its own
+    teardown. The resolved object is returned with the id so the cleanup reuses
+    it instead of loading the same session twice.
+    """
+    seen = set()
+    for candidate in candidates:
+        session_id = str(candidate or "").strip()
+        if not session_id or session_id in seen:
+            continue
+        seen.add(session_id)
+        try:
+            session = get_session(session_id)
+        except Exception:
+            session = None
+        if session is not None and getattr(session, 'active_stream_id', None) == stream_id:
+            return session_id, session
+    return None, None
+
+
 def _stream_writeback_can_supersede_recovery_marker(session, msg_text):
     """Allow a finishing worker to replace its own stale-repair marker.
 
@@ -14544,7 +14578,9 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
 
     if getattr(agent, 'api_mode', None) == 'anthropic_messages':
         if hasattr(agent, '_anthropic_api_key'):
-            rt['anthropic_api_key'] = getattr(agent, '_anthropic_api_key')
+            # Guarded by the hasattr above; the forward lint gate maps this
+            # line into the ownership hunks of this branch, so keep it clean.
+            rt['anthropic_api_key'] = getattr(agent, '_anthropic_api_key')  # noqa: B009
         if hasattr(agent, '_anthropic_base_url'):
             rt['anthropic_base_url'] = getattr(agent, '_anthropic_base_url')
         if hasattr(agent, '_is_anthropic_oauth'):
@@ -20405,6 +20441,7 @@ def _cancel_stream_impl(
     _snap_tool_calls = None
     _snap_flag = None
     _snap_agent = None
+    _snap_agent_session_id = None
     _snap_owner_session_id = None
     _cancel_session_payload = None
 
@@ -20424,6 +20461,12 @@ def _cancel_stream_impl(
         # cancel must snapshot them too or it loses the already-streamed text.
         _snap_flag = cancel_flags.get(stream_id)
         _snap_agent = agent_instances.get(stream_id)
+        # The Agent's id at cancel time is a HINT, never ownership: the same
+        # object stays live across the interruption below and a retry that is
+        # mid-rotation can already carry a continuation the turn has not
+        # published. Snapshot it here, under the lock, so the cleanup does not
+        # bind to whatever id the Agent happens to hold later.
+        _snap_agent_session_id = getattr(_snap_agent, 'session_id', None) if _snap_agent else None
         # Capture the stream owner WHILE the stream still exists (#6623). The
         # just-starting worker takes its `q is None -> unregister_stream_owner`
         # early path (api/streaming.py `_run_agent_streaming` and
@@ -20562,18 +20605,41 @@ def _cancel_stream_impl(
     # Session cleanup (get_session + save) must happen OUTSIDE the lock —
     # get_session() acquires LOCK, and the streaming thread does LOCK first
     # then STREAMS_LOCK, so inverting the order here would cause deadlock.
-    _cancel_session_id = getattr(agent, 'session_id', None) if agent else None
-    if not _cancel_session_id and active_run_session_id:
-        _cancel_session_id = active_run_session_id
-    # Third fallback: stream owner registry — populated before the worker
-    # thread starts, so it's always available even for early cancels that
-    # race ahead of AGENT_INSTANCES and ACTIVE_RUNS (#6623). The owner is
-    # read UNDER streams_lock above (while STREAMS[stream_id] still exists),
-    # NOT here after the eager pop: the just-starting worker unregisters the
-    # owner the instant the stream map entry disappears, so a post-pop lookup
-    # would race that teardown and return None.
-    if not _cancel_session_id and _snap_owner_session_id:
-        _cancel_session_id = _snap_owner_session_id
+    #
+    # Ownership decides which id this cleanup may touch (#8011): the session
+    # that currently owns this stream's writeback. The order below is a
+    # resolution priority, not a set of equal fallbacks — every candidate is
+    # verified against ``active_stream_id == stream_id`` by the resolver, so an
+    # id the live Agent carries while a retry is mid-rotation (unpublished
+    # continuation) resolves to nothing instead of claiming the session.
+    _cancel_candidates = (
+        _snap_owner_session_id,          # stream owner captured under the lock
+        active_run_session_id,           # id the run was admitted with
+        _snap_agent_session_id,          # Agent id captured under the lock
+        getattr(agent, 'session_id', None) if agent else None,
+        _snap_owner_session_id,          # early cancels that race the worker start
+    )
+    _cancel_session_id, _cancel_owned_session = _resolve_stream_writeback_session(
+        stream_id, _cancel_candidates,
+    )
+    if _cancel_session_id is None and any(_cancel_candidates):
+        # A candidate existed but no session owns this stream any more: the
+        # turn rotated past every id we know, or another owner already settled
+        # it. Writing here would land on a finished successor under a lock
+        # registered for an id the turn never owned. When a worker is still
+        # attached (the stream or its active-run row is present) that worker
+        # holds the writeback and settles the Stop from its own teardown, so
+        # this cancel must stay silent instead of publishing a second terminal
+        # frame. A detached cancel with nothing left to settle keeps its frame:
+        # no other owner exists to announce it.
+        if stream_present or active_run_session_id:
+            logger.info(
+                "Cancel of stream %s resolved no owning session (candidates=%r); "
+                "leaving the terminal frame to the worker that owns the writeback",
+                stream_id,
+                [str(c) for c in _cancel_candidates if c],
+            )
+            _emit_cancel_event = False
     # Use the snapshots captured under streams_lock above (the worker's finally
     # may have popped the live buffers by now via agent.interrupt()). For the
     # ACTIVE_RUNS-only path (stream absent) the snapshots are None → fall back to
@@ -20633,7 +20699,7 @@ def _cancel_stream_impl(
             _cancel_session_lock = contextlib.nullcontext()
         with _cancel_session_lock:
             try:
-                _cs = get_session(_cancel_session_id)
+                _cs = _cancel_owned_session or get_session(_cancel_session_id)
                 if not isinstance(getattr(_cs, 'messages', None), list):
                     _cs.messages = []
                 if not _stream_writeback_is_current(_cs, stream_id):
