@@ -24,6 +24,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1006,8 +1007,153 @@ def _entry_pool_exhausted_reason(entry):
     return reason + "."
 
 
+# OpenCode Go's /usage endpoint reports one rolling / weekly / monthly percentage per
+# *plan*, and a credential pool can hold several paid plans. The per-plan breakdown is
+# therefore a per-credential probe, not one call for the provider. A probe is an
+# optimisation, never load-bearing: any failure leaves that row's windows empty, which
+# is exactly the shape the pool had before it existed.
+_POOL_USAGE_PROBE_TIMEOUT_SECONDS = 3.0
+_POOL_USAGE_CACHE_TTL_SECONDS = 60.0
+_POOL_USAGE_CACHE_MAX_ENTRIES = 128
+# (monotonic timestamp, result-or-None) keyed by credential identity. Failures are cached
+# too: a dead endpoint must not be re-probed once per request per credential.
+_POOL_USAGE_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
+_POOL_USAGE_CACHE_LOCK = threading.Lock()
+
+
+def _pool_usage_cache_key(provider_id: str, entry, index: int) -> str:
+    """Cache key for one credential: its id, else its label, else its position.
+
+    Never derived from the token: a digest of a secret is still key material, and the
+    index is enough to keep two unlabelled entries apart.
+    """
+    identity = _entry_value(entry, "id", "label") or _safe_entry_label(entry, index)
+    return str(provider_id) + ":" + str(identity)
+
+
+def _opencode_go_usage_url(entry) -> str:
+    """Usage URL for one credential, honouring a per-entry base_url."""
+    base = str(_entry_value(entry, "base_url", "runtime_base_url") or "").rstrip("/")
+    if not base:
+        return _OPENCODE_GO_QUOTA_URL
+    if base.endswith("/usage"):
+        return base
+    if not base.endswith("/v1"):
+        base += "/v1"
+    return base + "/usage"
+
+
+def _opencode_go_pool_plan_name(payload: Any) -> str | None:
+    """A plan/account name from the response, when it carries one.
+
+    The live endpoint reports only ``usage``, so this is normally None and the credential
+    label names the plan. Free text is bounded so a response cannot inject a paragraph.
+    """
+    quota = payload.get("quota", payload.get("data", payload.get("usage", payload))) if isinstance(payload, dict) else None
+    for source in (quota, payload):
+        if not isinstance(source, dict):
+            continue
+        for key in ("plan", "plan_name", "planName", "account", "account_name", "accountName"):
+            value = source.get(key)
+            if isinstance(value, dict):
+                value = value.get("name")
+            if isinstance(value, str) and value.strip():
+                return " ".join(value.split())[:64]
+    return None
+
+
+def _probe_pool_credential_usage(provider, entry) -> dict[str, Any] | None:
+    """One credential's plan usage: ``{"plan": str|None, "windows": [...]}``, or None.
+
+    Only opencode-go answers this; every failure (missing token, non-200, timeout,
+    non-JSON, unrecognised body) is a None so a probe can never fail the quota endpoint.
+    The token is used in the request header only — never logged, returned or cached.
+    """
+    if str(provider or "").strip().lower() != "opencode-go":
+        return None
+    token = _entry_value(entry, "runtime_api_key", "access_token")
+    if not token:
+        return None
+    req = urllib.request.Request(
+        _opencode_go_usage_url(entry),
+        headers={
+            "Authorization": "Bearer " + token,
+            "Accept": "application/json",
+            # OpenCode's WAF rejects urllib's default identity.
+            "User-Agent": "hermes-webui/1.0",
+            # Mandatory: without this session header the endpoint answers 401 as if the
+            # key were dead.
+            "x-opencode-session": str(uuid.uuid4()),
+        },
+    )
+    try:
+        with _BEARER_QUOTA_OPENER.open(req, timeout=_POOL_USAGE_PROBE_TIMEOUT_SECONDS) as resp:
+            raw = resp.read(_PROVIDER_QUOTA_MAX_BYTES + 1)
+        if len(raw) > _PROVIDER_QUOTA_MAX_BYTES:
+            return None
+        payload = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
+    except Exception:  # noqa: BLE001 - a probe failure must never surface to the caller
+        return None
+    try:
+        sanitized = _sanitize_opencode_go_quota(payload)
+    except Exception:  # noqa: BLE001
+        return None
+    if not sanitized:
+        return None
+    return {"plan": _opencode_go_pool_plan_name(payload), "windows": sanitized["windows"]}
+
+
+def _cached_pool_credential_usage(provider, entry, index: int) -> dict[str, Any] | None:
+    """``_probe_pool_credential_usage`` behind a 60 s per-credential TTL cache."""
+    key = _pool_usage_cache_key(str(provider or "").strip().lower(), entry, index)
+    now = time.monotonic()
+    with _POOL_USAGE_CACHE_LOCK:
+        cached = _POOL_USAGE_CACHE.get(key)
+        if cached is not None and (now - cached[0]) < _POOL_USAGE_CACHE_TTL_SECONDS:
+            return cached[1]
+    result = _probe_pool_credential_usage(provider, entry)
+    with _POOL_USAGE_CACHE_LOCK:
+        if len(_POOL_USAGE_CACHE) >= _POOL_USAGE_CACHE_MAX_ENTRIES:
+            stale = [
+                cached_key
+                for cached_key, (stamp, _value) in _POOL_USAGE_CACHE.items()
+                if (now - stamp) >= _POOL_USAGE_CACHE_TTL_SECONDS
+            ]
+            for cached_key in stale or list(_POOL_USAGE_CACHE):
+                _POOL_USAGE_CACHE.pop(cached_key, None)
+        _POOL_USAGE_CACHE[key] = (now, result)
+    return result
+
+
+def _pool_row_usage(provider, entry, index: int, fallback_label=None):
+    """(plan, windows) for one pool row; empty when the probe is unsupported or failed.
+
+    A successful probe names the plan: the response's own plan/account name when it
+    carries one, else the credential label (the live endpoint reports no tier).
+    """
+    try:
+        usage = _cached_pool_credential_usage(provider, entry, index)
+    except Exception:  # noqa: BLE001 - defensive: the snapshot must always build
+        usage = None
+    if not isinstance(usage, dict):
+        return None, []
+    windows = usage.get("windows")
+    windows = list(windows) if isinstance(windows, list) else []
+    if not windows:
+        return None, []
+    plan = usage.get("plan")
+    if not (isinstance(plan, str) and plan):
+        plan = fallback_label
+    return plan or None, windows
+
+
 def _local_pool_snapshot(provider):
-    """Probe-free pool snapshot from local auth.json entries.
+    """Pool snapshot from local auth.json entries.
+
+    Rows are local-state driven; for opencode-go each credential additionally carries
+    its own plan usage windows (60 s cached probe). A failed probe leaves that row with
+    ``plan: None`` and ``windows: []`` exactly as before, so the probe is never
+    load-bearing.
 
     Returns a SimpleNamespace compatible with _serialize_account_usage_snapshot,
     or None if the provider has no pool or no entries.
@@ -1023,16 +1169,24 @@ def _local_pool_snapshot(provider):
     available_count = 0
     exhausted_count = 0
     dead_count = 0
+    # One credential needs no breakdown: its windows are the aggregate card's windows,
+    # and a probe would only duplicate them (and cost a request on the common path).
+    probe_pool_usage = (
+        str(provider or "").strip().lower() == "opencode-go" and len(entries) > 1
+    )
     for index, entry in enumerate(entries, start=1):
         label = _safe_entry_label(entry, index)
         entry_status = str(_entry_value(entry, "last_status") or "").strip().lower()
+        plan, windows = None, []
+        if probe_pool_usage and entry_status != "dead":
+            plan, windows = _pool_row_usage(provider, entry, index, label)
         if entry_status == "dead":
             dead_count += 1
             rows.append({
                 "label": label,
                 "status": "dead",
-                "plan": None,
-                "windows": [],
+                "plan": plan,
+                "windows": windows,
                 "details": [],
                 "unavailable_reason": "Credential permanently revoked or invalid.",
                 "retry_after": None,
@@ -1043,8 +1197,8 @@ def _local_pool_snapshot(provider):
             rows.append({
                 "label": label,
                 "status": "exhausted",
-                "plan": None,
-                "windows": [],
+                "plan": plan,
+                "windows": windows,
                 "details": [],
                 "unavailable_reason": _entry_pool_exhausted_reason(entry),
                 "retry_after": _entry_pool_retry_after(entry),
@@ -1055,8 +1209,8 @@ def _local_pool_snapshot(provider):
             rows.append({
                 "label": label,
                 "status": "available",
-                "plan": None,
-                "windows": [],
+                "plan": plan,
+                "windows": windows,
                 "details": [],
                 "unavailable_reason": None,
                 "retry_after": None,
@@ -2474,7 +2628,7 @@ def _provider_account_usage_status(provider: str, display_name: str, *, refresh:
     }
 
 
-def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False) -> dict[str, Any]:
+def _provider_quota_payload(provider_id: str | None = None, *, refresh: bool = False) -> dict[str, Any]:
     """Return sanitized quota/rate-limit status for the active provider.
 
     OpenRouter keeps its documented key endpoint. OAuth-backed account usage
@@ -2662,6 +2816,49 @@ def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False)
         "quota": None,
         "message": f"Quota status is not available for {display_name}. {detail}",
     }
+
+
+def _provider_quota_credential_entries(account_limits: Any) -> list[dict[str, Any]]:
+    """Per-credential pool windows, when the payload carries more than one credential.
+
+    The top-level window stays the aggregate (the single key the usage API answered, or
+    the pool's own state); this list is additive so a client can show every plan. Only
+    non-secret, already-sanitized row fields are copied — never the credential itself.
+    """
+    pool = account_limits.get("pool") if isinstance(account_limits, dict) else None
+    rows = pool.get("credentials") if isinstance(pool, dict) else None
+    if not isinstance(rows, list):
+        return []
+    entries = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        entries.append({
+            "label": str(row.get("label") or ""),
+            "status": str(row.get("status") or ""),
+            "plan": row.get("plan") if isinstance(row.get("plan"), str) else None,
+            "windows": list(row.get("windows") or []) if isinstance(row.get("windows"), list) else [],
+            "details": list(row.get("details") or []) if isinstance(row.get("details"), list) else [],
+            "unavailable_reason": row.get("unavailable_reason"),
+            "retry_after": row.get("retry_after"),
+        })
+    return entries
+
+
+def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False) -> dict[str, Any]:
+    """Return the quota payload, plus per-credential windows when a pool has several.
+
+    A provider with one configured credential answers exactly as before: the existing
+    top-level window is the whole payload and older clients keep working. With several
+    credentials, ``credentials`` lists one entry per credential (same window fields) so
+    the sidebar chip can keep showing the aggregate while the panel shows every plan.
+    """
+    result = _provider_quota_payload(provider_id, refresh=refresh)
+    if isinstance(result, dict):
+        entries = _provider_quota_credential_entries(result.get("account_limits"))
+        if len(entries) > 1:
+            result["credentials"] = entries
+    return result
 
 
 def _provider_is_oauth(provider_id: str) -> bool:

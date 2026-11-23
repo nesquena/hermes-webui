@@ -12505,21 +12505,25 @@ function _providerQuotaPoolShouldDefaultOpen(pool){
   return count>0&&count<=3;
 }
 
-function _buildProviderQuotaPoolBreakdown(accountLimits){
+function _buildProviderQuotaPoolBreakdown(accountLimits, credentialWindows){
   const pool=accountLimits&&accountLimits.pool;
-  if(!pool||!Array.isArray(pool.credentials)||pool.credentials.length===0) return '';
-  const defaultOpen=_providerQuotaPoolShouldDefaultOpen(pool);
-  const total=Number.isFinite(Number(pool.total_credentials))?Number(pool.total_credentials):pool.credentials.length;
-  const available=Number.isFinite(Number(pool.available_credentials))?Number(pool.available_credentials):pool.credentials.filter(c=>c&&c.status==='available').length;
-  const exhausted=Number.isFinite(Number(pool.exhausted_credentials))?Number(pool.exhausted_credentials):0;
-  const failed=Number.isFinite(Number(pool.failed_credentials))?Number(pool.failed_credentials):0;
-  const queried=Number.isFinite(Number(pool.queried_credentials))?Number(pool.queried_credentials):0;
+  // The response may carry the per-credential list at the top level (`credentials`);
+  // prefer it when present, so the panel shows every plan even if the pool block is absent.
+  const provided=Array.isArray(credentialWindows)?credentialWindows:[];
+  const list=provided.length?provided:((pool&&Array.isArray(pool.credentials))?pool.credentials:[]);
+  if(list.length===0) return '';
+  const defaultOpen=_providerQuotaPoolShouldDefaultOpen(pool||{credentials:list});
+  const total=Number.isFinite(Number(pool&&pool.total_credentials))?Number(pool.total_credentials):list.length;
+  const available=Number.isFinite(Number(pool&&pool.available_credentials))?Number(pool.available_credentials):list.filter(c=>c&&c.status==='available').length;
+  const exhausted=Number.isFinite(Number(pool&&pool.exhausted_credentials))?Number(pool.exhausted_credentials):0;
+  const failed=Number.isFinite(Number(pool&&pool.failed_credentials))?Number(pool.failed_credentials):0;
+  const queried=Number.isFinite(Number(pool&&pool.queried_credentials))?Number(pool.queried_credentials):0;
   const summaryParts=[t('provider_quota_pool_summary_available',available,total)];
   if(exhausted>0) summaryParts.push(t('provider_quota_pool_summary_exhausted',exhausted));
   if(failed>0) summaryParts.push(t('provider_quota_pool_summary_failed',failed));
   if(queried>0) summaryParts.push(t('provider_quota_pool_summary_checked',queried));
-  const planParts=Array.isArray(pool.plans)?pool.plans.filter(Boolean):[];
-  const rows=pool.credentials.map((credential,idx)=>{
+  const planParts=Array.isArray(pool&&pool.plans)?pool.plans.filter(Boolean):[];
+  const rows=list.map((credential,idx)=>{
     const label=(credential&&credential.label)||t('provider_quota_credential_label',idx+1);
     const status=_providerQuotaStateClass(credential&&credential.status);
     const statusText=_providerQuotaStatusLabel(credential&&credential.status);
@@ -12591,7 +12595,10 @@ function _buildProviderQuotaCard(status){
     const detailHtml=details.length
       ? `<div class="provider-quota-details">${details.map(d=>`<span>${esc(d)}</span>`).join('')}</div>`
       : '';
-    const poolHtml=_buildProviderQuotaPoolBreakdown(accountLimits);
+    const poolHtml=_buildProviderQuotaPoolBreakdown(
+      accountLimits,
+      Array.isArray(status.credentials)?status.credentials:null
+    );
     body=windowHtml+detailHtml+poolHtml;
     if(!body) body=`<div class="provider-quota-message">${esc(status.message||t('provider_quota_account_limits_loaded'))}</div>`;
     // A pool breakdown shown next to a failure reflects locally recorded credential
