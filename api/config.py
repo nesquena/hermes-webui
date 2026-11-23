@@ -7592,34 +7592,78 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         model_cfg["api_key"] = api_key
 
 
-def _declared_provider_names(config_obj: object) -> set[str]:
-    """Lower-cased provider names a config declares, switched-off records included.
+def _local_custom_provider_aliases(display_name: object, provider_key: object = "") -> frozenset[str]:
+    """Copy of the Agent's ``hermes_cli.providers.custom_provider_aliases`` for Agents without it."""
+    aliases: set[str] = set()
+    for value in (display_name, provider_key):
+        raw = str(value or "").strip().lower()
+        if not raw:
+            continue
+        normalized = raw.replace(" ", "-")
+        slug = normalized if normalized.startswith("custom:") else f"custom:{normalized}"
+        aliases.update({raw, normalized, slug})
+        if normalized.startswith("custom:"):
+            suffix = normalized.split(":", 1)[1]
+            if suffix:
+                aliases.update({suffix, f"custom:{normalized}"})
+    return frozenset(aliases)
 
-    Every native ``providers:`` mapping key and record ``name``, and every
-    ``custom_providers`` ``name``. The Agent routes a provider id through a
-    native record by its key or by its ``name`` (#9323), so both are
-    declarations. Whether a record is switched off decides routing, not whether
-    the name is declared.
+
+_custom_provider_aliases = None  # resolved on first use: Agent helper, else the local copy
+
+
+def _provider_record_aliases(display_name: object, provider_key: object = "") -> frozenset[str]:
+    """Every provider id the Agent routes to one configured record.
+
+    Same answer as the Agent's ``hermes_cli.providers.custom_provider_aliases``
+    (used when importable): the lower-cased name and key, their space-to-hyphen
+    forms, the ``custom:`` slug, and for a ``custom:``-prefixed name its suffix.
+    """
+    global _custom_provider_aliases
+    helper = _custom_provider_aliases
+    if helper is None:
+        try:
+            from hermes_cli.providers import custom_provider_aliases as helper
+        except Exception:
+            helper = None
+        if not callable(helper):
+            helper = _local_custom_provider_aliases
+        _custom_provider_aliases = helper
+    try:
+        return frozenset(helper(str(display_name or ""), str(provider_key or "")))
+    except Exception:
+        return _local_custom_provider_aliases(display_name, provider_key)
+
+
+def _declared_provider_names(config_obj: object) -> set[str]:
+    """Provider ids a config declares, switched-off records included.
+
+    Every id the Agent routes to a native ``providers:`` record (by its mapping
+    key or its ``name``) or to a ``custom_providers`` entry (by its ``name``),
+    in the Agent's own alias forms (#9323). Whether a record is switched off
+    decides routing, not whether the name is declared.
     """
     names: set[str] = set()
     if not isinstance(config_obj, dict):
         return names
 
-    def _add(value: object) -> None:
-        if isinstance(value, str) and value.strip():
-            names.add(value.strip().lower())
+    def _text(value: object) -> str:
+        return value.strip() if isinstance(value, str) else ""
 
     native = config_obj.get("providers")
     if isinstance(native, dict):
         for key, record in native.items():
-            _add(key)
-            if isinstance(record, dict):
-                _add(record.get("name"))
+            key_text = _text(key)
+            name_text = _text(record.get("name")) if isinstance(record, dict) else ""
+            if key_text or name_text:
+                names.update(_provider_record_aliases(name_text or key_text, key_text))
     legacy = config_obj.get("custom_providers")
     if isinstance(legacy, list):
         for record in legacy:
-            if isinstance(record, dict):
-                _add(record.get("name"))
+            if isinstance(record, dict) and _text(record.get("name")):
+                # The Agent drops a legacy row's own ``provider_key`` (hermes_cli.config.get_compatible_custom_providers),
+                # so only its ``name`` routes.
+                names.update(_provider_record_aliases(_text(record.get("name"))))
     return names
 
 
@@ -7632,11 +7676,17 @@ def _provider_is_config_declared(provider_id: str, config_obj: dict) -> bool:
     endpoint, so a save must persist it verbatim instead of splitting it into
     the built-in prefix. A switched-off record still declares its name: it is
     kept as written so the Agent refuses it, not rewritten to the public
-    built-in (#9323). Both the raw file this save loaded and the runtime config
-    count: a name given as a ``${VAR}`` reference matches only once expanded.
-    A lookup failure keeps it verbatim.
+    built-in (#9323). The file this save loaded counts both raw and
+    ``${VAR}``-expanded (with the live profile env), so a name given as a
+    reference matches once expanded. The runtime config counts too: a source
+    can only keep a name, never strip one, so a runtime config older than the
+    file fails toward keeping it, and the Agent refuses an id it can't route.
+    Any spelling the Agent routes to the record counts (see
+    ``_provider_record_aliases``). A lookup failure keeps it verbatim.
     """
-    wanted = str(provider_id or "").strip().lower()
+    # The Agent's rule on both sides: it normalises the requested id this way and looks it up among each record's
+    # aliases (hermes_cli.runtime_provider_custom). The id itself is still saved exactly as selected.
+    wanted = str(provider_id or "").strip().lower().replace(" ", "-")
     if not wanted:
         return False
     try:
