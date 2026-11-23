@@ -544,11 +544,6 @@ _STREAMING_CRONJOB_WRAPPER_WARNED = False
 _STREAMING_CRONJOB_TOOL_NAMES = ("cronjob_manage", "cronjob")
 
 # ── Pre-provider TTFT-reduction caches (#6006) ──────────────────────────────
-# MCP discovery is idempotent but does import + config read. Run it at most
-# once per process so it never blocks the send→first-token path on later turns.
-_MCP_DISCOVERY_RAN: bool = False
-_MCP_DISCOVERY_LOCK = threading.Lock()
-
 # Per-profile fingerprint cache: once we've resolved config-derived values
 # (_cfg, _prefill_messages, _toolsets, _main_request_overrides) for a given
 # config fingerprint, skip re-derivation on subsequent turns for the same
@@ -15454,21 +15449,14 @@ def _run_agent_streaming(
         # profile, falling back to bare, cross-profile names, unless the agent
         # honours the pin from `api.profiles._pin_process_profile_home()`.
         #
-        # #6006 TTFT: MCP discovery is idempotent (process-global _servers
-        # registry) and only needs to run once per process — on every
-        # subsequent turn it just re-imports and finds nothing new.  Gate it
-        # behind a process-level flag so the import + config-read overhead
-        # never hits the send→first-token path on later turns.
-        global _MCP_DISCOVERY_RAN
-        with _MCP_DISCOVERY_LOCK:
-            if not _MCP_DISCOVERY_RAN:
-                try:
-                    from api.agent_compat import agent_attr
-                    discover_mcp_tools = agent_attr("tools.mcp_tool", "discover_mcp_tools", "tools.mcp_tool_discovery")
-                    discover_mcp_tools()
-                except Exception:
-                    pass  # MCP not available or not configured — non-fatal
-                _MCP_DISCOVERY_RAN = True
+        # Runs per turn so newly configured servers and retries are picked up,
+        # reading the HERMES_HOME of the turn's own profile.
+        try:
+            from api.agent_compat import agent_attr
+            discover_mcp_tools = agent_attr("tools.mcp_tool", "discover_mcp_tools", "tools.mcp_tool_discovery")
+            discover_mcp_tools()
+        except Exception:
+            pass  # MCP not available or not configured — non-fatal
 
         # Register a gateway-style notify callback so the approval system can
         # push the `approval` SSE event the moment a dangerous command is
