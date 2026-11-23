@@ -1,4 +1,4 @@
-"""Keep the Parallel Search MCP onboarding notes in step with /reload-mcp.
+"""Keep the web search MCP onboarding notes in step with /reload-mcp.
 
 The guide describes two reload paths: the profile-scoped reload used with
 current Hermes Agents, and the process-wide fallback kept for older Agents.
@@ -6,7 +6,8 @@ Scoping is not blanket isolation: profiles with an identical route share one
 connection, and the config path WebUI reports is not always the one MCP
 discovery reads. These checks pin both the wording and the source contract it
 describes, so a change to either side fails here instead of leaving the docs
-stale.
+stale. The shared steps stay provider-neutral; Parallel is checked as the
+worked example it is.
 """
 
 from __future__ import annotations
@@ -15,16 +16,30 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
+SECTION_HEADING = "## Optional: add a web search MCP server"
+EXAMPLE_HEADING = "### Example: Parallel Search MCP"
+
 
 def _repo_text(path: str) -> str:
     return (REPO / path).read_text(encoding="utf-8")
 
 
-def _parallel_section() -> str:
+def _search_mcp_section() -> str:
     doc = _repo_text("docs/onboarding.md")
-    start = doc.index("## Optional web search with Parallel Search MCP")
+    start = doc.index(SECTION_HEADING)
     end = doc.index("\n## ", start + 1)
     return doc[start:end]
+
+
+def _shared_steps() -> str:
+    """The provider-neutral body, without the Parallel example."""
+    shared, _, example = _search_mcp_section().partition(EXAMPLE_HEADING)
+    assert example, "the Parallel example subsection moved or was dropped"
+    return shared
+
+
+def _parallel_example() -> str:
+    return EXAMPLE_HEADING + _search_mcp_section().partition(EXAMPLE_HEADING)[2]
 
 
 def test_reload_command_keeps_scoped_and_legacy_paths():
@@ -54,8 +69,8 @@ def test_config_path_override_outranks_the_profile_home():
     assert '"config_path": str(_get_config_path())' in _repo_text("api/onboarding.py")
 
 
-def test_parallel_docs_describe_scoped_reload_with_legacy_caveat():
-    section = " ".join(_parallel_section().split())
+def test_search_mcp_docs_describe_scoped_reload_with_legacy_caveat():
+    section = " ".join(_shared_steps().split())
     assert "/reload-mcp` reloads MCP servers for the profile selected in WebUI" in section
     assert "Profiles that share none of those connections are unaffected" in section
     assert "Older Agents without profile-scoped MCP fall back to a process-wide reload" in section
@@ -70,8 +85,8 @@ def test_parallel_docs_describe_scoped_reload_with_legacy_caveat():
     assert "other profiles' MCP connections and tools keep running" not in section
 
 
-def test_parallel_docs_qualify_shared_connections_and_waiting():
-    section = " ".join(_parallel_section().split())
+def test_search_mcp_docs_qualify_shared_connections_and_waiting():
+    section = " ".join(_shared_steps().split())
     assert "the Agent can serve both from one live connection" in section
     assert "deregisters its tools from every adopting profile" in section
     assert "can briefly disconnect and reconnect for a profile you did not reload" in section
@@ -106,8 +121,8 @@ def test_reload_reports_runtime_unavailable_only_for_a_failed_import():
     assert 'lines.append("No MCP servers connected")' in after_import
 
 
-def test_parallel_docs_blame_the_missing_extra_for_an_empty_reload():
-    section = " ".join(_parallel_section().split())
+def test_search_mcp_docs_blame_the_missing_extra_for_an_empty_reload():
+    section = " ".join(_shared_steps().split())
     empty, _, runtime_unavailable = section.partition(
         "If reload reports `MCP runtime unavailable` instead"
     )
@@ -122,8 +137,8 @@ def test_parallel_docs_blame_the_missing_extra_for_an_empty_reload():
     assert "read that as a missing Agent MCP runtime" not in section
 
 
-def test_parallel_docs_require_the_profile_homes_config_path():
-    section = " ".join(_parallel_section().split())
+def test_search_mcp_docs_require_the_profile_homes_config_path():
+    section = " ".join(_shared_steps().split())
     assert (
         "reported path must be the `config.yaml` inside the selected profile's Hermes home"
         in section
@@ -132,3 +147,54 @@ def test_parallel_docs_require_the_profile_homes_config_path():
     assert "this walkthrough does not apply" in section
     # The disable step carries the same restriction, not just the edit step.
     assert "the restriction above applies to removal as much as to the edit" in section
+
+
+def test_shared_steps_stay_provider_neutral():
+    """The steps are written for any Streamable HTTP search/fetch server."""
+    section = " ".join(_shared_steps().split())
+    assert (
+        "any remote MCP server reachable over Streamable HTTP that offers search "
+        "or fetch tools" in section
+    )
+    # Placeholders, not one provider's endpoint, name, or tools.
+    assert "mcp_servers: <name>: url: <url>" in section
+    assert "`mcp__<name>__`" in section
+    assert "- The host running Hermes can reach `<url>`." in _shared_steps()
+    for provider_specific in (
+        "search.parallel.ai", "mcp__parallel__", "`web_search`", "`web_fetch`",
+    ):
+        assert provider_specific not in section, provider_specific
+
+
+def test_shared_steps_cover_keyed_servers_without_leaking_keys():
+    section = " ".join(_shared_steps().split())
+    assert "A server that requires a key takes it in that entry's `headers` mapping" in section
+    # The field belongs to the Agent, so the docs point at its documentation.
+    assert "MCP documentation for the exact field" in section
+    assert (
+        "Keep such a key in the profile's config or in the environment that config reads, "
+        "and never paste it into chat" in section
+    )
+
+
+def test_parallel_example_keeps_its_endpoint_tools_and_limits():
+    example = " ".join(_parallel_example().split())
+    assert "url: https://search.parallel.ai/mcp" in example
+    assert "parallel: url: https://search.parallel.ai/mcp" in example
+    assert "`web_search` and `web_fetch`" in example
+    assert "`mcp__parallel__web_search` and `mcp__parallel__web_fetch`" in example
+    assert "Its anonymous endpoint needs no Parallel account or API key" in example
+    assert (
+        "Free access is rate limited. Check the linked Parallel documentation for "
+        "current access requirements and limits" in example
+    )
+    assert "https://docs.parallel.ai/integrations/mcp/search-mcp" in example
+    # The provider-specific privacy wording lives with the example; the shared
+    # text keeps the neutral form.
+    assert (
+        "Search queries, requested URLs, and any supplied objective or context go to "
+        "Parallel" in example
+    )
+    assert "Search queries and requested URLs go to that provider" in " ".join(
+        _shared_steps().split()
+    )
