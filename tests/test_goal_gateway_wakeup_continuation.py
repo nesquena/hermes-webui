@@ -1656,6 +1656,33 @@ console.log(JSON.stringify({calls,inflight:'s1' in INFLIGHT}));
     assert out["calls"].index("clearInflight") < len(out["calls"]) - 1
 
 @pytest.mark.parametrize("label", ["goal_continuation_stale", "goal_continuation_already_dispatched"])
+def test_refused_continuation_stops_this_sessions_pollers(label):
+    """send() starts approval/clarify polling before the POST; the refusal return must stop them."""
+    import json, shutil, subprocess
+    from pathlib import Path
+
+    if not shutil.which("node"):
+        pytest.skip("node not available")
+    src = Path(__file__).parents[1].joinpath("static", "messages.js").read_text(encoding="utf-8")
+    start = src.index("    // Refused continuation token:")
+    body = src[start : src.index("      return;\n    }", start)] + "      return;\n    }"
+    script = """
+const stopped=[];const INFLIGHT={s1:1};const activeSid='s1';
+const S={session:{session_id:'other'},messages:[]};const userMsg={};const e={status:409};const errMsg=%s;
+const _failedSendDraftText='x';const _failedSendFilesSnapshot=[];const _composerDraftClearPromise=Promise.resolve();
+function clearInflightState(){}function removeThinking(){}function setBusy(){}function setComposerStatus(){}
+function showToast(){}function renderSessionList(){}function _restoreComposerDraftAfterFailedSend(){}
+function stopApprovalPollingForSession(sid){stopped.push(['approval',sid])}
+function stopClarifyPollingForSession(sid){stopped.push(['clarify',sid])}
+(function(){%s})();
+console.log(JSON.stringify(stopped));
+""" % (json.dumps(label), body)
+    out = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+    assert ["clarify", "s1"] in out, "refused continuation left clarify polling running"
+    assert ["approval", "s1"] in out, "refused continuation left approval polling running"
+
+
+@pytest.mark.parametrize("label", ["goal_continuation_stale", "goal_continuation_already_dispatched"])
 def test_refused_continuation_does_not_drain_queued_followup_over_restored_draft(label):
     """Real setBusy + real rejection branch: a queued follow-up must not overwrite the restored draft."""
     import json, shutil, subprocess

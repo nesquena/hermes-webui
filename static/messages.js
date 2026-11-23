@@ -2271,6 +2271,9 @@ async function send(){
     if(e&&e.status===409&&/goal_continuation_(stale|already_dispatched)/.test(errMsg)){
       delete INFLIGHT[activeSid];
       if(typeof clearInflightState==='function') clearInflightState(activeSid);
+      // send() started this session's pollers before the POST; stop only those.
+      if(typeof stopApprovalPollingForSession==='function') stopApprovalPollingForSession(activeSid);
+      if(typeof stopClarifyPollingForSession==='function') stopClarifyPollingForSession(activeSid);
       // Pane-global UI belongs to the viewed session; an off-pane refusal leaves it alone.
       const _ownsPane=!S.session||S.session.session_id===activeSid;
       if(_ownsPane){removeThinking();setBusy(false,{drainQueue:false});setComposerStatus('');}
