@@ -957,9 +957,10 @@ _WORKSPACE_OPS = {
 _TRACK_LOAD_DIR = """() => {
   if (window.__loadDir) return true;
   const original = loadDir;
-  window.__loadDir = {active: 0};
+  window.__loadDir = {active: 0, calls: 0};
   window.loadDir = async function (...args) {
     window.__loadDir.active++;
+    window.__loadDir.calls++;
     try { return await original.apply(this, args); } finally { window.__loadDir.active--; }
   };
   return true;
@@ -1058,6 +1059,55 @@ def test_workspace_op_in_flight_when_another_conversation_opens_changes_only_its
     _tree_settled(page, first, "first-only.txt")
     shown = set(page.evaluate(_TREE_JS))
     assert shown == {p for p in change(before[0]) if "/" not in p}, shown
+
+
+def _tree_quiet(page):
+    """No tree load has started for 400 ms and none is in flight: a conversation's
+    deferred refresh (scheduled 150 ms after it loads) has already run."""
+    deadline = time.time() + WAIT_MS / 1000
+    while time.time() < deadline:
+        before = page.evaluate("() => window.__loadDir.calls")
+        page.wait_for_timeout(400)
+        if page.evaluate("([c]) => window.__loadDir.calls === c && window.__loadDir.active === 0", [before]):
+            return
+    raise AssertionError("tree loads did not settle")
+
+
+@pytest.mark.parametrize("op", list(_WORKSPACE_OPS))
+def test_workspace_op_in_flight_refreshes_a_tree_that_shows_the_same_workspace(page, server, op):
+    """Two conversations share one workspace. The write still lands, and the tree on
+    screen (the other conversation's) is refreshed to show it, while the issuing
+    conversation's own follow-ups (opening the file, prompts) stay suppressed."""
+    root = server["state"] / f"shared-{op}-{time.time_ns()}"
+    (root / "docs").mkdir(parents=True)
+    (root / "docs" / "readme.txt").write_text("readme")
+    (root / "notes.txt").write_text("shared notes")
+    (root / "marker.txt").write_text("marker")
+    first = _import(server, f"Shared {op} first", root)
+    second = _import(server, f"Shared {op} second", root)
+    _open_after(page, second, first)
+    page.evaluate(_TRACK_LOAD_DIR)
+    _tree_settled(page, first, "marker.txt")
+    fn, args, text, endpoint, change = _WORKSPACE_OPS[op]
+    _track(page, fn)
+    page.evaluate(f"() => {{ void {fn}({args}); return true; }}")
+    _wait_until(page, "() => _isAppDialogOpen()")
+    held, release = _hold(page, f"**{endpoint}")
+    _answer(page, text)
+    _wait_held(page, held, endpoint)
+    _history_go(page, second)
+    _tree_settled(page, second, "marker.txt")
+    _tree_quiet(page)  # the second conversation's own deferred refresh is done
+    before = _on_disk(root)
+    release()
+    _outcome(page)
+    _wait_until(page, "() => window.__loadDir.active === 0")
+    disk = _on_disk(root)
+    assert disk == change(before)
+    shown = set(page.evaluate(_TREE_JS))
+    assert shown == {p for p in disk if "/" not in p}
+    assert page.evaluate("() => S.session.session_id") == second
+    assert not page.evaluate("() => _isAppDialogOpen()")
 
 
 def _outside_link(server, root):
