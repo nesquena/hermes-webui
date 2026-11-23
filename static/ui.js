@@ -27695,6 +27695,11 @@ async function deleteWorkspaceDir(relPath, name){
   if(!ok||_sessionLeftScreen(session))return;
   try{
     await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:relPath,recursive:true})});
+    // Another conversation opened while the delete was in flight: the change is in
+    // the captured workspace only. The tree and its cache below belong to the pane
+    // now on screen (S._dirCache is keyed by relative path, not by workspace), and
+    // reopening the captured conversation reloads its tree from the server.
+    if(_sessionLeftScreen(session))return;
     showToast(t('deleted')+name);
     // Remove from expanded dirs cache
     if(S._expandedDirs){S._expandedDirs.delete(relPath);if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();}
@@ -27867,6 +27872,8 @@ async function _inlineRenameFileItem(item){
   if(!newName||newName===item.name||_sessionLeftScreen(session))return;
   try{
     await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:item.path,new_name:newName})});
+    // Same as deleteWorkspaceDir: never rename a row in the pane now on screen.
+    if(_sessionLeftScreen(session))return;
     showToast(t('renamed_to')+newName);
     _treeRowRenamed(item.path,newName);
     // Update expanded dirs cache key if renaming a directory
@@ -27894,6 +27901,8 @@ async function deleteWorkspaceFile(relPath, name){
   if(!_delFile||_sessionLeftScreen(session)) return;
   try{
     await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:relPath})});
+    // Same as deleteWorkspaceDir: never close a preview in the pane now on screen.
+    if(_sessionLeftScreen(session))return;
     showToast(t('deleted')+name);
     // Close preview if we just deleted the viewed file
     if($('previewPathText').textContent===relPath)$('btnClearPreview').onclick();
@@ -27928,6 +27937,8 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
   const relPath=_workspaceJoinTargetPath(targetDir,name);
   try{
     await api('/api/file/create',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:relPath,content:''})});
+    // Same as deleteWorkspaceDir: never open the new file in the pane now on screen.
+    if(_sessionLeftScreen(session))return;
     showToast(t('created')+name.trim());
     delete S._dirCache[targetDir || '.'];
     await loadDir(S.currentDir);
@@ -27962,6 +27973,9 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
   const relPath=_workspaceJoinTargetPath(targetDir,name);
   try{
     await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:relPath})});
+    // Same as deleteWorkspaceDir: no reload and no "add as space" prompt over the
+    // conversation now on screen.
+    if(_sessionLeftScreen(session))return;
     showToast(t('folder_created')+name.trim());
     delete S._dirCache[targetDir || '.'];
     await loadDir(S.currentDir);

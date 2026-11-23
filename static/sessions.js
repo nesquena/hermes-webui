@@ -6926,6 +6926,9 @@ function _syncSessionShareState(session, nextSession){
 // An action bound to the conversation on screen when it was clicked checks this once
 // its dialog is answered: true if that conversation is no longer on screen or a switch
 // to another conversation is in flight. The caller then fails closed.
+// Known gap (rare, left as is): a profile switch on an EMPTY conversation retags its
+// workspace in place (panels.js, profile switch: same session id, no pending load),
+// so this stays false across that workspace change.
 function _sessionLeftScreen(session){
   if(!session||!(S.session&&S.session.session_id===session.session_id)) return true;
   return !!(_loadingSessionId&&_loadingSessionId!==session.session_id);
@@ -6964,7 +6967,7 @@ async function _createOrRefreshSessionShare(session, opts){
   if(copied){
     showToast(existing?t('share_session_link_copied'):t('share_session_created'));
   }else{
-    showToast((existing?t('share_session_created'):t('share_session_created'))+' — '+href,6000);
+    showToast(t('share_session_created')+' — '+href,6000);
   }
   window.open(href,'_blank','noopener');
 }
