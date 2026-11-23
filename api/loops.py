@@ -215,6 +215,26 @@ def _apply_recorded_control(db, mgr):
     return True
 
 
+def _retire_if_rotated(session_id, before, mgr):
+    """A new loop saved while compression published a continuation may be overwritten by the carry.
+
+    The native carry copies whichever row it read (possibly the OLD one) and then clears the parent,
+    so re-check after the write: if the chat was sealed meanwhile, retire both generations by identity
+    (so whichever copy lands on the continuation stops at its first tick) and reject with 409.
+    """
+    from api.models import get_session
+    sealed, tip = _sealed(get_session(session_id, metadata_only=True))
+    if not sealed:
+        return
+    new = mgr.state
+    for gen in (before, new):
+        if gen is not None and gen.created_at:
+            _record_control(gen, None)
+    if new is not None and new.status != "cleared":
+        mgr.clear()
+    raise SessionRotated(tip)
+
+
 def run_loop_command(session_id, args, request_profile=None):
     """`request_profile`: the caller's profile; re-checked under the lock a retag takes."""
     from api.models import get_session
@@ -243,6 +263,8 @@ def run_loop_command(session_id, args, request_profile=None):
             out = dispatch_loop_command(mgr, args, route={"platform": "webui", "chat_id": session_id})
             if before is not None and args.strip().lower() in {"pause", "resume", "stop", "clear", "cancel"}:
                 _record_control(before, mgr.state)
+            elif args.strip().lower() not in _CONTROL_COMMANDS:
+                _retire_if_rotated(session_id, before, mgr)
     _WAKE.set()
     return out["output"]
 

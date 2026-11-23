@@ -342,3 +342,65 @@ def test_registered_loop_never_fires_on_a_sealed_parent(tmp_path, monkeypatch, c
         assert _loop(agent, loops).status == "cleared"
     else:
         assert s.paused_reason == "session compressed"
+
+
+@requires_agent_modules
+def test_replacement_loop_racing_compression_carry_is_rejected_and_retired(tmp_path, monkeypatch):
+    """Maintainer schedule: /loop NEW passes the unsealed check, compression publishes and the native carry
+    reads OLD, NEW saves, then the carry writes OLD on the child and clears the parent. The command must
+    409 session_rotated and neither generation may stay runnable on the continuation."""
+    import threading
+    from urllib.parse import urlparse
+    from api import compression_continuation, config, routes
+    session = NS(session_id="s1", profile=None, messages=[])
+    agent, loops, started = _setup(tmp_path, monkeypatch, session, cmd="5m OLD INTENT", due=False)
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path / "sidecars")
+    (tmp_path / "sidecars").mkdir()
+    (tmp_path / "sidecars" / "c1.json").write_text("{}")
+    published = threading.Event()
+    monkeypatch.setattr(compression_continuation, "durable_compression_continuation",
+                        lambda s: (True, "c1") if s.session_id == "s1" and published.is_set() else (False, None))
+    real_dispatch, real_save = agent.dispatch_loop_command, agent.save_loop
+    cmd_parked, cmd_go, carry_parked, carry_go = (threading.Event() for _ in range(4))
+
+    def dispatch(*a, **kw):  # barrier 1: the replacement passed the unsealed check
+        cmd_parked.set()
+        assert cmd_go.wait(5)
+        return real_dispatch(*a, **kw)
+
+    def save(sid, state):  # barrier 2: the carry read the parent's OLD row, before writing the child
+        if sid == "c1":
+            carry_parked.set()
+            assert carry_go.wait(5)
+        return real_save(sid, state)
+
+    monkeypatch.setattr(agent, "dispatch_loop_command", dispatch)
+    monkeypatch.setattr(agent, "save_loop", save)
+    out = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda h: True)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: None)
+    monkeypatch.setattr(routes, "read_body", lambda h: {"command": "/loop 5m NEW INTENT", "session_id": "s1"})
+    monkeypatch.setattr(routes, "j", lambda h, payload, status=200, **kw: out.update(payload, _status=status))
+
+    def carry():
+        with loops._home(None):
+            agent.migrate_loop_to_session("s1", "c1", reason="compression")
+
+    cmd = threading.Thread(target=routes.handle_post, args=(NS(headers={}), urlparse("/api/commands/exec")))
+    cmd.start()
+    assert cmd_parked.wait(5)
+    published.set()  # compression publishes the continuation...
+    mig = threading.Thread(target=carry)
+    mig.start()
+    assert carry_parked.wait(5)  # ...and the carry holds OLD
+    cmd_go.set()
+    cmd.join(5)
+    carry_go.set()
+    mig.join(5)
+    assert out.get("code") == "session_rotated" and out["_status"] == 409, out
+    with loops._home(None):
+        _due(agent, "c1")
+    session.session_id = "c1"
+    loops.run_due_loops()
+    assert started == []
+    assert _loop(agent, loops, "c1").status == "cleared" and _loop(agent, loops).status == "cleared"
