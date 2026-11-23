@@ -312,3 +312,92 @@ def test_stamp_records_pending_count_only_on_shrink():
     assert getattr(session, "_intentional_shrink_pending_count", None) is None
     assert _stamp_intentional_shrink_generation(session, 5, 3) is True
     assert session._intentional_shrink_pending_count == 5
+
+
+@pytest.mark.parametrize(
+    "operation", [retry_last, undo_last], ids=["retry", "undo"]
+)
+def test_get_between_truncation_and_save_keeps_unanswered_user_prefix(
+    tmp_path, monkeypatch, operation
+):
+    session_dir = tmp_path / "sessions"
+    sid = f"issue9029-unanswered-{operation.__name__}"
+    messages = [
+        _msg("user", "unanswered", 1.0, "u1"),
+        _msg("user", "retry-me", 2.0, "u2"),
+        _msg("assistant", "removed-reply", 3.0, "a1"),
+    ]
+    seed = Session(
+        session_id=sid,
+        title="issue 9029 unanswered",
+        workspace=str(session_dir.parent),
+        messages=messages,
+        context_messages=messages,
+    )
+    seed.save()
+    SESSIONS.clear()
+    cached = models.get_session(sid)
+    assert len(cached.messages) == 3
+
+    seen: list[Session] = []
+    state = _install_get_between_truncation_and_save(monkeypatch, sid, seen)
+    state["armed"] = True
+    try:
+        operation(sid)
+    finally:
+        state["armed"] = False
+
+    # The interleaved GET landed before the save and saw the shorter prefix.
+    assert len(seen) == 1
+    assert [row["content"] for row in seen[0].messages] == ["unanswered"]
+
+    # The operation itself persisted the shrink.
+    assert [row["content"] for row in _load_disk(session_dir, sid)] == ["unanswered"]
+
+    # The next full read is a cache hit and still sees the shrink.
+    after = models.get_session(sid)
+    assert [row["content"] for row in after.messages] == ["unanswered"]
+
+    # Persisting the object the next reader got must keep only the shrink on disk.
+    after.save()
+    assert [row["content"] for row in _load_disk(session_dir, sid)] == ["unanswered"]
+
+
+def test_unsaved_user_tail_without_pending_shrink_still_reloads(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    sid = "issue9029-control-unsaved-user-tail"
+    disk_messages = [
+        _msg("user", "unanswered", 1.0, "u1"),
+        _msg("user", "retry-me", 2.0, "u2"),
+        _msg("assistant", "reply", 3.0, "a1"),
+    ]
+    disk = Session(
+        session_id=sid,
+        title="issue 9029 control",
+        workspace=str(session_dir.parent),
+        messages=disk_messages,
+        context_messages=disk_messages,
+    )
+    disk.save()
+
+    cached_messages = [_msg("user", "unanswered", 1.0, "u1")]
+    cached = Session(
+        session_id=sid,
+        title="issue 9029 control",
+        workspace=str(session_dir.parent),
+        messages=cached_messages,
+        context_messages=cached_messages,
+    )
+    assert getattr(cached, "_intentional_shrink_pending_count", None) is None
+
+    assert models._cache_has_stale_unsaved_user_tail(cached, disk) is True
+
+    with models.LOCK:
+        SESSIONS[sid] = cached
+
+    reloaded = models.get_session(sid)
+    assert [row["content"] for row in reloaded.messages] == ["unanswered", "retry-me", "reply"]
+    with models.LOCK:
+        assert SESSIONS[sid] is reloaded
+        assert SESSIONS[sid] is not cached
+

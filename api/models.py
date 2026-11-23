@@ -6246,6 +6246,35 @@ def _message_content_text(message) -> str:
     return ''
 
 
+def _pending_intentional_shrink_snapshot(cached) -> tuple[int, str, int] | None:
+    """Return (pending, generation, cached_count) if cached owns an in-flight shrink.
+
+    A cached object owns a valid in-flight intentional shrink only when:
+    1. pending parses as a non-negative int;
+    2. generation is a non-empty string token; and
+    3. pending >= cached_count (the cache has not grown past the pre-shrink
+       snapshot this marker records; an append after the shrink invalidates it).
+    A real in-flight shrink always has pending > cached_count; the equality case
+    is kept so the freshness path can still drop the marker once disk reaches
+    parity with the snapshot.
+    """
+    if cached is None:
+        return None
+    with LOCK:
+        cached_count = len(getattr(cached, 'messages', None) or [])
+        pending = _parse_nonnegative_int(
+            getattr(cached, '_intentional_shrink_pending_count', None)
+        )
+        generation = getattr(cached, 'intentional_shrink_generation', None)
+        if pending is None:
+            return None
+        if not isinstance(generation, str) or not generation.strip():
+            return None
+        if pending < cached_count:
+            return None
+        return (pending, generation, cached_count)
+
+
 def _inactive_cache_tail_needs_disk_check(cached) -> bool:
     if cached is None:
         return False
@@ -6275,6 +6304,11 @@ def _cache_has_stale_unsaved_user_tail(cached, disk_session) -> bool:
     if _last_non_tool_role(disk_messages) != 'assistant':
         return False
     if len(cached_messages) < len(disk_messages):
+        snapshot = _pending_intentional_shrink_snapshot(cached)
+        if snapshot is not None:
+            pending, _gen, _count = snapshot
+            if len(disk_messages) <= pending:
+                return False
         return True
     if len(cached_messages) == len(disk_messages):
         # Same-length divergence is still stale: a completed assistant turn can
@@ -6987,12 +7021,13 @@ def _cached_session_lags_disk(cached) -> bool:
     # shrink's save landed and the marker would be dropped before the save
     # (Greptile P1 on PR #9273). The generation is the token that lets a clear
     # prove it still refers to the shrink this snapshot observed.
-    with LOCK:
-        cached_count = len(getattr(cached, 'messages', None) or [])
-        pending_shrink = _parse_nonnegative_int(
-            getattr(cached, '_intentional_shrink_pending_count', None)
-        )
-        pending_generation = getattr(cached, 'intentional_shrink_generation', None)
+    shrink_snapshot = _pending_intentional_shrink_snapshot(cached)
+    if shrink_snapshot is not None:
+        pending_shrink, pending_generation, cached_count = shrink_snapshot
+    else:
+        pending_shrink = pending_generation = None
+        with LOCK:
+            cached_count = len(getattr(cached, 'messages', None) or [])
     # Fast path: prefix read of just the metadata header.
     disk_count = _persisted_message_count(sid)
     if disk_count is not None:
