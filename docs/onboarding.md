@@ -274,22 +274,26 @@ A named profile normally has its own `config.yaml` under `profiles/<name>/` in
 the default Hermes home, where that `<name>` is the profile's own name rather
 than the MCP entry name.
 
-Confirm the effective `config.yaml` path in the onboarding diagnostics (**Config
-file** on the first wizard screen), with the same profile selected, before
-editing, especially for named profiles and on upgraded Windows installations.
-Use the reported path rather than creating a config at a different default
-location.
+Confirm the effective `config.yaml` path before editing, especially for named
+profiles and on upgraded Windows installations. With the profile you want
+selected, request `GET /api/onboarding/status` from the same WebUI origin and
+browser session, so it carries that session's authentication and its
+`hermes_profile` cookie, and read `system.config_path` from the response. That
+field is reported whether or not onboarding is complete, so the check stays
+available on a configured install and you never need to reset onboarding to
+find the path. Use the reported path rather than creating a config at a
+different default location.
 
 The reported path must be the `config.yaml` inside the selected profile's
-Hermes home, because that is the file MCP discovery reads. The diagnostics path
+Hermes home, because that is the file MCP discovery reads. `system.config_path`
 follows WebUI's own config resolution, and an explicit `HERMES_CONFIG_PATH`
-overrides the profile home there. If diagnostics reports a path outside the
+overrides the profile home there. If the reported path is outside the
 selected profile's home (an override pointing elsewhere is the usual cause),
 this walkthrough does not apply: discovery can still load the selected home's
 `config.yaml`, so an entry added at the reported path would never reach the
 Agent. Either leave `HERMES_CONFIG_PATH` unset, or point it at the selected
 profile home's own `config.yaml` so both sides resolve to one file, and recheck
-the diagnostics path before editing.
+`system.config_path` before editing.
 
 Add the server under the existing `mcp_servers` mapping, keeping other servers
 and settings intact. Pick a `<name>` that is unused. If an entry with that name
@@ -331,7 +335,7 @@ toolset if your conversation restricts tools.
 To stop using it, disable the server in **MCP Servers** or remove only its entry
 from that profile's config, then run `/reload-mcp` again with the same profile
 selected. The **MCP Servers** toggle writes through the same WebUI config
-resolution as the diagnostics path, so use it only where that path is the
+resolution as `system.config_path`, so use it only where that path is the
 selected profile home's `config.yaml`; the restriction above applies to removal
 as much as to the edit. Wait for active tool calls to finish first, on this
 profile and on every profile that shares one of its servers. On older Agents
@@ -347,8 +351,8 @@ no connection came up. Check these causes:
   discovery connects nothing and reload reports exactly this message however
   the config reads. Install the Agent's `mcp` extra in the runtime that serves
   WebUI, restart WebUI, then reload with the profile selected.
-- The entry is under `mcp_servers` in the file diagnostics reports for the
-  selected profile, and it is not disabled.
+- The entry is under `mcp_servers` in the file `system.config_path` reports for
+  the selected profile, and it is not disabled.
 - The host running Hermes can reach `<url>`.
 
 Then reload again with the same profile selected: a server that failed to

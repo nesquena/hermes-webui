@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import api.onboarding as onboarding
+
 REPO = Path(__file__).resolve().parents[1]
 
 SECTION_HEADING = "## Optional: add a web search MCP server"
@@ -61,12 +63,33 @@ def test_reload_command_keeps_scoped_and_legacy_paths():
 def test_config_path_override_outranks_the_profile_home():
     """Why the walkthrough excludes a divergent HERMES_CONFIG_PATH.
 
-    Diagnostics report WebUI's resolved config path, where the override
-    outranks the profile home, while MCP discovery reads the selected profile
-    home's own ``config.yaml``.
+    The status endpoint reports WebUI's resolved config path, where the
+    override outranks the profile home, while MCP discovery reads the selected
+    profile home's own ``config.yaml``.
     """
     assert 'env_override = os.getenv("HERMES_CONFIG_PATH")' in _repo_text("api/config.py")
     assert '"config_path": str(_get_config_path())' in _repo_text("api/onboarding.py")
+
+
+def test_status_endpoint_reports_the_config_path_after_onboarding(monkeypatch):
+    """The path check the walkthrough sends users to must survive setup.
+
+    The first wizard screen is not reachable once onboarding is complete, so
+    the walkthrough reads ``system.config_path`` from the status endpoint
+    instead. That endpoint keeps reporting the path on a completed install.
+    """
+    assert 'if parsed.path == "/api/onboarding/status":' in _repo_text("api/routes.py")
+    # The wizard, and the Config file label on its first screen, is withheld
+    # once onboarding is complete.
+    assert "ONBOARDING.active=!status.completed;" in _repo_text("static/onboarding.js")
+    assert "if(!ONBOARDING.active) return false;" in _repo_text("static/onboarding.js")
+
+    monkeypatch.setattr(onboarding, "load_settings", lambda: {"onboarding_completed": True})
+    monkeypatch.setattr(onboarding, "save_settings", lambda *a, **k: None)
+    status = onboarding.get_onboarding_status()
+
+    assert status["completed"] is True
+    assert status["system"]["config_path"].endswith("config.yaml")
 
 
 def test_search_mcp_docs_describe_scoped_reload_with_legacy_caveat():
@@ -137,6 +160,27 @@ def test_search_mcp_docs_blame_the_missing_extra_for_an_empty_reload():
     assert "read that as a missing Agent MCP runtime" not in section
 
 
+def test_search_mcp_docs_check_the_config_path_through_the_status_endpoint():
+    """The path check must be reachable where this section starts: after setup.
+
+    The first wizard screen is gone on a completed install, so the walkthrough
+    reads the path from the status endpoint, under the profile and session the
+    user already has.
+    """
+    section = " ".join(_shared_steps().split())
+    assert (
+        "request `GET /api/onboarding/status` from the same WebUI origin and browser "
+        "session" in section
+    )
+    assert "`hermes_profile` cookie" in section
+    assert "read `system.config_path` from the response" in section
+    assert "reported whether or not onboarding is complete" in section
+    assert "never need to reset onboarding to find the path" in section
+    # The unreachable prerequisite must not come back.
+    assert "first wizard screen" not in section
+    assert "**Config file**" not in section
+
+
 def test_search_mcp_docs_require_the_profile_homes_config_path():
     section = " ".join(_shared_steps().split())
     assert (
@@ -147,6 +191,9 @@ def test_search_mcp_docs_require_the_profile_homes_config_path():
     assert "this walkthrough does not apply" in section
     # The disable step carries the same restriction, not just the edit step.
     assert "the restriction above applies to removal as much as to the edit" in section
+    enable_step, _, disable_step = section.partition("To stop using it")
+    assert "`system.config_path`" in enable_step
+    assert "`system.config_path`" in disable_step
 
 
 def test_shared_steps_stay_provider_neutral():
