@@ -7618,8 +7618,21 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
             _expand_env_vars(str(model_cfg.get("provider") or "").strip()) or ""
         ).strip()
         requested_provider = str(provider or "").strip()
+        provider_prefix, separator, model_pin = requested_provider.partition(":")
+        model_to_resolve = selected_model
+        if (
+            separator
+            and model_pin
+            and provider_prefix.lower() != "custom"
+            and _is_known_model_provider(_resolve_provider_alias(provider_prefix))
+        ):
+            # The picker may send a built-in provider's pinned catalog group.
+            # Keep the provider selection without persisting its model pin.
+            requested_provider = provider_prefix
+            if not selected_model.startswith("@"):
+                model_to_resolve = f"@{requested_provider}:{selected_model}"
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
-            selected_model
+            model_to_resolve
         )
         # Persist the resolved bare/slash form, NOT the `@provider:` prefix. The
         # prefix is a WebUI-internal routing hint that the hermes-agent CLI does
