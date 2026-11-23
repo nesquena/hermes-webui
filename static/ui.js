@@ -27802,10 +27802,22 @@ function _showFileContextMenu(e, item){
     menu.style.maxHeight=Math.max(0,vh-16)+'px';
     menu.style.overflowY='auto';
   }
+  // Open away from the pointer: flip above/left of it when the menu does
+  // not fit below/right, and clamp only as a fallback, so the pointer never
+  // lands on an item (Delete is last) the way a plain clamp would put it.
   const menuRect=menu.getBoundingClientRect();
-  menu.style.left=Math.max(8,Math.min(e.clientX,vw-menuRect.width-8))+'px';
-  menu.style.top=Math.max(8,Math.min(e.clientY,vh-menuRect.height-8))+'px';
-  const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
+  const place=(at,size,limit)=>{
+    const pos=at+size+8<=limit ? at : at-size;
+    return Math.max(8,Math.min(pos,limit-size-8));
+  };
+  menu.style.left=place(e.clientX,menuRect.width,vw)+'px';
+  menu.style.top=place(e.clientY,menuRect.height,vh)+'px';
+  // Clicks inside the menu (its scrollbar or padding) keep it open; items
+  // remove it themselves.
+  const dismiss=(ev)=>{
+    if(ev&&ev.target&&menu.contains(ev.target))return;
+    menu.remove();document.removeEventListener('click',dismiss);
+  };
   setTimeout(()=>document.addEventListener('click',dismiss),0);
 }
 

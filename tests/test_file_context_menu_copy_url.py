@@ -10,6 +10,7 @@ import re
 import shutil
 import socket
 import subprocess
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -157,12 +158,21 @@ def test_copy_file_url_offered_exactly_where_the_raw_route_serves(tmp_path):
     """Rows come from the real listing and are checked against the real raw
     resolver: a FIFO or socket is listed as type 'file' and a link to one as
     !is_dir, but /api/file/raw serves none of them, so none may offer the item."""
+    # AF_UNIX paths are capped at ~104 bytes and macOS's tmp_path is long, so
+    # this workspace lives in a short directory.
+    short = Path(tempfile.mkdtemp(prefix="cfu", dir="/tmp" if os.path.isdir("/tmp") else None))
+    try:
+        _check_against_raw_resolver(tmp_path, short / "ws")
+    finally:
+        shutil.rmtree(short, ignore_errors=True)
+
+
+def _check_against_raw_resolver(tmp_path, ws):
     from types import SimpleNamespace
 
     from api.routes import _file_raw_target
     from api.workspace import list_dir, serialize_workspace_entries_for_browser
 
-    ws = tmp_path / "ws"
     (ws / "sub").mkdir(parents=True)
     (ws / "notes.txt").write_text("probe", encoding="utf-8")
     (ws / "page.html").write_text("<p>probe</p>", encoding="utf-8")
@@ -225,9 +235,20 @@ def test_copy_file_url_matches_live_raw_responses(tmp_path):
     (ws / "pipe-link").symlink_to("worker.pipe")
     (ws / "notes-link").symlink_to("notes.txt")
     _http("/api/workspaces/add", {"path": str(ws)})
-    status, body = _http("/api/session/new", {"workspace": str(ws)})
-    assert status == 200, body
-    sid = json.loads(body)["session"]["session_id"]
+    sid = None
+    try:
+        status, body = _http("/api/session/new", {"workspace": str(ws)})
+        assert status == 200, body
+        sid = json.loads(body)["session"]["session_id"]
+        _check_live_rows(sid)
+    finally:
+        # Leave no session or workspace pointing at a deleted tmp dir.
+        if sid:
+            _http("/api/session/delete", {"session_id": sid})
+        _http("/api/workspaces/remove", {"path": str(ws)})
+
+
+def _check_live_rows(sid):
     status, body = _http(f"/api/list?session_id={sid}&path=.")
     assert status == 200, body
     rows = sorted(json.loads(body)["entries"], key=lambda e: e["name"])
@@ -291,9 +312,11 @@ def _chromium():
 
 # Right-click points near the bottom edge (the reviewer's measurements), a
 # window too short for the whole menu, which must scroll instead, and the right
-# edge with labels as long as the longest locales' (wider than the old guess).
+# edge with labels as long as the longest locales' (wider than the old guess);
+# the bottom-right corner, where a plain clamp would put the pointer on Delete.
 @pytest.mark.parametrize("width,height,x,y,suffix", [
     (1440, 900, 1184, 600, ""),
+    (1440, 900, 1400, 880, ""),
     (900, 700, 700, 650, ""),
     (390, 844, 200, 800, ""),
     (1440, 320, 400, 300, ""),
@@ -315,6 +338,8 @@ def test_file_menu_near_bottom_edge_keeps_delete_reachable(width, height, x, y, 
                                    {name: 'notes.txt', path: 'docs/notes.txt', type: 'file', is_regular: true});
               const menu = document.querySelector('.file-ctx-menu');
               const last = menu.lastElementChild;
+              const underPointer = document.elementFromPoint(x, y);
+              const pointerOnDelete = !!underPointer && last.contains(underPointer);
               const before = last.getBoundingClientRect();
               last.scrollIntoView({block: 'nearest'});
               const after = last.getBoundingClientRect();
@@ -326,7 +351,7 @@ def test_file_menu_near_bottom_edge_keeps_delete_reachable(width, height, x, y, 
                 const tops = new Set([...r.getClientRects()].map(q => Math.round(q.top)));
                 return tops.size === 1 && c.scrollWidth <= c.clientWidth;
               });
-              return {left: m.left, right: m.right, vw: innerWidth, wide,label: last.textContent, items: menu.children.length,
+              return {pointerOnDelete, left: m.left, right: m.right, vw: innerWidth, wide,label: last.textContent, items: menu.children.length,
                       before: [before.top, before.bottom], after: [after.top, after.bottom],
                       menu: [m.top, m.bottom], scrolls: menu.scrollHeight > menu.clientHeight,
                       vh: innerHeight};
@@ -342,6 +367,8 @@ def test_file_menu_near_bottom_edge_keeps_delete_reachable(width, height, x, y, 
     assert 0 <= state["menu"][0] and state["menu"][1] <= vh, state
     assert 0 <= state["left"] and state["right"] <= state["vw"], state
     assert state["wide"], state
+    # The menu opens away from the pointer, so a stray click cannot hit Delete.
+    assert not state["pointerOnDelete"], state
     if state["scrolls"]:
         # Too tall to fit: reachable by scrolling the menu itself.
         assert state["menu"][0] <= state["after"][0] and state["after"][1] <= state["menu"][1], state
