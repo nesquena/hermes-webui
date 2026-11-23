@@ -189,9 +189,8 @@ function _shareVisibleWords(root){
   const counts=new Map();
   const text=[];
   const add=map=>{ for(const [w,c] of map) counts.set(w,(counts.get(w)||0)+c); };
-  // `clipped`: inside a block that cuts off anything drawn outside it (code, math, diagram).
   // `literal`: inside code, which shows its text as written (the source side keeps it whole).
-  const walk=(node,clipped,literal)=>{
+  const walk=(node,literal)=>{
     for(const child of Array.from(node.childNodes||[])){
       if(child.nodeType===3){ text.push(child.data); continue; }
       if(child.nodeType!==1) continue;  // comments are never shown
@@ -202,8 +201,7 @@ function _shareVisibleWords(root){
       const inline=_SHARE_INLINE_TAGS.has(tag)&&!math;
       if(!inline) text.push(' ');
       const start=text.length;
-      walk(child,clipped||tag==='pre'||attrs.some(a=>a.name==='class'&&/\b(?:katex|mermaid)-block\b/.test(a.value)),
-        literal||tag==='code'||tag==='pre');
+      walk(child,literal||tag==='code'||tag==='pre');
       if(!inline) text.push(' ');
       const ownText=text.slice(start).join('');
       for(const attr of attrs){
@@ -211,10 +209,10 @@ function _shareVisibleWords(root){
         let value=String(attr.value||'');
         if(name.startsWith('data-')||name==='download'||name==='style') continue;
         if(name==='class') value=value.split(/\s+/).filter(c=>!/^language-/i.test(c)).join(' ');
-        // A list item's number is drawn in the margin left of the item. It shows only inside a
-        // numbered list, not inside a block that clips that margin, and in full only up to four
-        // digits (longer numbers lose their leading digits on a phone). Otherwise it gives no credit.
-        if(name==='value'&&tag==='li'&&!(String(node.tagName||'').toLowerCase()==='ol'&&!clipped&&/^(?:0|[1-9]\d{0,3})$/.test(value))) continue;
+        // The share page gives wide counters and counters in clipping math/diagram
+        // blocks space inside the list item. Keep the fallback outside ordered
+        // lists, in literal code, and for numbers that may exceed the browser counter.
+        if(name==='value'&&tag==='li'&&!(String(node.tagName||'').toLowerCase()==='ol'&&!literal&&/^(?:0|[1-9]\d{0,8})$/.test(value))) continue;
         // A link the renderer makes inside code (it autolinks addresses there) adds no words:
         // the code's text already shows them, and the source side counts that text once.
         if(literal&&(name==='href'||name==='src')) continue;
@@ -224,7 +222,7 @@ function _shareVisibleWords(root){
       }
     }
   };
-  walk(root,false,false);
+  walk(root,false);
   add(_shareWordsOf(text.join('')));
   return counts;
 }
@@ -296,6 +294,11 @@ function _shareRenderMessages(messages){
     // Before highlighting or any other pass changes the rendered message.
     const body=row.querySelector('.share-message-body');
     if(body&&_shareMissingWords(source,body).length) _shareShowPlainText(body,source);
+    else if(body){
+      for(const item of body.querySelectorAll('ol > li[value]')){
+        if(item.value>=10000) item.classList.add('share-wide-list-marker');
+      }
+    }
     wrap.appendChild(row);
   });
   if(typeof highlightCode==='function') highlightCode(wrap);
