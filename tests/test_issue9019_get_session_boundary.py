@@ -223,8 +223,10 @@ def test_background_never_runs_the_agent_for_the_other_session(store, tmp_path, 
     """On master ``/api/background`` built the background session from the reloaded object: the
     victim's profile (``work``) and workspace, and ran the Agent there."""
     import api.background as background
+    import api.config as config
     import api.models as models
     import api.routes as routes
+    import api.run_drain as run_drain
 
     _victim(store, workspace=tmp_path)
     _own(store, tmp_path)
@@ -242,8 +244,16 @@ def test_background_never_runs_the_agent_for_the_other_session(store, tmp_path, 
     monkeypatch.setattr(routes, "_run_agent_streaming", lambda *a, **k: ran.append(a))
     monkeypatch.setattr(background, "track_background", lambda *a, **k: None)
     monkeypatch.setattr(background, "complete_background", lambda *a, **k: None)
-
-    replies = _post(monkeypatch, "/api/background", {"session_id": OWN, "prompt": "bg task"})
+    # #8904: the stand-in worker never unregisters the stream the route registered.
+    streams_before = set(config.STREAMS)
+    try:
+        replies = _post(monkeypatch, "/api/background", {"session_id": OWN, "prompt": "bg task"})
+    finally:
+        added_streams = set(config.STREAMS) - streams_before
+        for stream_id in added_streams:
+            for registry in vars(config).values():
+                if isinstance(registry, dict):
+                    registry.pop(stream_id, None)
 
     if swap:
         assert [s.profile for s in created] == [], "a background session was created from the other session"
@@ -253,6 +263,7 @@ def test_background_never_runs_the_agent_for_the_other_session(store, tmp_path, 
         assert replies and replies[0][:2] == ("j", 200), replies
     for s in created:
         models.SESSIONS.pop(s.session_id, None)
+    assert not added_streams & {run["stream_id"] for run in run_drain.all_active_runs()}
 
 
 @pytest.mark.parametrize("swap", [False, True])

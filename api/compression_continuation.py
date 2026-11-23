@@ -16,6 +16,57 @@ def _is_local_interactive_persisted_source(source):
     }
 
 
+class _StoreCompressionReads:
+    """``SessionDB``'s compression reads over the storage interface's read-only handle."""
+
+    def __init__(self, opened):
+        self._opened = opened
+        self._reader = opened.__enter__()
+
+    def get_session(self, session_id):
+        record = self._reader.sessions.get(session_id)
+        return None if record is None else record.as_session_row()
+
+    def get_compression_tip(self, session_id):
+        return str(self._reader.lineage.tip(session_id))
+
+    def get_compression_lineage(self, session_id):
+        return [str(sid) for sid in self._reader.lineage.lineage(session_id)]
+
+    def close(self):
+        self._opened.__exit__(None, None, None)
+
+
+def open_compression_reads(path):
+    """A read-only handle on one profile's ``state.db`` with ``get_session``,
+    ``get_compression_tip`` and ``get_compression_lineage``; the caller closes it.
+
+    Agents whose ``hermes_state.SessionDB`` carries those reads keep it. On newer
+    Agents ``hermes_state.SessionDB`` is a deprecated stand-in without them, and
+    the reads go through ``persistence_assembly.open_persistence_reader`` (never
+    creates or migrates the store). Any other ``SessionDB`` is returned as is,
+    so a missing read keeps the callers' legacy fallbacks.
+    """
+    try:
+        from hermes_state import SessionDB
+    except ImportError:
+        SessionDB = None
+    stand_in = SessionDB is None or (
+        getattr(SessionDB, "__module__", None) == "hermes_state"
+        and not callable(getattr(SessionDB, "get_compression_tip", None))
+    )
+    if stand_in:
+        try:
+            from persistence_assembly import open_persistence_reader
+        except ImportError:
+            open_persistence_reader = None
+        if open_persistence_reader is not None:
+            return _StoreCompressionReads(open_persistence_reader(Path(path)))
+    if SessionDB is None:
+        raise ImportError("hermes_state.SessionDB is unavailable")
+    return SessionDB(path, read_only=True)
+
+
 def durable_compression_continuation(session):
     """Return (sealed, resumable tip), without making a recovery write.
 
@@ -31,12 +82,10 @@ def durable_compression_continuation(session):
     db = None
     sealed = False
     try:
-        from hermes_state import SessionDB
-
         path = Path(_resolve_profile_home_for_name(profile)) / "state.db"
         if not path.is_file():
             return False, None
-        db = SessionDB(path, read_only=True)
+        db = open_compression_reads(path)
         # Establish the complete read API before accepting SQLite authority.
         # Old Agents must retain legacy sidecar recovery, not a sealed null tip.
         for name in ('get_session', 'get_compression_tip'):

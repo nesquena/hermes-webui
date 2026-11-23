@@ -93,16 +93,31 @@ def _profile_home_context_api():
     return set_hermes_home_override, reset_hermes_home_override
 
 
+def _context_db_path_resolver():
+    """The Agent's call-time ``state.db`` path resolver, or None: ``hermes_state._default_db_path``
+    on older Agents; on newer ones (no ``_default_db_path``) the goal store opens
+    ``profile_scope(home=get_hermes_home())``, whose file ``store_location(profile_scope())`` names."""
+    try:
+        from hermes_state import _default_db_path  # type: ignore
+
+        if callable(_default_db_path):
+            return _default_db_path
+    except Exception:  # pragma: no cover - depends on installed hermes-agent
+        pass
+    try:
+        from persistence_assembly import profile_scope, store_location  # type: ignore
+    except Exception:  # pragma: no cover - depends on installed hermes-agent
+        return None
+    return lambda: store_location(profile_scope())
+
+
 def _native_profile_context_api(profile_home: str | Path):
     """Return context setters only when SessionDB resolves that context at call time."""
     context_api = _profile_home_context_api()
     if context_api is None:
         return None
-    try:
-        from hermes_state import _default_db_path  # type: ignore
-    except Exception:  # pragma: no cover - depends on installed hermes-agent
-        return None
-    if not callable(_default_db_path):
+    _default_db_path = _context_db_path_resolver()
+    if _default_db_path is None:
         return None
 
     home = Path(profile_home).expanduser().resolve()

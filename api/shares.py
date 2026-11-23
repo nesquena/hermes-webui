@@ -1091,6 +1091,62 @@ def build_share_snapshot(session) -> dict:
     }
 
 
+class ShareLinkOwnedElsewhere(Exception):
+    """The share link a session names was published by another conversation (#8734)."""
+
+
+SHARE_OWNED_ELSEWHERE_MESSAGE = "This share link belongs to another conversation, so nothing was changed."
+_COMPRESSION_MARKERS = ("pre_compression_snapshot", "pre_compression_continuation_session_id")
+
+
+def _session_record(sid) -> dict | None:
+    """``sid``'s sidecar, or None when it is absent, unreadable or names another session."""
+    try:
+        from api import models
+
+        if not models.is_safe_session_id(sid):
+            return None
+        data = json.loads((models.SESSION_DIR / f"{sid}.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) and data.get("session_id") == sid else None
+
+
+def _chain_parent(record):
+    """The parent a record names as a lineage link, or "" for none or a fork.
+
+    A fork (``/api/session/branch``) also names its source as parent, but it is
+    a separate conversation with its own link, so it is not a chain link. The
+    value is returned as stored: only a parent equal to the owner's id, type
+    included, links the two records.
+    """
+    if record.get("session_source") == "fork":
+        return ""
+    return record.get("parent_session_id") or ""
+
+
+def _link_owned_by_other_conversation(payload, session_id: str) -> bool:
+    """True only for a live snapshot published by a different conversation that
+    still exists, when neither side is part of a compression chain (#8734).
+
+    A compression continuation inherits its parent's link, so either side of a
+    chain can hold a link the other published. A record counts as part of a
+    chain when it carries a compression marker or names a parent other than as
+    a fork. A snapshot with no owner, an owner that is gone, and a record that
+    cannot be read keep the behaviour from before this check.
+    """
+    if not isinstance(payload, dict) or payload.get("revoked_at"):
+        return False
+    owner = payload.get("source_session_id")
+    if not session_id or owner == session_id:
+        return False
+    owner_record = _session_record(owner)
+    if owner_record is None or any(owner_record.get(k) for k in _COMPRESSION_MARKERS) or _chain_parent(owner_record):
+        return False
+    acting = _session_record(session_id) or {}
+    return not (any(acting.get(k) for k in _COMPRESSION_MARKERS) or _chain_parent(acting) == owner)
+
+
 def write_share_snapshot(snapshot: dict, *, token: str = "", source_session_id: str = "") -> dict:
     """Persist a prebuilt share snapshot under ``token`` (or a fresh one).
 
@@ -1118,6 +1174,8 @@ def write_share_snapshot(snapshot: dict, *, token: str = "", source_session_id: 
                 token = ""
                 path = None
                 existing = None
+            if _link_owned_by_other_conversation(existing, str(source_session_id or "")):
+                raise ShareLinkOwnedElsewhere(SHARE_OWNED_ELSEWHERE_MESSAGE)
         if path is None:
             token = secrets.token_urlsafe(18)
             path = _share_path(token)
@@ -1269,6 +1327,8 @@ def revoke_share(session) -> bool:
                 payload = {}
             if not isinstance(payload, dict):
                 payload = {}
+            if _link_owned_by_other_conversation(payload, str(getattr(session, "session_id", "") or "")):
+                raise ShareLinkOwnedElsewhere(SHARE_OWNED_ELSEWHERE_MESSAGE)
             payload["revoked_at"] = time.time()
             _write_json_atomic(path, payload)
     return True

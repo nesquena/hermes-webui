@@ -113,6 +113,7 @@ def _ensure_state_db(profile=None):
         ('chat_type', 'ALTER TABLE sessions ADD COLUMN chat_type TEXT'),
         ('thread_id', 'ALTER TABLE sessions ADD COLUMN thread_id TEXT'),
         ('session_key', 'ALTER TABLE sessions ADD COLUMN session_key TEXT'),
+        ('model_config', 'ALTER TABLE sessions ADD COLUMN model_config TEXT'),
         ('origin_chat_id', 'ALTER TABLE sessions ADD COLUMN origin_chat_id TEXT'),
         ('origin_user_id', 'ALTER TABLE sessions ADD COLUMN origin_user_id TEXT'),
         ('platform', 'ALTER TABLE sessions ADD COLUMN platform TEXT'),
@@ -183,14 +184,16 @@ def _insert_agent_session_row(
     parent_session_id=None,
     ended_at=None,
     end_reason=None,
+    session_key=None,
+    model_config=None,
     messages=1,
 ):
     """Insert an agent session row with optional compression lineage."""
     started_at = started_at or time.time()
     conn.execute(
         "INSERT OR REPLACE INTO sessions "
-        "(id, source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(id, source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason, session_key, model_config) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             session_id,
             source,
@@ -201,6 +204,8 @@ def _insert_agent_session_row(
             parent_session_id,
             ended_at,
             end_reason,
+            session_key,
+            json.dumps(model_config) if isinstance(model_config, dict) else model_config,
         ),
     )
     conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
@@ -509,6 +514,32 @@ def test_compression_chain_collapses_to_latest_tip_in_sidebar():
         post('/api/settings', {'show_cli_sessions': False})
 
 
+def _append_state_rows(db, session_id, rows):
+    """Write fixture rows one at a time: ``append_message`` exists on every Agent's
+    ``SessionDB``, while ``append_messages_batch`` is gone from the stand-in newer
+    Agents keep for plugins."""
+    for row in rows:
+        db.append_message(session_id, row['role'], row['content'], timestamp=row['timestamp'])
+
+
+def _promote_state_session_to_reset(db, db_path, session_id):
+    """End ``session_id`` as a session reset the way the installed Agent does it.
+
+    Older Agents expose ``SessionDB.promote_to_session_reset``; newer ones keep a
+    stand-in without it and do the same write through the storage interface.
+    """
+    promote = getattr(db, 'promote_to_session_reset', None)
+    if callable(promote):
+        return promote(session_id)
+    from persistence_assembly import open_persistence, profile_scope
+
+    handle = open_persistence(profile_scope(home=pathlib.Path(db_path).parent), eager=True)
+    try:
+        return handle.sessions.promote_to_reset(session_id)
+    finally:
+        handle.close()
+
+
 @pytest.mark.parametrize('reset_marker_origin', ('creation', 'reopen'))
 def test_reopen_then_recompress_reset_child_stays_independent_across_readers(
     tmp_path, monkeypatch, reset_marker_origin
@@ -551,14 +582,16 @@ def test_reopen_then_recompress_reset_child_stays_independent_across_readers(
     db = hermes_state.SessionDB(db_path=db_path)
     try:
         db.create_session(parent_id, source='telegram', model='test-model', **routing)
-        db.append_messages_batch(
+        _append_state_rows(
+            db,
             parent_id,
             [
                 {'role': 'user', 'content': 'before reset', 'timestamp': 100.0},
                 {'role': 'assistant', 'content': 'answer before reset', 'timestamp': 101.0},
             ],
         )
-        assert db.promote_to_session_reset(parent_id) is True
+        assert _promote_state_session_to_reset(db, db_path, parent_id) is True
+        assert db.get_session(parent_id)['end_reason'] == 'session_reset'
         child_model_config = (
             {'_reset_from': parent_id} if reset_marker_origin == 'creation' else None
         )
@@ -570,7 +603,8 @@ def test_reopen_then_recompress_reset_child_stays_independent_across_readers(
             model_config=child_model_config,
             **routing,
         )
-        db.append_messages_batch(
+        _append_state_rows(
+            db,
             child_id,
             [
                 {'role': 'user', 'content': 'after reset', 'timestamp': 200.0},
@@ -596,7 +630,8 @@ def test_reopen_then_recompress_reset_child_stays_independent_across_readers(
         assert json.loads(db.get_session(child_id)['model_config']) == expected_child_config
         reopened = db.get_session(parent_id)
         assert reopened['ended_at'] is None and reopened['end_reason'] is None
-        db.append_messages_batch(
+        _append_state_rows(
+            db,
             parent_id,
             [{'role': 'user', 'content': 'resumed parent', 'timestamp': 300.0}],
         )
@@ -626,15 +661,15 @@ def test_reopen_then_recompress_reset_child_stays_independent_across_readers(
         )
 
     # (a) Sidebar projection: both rows visible; the child keeps its own
-    # title and is a plain child_session, never a hidden continuation.
+    # title and an independent reset root, never a nested child/continuation.
     projected = read_importable_agent_session_rows(db_path, limit=None, exclude_sources=None)
     projected_by_id = {row['id']: row for row in projected}
     assert set(projected_by_id) == {parent_id, child_id}
     child_row = projected_by_id[child_id]
     assert child_row['title'] == 'Reset child conversation'
-    assert child_row['relationship_type'] == 'child_session'
+    assert child_row['relationship_type'] == 'reset_successor'
     assert child_row['parent_session_id'] == parent_id
-    assert '_lineage_root_id' not in child_row
+    assert child_row['_lineage_root_id'] == child_id
     parent_row = projected_by_id[parent_id]
     assert parent_row['title'] == 'Reset parent conversation'
     assert '_lineage_tip_id' not in parent_row
@@ -642,8 +677,8 @@ def test_reopen_then_recompress_reset_child_stays_independent_across_readers(
 
     # (b) Lineage metadata and report.
     metadata = read_session_lineage_metadata(db_path, {parent_id, child_id})
-    assert metadata[child_id]['relationship_type'] == 'child_session'
-    assert '_lineage_root_id' not in metadata[child_id]
+    assert metadata[child_id]['relationship_type'] == 'reset_successor'
+    assert metadata[child_id]['_lineage_root_id'] == child_id
     assert '_lineage_tip_id' not in metadata.get(parent_id, {})
     child_report = read_session_lineage_report(db_path, child_id)
     assert child_report['lineage_key'] == child_id
@@ -652,11 +687,10 @@ def test_reopen_then_recompress_reset_child_stays_independent_across_readers(
     parent_report = read_session_lineage_report(db_path, parent_id)
     assert parent_report['tip_session_id'] == parent_id
     assert parent_report['total_segments'] == 1
-    assert [child['session_id'] for child in parent_report['children']] == [child_id]
-    assert parent_report['children'][0]['role'] == 'child_session'
+    assert parent_report['children'] == []
 
-    # (c) Watcher publication: the SSE payload carries both conversations
-    # with their own titles.
+    # (c) Watcher publication: its compact refresh payload carries both
+    # conversations with their own titles (lineage is on the list API).
     watcher = GatewayWatcher(state_db_path=db_path)
     subscriber = watcher.subscribe()
     assert watcher._poll_once(now=1.0) is True
@@ -1400,6 +1434,77 @@ def test_previous_messaging_setting_keeps_reset_history(monkeypatch):
         "discord_active",
         "discord_previous_history",
     ]
+
+
+@pytest.mark.parametrize(
+    ('end_reason', 'canonical_marker'),
+    [('session_reset', True), ('session_switch', False)],
+)
+def test_sessions_route_keeps_reset_successor_top_level(
+    cleanup_test_sessions, end_reason, canonical_marker
+):
+    """A reset child retains lineage without becoming a nested sidebar child."""
+    conn = _ensure_state_db()
+    parent_sid = f'reset_lineage_parent_7178_{end_reason}'
+    child_sid = f'reset_lineage_child_7178_{end_reason}'
+    now = time.time()
+    cleanup_test_sessions.extend([parent_sid, child_sid])
+    try:
+        _insert_agent_session_row(
+            conn,
+            session_id=parent_sid,
+            source='wecom',
+            title='Previous WeCom conversation',
+            started_at=now - 20,
+            ended_at=now - 10,
+            end_reason=end_reason,
+            session_key='same-messaging-identity',
+            messages=2,
+        )
+        _insert_agent_session_row(
+            conn,
+            session_id=child_sid,
+            source='wecom',
+            title='Reset WeCom conversation',
+            started_at=now - 5,
+            parent_session_id=parent_sid,
+            session_key='same-messaging-identity',
+            model_config=({'_reset_from': parent_sid} if canonical_marker else None),
+            messages=2,
+        )
+
+        post('/api/settings', {
+            'show_cli_sessions': True,
+            'show_previous_messaging_sessions': True,
+        })
+        data, status = get('/api/sessions')
+
+        assert status == 200
+        rows = {row['session_id']: row for row in data.get('sessions', [])}
+        assert parent_sid in rows
+        assert child_sid in rows
+        child = rows[child_sid]
+        assert child.get('parent_session_id') == parent_sid
+        assert child.get('relationship_type') == 'reset_successor'
+        assert child.get('_lineage_root_id') == child_sid
+        for key in (
+            'parent_title',
+            'parent_source',
+            '_parent_lineage_root_id',
+            '_parent_lineage_tip_id',
+            'model_config',
+        ):
+            assert key not in child
+    finally:
+        try:
+            _remove_test_sessions(conn, parent_sid, child_sid)
+            conn.close()
+        except Exception:
+            pass
+        post('/api/settings', {
+            'show_cli_sessions': False,
+            'show_previous_messaging_sessions': False,
+        })
 
 
 def test_cross_source_parent_child_is_not_collapsed_into_root_metadata(cleanup_test_sessions):
