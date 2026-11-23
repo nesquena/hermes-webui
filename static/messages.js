@@ -1718,10 +1718,7 @@ async function send(){
         }
       }
     const defaultMessageMode=window._defaultMessageMode||'steer';
-      // #9237: a /use re-armed after an off-screen 409 rides with the retry, as
-      // master's queued copy did, so that send is queued rather than steered.
-      const _rearmedSkill=typeof _forcedSkillRearmedFor==='function'&&_forcedSkillRearmedFor(S.session&&S.session.session_id);
-      if(defaultMessageMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'&&!_goalContinuationId&&!_rearmedSkill){
+      if(defaultMessageMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'&&!_goalContinuationId){
         // Real steer: clear the input first so the user gets immediate
         // feedback, then ship the steer payload via /api/chat/steer.
         // _trySteer captures the owner session/files before awaiting uploads,
@@ -2090,16 +2087,12 @@ async function send(){
   let msgText=text;
   if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
-  // #9237: the /use payload this send consumed, re-armed for its chat if an
-  // off-screen start is refused because that chat is still running.
-  let _sentSkillPayload=null;
   if(_forcedSkillDirectivePending){
     const _pending=_forcedSkillDirectivePending;
     if(!_pending.sessionId||_pending.sessionId===activeSid){
       const _directivePayload = await _pending.promise;
       if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
       if(_directivePayload){
-        _sentSkillPayload=_directivePayload;
         const _directive = typeof _directivePayload==='string'
           ? _directivePayload
           : String(_directivePayload.directive||'').trim();
@@ -2283,26 +2276,21 @@ async function send(){
     // failure belongs to activeSid: settle its optimistic state by id and keep
     // the text as its draft (the continuation's after a compression rotation,
     // none for a deleted chat). Never clear, navigate or annotate the chat now
-    // on screen, and never queue or reload a conflicting send from here.
-    if(!_isSessionCurrentPane(activeSid)){
+    // on screen. A chat that is still running takes master's queue-and-reload
+    // branch below instead, on screen or not.
+    if(!_isSessionCurrentPane(activeSid)&&!/session already has an active stream/i.test(errMsg)){
       delete INFLIGHT[activeSid];
       if(typeof clearInflightState==='function') clearInflightState(activeSid);
       if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
       const deleted=!!(e&&e.status===404);
-      const busy=/session already has an active stream/i.test(errMsg);
       let draftSid=activeSid;
       try{
         const body=e&&e.status===409?JSON.parse(e.body||'{}'):null;
         if(body&&body.code==='session_rotated'&&typeof body.continuation_session_id==='string'&&body.continuation_session_id) draftSid=body.continuation_session_id;
       }catch(_){ }
       if(!deleted) _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, draftSid, _composerDraftClearPromise, _goalContinuationId);
-      // Master queued a copy of this message, skill included, for the running
-      // chat. Re-arm the skill as that chat's pending /use instead, unless
-      // another /use is already pending.
-      if(busy&&_sentSkillPayload&&!_forcedSkillDirectivePending) _forcedSkillDirectivePending={sessionId:activeSid,promise:Promise.resolve(_sentSkillPayload),rearmed:activeSid};
       const owner=_sendOwnerLabel(_ownerTitle);
       if(_sendOwnerIsNewChat(_ownerTitle,_ownerHadMessages)) showToast(t('send_offscreen_new_chat'),null,'error');
-      else if(busy) showToast(t('send_offscreen_busy',owner),8000,'warning');
       else showToast(deleted?t('send_offscreen_deleted',owner)
         :t('send_offscreen_failed',owner,(errMsg||'request failed').replace(/[\s.]+$/,'')),null,'error');
       if(typeof renderSessionList==='function') void renderSessionList();
@@ -2476,11 +2464,6 @@ async function send(){
   else if(INFLIGHT[activeSid]){ INFLIGHT[activeSid].streamId=streamId; INFLIGHT[activeSid].reattach=true; }
 
   }finally{ _sendInProgress=false; _sendInProgressSid=null; }
-}
-
-// #9237: whether the pending /use is the one send() re-armed for sid.
-function _forcedSkillRearmedFor(sid){
-  return !!sid&&typeof _forcedSkillDirectivePending!=='undefined'&&!!_forcedSkillDirectivePending&&_forcedSkillDirectivePending.rearmed===sid;
 }
 
 async function startRegeneration(sessionId, regenerationRevision){

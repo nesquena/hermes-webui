@@ -5,7 +5,8 @@ forced-skill directive and POST /api/chat/start. If the user switches to
 another chat (or New Chat) during one of those awaits, every later write must
 stay with the issuing chat: the chat now on screen must not receive the
 optimistic turn, the stream id, the effective model, the live SSE attach or
-the start-error handling.
+the start-error handling. One start error keeps master's behaviour on or off
+screen: a chat that is still running gets the message queued and is reloaded.
 
 These tests run the real send() from static/messages.js in node with
 recording stubs and switch the visible chat inside the awaited stub, the same
@@ -142,7 +143,9 @@ function maybeSwitch(at){ if(SC.switchAt === at) doSwitch(); }
 function _normalizeGoalContinuationId(id){ return String(id||'').trim(); }
 function _takeRestoredDraftGoalContinuationId(){ return ''; }
 function _composerTextWithPendingSelections(){ return input.value; }
-function _chatPayloadModelState(){ return {model:S.session.model, model_provider:S.session.model_provider}; }
+function _chatPayloadModelState(){
+  return {model:S.session && S.session.model || '', model_provider:S.session && S.session.model_provider || null};
+}
 function _flushSelectionBlocksToComposer(){}
 function shouldInterceptCompressionRecoveryContinuation(){ return false; }
 function _dismissHandoffHint(){}
@@ -202,7 +205,7 @@ function saveInflightState(sid, state){
 function clearInflightState(sid){ rec('clearInflightState', sid); }
 function queueSessionMessage(sid, payload){ rec('queueSessionMessage', sid, payload && payload.text); }
 function _clearComposerAfterQueuedSelectionSend(){}
-function updateQueueBadge(){}
+function updateQueueBadge(sid){ rec('updateQueueBadge', sid); }
 function showToast(msg, ms, type){
   rec('showToast', String(msg), ms === undefined ? '<undefined>' : ms, type === undefined ? '<undefined>' : type);
 }
@@ -424,11 +427,47 @@ def test_start_404_after_switch_does_not_clear_or_navigate_the_new_pane():
     assert _named(result, "_restoreComposerDraftAfterFailedSend") == []
 
 
-def test_start_conflict_after_switch_keeps_the_text_as_the_owner_draft():
-    result = _run(switchAt="start", start="409-conflict")
-    _assert_b_untouched(result)
-    _assert_owner_settled(result)
-    assert _named(result, "_restoreComposerDraftAfterFailedSend") == [["hello", "A"]]
+MASTER_QUEUED = "Current session is still running. Reconnected and queued your message."
+
+
+def _assert_master_queue_and_return(result):
+    # Master's "already has an active stream" branch, on screen or not: A's
+    # optimistic state is dropped, the whole message as posted (attachments
+    # and forced-skill block included) is queued for A, A is reloaded and
+    # nothing is restored as a draft, so a newer draft saved for A stays.
+    assert len(_named(result, "api.start")) == 1
+    assert "A" not in result["inflight"]
+    assert ["A"] in _named(result, "clearInflightState")
+    assert _named(result, "queueSessionMessage") == [["A", result["startBody"]["message"]]]
+    assert _named(result, "updateQueueBadge") == [["A"]]
+    assert _named(result, "loadSession") == [["A"]]
+    assert _named(result, "_restoreComposerDraftAfterFailedSend") == []
+    assert _named(result, "showToast") == [[MASTER_QUEUED, 2600, "<undefined>"]]
+    assert _named(result, "attachLiveStream") == []
+    assert not [m for m in result["messages"] if str(m.get("content", "")).startswith("**Error:**")]
+    assert _named(result, "setComposerStatus")[-1] == [""]
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        {"switchAt": "start"},
+        {"switchAt": "start", "switchKind": "chain"},
+        {"switchAt": "start", "switchKind": "loading"},
+        {"switchAt": "start", "switchKind": "cleared"},
+        {"switchAt": "upload", "files": True},
+        {"switchAt": "directive", "directive": True, "files": True},
+        {"switchAt": "start", "ownerTitle": "Untitled", "ownerMessages": []},
+    ],
+    ids=["start", "b-then-c", "still-loading", "empty-pane", "upload", "forced-skill", "never-started"],
+)
+def test_start_conflict_after_switch_queues_for_the_owner_and_reloads_it_as_master(scenario):
+    result = _run(start="409-conflict", **scenario)
+    _assert_master_queue_and_return(result)
+    if scenario.get("directive"):
+        queued = _named(result, "queueSessionMessage")[0][1]
+        assert queued.startswith("/use writer\n\n[FORCED SKILL CONTEXT: writer]\nguide\n[/FORCED SKILL CONTEXT]")
+        assert queued.endswith("hello\n\n[Attached files: /ws/f.txt]")
 
 
 def test_start_error_after_switch_does_not_add_an_error_bubble_to_the_new_pane():
@@ -474,6 +513,7 @@ def test_control_no_switch_start_conflict_queues_and_reloads_the_owner():
     result = _run(start="409-conflict")
     assert _named(result, "queueSessionMessage") == [["A", "hello"]]
     assert _named(result, "loadSession") == [["A"]]
+    _assert_master_queue_and_return(result)
 
 
 def test_control_no_switch_start_error_adds_the_error_bubble():
@@ -513,22 +553,12 @@ def _toasts(result):
     return _named(result, "showToast")
 
 
-def _busy(label):
-    return f"Message not sent: {label} is still running. {SAVED}"
-
-
 def _failed(label, reason):
     return f"Message not sent in {label}: {reason}. {SAVED}"
 
 
 def _deleted(label):
     return f"Message not sent: {label} no longer exists, so your text was not saved."
-
-
-def test_start_conflict_after_switch_says_the_chat_is_still_running():
-    result = _run(switchAt="start", start="409-conflict")
-    # The raw server sentence ("Session already has an active stream") is not shown.
-    assert _toasts(result) == [[_busy("\u201cChat A\u201d"), 8000, "warning"]]
 
 
 def test_start_error_after_switch_names_the_chat_and_the_reason():
@@ -556,7 +586,6 @@ def test_start_404_after_switch_says_the_text_was_not_saved():
 @pytest.mark.parametrize(
     "start, expected",
     [
-        ("409-conflict", [_busy("\u201cChat A\u201d"), 8000, "warning"]),
         ("500", [_failed("\u201cChat A\u201d", "boom"), None, "error"]),
         ("404", [_deleted("\u201cChat A\u201d"), None, "error"]),
     ],
@@ -596,8 +625,8 @@ def test_offscreen_notices_quote_cut_or_replace_the_owner_title(owner_title, lab
     assert TRIM_TITLE[39] == " "
     result = _run(switchAt="start", start="500", ownerTitle=owner_title)
     assert _toasts(result) == [[_failed(label, "boom"), None, "error"]]
-    result = _run(switchAt="start", start="409-conflict", ownerTitle=owner_title)
-    assert _toasts(result) == [[_busy(label), 8000, "warning"]]
+    result = _run(switchAt="start", start="404", ownerTitle=owner_title)
+    assert _toasts(result) == [[_deleted(label), None, "error"]]
 
 
 # ── UX review round 2: "an untitled chat", and a chat that never started ────
@@ -618,7 +647,6 @@ SLASH = {"text": "/custom do it"}
 @pytest.mark.parametrize(
     "scenario, expected",
     [
-        ({"switchAt": "start", "start": "409-conflict"}, [_busy(UNTITLED), 8000, "warning"]),
         ({"switchAt": "start", "start": "500"}, [_failed(UNTITLED, "boom"), None, "error"]),
         ({"switchAt": "start", "start": "404"}, [_deleted(UNTITLED), None, "error"]),
     ],
@@ -629,11 +657,11 @@ def test_an_untitled_chat_with_messages_reads_an_untitled_chat_in_every_notice(s
 
 
 def test_the_untitled_phrase_reads_as_a_sentence():
-    result = _run(ownerTitle="Untitled", switchAt="start", start="409-conflict")
-    assert _toasts(result)[0][0].startswith("Message not sent: an untitled chat is still running.")
+    result = _run(ownerTitle="Untitled", switchAt="start", start="404")
+    assert _toasts(result)[0][0].startswith("Message not sent: an untitled chat no longer exists,")
 
 
-@pytest.mark.parametrize("start", ["409-conflict", "500", "404", "409-rotated"])
+@pytest.mark.parametrize("start", ["500", "404", "409-rotated"])
 @pytest.mark.parametrize("owner_title", DEFAULT_TITLES)
 def test_a_never_started_chat_start_failure_says_it_is_not_in_the_list(owner_title, start):
     # A was on screen when its user row was pushed, then the user left during
@@ -651,8 +679,8 @@ def test_a_never_started_chat_start_failure_says_it_is_not_in_the_list(owner_tit
 @pytest.mark.parametrize(
     "scenario, expected",
     [
-        ({"switchAt": "start", "start": "409-conflict"}, [_busy(UNTITLED), 8000, "warning"]),
         ({"switchAt": "start", "start": "500"}, [_failed(UNTITLED, "boom"), None, "error"]),
+        ({"switchAt": "start", "start": "404"}, [_deleted(UNTITLED), None, "error"]),
     ],
 )
 def test_an_untitled_chat_whose_rows_are_still_loading_is_not_called_new(scenario, expected, counts):
@@ -668,7 +696,7 @@ def test_control_zero_counts_still_mean_a_new_chat(counts):
     assert _toasts(result) == [[NEW_CHAT, None, "error"]]
 
 
-@pytest.mark.parametrize("start", ["409-conflict", "500", "404"])
+@pytest.mark.parametrize("start", ["500", "404"])
 def test_a_never_started_chat_left_before_the_start_gets_the_new_chat_notice(start):
     result = _run(files=True, switchAt="upload", start=start, ownerTitle="Untitled", ownerMessages=[])
     _assert_b_untouched(result)
@@ -678,7 +706,6 @@ def test_a_never_started_chat_left_before_the_start_gets_the_new_chat_notice(sta
 @pytest.mark.parametrize(
     "scenario, expected",
     [
-        ({"switchAt": "start", "start": "409-conflict"}, [_busy("\u201cChat A\u201d"), 8000, "warning"]),
         ({"switchAt": "start", "start": "500"}, [_failed("\u201cChat A\u201d", "boom"), None, "error"]),
         ({"switchAt": "start", "start": "404"}, [_deleted("\u201cChat A\u201d"), None, "error"]),
     ],
@@ -691,7 +718,6 @@ def test_control_a_titled_chat_without_messages_keeps_the_titled_notices(scenari
 @pytest.mark.parametrize(
     "scenario",
     [
-        {"switchAt": "start", "start": "409-conflict"},
         {"switchAt": "start", "start": "500"},
         {"switchAt": "start", "start": "404"},
     ],
