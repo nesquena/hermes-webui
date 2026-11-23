@@ -224,6 +224,84 @@ State normally lives outside the repository. By default:
 Override these with `HERMES_HOME` and `HERMES_WEBUI_STATE_DIR` when you need an
 isolated test install.
 
+## Optional web search with Parallel Search MCP
+
+After onboarding, you can add [Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp)
+for web search and page extraction without a Parallel account or API key.
+This uses Hermes Agent's existing remote MCP client over Streamable HTTP.
+Free access is rate limited. Check the linked Parallel documentation for current
+access requirements and limits.
+
+`/reload-mcp` reloads MCP servers for the profile selected in WebUI. With a
+current Hermes Agent that supports profile-scoped MCP, it shuts down and
+rediscovers only that profile's servers from that profile's `config.yaml`, so
+other profiles' MCP connections and tools keep running. Older Agents without
+profile-scoped MCP fall back to a process-wide reload: it reconnects every MCP
+server in the process and rediscovers from the Agent's process home, not the
+profile selected in WebUI. On those older Agents, use this walkthrough only with
+the default profile in a process that is not serving named profiles, or update
+Hermes Agent first.
+
+Select the profile you want in WebUI, then edit that profile's `config.yaml` on
+the machine running Hermes. For the default profile:
+
+- Linux, macOS, and WSL: `~/.hermes/config.yaml`.
+- Native Windows: normally `%LOCALAPPDATA%\hermes\config.yaml`. On upgraded
+  installations, WebUI keeps using `%USERPROFILE%\.hermes\config.yaml` if the
+  legacy home has WebUI state and the new home does not yet have WebUI state.
+- If the running process sets `HERMES_HOME`, use `config.yaml` inside that
+  directory instead of the platform default.
+
+A named profile normally has its own `config.yaml` under `profiles/<name>/` in
+the default Hermes home.
+
+Confirm the effective `config.yaml` path in the onboarding diagnostics, with the
+same profile selected, before editing, especially for named profiles and on
+upgraded Windows installations. Use the reported path
+rather than creating a config at a different default location.
+
+Add this entry under the existing `mcp_servers` mapping, keeping other servers
+and settings intact. This example assumes the name `parallel` is unused. If an
+entry with that name already exists, inspect it first; do not overwrite it or
+add a duplicate key.
+
+```yaml
+mcp_servers:
+  parallel:
+    url: https://search.parallel.ai/mcp
+```
+
+No authorization headers are needed for this anonymous endpoint. Adding the
+entry enables the server on the next MCP discovery or reload, and the agent may
+call its tools during a conversation. Search queries, requested
+URLs, and any supplied objective or context go to Parallel. This adds MCP tools;
+it does not replace the built-in web tools or change their provider settings.
+
+With the same profile selected, let active tool calls finish, then run
+`/reload-mcp` in chat. If it reports that the profile's MCP runtime scope could
+not be confirmed, a chat turn on that profile may still be running; retry when
+it finishes. Check **MCP Servers** and **MCP Tools** in Settings.
+If `parallel` initially appears unavailable while
+reload is still running, wait for it to finish discovering tools, then refresh
+the panel. A configured server is not proof of a working
+connection: confirm that `parallel` is active and that `web_search` and
+`web_fetch` appear under it (Hermes prefixes their registered names with
+`mcp__parallel__`). Ask Hermes to use Parallel to find a public
+documentation page and fetch its contents. Confirm that both tool calls
+succeed; configuration and Settings status alone do not prove readiness.
+Existing toolset selections still apply, so include the server's MCP toolset if
+your conversation restricts tools.
+
+To stop using it, disable the server in **MCP Servers** or remove only its entry
+from that profile's config, then run `/reload-mcp` again with the same profile
+selected. Wait for active tool calls to finish first. On older Agents without
+profile-scoped MCP, reload reconnects MCP servers process-wide, so the same
+single-profile conditions apply.
+
+If reload reports `MCP runtime unavailable`, check the Hermes Agent installation
+using [Troubleshooting](troubleshooting.md). Docker users should also check the
+Agent source mount and dependency setup in the [Docker guide](docker.md).
+
 ## When to file an issue
 
 File an issue when the diagnostics point to WebUI rather than local
