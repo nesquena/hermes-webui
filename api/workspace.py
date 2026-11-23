@@ -1712,9 +1712,15 @@ def list_dir(workspace: Path, rel: str='.'):
                     'mtime_ns': mtime_ns,
                     'birthtime_ns': _birthtime_ns(lstat_result) if lstat_result is not None else None,
                 }
+                # is_regular: the resolved target is a regular file, the only
+                # kind /api/file/raw serves (a FIFO or socket is neither a
+                # directory nor servable, so !is_dir alone is not enough).
+                entry['is_regular'] = False
                 if not is_dir:
                     try:
-                        entry['size'] = link_target.stat().st_size
+                        target_stat = link_target.stat()
+                        entry['size'] = target_stat.st_size
+                        entry['is_regular'] = stat.S_ISREG(target_stat.st_mode)
                     except OSError:
                         entry['size'] = None
                 entries.append(entry)
@@ -1729,6 +1735,7 @@ def list_dir(workspace: Path, rel: str='.'):
                 mtime_ns = lstat_result.st_mtime_ns
                 is_dir_entry = stat.S_ISDIR(lstat_result.st_mode)
             else:
+                is_file = False
                 size = None
                 mtime_ns = None
                 is_dir_entry = False
@@ -1737,6 +1744,9 @@ def list_dir(workspace: Path, rel: str='.'):
                 'name': name,
                 'path': entry_path,
                 'type': 'dir' if is_dir_entry else 'file',
+                # 'file' also covers FIFOs, sockets and devices; is_regular
+                # marks the entries /api/file/raw can actually serve.
+                'is_regular': is_file,
                 'size': size,
                 'mtime_ns': mtime_ns,
                 'birthtime_ns': _birthtime_ns(lstat_result) if lstat_result is not None else None,

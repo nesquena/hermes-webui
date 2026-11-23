@@ -27740,11 +27740,13 @@ function _showFileContextMenu(e, item){
     // HTML, which the raw route then renders sandboxed (as "Open in browser"
     // does) instead of downloading; on other types it would only add the
     // sandbox CSP, which some browsers' PDF viewers refuse to run under.
-    // Files only: the raw route has no directory form, and a symlink to a
-    // target outside the workspace 404s there. Kept inside the non-escape
+    // Regular files only (is_regular from the listing, which follows an
+    // in-workspace symlink): the raw route serves nothing else, so a
+    // directory, a FIFO or socket, or a link to one gets no item, and a
+    // symlink to a target outside the workspace 404s there. Kept inside the non-escape
     // block, and rechecked at click time (a grant may land while the menu is
     // open), so the copied URL never carries an escape grant token.
-    if(!isDirLike&&!isExternalLink){
+    if(item.is_regular===true&&!isDirLike&&!isExternalLink){
       menu.appendChild(_workspaceContextMenuItem(t('copy_file_url'),()=>{
         menu.remove();
         // The server picks the MIME type from the resolved target's suffix,

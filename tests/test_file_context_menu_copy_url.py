@@ -5,9 +5,14 @@ static/workspace.js plus _workspaceContextMenuItem/_showFileContextMenu from
 static/ui.js, over a minimal DOM stub, under a subpath document.baseURI.
 """
 import json
+import os
 import re
 import shutil
+import socket
 import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -108,12 +113,12 @@ def _copied(url):
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_copy_file_url_copies_absolute_subpath_url_for_files_only():
     file_res, html_res, pdf_res, html_link_res, dir_res, dir_link_res = _run_menu([
-        {"item": {"name": "a b.py", "path": "src/a b.py", "type": "file"}},
-        {"item": {"name": "Page.HTM", "path": "docs/Page.HTM", "type": "file"}},
-        {"item": {"name": "r.pdf", "path": "r.pdf", "type": "file"}},
+        {"item": {"name": "a b.py", "path": "src/a b.py", "type": "file", "is_regular": True}},
+        {"item": {"name": "Page.HTM", "path": "docs/Page.HTM", "type": "file", "is_regular": True}},
+        {"item": {"name": "r.pdf", "path": "r.pdf", "type": "file", "is_regular": True}},
         # The server types a symlink by its resolved target's suffix.
         {"item": {"name": "index", "path": "index", "type": "symlink",
-                  "target": "/ws/build/index.html", "is_dir": False}},
+                  "target": "/ws/build/index.html", "is_dir": False, "is_regular": True}},
         {"item": {"name": "src", "path": "src", "type": "dir"}},
         {"item": {"name": "lnk", "path": "lnk", "type": "symlink", "is_dir": True}},
     ])
@@ -133,16 +138,123 @@ def test_copy_file_url_never_copies_a_failing_relative_or_token_url():
         # Symlink to a file outside the workspace: /api/file/raw cannot serve it.
         {"item": {"name": "ext", "path": "ext", "type": "symlink", "target_outside_workspace": True}},
         # Inside an escape grant: the URL would carry the grant token.
-        {"item": {"name": "f.txt", "path": "ext/f.txt", "type": "file"}, "grantRoot": "ext"},
-        {"item": {"name": "f.txt", "path": "ext/f.txt", "type": "file"}, "grantAfterOpen": "ext"},
+        {"item": {"name": "f.txt", "path": "ext/f.txt", "type": "file", "is_regular": True}, "grantRoot": "ext"},
+        {"item": {"name": "f.txt", "path": "ext/f.txt", "type": "file", "is_regular": True}, "grantAfterOpen": "ext"},
         # Without an http(s) base the route stays "/api/..." — not a usable URL.
-        {"item": {"name": "f.txt", "path": "f.txt", "type": "file"}, "baseURI": "about:blank"},
+        {"item": {"name": "f.txt", "path": "f.txt", "type": "file", "is_regular": True}, "baseURI": "about:blank"},
     ])
     assert external == NOT_OFFERED
     assert escaped == NOT_OFFERED
     failed = {"offered": True, "copied": [], "toasts": ["file_url_copy_failed"]}
     assert late_grant == failed
     assert no_http == failed
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.skipif(not hasattr(os, "mkfifo") or not hasattr(socket, "AF_UNIX"),
+                    reason="needs FIFOs and Unix sockets")
+def test_copy_file_url_offered_exactly_where_the_raw_route_serves(tmp_path):
+    """Rows come from the real listing and are checked against the real raw
+    resolver: a FIFO or socket is listed as type 'file' and a link to one as
+    !is_dir, but /api/file/raw serves none of them, so none may offer the item."""
+    from types import SimpleNamespace
+
+    from api.routes import _file_raw_target
+    from api.workspace import list_dir, serialize_workspace_entries_for_browser
+
+    ws = tmp_path / "ws"
+    (ws / "sub").mkdir(parents=True)
+    (ws / "notes.txt").write_text("probe", encoding="utf-8")
+    (ws / "page.html").write_text("<p>probe</p>", encoding="utf-8")
+    os.mkfifo(ws / "worker.pipe")
+    (ws / "pipe-link").symlink_to("worker.pipe")
+    (ws / "notes-link").symlink_to("notes.txt")
+    (ws / "sub-link").symlink_to("sub")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("probe", encoding="utf-8")
+    (ws / "outside-link").symlink_to(outside)
+    sock = socket.socket(socket.AF_UNIX)
+    sock.bind(str(ws / "svc.sock"))
+    (ws / "sock-link").symlink_to("svc.sock")
+
+    rows = {e["name"]: e for e in serialize_workspace_entries_for_browser(list_dir(ws, "."))}
+    names = sorted(rows)
+    assert names == ["notes-link", "notes.txt", "outside-link", "page.html",
+                     "pipe-link", "sock-link", "sub", "sub-link", "svc.sock", "worker.pipe"]
+    assert rows["worker.pipe"]["type"] == "file"  # why type alone is not enough
+    assert rows["pipe-link"]["is_dir"] is False
+
+    try:
+        results = _run_menu([{"item": rows[n]} for n in names])
+    finally:
+        sock.close()
+    session = SimpleNamespace(workspace=str(ws))
+    for name, res in zip(names, results):
+        served = _file_raw_target(session, "no-such-session", name) is not None
+        assert res["offered"] is served, (name, rows[name], res)
+        assert res["toasts"] == [], (name, res)
+    offered = {n for n, r in zip(names, results) if r["offered"]}
+    assert offered == {"notes-link", "notes.txt", "page.html"}
+    assert dict(zip(names, results))["page.html"] == _copied(BASE + "page.html&inline=1")
+
+
+def _http(path, body=None):
+    from tests._pytest_port import BASE as SERVER
+
+    req = urllib.request.Request(
+        SERVER + path,
+        data=None if body is None else json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
+def test_copy_file_url_matches_live_raw_responses(tmp_path):
+    """Over real HTTP: rows from /api/list, and each offered URL's path
+    returns 200 from /api/file/raw while every withheld one returns 404."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "notes.txt").write_text("probe", encoding="utf-8")
+    os.mkfifo(ws / "worker.pipe")
+    (ws / "pipe-link").symlink_to("worker.pipe")
+    (ws / "notes-link").symlink_to("notes.txt")
+    _http("/api/workspaces/add", {"path": str(ws)})
+    status, body = _http("/api/session/new", {"workspace": str(ws)})
+    assert status == 200, body
+    sid = json.loads(body)["session"]["session_id"]
+    status, body = _http(f"/api/list?session_id={sid}&path=.")
+    assert status == 200, body
+    rows = sorted(json.loads(body)["entries"], key=lambda e: e["name"])
+    assert [r["name"] for r in rows] == ["notes-link", "notes.txt", "pipe-link", "worker.pipe"]
+
+    results = _run_menu([{"item": r} for r in rows])
+    seen = {}
+    for row, res in zip(rows, results):
+        status, body = _http("/api/file/raw?session_id=" + urllib.parse.quote(sid)
+                             + "&path=" + urllib.parse.quote(row["path"], safe=""))
+        seen[row["name"]] = (res["offered"], status)
+        if res["offered"]:
+            assert res["copied"] == [BASE + urllib.parse.quote(row["path"], safe="")]
+            assert body == b"probe"
+    assert seen == {"notes-link": (True, 200), "notes.txt": (True, 200),
+                    "pipe-link": (False, 404), "worker.pipe": (False, 404)}
+
+
+def test_listing_marks_only_regular_files_and_links_to_them(tmp_path):
+    from api.workspace import list_dir
+
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "d").mkdir()
+    (tmp_path / "a-link").symlink_to("a.txt")
+    (tmp_path / "d-link").symlink_to("d")
+    flags = {e["name"]: e.get("is_regular") for e in list_dir(tmp_path, ".")}
+    assert flags == {"a.txt": True, "a-link": True, "d": False, "d-link": False}
 
 
 def test_copy_file_url_strings_exist_in_every_locale():
@@ -200,7 +312,7 @@ def test_file_menu_near_bottom_edge_keeps_delete_reachable(width, height, x, y, 
             """([x, y, suffix]) => {
               window.__labelSuffix = suffix;
               _showFileContextMenu({clientX: x, clientY: y},
-                                   {name: 'notes.txt', path: 'docs/notes.txt', type: 'file'});
+                                   {name: 'notes.txt', path: 'docs/notes.txt', type: 'file', is_regular: true});
               const menu = document.querySelector('.file-ctx-menu');
               const last = menu.lastElementChild;
               const before = last.getBoundingClientRect();
