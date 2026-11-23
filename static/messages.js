@@ -2293,7 +2293,9 @@ async function send(){
       let restoreFiles=_failedSendFilesSnapshot;
       if(_isSessionCurrentPane(draftSid)&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length){
         const staged=S.pendingFiles;
-        restoreFiles=staged.concat((restoreFiles||[]).filter(f=>f&&!staged.includes(f)));
+        // Same test as addFiles(): a file reselected there is the same file.
+        const same=(p,f)=>p&&(p._origName||p.name)===(f._origName||f.name)&&p.size===f.size&&p.lastModified===f.lastModified;
+        restoreFiles=staged.concat((restoreFiles||[]).filter(f=>f&&!staged.some(p=>same(p,f))));
       }
       if(!deleted) _restoreComposerDraftAfterFailedSend(_failedSendDraftText, restoreFiles, draftSid, _composerDraftClearPromise, _goalContinuationId);
       const owner=_sendOwnerLabel(_ownerTitle);

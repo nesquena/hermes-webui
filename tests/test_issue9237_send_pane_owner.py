@@ -127,7 +127,7 @@ function doSwitch(){
     S.session = {session_id:'A2', workspace:'/a', profile:'pa', model:'model-a', model_provider:'prov-a',
                  title:'Chat A'};
     S.messages = [];
-    S.pendingFiles = [{name:'newer.txt'}];
+    S.pendingFiles = SC.a2Staged || [{name:'newer.txt'}];
     return;
   }
   if(SC.switchKind === 'loadingBack'){
@@ -840,3 +840,17 @@ def test_failed_start_restore_into_the_issuing_chat_passes_only_the_snapshot():
     """B's staged files are B's: a failure for A never hands them to A's draft."""
     result = _run(switchAt="start", start="500", files=True, bStaged=True)
     assert _named(result, "restore.files") == [["A", ["f.txt"]]]
+
+
+def test_rotated_restore_does_not_duplicate_a_file_reselected_on_the_continuation():
+    """Codex r12: the same file picked again on A2 is a new File object; it is the same file (name, size, mtime)."""
+    result = _run(switchAt="start", switchKind="continuation", start="409-rotated", files=True,
+                  a2Staged=[{"name": "f.txt"}])
+    assert _named(result, "restore.files") == [["A2", ["f.txt"]]]
+
+
+@pytest.mark.parametrize("other", [{"size": 9}, {"lastModified": 7}], ids=["other-size", "other-mtime"])
+def test_rotated_restore_keeps_a_different_file_with_the_same_name(other):
+    result = _run(switchAt="start", switchKind="continuation", start="409-rotated", files=True,
+                  a2Staged=[{"name": "f.txt", **other}])
+    assert _named(result, "restore.files") == [["A2", ["f.txt", "f.txt"]]]
