@@ -835,7 +835,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 Hermes WebUI is built with help from the open-source community. Every PR — whether merged directly, absorbed into a batch release, or salvaged from a larger proposal — shapes the project, and we're grateful to everyone who has taken the time to contribute.
 
 <!-- BEGIN GENERATED CONTRIBUTORS -->
-Over **497 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
+Over **500 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
 
 ### Top contributors (by PR count, including absorbed/batch-released work)
 
@@ -847,12 +847,12 @@ Over **497 contributors** have shipped code that landed in a release tag. The fu
 | 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 155 | `v0.50.279` → `v0.52.458` |
 | 5 | [@webtecnica](https://github.com/webtecnica) | 103 | `v0.51.619` → `v0.52.727` |
 | 6 | [@bergeouss](https://github.com/bergeouss) | 80 | `v0.48.0` → `v0.51.703` |
-| 7 | [@chhxbchhxb](https://github.com/chhxbchhxb) | 69 | `v0.50.238` → `v0.52.724` |
+| 7 | [@chhxbchhxb](https://github.com/chhxbchhxb) | 73 | `v0.50.238` → `v0.52.732` |
 | 8 | [@AJV20](https://github.com/AJV20) | 57 | `v0.51.93` → `v0.51.346` |
 | 9 | [@happy5318](https://github.com/happy5318) | 56 | `v0.50.238` → `v0.52.667` |
 | 10 | [@starship-s](https://github.com/starship-s) | 56 | `v0.50.123` → `v0.52.544` |
 
-See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 497 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
+See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 500 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
 <!-- END GENERATED CONTRIBUTORS -->
 
 ### Notable contributions
