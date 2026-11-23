@@ -103,6 +103,9 @@ _DRIVER = textwrap.dedent(
     }
 
     const result = { calls: [], postCalls: 0, getCalls: 0, bannerCalls: 0, listeners: [], intervals: [], returnedNull: false, firstReturned: false, secondReturned: false, sharedPromise: false, intervalHandleStored: false };
+    // boot.js is browser code: the scheduler reads window._updateRecoveryGeneration
+    // (master's recovery-generation guard), so the harness must model the global.
+    global.window = global;
     const store = {};
     global.sessionStorage = {
       getItem: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),

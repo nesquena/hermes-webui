@@ -4346,16 +4346,25 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // token is cleared in finally so a later trigger can run after settlement.
   // ?test_updates=1 in URL forces banner display for testing (bypasses dismissed guard)
   const _testUpdates=new URLSearchParams(location.search).get('test_updates')==='1';
+  window._updateCheckOwner=window._updateCheckOwner||{generation:0,manualPending:0};
   let _updateCheckInFlight=null;
   let _updateCheckTimer=null;
   const _checkUpdates=()=>{
+    const _owner=(typeof window!=='undefined')?(window._updateCheckOwner=window._updateCheckOwner||{generation:0,manualPending:0}):null;
+    if(_owner&&_owner.manualPending>0) return;
     if(_bootSettings.check_for_updates===false||sessionStorage.getItem('hermes-update-dismissed')) return;
     if(_updateCheckInFlight) return _updateCheckInFlight;
     // The banner must not be rendered from a check that started before an
     // update-recovery restart: capture the recovery generation per request
     // (the boot one-shot captured it right before its own POST).
     const _recoveryGenAtCheck=Number(window._updateRecoveryGeneration)||0;
+    const _checkGen=_owner?_owner.generation:0;
     _updateCheckInFlight=api('api/updates/check',{method:'POST',body:JSON.stringify({force:false}),timeoutMs:300000}).then(d=>{
+      if(d&&d.disabled){
+        if(_bootSettings)_bootSettings.check_for_updates=false;
+        return;
+      }
+      if(_owner&&_owner.generation!==_checkGen) return;
       // Re-check dismissed state after fetch — the user may have dismissed
       // the banner while the request was in flight, preventing a race where
       // _showUpdateBanner() re-displays a banner the user just closed.
@@ -4373,8 +4382,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     // a tab that was closed and re-opened is handled by the normal boot path.
     document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible') _checkUpdates();});
     // Periodic re-check every 30 minutes for always-open tabs (1,800,000 ms).
-    // The handle is kept in a boot-scope binding so the poll can be torn down
-    // instead of leaking a timer per boot.
+    // The handle is kept in a boot-scope binding so the poll can be torn down;
+    // when the server reports updates disabled, _bootSettings.check_for_updates
+    // is set to false so subsequent ticks short-circuit without issuing requests.
     _updateCheckTimer=setInterval(_checkUpdates,1800000);
   }
   const _bootActiveProfileUnauthRedirectBudget=(()=>{
