@@ -1311,11 +1311,12 @@ def git_diff(workspace: str | Path, path: str, kind: str = "unstaged") -> dict:
     raw = result.stdout
     diff = raw.replace("\r\n", "\n").replace("\r", "\n")
     binary = "Binary files " in diff or "GIT binary patch" in diff
+    # Count the whole patch: cutting the raw text at the payload limit would
+    # reach fewer lines than the payload whenever it still holds CRs.
+    additions, deletions = _diff_stats(raw)
     too_large = len(diff.encode("utf-8", errors="replace")) > DIFF_SIZE_LIMIT
     if too_large:
         diff = diff[:DIFF_SIZE_LIMIT]
-        raw = raw[:DIFF_SIZE_LIMIT]
-    additions, deletions = _diff_stats(raw)
     return {
         "path": workspace_rel,
         "kind": kind,

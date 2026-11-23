@@ -14,7 +14,7 @@ import subprocess
 
 import pytest
 
-from api.workspace_git import _diff_stats, git_diff
+from api.workspace_git import DIFF_SIZE_LIMIT, _diff_stats, git_diff
 from tests.test_workspace_git import _commit_all, _git, _init_repo
 
 pytestmark = pytest.mark.usefixtures("isolated_host_git_config")
@@ -91,3 +91,17 @@ def test_combined_diff_headers_reset_between_files():
            "++<<<<<<< HEAD\n +ours\n++>>>>>>> x\n")
     two = one.replace("h1", "h2")
     assert _diff_stats(one + two) == tuple(2 * n for n in _diff_stats(one))
+
+
+@pytest.mark.parametrize("eol", [b"\n", b"\r\n"])
+def test_too_large_diff_counts_the_whole_patch(tmp_path, eol):
+    repo = _init_repo(tmp_path / "repo")
+    _git(repo, "config", "core.autocrlf", "false")
+    rows = 20000
+    (repo / "big.txt").write_bytes(b"".join(b"old row %05d" % i + eol for i in range(rows)))
+    _commit_all(repo)
+    (repo / "big.txt").write_bytes(b"".join(b"new row %05d" % i + eol for i in range(rows)))
+    payload = git_diff(repo, "big.txt")
+    assert payload["too_large"] is True
+    assert len(payload["diff"]) == DIFF_SIZE_LIMIT
+    assert (payload["additions"], payload["deletions"]) == (rows, rows) == _numstat(repo, "--", "big.txt")
