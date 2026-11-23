@@ -437,7 +437,7 @@ def run_turn(monkeypatch, homes):
             lambda model, provider_context, profile_home, has_profile: (model, provider_context, False),
         )
         monkeypatch.setattr(config_mod, "_resolve_cli_toolsets", lambda cfg: [])
-        monkeypatch.setattr(config_mod, "get_config_for_profile_home", lambda profile_home: {})
+        monkeypatch.setattr(config_mod, "get_config_for_profile_home", lambda profile_home, **_kwargs: {})
         fake_mcp = types.ModuleType("tools.mcp_tool")
         fake_mcp.discover_mcp_tools = lambda *a, **k: None
         monkeypatch.setitem(sys.modules, "tools.mcp_tool", fake_mcp)

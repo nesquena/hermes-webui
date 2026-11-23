@@ -47,7 +47,8 @@ def _profile(tmp_path, name, *, approved=True):
 
 def test_terminal_gate_blocks_a_sync_turn(monkeypatch, tmp_path, real_hooks):
     from api import config, routes
-    import run_agent
+    run_agent = pytest.importorskip("run_agent", exc_type=ImportError)
+    pytest.importorskip("openai", exc_type=ImportError)
     from run_agent import AIAgent
     from openai.resources.chat.completions import Completions
     from openai.types.chat import ChatCompletion
