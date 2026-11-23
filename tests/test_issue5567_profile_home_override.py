@@ -294,7 +294,7 @@ def test_run_agent_streaming_installs_and_resets_profile_home_override(tmp_path,
     monkeypatch.setattr(profiles_api, "_skill_modules_support_profile_home", lambda profile_home: True)
     import api.config as _config_mod
     monkeypatch.setattr(_config_mod, "_resolve_cli_toolsets", lambda cfg: [])
-    monkeypatch.setattr(_config_mod, "get_config_for_profile_home", lambda profile_home: {})
+    monkeypatch.setattr(_config_mod, "get_config_for_profile_home", lambda profile_home, **_kwargs: {})
     _fake_mcp_module = types.ModuleType("tools.mcp_tool")
     _fake_mcp_module.discover_mcp_tools = _discover_mcp_tools
     monkeypatch.setitem(sys.modules, "tools.mcp_tool", _fake_mcp_module)
@@ -486,7 +486,7 @@ def test_run_agent_streaming_falls_back_to_skill_module_patch_for_static_modules
 
     import api.config as _config_mod
     monkeypatch.setattr(_config_mod, "_resolve_cli_toolsets", lambda cfg: [])
-    monkeypatch.setattr(_config_mod, "get_config_for_profile_home", lambda profile_home: {})
+    monkeypatch.setattr(_config_mod, "get_config_for_profile_home", lambda profile_home, **_kwargs: {})
 
     monkeypatch.setattr(profiles_api, "get_hermes_home_for_profile", lambda name: _home)
     monkeypatch.setattr(profiles_api, "get_profile_runtime_env", lambda home: {})
@@ -708,7 +708,7 @@ def test_run_agent_streaming_turns_overlap_when_skill_manager_shares_skills_tool
     _fake_mcp_module.discover_mcp_tools = lambda: None
     monkeypatch.setitem(sys.modules, "tools.mcp_tool", _fake_mcp_module)
     monkeypatch.setattr(_config_mod, "_resolve_cli_toolsets", lambda cfg: [])
-    monkeypatch.setattr(_config_mod, "get_config_for_profile_home", lambda profile_home: {})
+    monkeypatch.setattr(_config_mod, "get_config_for_profile_home", lambda profile_home, **_kwargs: {})
     monkeypatch.setattr(profiles_api, "get_hermes_home_for_profile", lambda name: homes[name])
     monkeypatch.setattr(profiles_api, "get_profile_runtime_env", lambda home: {})
     monkeypatch.setattr(profiles_api, "filter_runtime_env_for_gateway_parity", lambda env: {})

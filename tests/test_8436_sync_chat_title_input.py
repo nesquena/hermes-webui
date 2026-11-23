@@ -11,11 +11,13 @@ from types import SimpleNamespace
 import sys
 
 
-def _drive_sync_chat(monkeypatch, tmp_path, agent_cls, message="Plan the release notes"):
+def _drive_sync_chat(monkeypatch, tmp_path, agent_cls, message="Plan the release notes",
+                     *, agent_module=None, config_data=None):
     import api.config as config
     import api.models as models
     import api.routes as routes
 
+    config_data = config_data or {"model": "test-model", "provider": "test-provider"}
     state_dir = tmp_path / "state"
     session_dir = state_dir / "sessions"
     session_dir.mkdir(parents=True)
@@ -24,8 +26,8 @@ def _drive_sync_chat(monkeypatch, tmp_path, agent_cls, message="Plan the release
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", state_dir / "session_index.json")
     monkeypatch.setattr(routes, "get_session", models.get_session)
     monkeypatch.setattr(routes, "title_from", models.title_from)
-    monkeypatch.setattr(config, "get_config", lambda: {"model": "test-model", "provider": "test-provider"})
-    monkeypatch.setattr(routes, "get_config", lambda: {"model": "test-model", "provider": "test-provider"})
+    monkeypatch.setattr(config, "get_config", lambda: config_data)
+    monkeypatch.setattr(routes, "get_config", lambda: config_data)
     monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value, **_kw: tmp_path)
     monkeypatch.setattr(routes, "load_settings", lambda: {})
     monkeypatch.setattr(routes, "_resolve_cli_toolsets", lambda: [])
@@ -35,11 +37,14 @@ def _drive_sync_chat(monkeypatch, tmp_path, agent_cls, message="Plan the release
         workspace=str(tmp_path),
         messages=[],
         context_messages=[],
-        model="test-model",
-        model_provider="test-provider",
+        model=config_data["model"],
+        model_provider=config_data["provider"],
     )
     session.save(touch_updated_at=False)
-    monkeypatch.setitem(sys.modules, "run_agent", SimpleNamespace(AIAgent=agent_cls))
+    if agent_module is None:
+        monkeypatch.setitem(sys.modules, "run_agent", SimpleNamespace(AIAgent=agent_cls))
+    else:
+        monkeypatch.setattr(agent_module, "AIAgent", agent_cls)
 
     class Handler:
         def __init__(self):

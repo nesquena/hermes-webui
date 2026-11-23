@@ -33161,6 +33161,12 @@ def _handle_chat_sync(handler, body):
             _sync_turn_scope_reason = _sync_turn_scope.enter_context(
                 profile_home_turn_scope(_sync_profile_home)
             )
+            from api.config import get_config_for_profile_home, register_profile_hooks
+            _hook_cfg = get_config_for_profile_home(_sync_profile_home, isolate_config_override=True)
+            register_profile_hooks(
+                _hook_cfg, profile_home=_sync_profile_home,
+                turn_scope_error=_sync_turn_scope_reason,
+            )
             agent, _ = construct_profile_scoped_agent(
                 AIAgent,
                 dict(
