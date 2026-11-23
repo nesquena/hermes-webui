@@ -1254,22 +1254,48 @@ class IdempotencyStore:
             raise IdempotencyStoreUnavailable(
                 f"could not create store dir {path.parent}: {exc}"
             ) from exc
-        created = not path.exists()
-        start_size = 0
+        # Open the append descriptor FIRST and derive the rollback boundary
+        # from that same descriptor (``fstat``). The pre-append size used to
+        # be read through a second path lookup whose failure was swallowed as
+        # ``start_size = 0``; a later append failure then truncated the whole
+        # WAL — including records earlier requests had already been
+        # acknowledged for (#7782 round-13 review). An unknown boundary is
+        # NOT an empty preimage: fail closed before writing a byte.
+        fd = None
         try:
-            start_size = path.stat().st_size if path.exists() else 0
-        except OSError:
-            pass
-        fh = None
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o666)
+            start_size = os.fstat(fd).st_size
+        except OSError as exc:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            raise IdempotencyStoreUnavailable(
+                f"could not open idempotency store {path} for append: {exc}"
+            ) from exc
+        # An empty preimage can only mean the file was just created or was
+        # already empty; both want the directory entry made durable, so this
+        # conservative split cannot skip the fsync a fresh file needs.
+        created = start_size == 0
         try:
-            fh = open(path, "a", encoding="utf-8")
             for op in ops:
                 self._seq += 1
                 op["seq"] = self._seq
-                fh.write(json.dumps(op, ensure_ascii=False, separators=(",", ":")) + "\n")
-            fh.flush()
+                line = (
+                    json.dumps(op, ensure_ascii=False, separators=(",", ":"))
+                    + "\n"
+                ).encode("utf-8")
+                view = memoryview(line)
+                while view:
+                    written = os.write(fd, view)
+                    if written <= 0:
+                        raise OSError(
+                            errno.EIO, "short write to idempotency WAL"
+                        )
+                    view = view[written:]
             try:
-                os.fsync(fh.fileno())
+                os.fsync(fd)
             except OSError as exc:
                 # Same tolerance as the snapshot path: only the two "this
                 # filesystem cannot fsync" errors are tolerable. A REAL
@@ -1278,19 +1304,32 @@ class IdempotencyStore:
                 # finding 3).
                 if exc.errno not in {errno.EINVAL, errno.ENOTSUP}:
                     raise
-            fh.close()
-            fh = None
-        except OSError as exc:
-            if fh is not None:
+            self._wal_lines += len(ops)
+            if created:
+                # First appearance of the WAL file: its directory entry must
+                # be durable before any acknowledged op can survive a power
+                # loss.
                 try:
-                    fh.close()
-                except OSError:
-                    pass
-            # Roll the file back to its pre-append length so a failed
-            # append leaves no phantom line for a clean restart to replay
-            # (the data may already be in the page cache even though the
-            # fsync never acknowledged it — truncate regardless of whether
-            # the file was empty before).
+                    _fsync_directory(path.parent)
+                except OSError as exc:
+                    # The bytes are durable but the directory entry may not
+                    # survive a power loss: best-effort rollback of what this
+                    # append wrote, then fail closed (EINVAL/ENOTSUP never
+                    # escape _fsync_directory).
+                    try:
+                        os.ftruncate(fd, start_size)
+                    except OSError:
+                        pass
+                    self._wal_lines = max(0, self._wal_lines - len(ops))
+                    raise IdempotencyStoreUnavailable(
+                        f"could not fsync store directory {path.parent}: {exc}"
+                    ) from exc
+        except OSError as exc:
+            # Roll the file back to the boundary read from THIS descriptor so
+            # a failed append leaves no phantom line for a clean restart to
+            # replay. Descriptor-bound on purpose: a path lookup here could
+            # name a different file, and an unknown boundary is not an empty
+            # preimage.
             #
             # #7782 review 2026-11-18: when the rollback itself fails, that
             # silence is the bug. The unfinished line stays on disk, the
@@ -1300,10 +1339,7 @@ class IdempotencyStore:
             # operation. Latch the WAL unusable and keep failing closed.
             rollback_error = None
             try:
-                if created:
-                    path.unlink()
-                else:
-                    os.truncate(path, start_size)
+                os.ftruncate(fd, start_size)
             except OSError as rollback_exc:
                 rollback_error = rollback_exc
             if rollback_error is not None:
@@ -1318,24 +1354,11 @@ class IdempotencyStore:
             raise IdempotencyStoreUnavailable(
                 f"failed to append to idempotency store {path}: {exc}"
             ) from exc
-        self._wal_lines += len(ops)
-        if created:
-            # First appearance of the WAL file: its directory entry must be
-            # durable before any acknowledged op can survive a power loss.
+        finally:
             try:
-                _fsync_directory(path.parent)
-            except OSError as exc:
-                # Best-effort rollback of the file itself, then fail closed
-                # (a real I/O error — EINVAL/ENOTSUP never escapes
-                # _fsync_directory).
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-                self._wal_lines = max(0, self._wal_lines - len(ops))
-                raise IdempotencyStoreUnavailable(
-                    f"could not fsync store directory {path.parent}: {exc}"
-                ) from exc
+                os.close(fd)
+            except OSError:
+                pass
 
     def _maybe_compact_locked(self) -> None:
         """Compact the WAL into a fresh snapshot once it crosses the

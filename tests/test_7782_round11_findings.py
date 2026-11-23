@@ -69,22 +69,22 @@ def test_failed_rollback_stops_further_appends(tmp_path, monkeypatch):
     store.claim("first", "fp-1", profile="default")
 
     real_fsync = os.fsync
-    real_truncate = os.truncate
+    real_ftruncate = os.ftruncate
 
     def failing_fsync(fd):
         raise OSError(5, "simulated EIO")
 
-    def failing_truncate(path, size):
+    def failing_ftruncate(fd, size):
         raise OSError(5, "simulated EIO on rollback")
 
     monkeypatch.setattr(os, "fsync", failing_fsync)
-    monkeypatch.setattr(os, "truncate", failing_truncate)
+    monkeypatch.setattr(os, "ftruncate", failing_ftruncate)
     try:
         with pytest.raises(IdempotencyStoreUnavailable):
             store.claim("second", "fp-2", profile="default")
     finally:
         monkeypatch.setattr(os, "fsync", real_fsync)
-        monkeypatch.setattr(os, "truncate", real_truncate)
+        monkeypatch.setattr(os, "ftruncate", real_ftruncate)
 
     assert store._wal_broken, "a failed rollback must latch the WAL unusable"
     with pytest.raises(IdempotencyStoreUnavailable) as excinfo:

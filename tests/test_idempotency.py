@@ -3631,3 +3631,106 @@ def test_lf_wal_terminated_malformed_tail_repair_keeps_the_prefix(idem_env):
         phantom_key="lf-torn",
     )
 
+
+def test_round13_preappend_boundary_fault_preserves_acknowledged_key(
+    idem_env, monkeypatch
+):
+    """#7782 round 13, handler level: faulting L's append must not erase K.
+
+    K is acknowledged through the real ``_handle_chat_start`` route. L then
+    hits a pre-append boundary failure followed by an append-fsync failure.
+    The route must answer 503, never admit L, and leave K's acknowledged WAL
+    prefix byte-for-byte intact. A cold-loaded store must then replay K's
+    original session/stream/turn identity with the admission recorder still
+    at one.
+    """
+    from pathlib import Path
+
+    from api.idempotency import (
+        IdempotencyStore,
+        set_idempotency_store,
+    )
+
+    body_k = {"session_id": "idem-session", "message": "hello-K"}
+    key_k = "round13-K"
+    s1, p1 = idem_env.run_handler(body_k, key_header=key_k)
+    assert s1 == 200
+    assert p1.get("stream_id") == "stream-1"
+    assert len(idem_env.recorder.calls) == 1
+
+    wal = idem_env.store.path.with_name(idem_env.store.path.name + ".wal")
+    wal_before = wal.read_bytes()
+    assert wal_before, "K must have durable WAL records before the fault"
+    wal_stat = os.stat(wal)
+    wal_ident = (wal_stat.st_dev, wal_stat.st_ino)
+
+    real_stat = Path.stat
+    real_fstat = os.fstat
+    real_fsync = os.fsync
+    stat_calls = {"wal": 0}
+
+    def faulting_stat(self, *args, **kwargs):
+        if self == wal:
+            stat_calls["wal"] += 1
+            # The pre-fix code stats the path twice: once inside exists()
+            # (to decide created/unlink) and once for the start_size read.
+            # Fault the size read only, exactly as the finding describes.
+            if stat_calls["wal"] == 2:
+                raise OSError(5, "simulated EIO on pre-append size read")
+        return real_stat(self, *args, **kwargs)
+
+    def _is_wal_fd(fd):
+        st = real_fstat(fd)
+        return (st.st_dev, st.st_ino) == wal_ident
+
+    def faulting_fstat(fd):
+        if _is_wal_fd(fd):
+            raise OSError(5, "simulated EIO on pre-append fstat")
+        return real_fstat(fd)
+
+    def faulting_fsync(fd):
+        if _is_wal_fd(fd):
+            raise OSError(5, "simulated EIO on append fsync")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(Path, "stat", faulting_stat)
+    monkeypatch.setattr(os, "fstat", faulting_fstat)
+    monkeypatch.setattr(os, "fsync", faulting_fsync)
+    try:
+        s2, p2 = idem_env.run_handler(
+            {"session_id": "idem-session", "message": "hello-L"},
+            key_header="round13-L",
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert s2 == 503
+    assert p2.get("code") == "idempotency_store_unavailable"
+    assert len(idem_env.recorder.calls) == 1, "L must never be admitted"
+    assert wal.read_bytes() == wal_before, (
+        "a failed append must never truncate the acknowledged WAL prefix"
+    )
+
+    # Cold load: a fresh store over the same durable files.
+    fresh = IdempotencyStore(path=idem_env.store.path)
+    fresh._ensure_loaded()
+    recorded = fresh.lookup(key_k)
+    assert recorded is not None
+    assert recorded.status == "complete"
+    assert (
+        recorded.session_id,
+        recorded.stream_id,
+        recorded.turn_id,
+    ) == (p1["session_id"], p1["stream_id"], p1["turn_id"])
+    assert fresh.lookup("round13-L") is None
+
+    # Retry K through the route on the cold-loaded store: it must replay the
+    # original identity, not admit a second turn.
+    set_idempotency_store(fresh)
+    s3, p3 = idem_env.run_handler(body_k, key_header=key_k)
+    assert s3 == 200
+    assert p3.get("stream_id") == p1["stream_id"]
+    assert p3.get("turn_id") == p1["turn_id"]
+    assert p3.get("replayed_from_idempotency_key") is True
+    assert len(idem_env.recorder.calls) == 1
+
