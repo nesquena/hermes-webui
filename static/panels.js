@@ -9661,11 +9661,19 @@ async function _autosavePreferencesSettings(payload){
     const modelUnchanged=rawModelValue===savedModelOnOpen
       ||capturedModelValue===savedModelOnOpen
       ||prefixStrippedValue===savedModelOnOpen;
+    // The provider decides on its own and always counts as dirty: changing
+    // only the Settings provider (same bare model) must keep the unsaved
+    // warning. The equality short-circuit may suppress a model substitution
+    // that keeps the same provider, never a provider change (#7777 re-gate
+    // 2026-11-23: "preserve !modelUnchanged || providerChanged").
+    const providerChanged=(modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null);
     const modelDirty=!!(
       modelSel&&!modelSel._suppressDefaultModelSave&&(
-        ((modelState.model||'')!==(_settingsHermesDefaultModelOnOpen||'')||
-        ((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null)))
-        &&!modelUnchanged
+        providerChanged
+        ||(
+          ((modelState.model||'')!==(_settingsHermesDefaultModelOnOpen||''))
+          &&!modelUnchanged
+        )
       )
     );
     if(!pwDirty&&!modelDirty){

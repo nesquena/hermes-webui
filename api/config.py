@@ -1811,8 +1811,16 @@ def _provider_id_lookup_keys(provider_id: object) -> tuple[str, ...]:
     if canonical and canonical != raw:
         keys.append(canonical)
     if raw.startswith("custom:"):
+        # The bare suffix of a namespaced custom id is a legitimate spelling
+        # of the SAME provider ONLY when that bare slug is not itself an
+        # existing provider id. A custom endpoint may be named after a builtin
+        # (``custom:openai``); that bare slug belongs to the BUILTIN, so
+        # bridging to it would collapse two distinct providers and apply one's
+        # picker policy to the other (#7777 re-gate 2026-11-23: provider
+        # identity overlap). A bare slug that is not a known provider id stays
+        # bridged — that is the historical custom-provider spelling pair.
         bare = raw[len("custom:") :].strip()
-        if bare and bare not in keys:
+        if bare and bare not in keys and not _is_known_model_provider(bare):
             keys.append(bare)
     return tuple(keys)
 
