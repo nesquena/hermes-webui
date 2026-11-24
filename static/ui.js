@@ -28557,6 +28557,9 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
     showToast(t('external_link_read_only'), 2000);
     return;
   }
+  const repaintBoundary=_captureWorkspaceRepaintBoundary();
+  const owner=repaintBoundary.owner;
+  if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
   const targetLabel=_workspaceCreateTargetLabel(targetDir);
   const name=await showPromptDialog({
     title:t('new_file_prompt_title', targetLabel),
@@ -28564,8 +28567,8 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
     confirmLabel:t('create')
   });
   if(!name||!name.trim()) return;
-  const repaintBoundary=_captureWorkspaceRepaintBoundary();
-  const owner=repaintBoundary.owner;
+  // The owner is pinned before the dialog: a switch that completed, or one that
+  // is still loading, drops the answer instead of adopting the new conversation.
   if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
   const relPath=_workspaceJoinTargetPath(targetDir,name);
   const refreshDir=S.currentDir;
@@ -28613,6 +28616,9 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
     showToast(t('external_link_read_only'), 2000);
     return;
   }
+  const repaintBoundary=_captureWorkspaceRepaintBoundary();
+  const owner=repaintBoundary.owner;
+  if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
   const targetLabel=_workspaceCreateTargetLabel(targetDir);
   const name=await showPromptDialog({
     title:t('new_folder_prompt_title', targetLabel),
@@ -28620,8 +28626,8 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
     confirmLabel:t('create')
   });
   if(!name||!name.trim()) return;
-  const repaintBoundary=_captureWorkspaceRepaintBoundary();
-  const owner=repaintBoundary.owner;
+  // Same as promptNewFile: the owner was pinned before the dialog, so a switch
+  // that landed while it was open drops the answer instead of adopting it.
   if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
   const relPath=_workspaceJoinTargetPath(targetDir,name);
   const refreshDir=S.currentDir;
