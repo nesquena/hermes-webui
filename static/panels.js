@@ -7981,7 +7981,20 @@ async function switchToProfile(name) {
       const sourceProfile = String(S.session.profile || _prevProfileName || 'default').trim() || 'default';
       const sourceText = ($('msg') || {}).value || '';
       const sourceFiles = Array.isArray(S.pendingFiles) ? [...S.pendingFiles] : [];
-      await _saveComposerDraftNow(sourceSid, sourceText, sourceFiles, '', {rejectOnError:true, ownerProfile:sourceProfile});
+      // #6423 (maintainer review): a restored goal continuation keeps its token
+      // in this save when the text still matches the draft, exactly like the
+      // ordinary loadSession switch does. Posting '' cleared the stored token,
+      // so returning to the source conversation degraded the continuation to an
+      // ordinary draft. An edited draft never carries the old token.
+      let sourceContId = '';
+      if (typeof _peekRestoredGoalContinuationDraft === 'function') {
+        const peeked = _peekRestoredGoalContinuationDraft();
+        if (peeked && peeked.id
+            && String(peeked.text || '').trim() === sourceText.trim()) {
+          sourceContId = peeked.id;
+        }
+      }
+      await _saveComposerDraftNow(sourceSid, sourceText, sourceFiles, sourceContId, {rejectOnError:true, ownerProfile:sourceProfile});
       _savedSourceDraftForReplacement = {session_id:sourceSid, profile:sourceProfile};
     }
     // Invalidate any in-flight/queued session-list render BEFORE showing the skeleton,

@@ -51,6 +51,7 @@ pytestmark = pytest.mark.skipif(
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 
 
@@ -148,6 +149,27 @@ def test_the_session_switch_save_persists_the_token() -> None:
         "the session-switch save omits the continuation token, so a restored "
         "queued continuation degrades to an ordinary draft on return "
         "(#7855 round-7 CORE)"
+    )
+
+
+def test_the_profile_switch_save_keeps_a_matching_token() -> None:
+    """A profile switch persists the source draft under the old cookie. That
+    save must carry a restored continuation token only while the text still
+    matches the draft, exactly like the ordinary session switch (#6423)."""
+    switch_body = _js_function(PANELS_JS, "async function switchToProfile(")
+    assert "const sourceText = ($('msg') || {}).value || '';" in switch_body, (
+        "the profile-switch draft save call site was not found"
+    )
+    assert "_peekRestoredGoalContinuationDraft()" in switch_body, (
+        "the profile-switch save never reads the restored continuation "
+        "binding, so it posts '' and clears the stored token"
+    )
+    assert "String(peeked.text || '').trim() === sourceText.trim()" in switch_body, (
+        "the profile-switch save does not apply the exact-text rule, so an "
+        "edited draft would inherit the old continuation token"
+    )
+    assert "_saveComposerDraftNow(sourceSid, sourceText, sourceFiles, sourceContId" in switch_body, (
+        "the profile-switch save still passes an empty continuation id"
     )
 
 
