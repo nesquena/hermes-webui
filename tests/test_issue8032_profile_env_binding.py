@@ -429,6 +429,9 @@ _ALLOWED = {
     ("config.py", "get_config_snapshot_for_profile_home"): "value reader: snapshot via the isolated loader",
     # #7170: reasoning effort writer (raw loader + save)
     ("config.py", "set_reasoning_effort"): _WRITER + " (reasoning effort route)",
+    # #7842: skills.external_dirs paths expand like the Agent's os.path.expandvars (bare $VAR too), which the
+    # shared ${VAR} expander does not do, so the resolver has its own tokenizer under profile_env_binding.
+    ("skill_runtime.py", "profile_external_skill_dirs"): "value reader with its own $VAR tokenizer under profile_env_binding (#7842)",
 }
 
 
@@ -477,6 +480,7 @@ def test_routed_value_readers_go_through_the_helper():
         ("routes.py", "_read_profile_model_config"): "expand_profile_config",
         ("providers.py", "_clean_provider_key_from_config"): "expand_profile_config",
         ("onboarding.py", "apply_onboarding_setup"): "expand_profile_config",
+        ("skill_runtime.py", "profile_external_skill_dirs"): "profile_env_binding",
     }
     for (module, function), helper in expected.items():
         tree = ast.parse((API_DIR / module).read_text(encoding="utf-8"))
