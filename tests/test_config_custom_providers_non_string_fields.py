@@ -327,6 +327,126 @@ def test_non_string_name_does_not_collide_with_quoted_name(quoted_five_store):
 
 
 
+# ── Endpoint OWNERSHIP: the identity rule must gate the owner selection too ──
+#
+# Two paths still selected an endpoint from a row the identity rule had already
+# rejected, so a malformed legacy row could still supply (or borrow) an endpoint:
+#
+#   * ``resolve_model_provider``'s active-owner scan compared
+#     ``_custom_provider_slug_key(e.get('name'))`` — which COERCES — so a numeric
+#     ``name: 5`` won the active ``custom:5`` slot even though the uniqueness
+#     check accepts only the quoted row;
+#   * the auxiliary slot's ``if not resolved_base_url`` bare-model fallback ran
+#     for NAMED providers too, so a named row whose endpoint is ``int 9`` fell
+#     through to the MAIN provider's endpoint and persisted it on the slot.
+
+# Active provider IS ``custom:5`` and BOTH rows advertise ``gpt-x``: the numeric
+# row must not be the owner, so the quoted row's endpoint is the one returned.
+# ``eu-ok`` is a well-formed control that must keep resolving either way.
+ACTIVE_SHARED_MODEL_YAML = """
+model:
+  provider: "custom:5"
+  default: gpt-x
+custom_providers:
+  - name: 5
+    base_url: "https://numeric.example/v1"
+    models:
+      gpt-x: {}
+  - name: "5"
+    base_url: "https://quoted.example/v1"
+    models:
+      gpt-x: {}
+  - name: eu-ok
+    base_url: " https://eu-ok.example/v1 "
+    models:
+      eu-only: {}
+"""
+
+# The MAIN provider has its own endpoint, so a named auxiliary provider whose
+# endpoint is an ``int`` has something to borrow. The previous fixture omitted
+# it, which is why the contributed test never saw the misroute.
+AUX_MAIN_ENDPOINT_YAML = """
+model:
+  provider: openrouter
+  default: gpt-x
+  base_url: "https://main.example/v1"
+custom_providers:
+  - name: eu
+    base_url: 9
+    models:
+      gpt-x: {}
+  - name: eu-ok
+    base_url: "https://eu-ok.example/v1"
+    models:
+      gpt-x: {}
+"""
+
+
+@pytest.fixture()
+def active_shared_model_store(tmp_path, monkeypatch):
+    yield from _install_config(tmp_path, monkeypatch, ACTIVE_SHARED_MODEL_YAML)
+
+
+@pytest.fixture()
+def aux_main_endpoint_store(tmp_path, monkeypatch):
+    yield from _install_config(tmp_path, monkeypatch, AUX_MAIN_ENDPOINT_YAML)
+
+
+def _saved_slot(path, task: str = "vision") -> dict:
+    saved = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return (saved.get("auxiliary") or {}).get(task) or {}
+
+
+def test_active_owner_ignores_non_string_name_on_shared_model(active_shared_model_store):
+    """A numeric ``name`` cannot be the active owner of the slug it names.
+
+    Both rows advertise ``gpt-x`` and the active provider is ``custom:5``. The
+    uniqueness check already accepted only the quoted row, so the active-owner
+    scan has to agree — otherwise the numeric row's endpoint is what the request
+    routes to, contradicting the identity rule that accepted the other row.
+    """
+    assert config.resolve_model_provider("gpt-x") == (
+        "gpt-x",
+        "custom:5",
+        "https://quoted.example/v1",
+    )
+    # Control: an ordinary named row still owns its own model and endpoint.
+    assert config.resolve_model_provider("eu-only") == (
+        "eu-only",
+        "custom:eu-ok",
+        "https://eu-ok.example/v1",
+    )
+
+
+def test_auxiliary_named_provider_does_not_borrow_main_endpoint(aux_main_endpoint_store):
+    """A named slot never takes the MAIN provider's endpoint as its own.
+
+    ``custom:eu``'s endpoint is an ``int`` — typed absence — so the slot must be
+    written without an endpoint rather than with ``https://main.example/v1``.
+    """
+    result = config.set_auxiliary_model("vision", "custom:eu", "gpt-x")
+    assert result["ok"] is True
+    slot = _saved_slot(aux_main_endpoint_store)
+    assert slot.get("provider") == "custom:eu"
+    assert slot.get("model") == "gpt-x"
+    assert "base_url" not in slot
+    # Control: the valid named row still persists its OWN endpoint.
+    result = config.set_auxiliary_model("vision", "custom:eu-ok", "gpt-x")
+    assert result["ok"] is True
+    assert _saved_slot(aux_main_endpoint_store)["base_url"] == "https://eu-ok.example/v1"
+
+
+def test_auxiliary_unnamed_custom_keeps_main_fallback(aux_main_endpoint_store):
+    """The bare ``custom`` provider has no entry of its own — the fallback stays.
+
+    Restricting the bare-model fallback to the unnamed case must not remove it
+    from that case.
+    """
+    result = config.set_auxiliary_model("vision", "custom", "gpt-x")
+    assert result["ok"] is True
+    assert _saved_slot(aux_main_endpoint_store)["base_url"] == "https://main.example/v1"
+
+
 def test_yaml_source_is_really_a_legacy_store(legacy_store):
     """Guard the fixture itself: the malformed rows must survive YAML parsing."""
     parsed = yaml.safe_load(legacy_store.read_text(encoding="utf-8"))

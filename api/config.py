@@ -3719,7 +3719,8 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                     e for e in custom_providers
                     if isinstance(e, dict)
                     and _entry_owns_model(e)
-                    and _custom_provider_slug_key(e.get('name')) == _active_key
+                    and _str_field(e, 'name')
+                    and _custom_provider_slug_key(_str_field(e, 'name')) == _active_key
                 ),
                 None,
             )
@@ -7975,7 +7976,7 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                             resolved_base_url = _raw_custom_provider_url(
                                 config_data, _exp_cfg, _cp_match, _url,
                             )
-                if not resolved_base_url:
+                if not resolved_base_url and provider == "custom":
                     # Best-effort fallback for the unnamed `custom` case (no own
                     # entry). Keep it non-fatal for unexpected errors, but let a
                     # genuine ambiguity propagate so the save fails closed.
