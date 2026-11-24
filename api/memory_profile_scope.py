@@ -661,7 +661,16 @@ def construct_profile_scoped_agent(
         # registration below and through an aborted build alike — so the
         # last-holder proof can never prove the old agent alone while this
         # construction is acquiring the same instance.
-        _reserve_acquisition(target_key or "")
+        if not _reserve_acquisition(target_key or ""):
+            logger.warning(
+                "[webui] #8804: a teardown of the memory provider of profile home %r is still "
+                "running, and this Hermes Agent cannot keep a new agent off the instance it "
+                "closes (no claim_instance; older than 2026-10-17). The agent built for "
+                "session %s runs without memory this turn and is not cached; the next turn "
+                "constructs it again.",
+                profile_home, session_id,
+            )
+            return _build_without_memory(agent_cls, agent_kwargs, params), False
         try:
             # #8517 (master): the shared-instance guard refuses a provider another
             # profile already owns; the Agent drops it and keeps the rest. Recorded
@@ -715,6 +724,7 @@ def construct_profile_scoped_agent(
                     "again.",
                     list(refused), session_id,
                 )
+                _record_build_home(agent, profile_home)
                 register_provider_holders(agent, home_key=target_key or "")
                 return agent, False
             # #8613: fail closed if the build ended up holding an instance a teardown
@@ -737,6 +747,7 @@ def construct_profile_scoped_agent(
                 return agent, False
             # #8613: this agent now holds every provider instance its manager serves, so a
             # later session boundary can prove whether it is the last holder of them.
+            _record_build_home(agent, profile_home)
             register_provider_holders(agent, home_key=target_key or "")
             # #8517 (master): the guard refused a shared provider instance another
             # profile owns; the Agent dropped it and kept the rest. Holds until the
@@ -973,7 +984,9 @@ def call_as_session_owner(
 # ``claim_instance(provider, hermes_home)`` (agent/memory_caller_scope.py, looked up
 # through the ``agent.memory_manager`` module global) for every external provider,
 # drops the provider when the claim is refused, and only then calls
-# ``provider.initialize(hermes_home=...)``. The Agent refuses a second profile only on
+# ``provider.initialize(hermes_home=...)``. Agent c9de6070+ also passes
+# ``manager=self``; the guard hands every argument after ``home`` to the Agent's
+# claim unchanged (#9060). The Agent refuses a second profile only on
 # a multiplexed gateway; WebUI serves several profiles in one process without that
 # flag (turning it on breaks the second profile's memory and WebUI credential reads),
 # so an instance shared by the plugin would be re-pointed by every construction.
@@ -1007,8 +1020,15 @@ def _prune_dead_owners() -> None:
             del _instance_owners[pid]
 
 
-def _claim_for_profile(original: Callable[[Any, Any], bool], provider: Any, home: Any) -> bool:
-    """``claim_instance`` that also refuses a cross-profile rebind without multiplexing."""
+def _claim_for_profile(
+    original: Callable[..., bool], provider: Any, home: Any, /, *args: Any, **kwargs: Any
+) -> bool:
+    """``claim_instance`` that also refuses a cross-profile rebind without multiplexing.
+
+    Arguments after ``home`` are the Agent's own and go to ``original`` unchanged
+    (#9060: Agent c9de6070+ passes ``manager=``; an Agent before it passes none). The
+    first three parameters are positional-only so a future Agent keyword can never
+    collide with them (an Agent ``original=`` would otherwise raise TypeError)."""
     key = profile_home_key(home) or str(home or "")
     pid = id(provider)
     # #8613: the acquisition half of the instance-lifetime protocol. An instance a
@@ -1041,7 +1061,16 @@ def _claim_for_profile(original: Callable[[Any, Any], bool], provider: Any, home
         if owner is None or owner == key:
             # The Agent's own claim keeps its bookkeeping and multiplex refusal; only an
             # accepted claim makes this home the owner.
-            if not original(provider, home):
+            if not original(provider, home, *args, **kwargs):
+                # #9061 (item 2): the Agent dropped the provider and keeps built-in
+                # memory. Record the refusal for the construction in progress, the
+                # same way the guard's own refusal below does; without it the caller
+                # reads an empty list once the constructor has returned and reports
+                # memory as ok although the provider is gone. (Caching does not read
+                # this list.)
+                refusals = _construction_refusals.get()
+                if refusals is not None:
+                    refusals.append(getattr(provider, "name", "?"))
                 return False
             if owner is None:
                 _prune_dead_owners()
@@ -1096,8 +1125,8 @@ def install_shared_provider_instance_guard() -> bool:
             return True
 
         @functools.wraps(current)
-        def claim_instance(provider: Any, home: Any) -> bool:
-            return _claim_for_profile(current, provider, home)
+        def claim_instance(provider: Any, home: Any, *args: Any, **kwargs: Any) -> bool:
+            return _claim_for_profile(current, provider, home, *args, **kwargs)
 
         setattr(claim_instance, _GUARD_MARK, True)
         mm.claim_instance = claim_instance
@@ -1321,13 +1350,53 @@ def release_without_fence_wait():
         _skip_fence_wait.reset(token)
 
 
-def _reserve_acquisition(home_key: str) -> None:
+# #8804: how long a construction on an Agent without ``claim_instance`` waits for a
+# teardown of its profile's provider instance before it builds without memory. Well
+# above the Agent's own bounded waits inside ``shutdown_all``.
+_UNFENCED_TEARDOWN_WAIT_S = 30.0
+
+
+def _teardown_running_locked(home_key: str) -> bool:
+    """A teardown is closing a provider instance ``home_key``'s agents may share
+    (#8804). Holder lock held. An entry without a home key could serve any profile,
+    so it counts for every one."""
+    return any(
+        entry.teardown and (not entry.home_key or entry.home_key == home_key)
+        for entry in _provider_holders.values()
+    )
+
+
+def _reserve_acquisition(home_key: str) -> bool:
     """Reserve the acquisition of ``home_key``'s provider instances BEFORE they
-    are initialised (#8613). Paired with ``_end_acquisition`` in a ``finally``."""
+    are initialised (#8613). Paired with ``_end_acquisition`` in a ``finally``.
+
+    #8804: on an Agent without ``claim_instance`` (before 2026-10-17) the instance a
+    teardown is closing cannot be refused to a new agent: the Agent initialises the
+    shared instance inside its constructor, so a build that ran during another
+    agent's ``shutdown_all`` re-opened the instance and the teardown then closed it
+    under the new agent. Such a construction therefore WAITS here, before it
+    reserves and in the same critical section as the release's claim, until no
+    teardown of an instance its profile may share is running; the release's
+    settlement wakes it. It never waits while holding a reservation, so it cannot
+    hold up the claim's own wait for constructions in flight. False (nothing
+    reserved) when the wait runs out: the caller builds without memory and does not
+    cache the agent. The holder lock is not held across the teardown itself.
+
+    An Agent with the seam refuses the instance itself (``_claim_for_profile``), so
+    its constructions never wait here and reserve exactly as before."""
     if not home_key:
-        return
+        return True
+    webui_fences = _claim_seam_available() is not True
     with _provider_holders_lock:
+        if webui_fences and _teardown_running_locked(home_key):
+            deadline = time.monotonic() + _UNFENCED_TEARDOWN_WAIT_S
+            while _teardown_running_locked(home_key):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                _provider_holders_cond.wait(remaining)
         _inflight_homes[home_key] = _inflight_homes.get(home_key, 0) + 1
+    return True
 
 
 def _end_acquisition(home_key: str) -> None:
@@ -1345,6 +1414,14 @@ def _end_acquisition(home_key: str) -> None:
         # proof: either a holder appeared for the instance (the release is then
         # correctly refused) or nothing was acquired (the release runs).
         _provider_holders_cond.notify_all()
+        # #8817: a release that could not wait for the construction kept its
+        # intent; it is retried now that no construction is in flight for its
+        # homes. A new holder of the same instance has already taken the intent
+        # over (``register_provider_holders``), so it is not among these.
+        ready = _fence_intents_ready_locked()
+    # Started outside the holder lock: the retry takes it itself.
+    for intent in ready:
+        _start_intent_retry(intent)
 
 
 def _weak_manager_ref(manager: Any) -> Callable[[], Any]:
@@ -1603,6 +1680,171 @@ def _live_holders_entry(provider: Any) -> Optional[_InstanceHolders]:
         del _provider_holders[inst_pid]
         return None
     return entry
+
+
+_BUILD_HOME_ATTR = "_webui_memory_build_home"
+
+
+def _record_build_home(agent: Any, profile_home: str) -> None:
+    """Remember the profile home ``agent`` was built under (#8804).
+
+    An Agent from before 2026-10-17 does not report the home its memory provider
+    bound (no ``_bound_scope``). Its provider binds exactly the home the WebUI held
+    for the build: on such an Agent, an external provider only runs while the WebUI
+    serves a single profile (no ``claim_instance`` seam, #8585). The unowned-eviction
+    release needs that home to run the teardown in it."""
+    try:
+        setattr(agent, _BUILD_HOME_ATTR, str(profile_home or ""))
+    except Exception:
+        logger.debug("[webui] #8804: could not record the build home on the agent", exc_info=True)
+
+
+def _is_legacy_manager(manager: Any) -> bool:
+    """A MemoryManager from before 2026-10-19 (#8804): no ``release_soft`` and no
+    ``claim_teardown``, but the ``shutdown_all`` every Agent since 2026-04 has."""
+    return (
+        manager is not None
+        and not callable(getattr(manager, "release_soft", None))
+        and not callable(getattr(manager, "claim_teardown", None))
+        and callable(getattr(manager, "shutdown_all", None))
+    )
+
+
+def _mark_legacy_shut_down(holder: Any) -> None:
+    """After an old Agent's provider was released, make the agent's own
+    ``shutdown_memory_provider`` a no-op (#8804). On those Agents it runs
+    ``on_session_end`` unconditionally, so a later ``close()`` would commit under an
+    owner nobody could resolve, then shut the providers down a second time (closing
+    the client under any successor that shares the instance). Current Agents get the
+    same effect from the soft-release teardown claim.
+
+    A deferred release runs for a ``_ReleaseIntent``: the agent it stands in for is
+    marked through the intent's weak reference, when that agent is still alive."""
+    target = holder
+    if isinstance(holder, _ReleaseIntent):
+        ref = holder.agent_ref
+        target = ref() if ref is not None else None
+        if target is None:
+            return
+    try:
+        target._memory_provider_shutdown = True
+    except Exception:
+        logger.debug("[webui] #8804: could not mark the released agent shut down", exc_info=True)
+
+
+# The reason the Agent itself passes to ``PreparedCompaction.discard`` when it releases an
+# agent (``agent.prepared_compaction.release_for_agent``: cache eviction, rewind, close).
+_AGENT_RELEASED_DISCARD = ("agent released", "agent_released")
+
+
+# The methods of the Agent's ``PreparedCompaction`` that ``discard`` runs on the instance
+# itself. Shadowing any of them on the instance would run someone else's code there.
+_AGENT_DISCARD_PATH = frozenset({"discard", "_count_unspliced"})
+
+
+def _agent_context_classes() -> tuple:
+    """The Agent's built-in ``ContextCompressor`` and ``PreparedCompaction`` classes
+    (either is None when this Agent does not have it; ``PreparedCompaction`` is v0.22.6+)."""
+    classes = []
+    for module_name, class_name in (
+        ("agent.context_compressor", "ContextCompressor"),
+        ("agent.prepared_compaction", "PreparedCompaction"),
+    ):
+        try:
+            module = sys.modules.get(module_name) or importlib.import_module(module_name)
+            classes.append(getattr(module, class_name, None))
+        except Exception:
+            classes.append(None)
+    return tuple(classes)
+
+
+def release_unowned_context_engine(agent: Any, *, session_id: str) -> bool:
+    """Cancel the background summary work of an evicted agent whose
+    ``shutdown_memory_provider`` the WebUI refused (#8804 follow-up). True when this
+    function called the Agent's own ``PreparedCompaction.discard``, whether or not that call
+    raised (an exception is caught and logged at DEBUG); the caller does not use the value.
+
+    ``call_as_session_owner`` refuses the whole shutdown when the session's owner cannot
+    be resolved, because a session end may write under an owner nobody can confirm
+    (#8517; fail closed, AGENTS.md). That includes the context engine's
+    ``on_session_end``: ``agent/context_engine.py`` makes it a plugin extension point that
+    may flush session data, so it is NEVER called here, and stays behind the owner check.
+
+    What the built-in ``ContextCompressor``'s end does beyond resetting the in-memory
+    state of an engine that is being discarded is ``prepared_compaction.discard`` (Agent
+    v0.22.6+). It cancels a background summary pass that would otherwise run to
+    completion, a model call nobody will use. That is close-only: no session data, only an
+    aggregate opt-in metric count. The Agent makes the same call itself when it releases an
+    agent (``release_for_agent``: cache eviction, rewind, close), with the same reason. So
+    that one call runs here, in the profile home the WebUI built the agent under (never the
+    ambient env mirror). An older Agent has no prepared compaction, and nothing to cancel.
+
+    Only the Agent's own code may run on this path, because the session's owner is unknown.
+    So nothing on the engine or its class is read before the identity check
+    ``type(engine) is ContextCompressor``: not ``isinstance`` (it can consult a plugin's
+    ``__class__``), not a method or ``__name__`` (a plugin's descriptor or metaclass would
+    run). Any other engine is the plugin's and is left alone, with a once-only line that
+    names no class. Then the engine must hold exactly the Agent's ``PreparedCompaction``,
+    with no instance attribute shadowing ``discard`` or ``_count_unspliced``.
+
+    The caller runs this only when the Agent's own shutdown did not run (a refusal at hook
+    time happens INSIDE that shutdown), decided before the memory release, which marks an
+    old Agent's agent shut down (#8806). Either way the agent is then marked shut down,
+    the state v0.52.544 left an evicted agent in, so a later ``shutdown_memory_provider``
+    cannot run a session end under the unresolved owner."""
+    if agent is None:
+        return False
+    try:
+        engine = getattr(agent, "context_compressor", None)
+        if engine is None:
+            return False
+        compressor_class, prepared_class = _agent_context_classes()
+        # The first touch of the engine: an identity compare of its exact type.
+        if compressor_class is None or type(engine) is not compressor_class:
+            _log_once(
+                "engine-end-owner",
+                "[webui] #8804: an evicted agent's context engine is not the Agent's built-in "
+                "compressor, so it is left alone: its session end may write session data and the "
+                "session's owner could not be confirmed, so it stays behind the owner check (fail "
+                "closed).",
+            )
+            return False
+        prepared = getattr(engine, "prepared_compaction", None)  # the Agent's own engine
+        if prepared is None:  # the opt-in prepare_ahead is off, or an Agent before v0.22.6
+            return False
+        if (
+            prepared_class is None
+            or type(prepared) is not prepared_class
+            or _AGENT_DISCARD_PATH.intersection(vars(prepared))
+        ):
+            logger.debug(
+                "[webui] #8804: the built-in context engine of evicted session %s holds "
+                "prepared-summary state that is not the Agent's own; it is left alone.",
+                session_id,
+            )
+            return False
+        build_home = str(getattr(agent, _BUILD_HOME_ATTR, "") or "")
+        restore, reason = _enter_profile_home(build_home, profile_home_key(build_home) if build_home else None)
+        if reason is not None:
+            _log_once(
+                "engine-release-scope",
+                "[webui] #8804: the background summary pass of an evicted agent whose memory "
+                "shutdown was refused was not cancelled (%s); it runs to completion unused.",
+                reason,
+            )
+            return False
+        try:
+            prepared.discard(*_AGENT_RELEASED_DISCARD)
+        except Exception:
+            logger.debug("[webui] #8804: cancelling the prepared summary failed for %s", session_id, exc_info=True)
+        finally:
+            restore()
+        return True
+    finally:
+        try:
+            agent._memory_provider_shutdown = True
+        except Exception:
+            logger.debug("[webui] #8804: could not mark the evicted agent shut down", exc_info=True)
 
 
 def register_provider_holders(agent: Any, *, home_key: str = "") -> int:
@@ -1964,6 +2206,49 @@ def _agent_holds_instances_locked(agent: Any) -> tuple[bool, str, list]:
     return True, "", instances
 
 
+def _retain_for_fence_locked(retain: "Optional[_ReleaseIntent]", entries: list) -> bool:
+    """Keep ``retain`` on ``entries`` while a construction in flight refuses the
+    release, and record the profile homes it waits for (#8817). Holder lock held,
+    in the critical section that refused, so a construction ending right after
+    the refusal cannot be missed: ``_end_acquisition`` takes the same lock and
+    starts the retry once those homes have no construction in flight. False when
+    there is nothing to keep (no intent, or no tracked entry)."""
+    if retain is None or not entries:
+        return False
+    for entry in entries:
+        entry.intent = retain
+    retain.fence_homes = frozenset(entry.home_key for entry in entries)
+    retain.retained = True
+    retain.deferred_for = "construction"
+    return True
+
+
+def _fence_refusal_outcome(kept: bool) -> str:
+    """The log tail for a release a construction in flight refused (#8817)."""
+    if kept:
+        return ("The release is kept and runs once that construction has finished, "
+                "unless the new agent holds the same instance.")
+    return "The provider keeps its worker until the next session boundary."
+
+
+def _fence_intents_ready_locked() -> list:
+    """Intents waiting on constructions whose profile homes have none in flight
+    any more (#8817), each taken off the wait so it is started exactly once.
+    Holder lock held. Read through the holder table, so an intent no entry
+    carries any more (a new holder took every instance over, or it was dropped)
+    is never started. One a new holder took over on only some of its instances
+    is started, and its claim then drops it (``_claim_release_intent``)."""
+    ready: dict = {}
+    for entry in list(_provider_holders.values()):
+        intent = entry.intent
+        if intent is None or not intent.fence_homes or id(intent) in ready:
+            continue
+        if all(_inflight_acquisitions(home) == 0 for home in intent.fence_homes):
+            intent.fence_homes = None
+            ready[id(intent)] = intent
+    return list(ready.values())
+
+
 def _claim_last_held_teardown(agent: Any, *, retain: "Optional[_ReleaseIntent]" = None) -> tuple[bool, str, list]:
     """``agent_is_last_provider_holder`` AND the teardown claim in ONE critical
     section, so no holder can be registered, dropped or reserved between the proof
@@ -2042,6 +2327,8 @@ def _claim_last_held_teardown(agent: Any, *, retain: "Optional[_ReleaseIntent]" 
                     # the caller arms it (``_arm_release_intent``).
                     for entry in claiming_entries:
                         entry.intent = retain
+                    retain.retained = True
+                    retain.deferred_for = "work"
                     return False, why, []
                 if wait_for != "fence":
                     # #8613 round 3 (finding 3): the releasing agent's own queued
@@ -2056,23 +2343,29 @@ def _claim_last_held_teardown(agent: Any, *, retain: "Optional[_ReleaseIntent]" 
                     # #8613 round 2 (the maintainer's note): this caller must
                     # not block — it holds the per-session agent lock, and the
                     # fence wait would stall the user's next turn. Refuse the
-                    # release now, exactly as the wait's timeout does: the
-                    # provider keeps its worker until the next session
-                    # boundary, and no client is closed under a live agent.
+                    # release now, exactly as the wait's timeout does, and no
+                    # client is closed under a live agent.
+                    #
+                    # #8817: the cleanup intent is KEPT, in this same critical
+                    # section, and the release runs once the construction has
+                    # finished (``_end_acquisition``). Dropping it here left the
+                    # instance out of the holder table with its writer alive
+                    # until restart whenever the construction got a different
+                    # instance, since no later boundary reaches it.
+                    kept = _retain_for_fence_locked(retain, claiming_entries)
                     logger.info(
                         "[webui] #8613: not waiting for a construction of the same "
-                        "profile before releasing a memory provider (%s). The provider "
-                        "keeps its worker until the next session boundary.",
-                        why,
+                        "profile before releasing a memory provider (%s). %s",
+                        why, _fence_refusal_outcome(kept),
                     )
                     return False, why, []
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    kept = _retain_for_fence_locked(retain, claiming_entries)  # #8817
                     logger.warning(
                         "[webui] #8613: waited %.0fs for a construction of the same profile to "
-                        "finish before releasing a memory provider and gave up (%s). The "
-                        "provider keeps its worker until the next session boundary.",
-                        _ACQUISITION_FENCE_WAIT_S, why,
+                        "finish before releasing a memory provider and gave up (%s). %s",
+                        _ACQUISITION_FENCE_WAIT_S, why, _fence_refusal_outcome(kept),
                     )
                     return False, why, []
                 _provider_holders_cond.wait(remaining)
@@ -2098,6 +2391,7 @@ def _settle_last_held_teardown(agent: Any, claimed: list, *, released: bool = Fa
     raced: list[str] = []
     agent_pid = id(agent)
     manager = _agent_manager(agent)
+    webui_fences = _claim_seam_available() is not True
     with _provider_holders_lock:
         # #8613 round 3 (finding 1): apply the queued forgets before the table is
         # read, so a collected agent is not counted as a live holder here.
@@ -2126,6 +2420,10 @@ def _settle_last_held_teardown(agent: Any, claimed: list, *, released: bool = Fa
         for key, entry in list(_provider_holders.items()):
             if not entry.holders and not entry.teardown and not entry.work and not entry.claiming and entry.intent is None:
                 _provider_holders.pop(key, None)
+        if webui_fences:
+            # #8804: a construction on an Agent without ``claim_instance`` may be
+            # waiting in ``_reserve_acquisition`` for this teardown to settle.
+            _provider_holders_cond.notify_all()
     return raced
 
 
@@ -2141,17 +2439,26 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
 
     * the owner is still unresolvable; a refusal for any other reason (provider bound
       to another profile, no home override) leaves the provider alone;
-    * the manager has ``release_soft`` AND ``claim_teardown`` (Agent 2026-10-19+).
-      ``release_soft`` is not a pure cancellation: it claims teardown once (a later
-      session-end shutdown of this manager then runs neither ``on_session_end`` nor a
-      second ``shutdown_all``), waits up to 10 s for writes the agent ALREADY queued
-      (they run in the provider's bound profile, ``in_owner_home``), then runs
-      ``shutdown_all`` (bounded drain + each provider's ``shutdown()``). It never
-      calls ``on_session_end`` and adds no write of its own;
-    * the manager reports the profile home it is bound to (``_bound_scope``); the
-      release runs with that home held as the context-local home, so anything
-      resolved during the drain or a provider's ``shutdown()`` names the provider's
-      own profile, never the ambient env mirror (another profile's);
+    * the manager has ``release_soft`` AND ``claim_teardown`` (Agent 2026-10-19+), or
+      neither (an older Agent, #8804). ``release_soft`` is not a pure cancellation: it
+      claims teardown once (a later session-end shutdown of this manager then runs
+      neither ``on_session_end`` nor a second ``shutdown_all``), waits up to 10 s for
+      writes the agent ALREADY queued (they run in the provider's bound profile,
+      ``in_owner_home``), then runs ``shutdown_all`` (bounded drain + each provider's
+      ``shutdown()``). An older manager has nothing softer than ``shutdown_all``: it
+      runs after this agent's own queued work was drained, and the agent (or the one
+      a deferred ``_ReleaseIntent`` stands in for) is then marked shut down so its own
+      ``shutdown_memory_provider`` cannot run a session end or a second teardown
+      (``_mark_legacy_shut_down``). Neither path calls ``on_session_end`` or adds a
+      write of its own. A manager with only part of the soft-release seam is left
+      alone;
+    * the profile home the provider is bound to is known: the manager reports it
+      (``_bound_scope``, Agent 2026-10-17+), or, on an older Agent that reports
+      nothing, it is the home the WebUI built the agent under (``_record_build_home``;
+      such an Agent keeps an external provider only while one profile is served,
+      #8585). The release runs with that home held as the context-local home, so
+      anything resolved during the drain or a provider's ``shutdown()`` names the
+      provider's own profile, never the ambient env mirror (another profile's);
     * this agent is the LAST holder of every provider instance it serves
       (``agent_is_last_provider_holder``, claimed atomically with
       ``_claim_last_held_teardown``). A provider that hands one instance to every
@@ -2166,7 +2473,10 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
       A construction in flight is waited for, bounded, rather than refused: the
       build either registers a holder or acquires nothing. An instance this
       release DID tear down is claimed again — and re-initialised — by the next
-      construction, exactly as after an owned session-end teardown.
+      construction, exactly as after an owned session-end teardown. On an Agent
+      without ``claim_instance`` a construction that starts while the teardown runs
+      waits for it to settle (``_reserve_acquisition``, #8804), because such an Agent
+      cannot refuse the instance itself.
     * the manager's teardown has not been claimed already: ``release_soft`` is a
       no-op when it has, and a no-op must not be reported as a release (the
       provider's worker is still alive).
@@ -2184,18 +2494,26 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
     if owner and profile_home_key(owner):
         return False
     release = getattr(manager, "release_soft", None)
-    if not (callable(release) and callable(getattr(manager, "claim_teardown", None))):
+    legacy = _is_legacy_manager(manager)
+    if not legacy and not (callable(release) and callable(getattr(manager, "claim_teardown", None))):
         _log_once(
             "release-soft-missing",
-            "[webui] #8613: this Hermes Agent cannot release a memory provider without a "
-            "session end (no MemoryManager.release_soft/claim_teardown; older than "
-            "2026-10-19). An evicted agent whose session owner cannot be resolved keeps "
-            "its provider worker until the WebUI restarts.",
+            "[webui] #8613: this Hermes Agent's memory manager has only part of the soft "
+            "release (MemoryManager.release_soft/claim_teardown), so an evicted agent "
+            "whose session owner cannot be resolved keeps its provider worker until the "
+            "WebUI restarts.",
         )
         return False
     state, bound_key = _bound_memory_home_key(agent)
     bound = getattr(manager, "_bound_scope", None)
     bound_home = str(bound.get("hermes_home") or "") if isinstance(bound, dict) else ""
+    if legacy and not bound_home:
+        # #8804: an Agent from before 2026-10-17 reports no bound home. Its provider
+        # is bound to the home the WebUI built it under (one profile only, #8585).
+        build_home = str(getattr(agent, _BUILD_HOME_ATTR, "") or "")
+        build_key = profile_home_key(build_home) if build_home else None
+        if build_key and (state != "bound" or bound_key == build_key):
+            state, bound_home, bound_key = "bound", build_home, build_key
     if state != "bound" or not bound_home or profile_home_key(bound_home) != bound_key:
         _log_once(
             "release-unbound",
@@ -2235,7 +2553,11 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
         # that same outstanding write and RETAINS the cleanup intent, so the
         # release runs once the write drains instead of waiting for a session
         # boundary of some later agent that may never come.
-    intent = _ReleaseIntent(manager, bound_home, bound_key, session_id)
+    try:
+        departing = weakref.ref(agent)
+    except TypeError:
+        departing = None
+    intent = _ReleaseIntent(manager, bound_home, bound_key, session_id, agent_ref=departing)
     ok, why, claimed = _claim_last_held_teardown(agent, retain=intent)
     if not ok:
         armed = _arm_release_intent(intent)
@@ -2246,7 +2568,20 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
                 f"release-deferred:{session_id}",
                 "[webui] #8613: the memory provider of evicted session %s was NOT released "
                 "yet: %s. The release is kept and runs on its own once that memory work "
-                "has drained.",
+                "has drained or that construction has finished.",
+                session_id, why,
+            )
+            return False
+        if intent.retained:
+            # #8817 (senior r1, nit 1): the refusal kept the intent, and before
+            # this arm ran a retry started by ``_end_acquisition`` claimed it (or
+            # a new holder of the instance took it over). Nothing was lost, so
+            # "until the WebUI restarts" would be false.
+            _log_once(
+                f"release-deferred:{session_id}",
+                "[webui] #8613: the memory provider of evicted session %s was not released "
+                "at eviction: %s. The release was kept and has since been taken over, by its "
+                "retry or by a new holder of the instance.",
                 session_id, why,
             )
             return False
@@ -2458,8 +2793,16 @@ def release_shed_agent_clients(agent: Any, *, session_id: str = "",
             logger.debug("releasing a detached child of a shed agent failed", exc_info=True)
 
     if ok:
-        claimed_teardown = False
-        if not scoped:
+        released = False
+        if scoped:
+            # Reuse the eviction path's release: it runs ``release_soft`` in the
+            # provider's own profile home, refuses a teardown another owner already
+            # claimed, handles a legacy manager (#8804) and settles the claim.
+            released = _run_claimed_release(
+                agent, claimed, manager=manager, bound_home=bound_home,
+                bound_key=bound_key, session_id=session_id,
+            )
+        else:
             _settle_last_held_teardown(agent, claimed)
             _log_once(
                 f"shed-unscoped:{session_id}",
@@ -2468,45 +2811,8 @@ def release_shed_agent_clients(agent: Any, *, session_id: str = "",
                 "would have run in another profile.",
                 session_id,
             )
-        elif getattr(manager, "_teardown_claim", None):
-            _settle_last_held_teardown(agent, claimed)
-            _log_once(
-                f"shed-claimed:{session_id}",
-                "[webui] #8810: the memory provider of shed session %s was not released: a "
-                "teardown of its memory manager was already claimed, so the release would "
-                "have done nothing. It keeps its worker until the WebUI restarts.",
-                session_id,
-            )
-        else:
-            restore, reason = _enter_profile_home(bound_home, bound_key)
-            if reason is None:
-                released = False
-                try:
-                    native()
-                    released = True
-                except Exception:
-                    logger.debug("releasing a shed agent's clients failed", exc_info=True)
-                finally:
-                    restore()
-                    raced = _settle_last_held_teardown(agent, claimed, released=released)
-                if raced:
-                    logger.warning(
-                        "[webui] #8810: provider(s) %s gained a holder while the release of "
-                        "shed session %s was running; that holder may have been shut down "
-                        "with them.",
-                        raced, session_id,
-                    )
-                claimed_teardown = released
-            else:
-                _settle_last_held_teardown(agent, claimed)
-                _log_once(
-                    f"shed-scope:{session_id}",
-                    "[webui] #8810: the memory provider of shed session %s was not released "
-                    "(%s); it keeps its worker until the WebUI restarts.",
-                    session_id, reason,
-                )
-        if claimed_teardown:
-            return True
+        # LLM clients and LLM work (prompt-cache warming, prepared compaction) go
+        # whether or not the provider was torn down.
         if not _release_llm_client_phases(agent):
             _log_once(
                 "shed-clients-unavailable",
@@ -2514,7 +2820,7 @@ def release_shed_agent_clients(agent: Any, *, session_id: str = "",
                 "LLM clients vs memory provider, so a shed agent keeps its LLM clients "
                 "rather than closing a provider a live agent may still use.",
             )
-        return False
+        return released
 
     # Not the last holder: the provider stays with the agents that hold it.
     if intent is not None:
@@ -2554,8 +2860,15 @@ def release_shed_agent_clients(agent: Any, *, session_id: str = "",
     return False
 
 
+# The tail of a deferred release's log line, by what it was deferred for.
+_DEFERRED_RELEASE_SUFFIX = {
+    "work": " once its queued memory work had drained",
+    "construction": " once a construction of the same profile had finished",
+}
+
+
 def _run_claimed_release(holder: Any, claimed: list, *, manager: Any, bound_home: str,
-                         bound_key: Optional[str], session_id: str, deferred: bool = False) -> bool:
+                         bound_key: Optional[str], session_id: str, deferred: str = "") -> bool:
     """Run a release whose teardown ``claimed`` (``_claim_last_held_teardown`` or
     ``_claim_release_intent``) already holds: ``release_soft`` in the provider's
     bound profile home, never a session end, then settle the claim. True when the
@@ -2576,7 +2889,8 @@ def _run_claimed_release(holder: Any, claimed: list, *, manager: Any, bound_home
         # #8613 (low): ``release_soft`` claims the teardown itself and does nothing
         # when another teardown of this manager already claimed it. Reporting that
         # as a release would retire the instance with its worker still alive.
-        if getattr(manager, "_teardown_claim", None):
+        legacy = _is_legacy_manager(manager)
+        if getattr(manager, "_teardown_claim", None) or (legacy and getattr(manager, "_shutting_down", False)):
             _log_once(
                 f"release-claimed:{session_id}",
                 "[webui] #8613: the memory provider of evicted session %s was NOT released: "
@@ -2586,7 +2900,16 @@ def _run_claimed_release(holder: Any, claimed: list, *, manager: Any, bound_home
                 session_id,
             )
             return False
-        manager.release_soft()
+        if legacy:
+            # #8804: an Agent from before 2026-10-19 has no soft release. Its
+            # ``shutdown_all`` is the teardown ``release_soft`` ends with (bounded
+            # drain, then each provider's ``shutdown()``). The releasing manager's
+            # queued work was drained before the claim, and nothing here runs
+            # ``on_session_end``.
+            manager.shutdown_all()
+            _mark_legacy_shut_down(holder)
+        else:
+            manager.release_soft()
         released = True
     finally:
         restore()
@@ -2600,7 +2923,7 @@ def _run_claimed_release(holder: Any, claimed: list, *, manager: Any, bound_home
     logger.info(
         "[webui] #8613: released the memory provider of evicted session %s without "
         "session end (its owner cannot be resolved)%s",
-        session_id, " once its queued memory work had drained" if deferred else "",
+        session_id, _DEFERRED_RELEASE_SUFFIX.get(deferred, ""),
     )
     return True
 
@@ -2637,22 +2960,42 @@ class _ReleaseIntent:
     holder.
 
     Retained by ``_claim_last_held_teardown`` in the critical section that
-    refused; armed by ``_arm_release_intent``; run by ``_run_release_intent``.
-    Dropped when a new holder registers (``register_provider_holders``), when a
-    newer intent replaces it, when the proof refuses for any reason but queued
-    work, or once the release has run.
+    refused; armed by ``_arm_release_intent`` (queued work) or started by
+    ``_end_acquisition`` (a construction in flight, #8817); run by
+    ``_run_release_intent``. Dropped when a new holder registers
+    (``register_provider_holders``), when a newer intent replaces it, when the
+    proof refuses for any reason but queued work or a construction in flight, or
+    once the release has run.
     """
 
-    __slots__ = ("_memory_manager", "bound_home", "bound_key", "session_id", "armed")
+    __slots__ = ("_memory_manager", "bound_home", "bound_key", "session_id", "armed", "agent_ref",
+                 "fence_homes", "retained", "deferred_for")
 
-    def __init__(self, manager: Any, bound_home: str, bound_key: Optional[str], session_id: str):
+    def __init__(self, manager: Any, bound_home: str, bound_key: Optional[str], session_id: str,
+                 agent_ref: Optional[Callable[[], Any]] = None):
         self._memory_manager = manager
         self.bound_home = bound_home
         self.bound_key = bound_key
         self.session_id = session_id
+        # #8804: a PLAIN weak reference to the departed agent (no holder-table
+        # callback, never a strong one), so a deferred legacy release can mark it
+        # shut down if it is still alive (``_mark_legacy_shut_down``).
+        self.agent_ref = agent_ref
         # Futures already carrying this intent's done-callback, by identity (the
         # future itself is kept so a reused id() can never match). Holder lock.
         self.armed: dict = {}
+        # #8817: the profile homes whose constructions in flight refused this
+        # release, while it waits for them to finish (``_end_acquisition`` then
+        # starts the retry). None when it is not waiting on a construction.
+        # Holder lock.
+        self.fence_homes: Optional[frozenset] = None
+        # True once a refusal has kept this intent on the entries, so a caller
+        # that finds no entry carrying it any more knows a retry already took
+        # it over rather than that it was never kept. Holder lock.
+        self.retained = False
+        # What the release was last deferred for, for its log line: "work"
+        # (queued memory work) or "construction" (#8817). Holder lock.
+        self.deferred_for = "work"
 
 
 def _outstanding_futures(manager: Any) -> list:
@@ -2670,6 +3013,7 @@ def _outstanding_futures(manager: Any) -> list:
 def _drop_intent_locked(intent: _ReleaseIntent) -> None:
     """Retire ``intent`` from every entry still carrying it. Holder lock held."""
     intent.armed.clear()
+    intent.fence_homes = None
     for key, entry in list(_provider_holders.items()):
         if entry.intent is intent:
             entry.intent = None
@@ -2682,8 +3026,10 @@ def _arm_release_intent(intent: _ReleaseIntent) -> str:
 
     ``"unretained"`` when no entry carries it (the refusal was not about queued
     work: nothing to arm), ``"hooked"`` when a done-callback now waits on that
-    work, ``"unhookable"`` when nothing could be hooked: the caller then
-    re-checks it itself, bounded (``_run_release_intent`` with ``poll``).
+    work, ``"fenced"`` when it waits for a construction in flight instead
+    (``_end_acquisition`` starts it, #8817), ``"unhookable"`` when nothing could
+    be hooked: the caller then re-checks it itself, bounded
+    (``_run_release_intent`` with ``poll``).
 
     Never called with the holder lock held: ``add_done_callback`` takes the
     future's own condition lock, and holder lock -> future lock is the inversion
@@ -2698,6 +3044,11 @@ def _arm_release_intent(intent: _ReleaseIntent) -> str:
         entries = [entry for entry in list(_provider_holders.values()) if entry.intent is intent]
         if not entries:
             return "unretained"
+        if intent.fence_homes:
+            # #8817: kept because a construction in flight refused it, not for
+            # queued work. ``_end_acquisition`` starts the retry when that
+            # construction finishes; there is nothing to hook here.
+            return "fenced"
         managers = {id(intent._memory_manager): intent._memory_manager}
         for entry in entries:
             for manager_ref in entry.work.values():
@@ -2742,6 +3093,11 @@ def _start_intent_retry(intent: _ReleaseIntent, *, poll: bool = False) -> None:
             name="webui-8613-deferred-release", daemon=True,
         ).start()
     except Exception:
+        # The intent is NOT dropped here (#8817 Codex r2): retries of one intent
+        # can be started by several sources (each armed manager's queued work,
+        # a construction's end), and a sibling retry that did start may not have
+        # claimed it yet. Retiring it would cancel that retry's release. A
+        # failed start only leaves the release to whichever retry runs next.
         logger.warning(
             "[webui] #8613: the deferred release of the memory provider of evicted session %s "
             "could not start; the provider keeps its worker until the WebUI restarts.",
@@ -2763,9 +3119,16 @@ def _claim_release_intent(intent: _ReleaseIntent) -> tuple[str, str, list]:
             entries = [_live_holders_entry(provider) for provider in instances]
             if not instances or any(entry is None or entry.intent is not intent for entry in entries):
                 # A new holder took the instance over, a newer intent replaced
-                # this one, or the instance is no longer tracked.
+                # this one, another retry of it already claimed it, or the
+                # instance is no longer tracked (its release already ran).
+                if not instances or any(entry is None for entry in entries):
+                    gone = "the provider instance is no longer tracked; its release already ran"
+                elif any(entry.teardown for entry in entries):
+                    gone = "another retry of this release is already running it"
+                else:
+                    gone = "another agent holds the provider instance now, or a newer release replaced this one"
                 _drop_intent_locked(intent)
-                return "dropped", "another agent holds the provider instance now", []
+                return "dropped", gone, []
             ok, why, wait_for = _last_provider_holder_locked(intent, self_dropped=True)
             if ok:
                 for entry in entries:
@@ -2774,12 +3137,20 @@ def _claim_release_intent(intent: _ReleaseIntent) -> tuple[str, str, list]:
                 intent.armed.clear()
                 return "claimed", "", instances
             if wait_for in ("own_work", "work"):
+                intent.deferred_for = "work"
                 return "work", why, []
             if wait_for == "fence":
                 remaining = deadline - time.monotonic()
                 if remaining > 0:
                     _provider_holders_cond.wait(remaining)
                     continue
+                # #8817: the construction is still in flight. Give up the wait,
+                # not the release: the intent waits for that construction to
+                # finish (``_end_acquisition`` restarts it), in this same
+                # critical section, so the end cannot be missed.
+                intent.fence_homes = frozenset(entry.home_key for entry in entries if entry is not None)
+                intent.deferred_for = "construction"
+                return "fenced", why, []
             _drop_intent_locked(intent)
             return "dropped", why, []
 
@@ -2794,7 +3165,17 @@ def _run_release_intent(intent: _ReleaseIntent, poll: bool = False) -> None:
         if state == "claimed":
             _run_claimed_release(
                 intent, claimed, manager=intent._memory_manager, bound_home=intent.bound_home,
-                bound_key=intent.bound_key, session_id=intent.session_id, deferred=True,
+                bound_key=intent.bound_key, session_id=intent.session_id,
+                deferred=intent.deferred_for or "work",
+            )
+            return
+        if state == "fenced":
+            # #8817: still a construction in flight; ``_end_acquisition`` starts
+            # the next retry when it finishes.
+            logger.info(
+                "[webui] #8613: the deferred release of the memory provider of evicted "
+                "session %s waits for a construction of the same profile: %s.",
+                intent.session_id, why,
             )
             return
         if state != "work":

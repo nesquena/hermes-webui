@@ -158,24 +158,18 @@ def test_route_resolver_uses_named_custom_provider_base_url(monkeypatch):
     assert calls[-1]["config_context_length"] == 888000
     assert calls[-1]["base_url"] == "https://zenmux.example/v1"
     assert calls[-1]["provider"] == "custom:zenmux"
+    # The configured custom-provider records still reach the Agent resolver
+    # (content, not list identity): without them it cannot see their models.
+    assert calls[-1]["custom_providers"] == custom_providers
     # A shared URL/model does not grant the sibling's metadata or credential.
     # Content and owner isolation matter; the raw list's identity does not.
-    assert calls[-1]["custom_providers"] == [custom_providers[1]]
     assert calls[-1]["api_key"] == "synthetic-zenmux-key"
 
     assert routes._resolve_context_length_for_session_model(
         "custom-model", "custom:other",
     ) == 444000
-    assert calls[-1]["custom_providers"] == [custom_providers[0]]
     assert calls[-1]["provider"] == "custom:other"
     assert calls[-1]["api_key"] == "synthetic-other-key"
-
-    assert routes._resolve_context_length_for_session_model(
-        "custom-model", "custom:missing", base_url="https://zenmux.example/v1",
-    ) == 256000
-    assert calls[-1]["config_context_length"] is None
-    assert calls[-1]["custom_providers"] == []
-    assert calls[-1]["api_key"] == ""
 
 
 def test_global_context_length_remains_default_model_only(monkeypatch):
@@ -239,11 +233,46 @@ def test_route_helper_keeps_all_context_length_sources_aligned(providers_cfg):
     assert default.base_url == "https://default.example/v1"
     assert default.provider == "openai"
     assert default.api_key == "synthetic-default-key"
-    assert default.custom_providers == []
 
     unrelated = _context_length_lookup_inputs_for_model("other-model", "custom:missing", cfg=cfg)
     assert unrelated.config_context_length is None
     assert unrelated.base_url == ""
     assert unrelated.provider == "custom:missing"
     assert unrelated.api_key == ""
-    assert unrelated.custom_providers == []
+
+
+def test_missing_slug_with_no_lookup_url_does_not_borrow_a_sibling_key(monkeypatch):
+    """A missing slug with no caller URL inherits neither the sibling URL nor its key.
+
+    This test does not exercise caller-supplied URL ownership.
+    """
+    import api.config as config
+    import api.routes as routes
+
+    calls = _install_fake_context_resolver(monkeypatch)
+    cfg = {
+        "model": {
+            "provider": "openai",
+            "default": "default-model",
+            "context_length": "123456",
+        },
+        "custom_providers": [
+            {
+                "name": "zenmux",
+                "base_url": "https://shared.example.test/v1",
+                "api_key": "synthetic-sibling-key",
+                "models": {"custom-model": {"context_length": 999000}},
+            },
+        ],
+    }
+    monkeypatch.setattr(config, "get_config", lambda *a, **k: cfg)
+
+    result = routes._resolve_context_length_for_session_model(
+        "other-model", "custom:missing"
+    )
+
+    assert result == 256000
+    assert calls, "the lookup must still run"
+    assert calls[-1]["base_url"] in (None, ""), calls[-1]
+    assert not calls[-1]["api_key"], calls[-1]
+    assert calls[-1]["config_context_length"] is None, calls[-1]

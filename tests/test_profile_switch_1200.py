@@ -666,7 +666,9 @@ def test_get_available_models_reloads_when_request_profile_changes_even_with_reb
 
 def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_path):
     """An empty session created under profile A can be sent under profile B after a switch."""
+    import api.config as config
     import api.routes as routes
+    import api.run_drain as run_drain
 
     class FakeSession:
         def __init__(self):
@@ -729,17 +731,29 @@ def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_pat
         "model_provider": fake.model_provider,
         "profile": "work",
     }
-    routes._handle_chat_start(Handler(), body)
+    # #8904: FakeThread never runs the worker that unregisters the stream.
+    streams_before = set(config.STREAMS)
+    try:
+        routes._handle_chat_start(Handler(), body)
+    finally:
+        added_streams = set(config.STREAMS) - streams_before
+        for stream_id in added_streams:
+            for registry in vars(config).values():
+                if isinstance(registry, dict):
+                    registry.pop(stream_id, None)
 
     assert fake.profile == "work"
     assert fake.saved is True
     assert started_threads, "chat_start should launch the stream after retagging"
     assert payloads and payloads[-1][0] == 200
+    assert not added_streams & {run["stream_id"] for run in run_drain.all_active_runs()}
 
 
 def test_chat_start_does_not_retag_non_empty_session(monkeypatch, tmp_path):
     """Profile retagging is limited to empty placeholder sessions."""
+    import api.config as config
     import api.routes as routes
+    import api.run_drain as run_drain
 
     class FakeSession:
         def __init__(self):
@@ -781,20 +795,30 @@ def test_chat_start_does_not_retag_non_empty_session(monkeypatch, tmp_path):
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
     monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: payload)
 
-    routes._handle_chat_start(
-        object(),
-        {
-            "session_id": fake.session_id,
-            "message": "hello",
-            "workspace": str(tmp_path),
-            "model": fake.model,
-            "model_provider": fake.model_provider,
-            "profile": "work",
-        },
-    )
+    # #8904: FakeThread never runs the worker that unregisters the stream.
+    streams_before = set(config.STREAMS)
+    try:
+        routes._handle_chat_start(
+            object(),
+            {
+                "session_id": fake.session_id,
+                "message": "hello",
+                "workspace": str(tmp_path),
+                "model": fake.model,
+                "model_provider": fake.model_provider,
+                "profile": "work",
+            },
+        )
+    finally:
+        added_streams = set(config.STREAMS) - streams_before
+        for stream_id in added_streams:
+            for registry in vars(config).values():
+                if isinstance(registry, dict):
+                    registry.pop(stream_id, None)
 
     assert fake.profile == "default"
     assert fake.saved is True
+    assert not added_streams & {run["stream_id"] for run in run_drain.all_active_runs()}
 
 
 def test_chat_start_rejects_invalid_request_profile(monkeypatch):

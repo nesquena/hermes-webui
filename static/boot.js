@@ -718,6 +718,12 @@ function _openMobileSidebarFromGesture(){
   _setPanelInert(sidebar, true);
 }
 
+function _swipeHitsRect(point,id){
+  const el=document.getElementById(id);
+  if(!el||!point) return false;
+  const r=el.getBoundingClientRect();
+  return point.clientX>=r.left&&point.clientX<=r.right&&point.clientY>=r.top&&point.clientY<=r.bottom;
+}
 function _onPwaSidebarSwipeStart(e){
   if(_isDesktopWidth())return;
   if(_isTouchPointerEvent(e))return;
@@ -727,6 +733,9 @@ function _onPwaSidebarSwipeStart(e){
   if(!point)return;
   if(point.clientX>_PWA_SIDEBAR_SWIPE_EDGE)return;
   if(_isInteractiveSwipeTarget(e.target))return;
+  // hwc: sidebar-typing-lock — composer and the message field. A real keyboard
+  // inset grows .composer-wrap padding, so this rect already covers that band.
+  if(_swipeHitsRect(point,'composerWrap')||_swipeHitsRect(point,'msg'))return;
   _pwaSidebarSwipe={startX:point.clientX,startY:point.clientY,active:true,opened:false};
 }
 
@@ -2751,48 +2760,23 @@ $('btnExportJSON').onclick=()=>{
   a.download=`hermes-${S.session.session_id}.json`;a.click();
 };
 $('btnShareSession').onclick=async()=>{
-  if(!S.session) return;
+  // Bind the action to the conversation on screen at click time. The shared helper
+  // never reads S.session to pick its target, and requireActive drops the dialog's
+  // answer if another conversation was opened while the dialog was up.
+  const session=S.session;
+  if(!session) return;
   try{
-    const existing=(S.session&&S.session.share_token)?new URL(`/share/${encodeURIComponent(S.session.share_token)}`,location.origin).href:null;
-    if(existing){
-      const reuse=await showConfirmDialog({
-        title:t('share_session'),
-        message:t('share_session_existing_confirm'),
-        confirmLabel:t('share_session_copy_existing'),
-        cancelLabel:t('share_session_refresh_snapshot'),
-      });
-      if(reuse){
-        await _copyText(existing);
-        showToast(t('share_session_link_copied'));
-        window.open(existing,'_blank','noopener');
-        return;
-      }
-    }
-    const res=await api('/api/share/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
-    if(res&&res.session) S.session=res.session;
-    const href=new URL(String(res&&res.share&&res.share.url||''),location.origin).href;
-    await _copyText(href);
-    showToast(t('share_session_created'));
-    if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
-    window.open(href,'_blank','noopener');
+    await _createOrRefreshSessionShare(session,{requireActive:true});
   }catch(err){
     showToast(t('share_session_failed')+(err&&err.message?err.message:String(err||'')),4000,'error');
   }
 };
 $('btnStopSharingSession').onclick=async()=>{
-  if(!S.session||!S.session.share_token) return;
-  const ok=await showConfirmDialog({
-    title:t('stop_sharing_session'),
-    message:t('stop_sharing_session_confirm'),
-    confirmLabel:t('stop_sharing_session'),
-    danger:true,
-  });
-  if(!ok) return;
+  // Bound to the conversation on screen at click time, like Share above.
+  const session=S.session;
+  if(!session||!session.share_token) return;
   try{
-    const res=await api('/api/share/revoke',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
-    if(res&&res.session) S.session=res.session;
-    showToast(t('share_session_revoked'));
-    if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
+    await _revokeSessionShare(session,{requireActive:true});
   }catch(err){
     showToast(t('share_session_revoke_failed')+(err&&err.message?err.message:String(err||'')),4000,'error');
   }
@@ -3171,7 +3155,10 @@ document.addEventListener('keydown',async e=>{
   // shortcuts (e.g. bold in some embedded editors) are never stolen.
   if((e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey&&(e.key==='b'||e.key==='B')){
     const t=e.target;
-    const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
+    const active=document.activeElement;
+    const _isTextEl=el=>!!(el&&(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable));
+    // hwc: sidebar-typing-lock — also the focused element, not only the event target.
+    const isText=_isTextEl(t)||_isTextEl(active);
     if(!isText&&typeof toggleSidebar==='function'&&_isDesktopWidth()){
       e.preventDefault();
       toggleSidebar();
@@ -3214,6 +3201,8 @@ document.addEventListener('keydown',async e=>{
     const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
     if(isText) return;
     e.preventDefault();
+    // A shared app dialog is modal: never open a new chat underneath it.
+    if(typeof _isAppDialogOpen==='function'&&_isAppDialogOpen()) return;
     // If the current session has no messages AND nothing is in flight, just focus
     // the composer rather than creating another empty session that will clutter
     // the sidebar list (#1171). See the matching guard in $('btnNewChat').onclick
@@ -3990,6 +3979,9 @@ function _applyComposerFooterVisibilitySettings(){
     // when buttons are visible (Greptile feedback).
     _divider.classList.toggle('composer-control-hidden',_allLeftHidden);
   }
+  // #9101: hide_composer_yolo hides the YOLO pill only while YOLO is off
+  // (while it is on, the pill shrinks to its ⚡ icon).
+  if(typeof _updateYoloPill==='function') _updateYoloPill();
 }
 window._applyComposerFooterVisibilitySettings=_applyComposerFooterVisibilitySettings;
 
@@ -4085,6 +4077,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
     window._showTokenUsage=!!s.show_token_usage;
     window._showQuotaChip=s.show_quota_chip===true;
+    window._quotaChipWindow=_normalizeQuotaChipWindow(s.quota_chip_window);
     window._showConversationOutline=s.show_conversation_outline===true;
     document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
@@ -4258,6 +4251,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._sendKey='enter';
     window._showTokenUsage=false;
     window._showQuotaChip=false;
+    window._quotaChipWindow='most_constrained';
     window._showConversationOutline=false;
     document.documentElement.dataset.conversationOutline='disabled';
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();

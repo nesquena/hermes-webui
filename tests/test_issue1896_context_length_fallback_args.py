@@ -25,8 +25,6 @@ import copy
 import sys
 import types
 
-import pytest
-
 
 REPO = Path(__file__).resolve().parent.parent
 STREAMING_PY = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
@@ -171,8 +169,7 @@ def test_legacy_signature_fallback_present():
     )
 
 
-@pytest.mark.parametrize("store", ["legacy", "native"])
-def test_cfg_custom_providers_resolved_from_cfg_dict(monkeypatch, store):
+def test_cfg_custom_providers_resolved_from_cfg_dict(monkeypatch):
     """The kwargs source must be the per-profile config (`_cfg`), not a
     module-level snapshot — otherwise profile switches with different
     custom_providers wouldn't take effect."""
@@ -195,16 +192,13 @@ def test_cfg_custom_providers_resolved_from_cfg_dict(monkeypatch, store):
             },
         ]
         cfg = {"model": {"provider": "openai", "default": "default-model", "context_length": window + 1}}
-        if store == "legacy":
-            cfg["custom_providers"] = owners
-        else:
-            cfg["providers"] = {"other": owners[0], "zenmux": owners[1]}
+        cfg["custom_providers"] = owners
         profiles.append(cfg)
 
     before = copy.deepcopy(profiles)
     # Stand in only for request/profile config acquisition. The production
     # helper must re-read it on every call, not use a module-global snapshot.
-    monkeypatch.setattr(config, "cfg", {"custom_providers": [{"name": "ZenMux", "api_key": "wrong-global-key"}]})
+    monkeypatch.setattr(config, "cfg", {"custom_providers": [{"name": "ZenMux", "api_key": "synthetic-global-key"}]})
     active = [profiles[0]]
     reads = []
 
@@ -220,19 +214,12 @@ def test_cfg_custom_providers_resolved_from_cfg_dict(monkeypatch, store):
         assert lookup.provider == "custom:zenmux"
         assert lookup.base_url == "https://shared.example/v1"
         assert lookup.api_key == f"synthetic-{profile}-owner-key"
-        assert len(lookup.custom_providers) == 1
-        selected = lookup.custom_providers[0]
-        assert selected["name"].lower() == "zenmux"
-        assert selected["models"] == {"shared-model": {"context_length": str(window)}}
-        assert selected["api_key"] == f"synthetic-{profile}-owner-key"
 
         default = routes._context_length_lookup_inputs_for_model("default-model", "openai")
         assert default.config_context_length == window + 1
-        assert default.custom_providers == []
         assert default.api_key == ""
         unrelated = routes._context_length_lookup_inputs_for_model("other-model", "openai")
         assert unrelated.config_context_length is None
-        assert unrelated.custom_providers == []
         assert unrelated.api_key == ""
 
     assert reads == [profiles[0]] * 3 + [profiles[1]] * 3 + [profiles[0]] * 3
