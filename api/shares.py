@@ -1188,6 +1188,11 @@ def build_share_snapshot(session) -> dict:
             trusted_roots=_trusted_roots,
         )
         if sanitized:
+            if isinstance(sanitized, dict) and isinstance(sanitized.get("content"), str):
+                # Media embedding and path redaction add text after the prose
+                # pre-scrub, so a value can span the original text and that
+                # markup. Mask the assembled text as a read of the snapshot does.
+                sanitized = {**sanitized, "content": _scrub_registered_values(sanitized["content"])}
             safe_messages.append(sanitized)
     if not safe_messages:
         raise ValueError("This conversation has no shareable messages yet.")
@@ -1199,7 +1204,7 @@ def build_share_snapshot(session) -> dict:
     # pattern pass memoizes it, so the exact values go first here as well.
     title = _force_redact_credentials(_scrub_registered_values(_raw_title or "Untitled"))
     title = _placeholder_inline_data_uris(title)
-    title = _redact_share_paths(title, redact_paths) or "Untitled"
+    title = _scrub_registered_values(_redact_share_paths(title, redact_paths) or "Untitled")
     return {
         "title": title,
         "messages": safe_messages,

@@ -418,6 +418,45 @@ def test_stored_share_read_masks_a_value_across_an_embed_tag_boundary(state, reg
     assert _public_read(token)["messages"][0]["content"] == content.replace(value, mask)
 
 
+@pytest.mark.parametrize("where", ["prose-into-tag", "image-data-into-tag"])
+def test_new_share_masks_a_value_across_the_embed_tag_it_generates(state, registry, redaction_setting, where):
+    """A value registered before the build that spans the generated embed tag is masked in the build too."""
+    from api import shares
+
+    register, mask = registry
+    workspace = state / "ws"
+    workspace.mkdir()
+    (workspace / "pic.png").write_bytes(_png_bytes())
+    b64 = base64.b64encode(_png_bytes()).decode()
+    expected = "DUMMYprefix" + _embed_tag(b64)
+    value = 'DUMMYprefix<img src="data:' if where == "prose-into-tag" else b64[-8:] + '" class="msg'
+    assert expected.count(value) == 1
+    register(value)
+
+    snapshot = shares.build_share_snapshot(types.SimpleNamespace(
+        session_id=SID, title="Pic", messages=[{"role": "assistant", "content": "DUMMYprefixMEDIA:pic.png"}],
+        workspace=str(workspace),
+    ))
+    assert snapshot["messages"][0]["content"] == expected.replace(value, mask)
+
+
+def test_new_share_masks_a_value_across_a_redacted_path_in_the_title(state, registry, redaction_setting):
+    """A value spanning the title text and the path marker the build writes is masked in the build."""
+    from api import shares
+
+    register, mask = registry
+    workspace = state / "ws"
+    workspace.mkdir()
+    value = "DUMMYrun [redacted"
+    register(value)
+
+    snapshot = shares.build_share_snapshot(types.SimpleNamespace(
+        session_id=SID, title=f"DUMMYrun {workspace}", messages=[{"role": "user", "content": "hi"}],
+        workspace=str(workspace),
+    ))
+    assert snapshot["title"] == f"{mask}-path]"
+
+
 @pytest.mark.parametrize("prefix", ["X", "_", "meta"])
 def test_stored_share_read_masks_data_uri_lookalikes(state, registry, prefix):
     """Prose that looks like image data is scrubbed on read, in the title and in messages."""
