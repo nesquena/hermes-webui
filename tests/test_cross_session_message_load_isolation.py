@@ -176,6 +176,7 @@ COMPOSER_DRAFT_HELPERS_SRC = "\n".join(
         "_syncComposerOwnerStateFromDraft",
         "_rememberComposerPendingFiles",
         "_forgetComposerPendingFiles",
+        "_peekComposerPendingFiles",
         "_restoreComposerPendingFiles",
     )
 )

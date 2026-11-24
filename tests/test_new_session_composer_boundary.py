@@ -1307,6 +1307,7 @@ def _run_new_session_load_interleave_harness(
         function _isComposerDraftRestoreSuppressed(){{return false;}}
         function _clearComposerDraftRestoreSuppression(){{}}
         function _restoreComposerPendingFiles(){{S.pendingFiles=[];}}
+        function _peekComposerPendingFiles(){{return [];}}
         function _newSessionPendingText(){{return 'Starting';}}
         function setComposerStatus(text){{controls.composerStatus.textContent=text;}}
         function showToast(){{}}
@@ -3232,6 +3233,7 @@ def _run_switch_file_detach_harness() -> dict:
         _function(SESSIONS_JS, "_composerPendingFilesOwnerKey", "\nfunction _clearComposerDraftSaveTimer("),
         _function(SESSIONS_JS, "_rememberComposerPendingFiles", "\nfunction _forgetComposerPendingFiles("),
         _function(SESSIONS_JS, "_detachComposerPendingFilesForSwitch", "\n\nasync function loadSession("),
+        _function(SESSIONS_JS, "_peekComposerPendingFiles", "\nfunction _restoreComposerPendingFiles("),
         _function(SESSIONS_JS, "_restoreComposerPendingFiles", "\n// Bumped when a non-empty draft"),
         _function(UI_JS, "_syncComposerFiles", "\nfunction renderTray("),
         _function(UI_JS, "renderTray", "\nfunction _uploadTooLargeMessage("),
