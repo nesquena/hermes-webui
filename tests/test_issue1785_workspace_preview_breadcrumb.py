@@ -66,7 +66,12 @@ def test_load_dir_ignores_stale_session_results():
     )
     assert "navigationGen===_wsNavigationGen" in block
     assert "String(S.currentDir||'.')===requestedPath" in block
-    assert block.count("if(!isCurrentNavigation())return false;") >= 2
+    assert block.count("if(!isCurrentNavigation())") >= 2, (
+        "loadDir must re-check the current navigation after both awaited /api/list points"
+    )
+    assert block.count("if(isSameNavigation())return true;") >= 2, (
+        "a superseded reply for the same navigation must still count as committed"
+    )
 
 
 def test_file_preview_breadcrumb_uses_directory_navigation_for_root():

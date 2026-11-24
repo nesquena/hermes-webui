@@ -169,6 +169,11 @@ function createTab(server, name, overrides = null, extraSrc = []) {
     extractFunction(sessionsJs, '_paneNavigationClaimIsCurrent'),
     extractFunction(sessionsJs, '_paneNavigationOwnerIsCurrent'),
     extractFunction(sessionsJs, '_contextTransitionOwnerIsCurrent'),
+    // The create installers capture and re-check a workspace repaint boundary
+    // around the name dialog and the write; both helpers live in sessions.js.
+    'let _wsTreeGen = 0;',
+    extractFunction(sessionsJs, '_captureWorkspaceRepaintBoundary'),
+    extractFunction(sessionsJs, '_workspaceRepaintBoundaryIsCurrent'),
     'let _blankPageSessionInFlight = null;',
     extractFunction(sessionsJs, '_ensureBlankPageSession'),
     // Mirrors the install side effects master's inlined block performed: drop the
