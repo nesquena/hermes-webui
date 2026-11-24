@@ -908,3 +908,61 @@ def test_scoped_key_exact_spelling_outranks_a_derived_one_regardless_of_yaml_ord
         )
         == "medium"
     ), "a derived spelling still matches when it is the only key"
+
+
+# ──────────────── greptile P1 (2026-11-23): core install applies the exact @ key ────────────────
+#
+# The 11-18 fix made the caller's ``@provider:model`` spelling a fallback
+# candidate, and added ``_at_key_present`` so the colon-scoped lookup does not
+# outrank it. But when ``hermes_constants`` IS importable, core resolves the
+# BARE id first (``gpt-5.4-mini: high``) and returns a value, so the fallback
+# branch never runs; ``_at_key_present`` then only suppresses the scoped
+# lookup and never applies the @ key's own value. The route-specific override
+# therefore lost to the bare one. Core's result must be subject to the
+# caller's exact @ key.
+
+
+def test_core_install_applies_exact_at_key_over_bare_match():
+    """``@openrouter:gpt-5.4-mini: low`` must beat bare ``gpt-5.4-mini: high``.
+
+    Both keys are real override entries; the @ spelling names the exact
+    routing lane the caller asked for, so it is the authoritative one. Core
+    resolving the bare id (and returning ``high``) must not short-circuit it.
+    """
+    pytest.importorskip("hermes_constants")
+
+    data = _write_overrides(
+        {"@openrouter:gpt-5.4-mini": "low", "gpt-5.4-mini": "high"}
+    )
+
+    resolved = cfg.configured_reasoning_effort_for_model(
+        data, model_id="@openrouter:gpt-5.4-mini"
+    )
+    assert resolved == "low", (
+        "the caller's exact @-qualified override must be APPLIED on top of the "
+        f"core result, got {resolved!r}"
+    )
+
+    # Same through the gateway bridge path, which passes the provider id too.
+    bridged = gateway_chat._gateway_reasoning_effort_for_request(
+        data,
+        model="@openrouter:gpt-5.4-mini",
+        model_provider="openrouter",
+    )
+    assert bridged == "low", (
+        "the gateway bridge must apply the exact @ key as well, got "
+        f"{bridged!r}"
+    )
+
+
+def test_core_install_bare_only_control_still_matches():
+    """Control: with no @ key present, the bare match still wins."""
+    pytest.importorskip("hermes_constants")
+
+    data = _write_overrides({"gpt-5.4-mini": "low"})
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            data, model_id="@openrouter:gpt-5.4-mini"
+        )
+        == "low"
+    )

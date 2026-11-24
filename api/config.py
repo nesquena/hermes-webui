@@ -7648,17 +7648,26 @@ def configured_reasoning_effort_for_model(
     # and treating that as "an @ key won" would let the bare spelling beat the
     # scoped one for an @-qualified model.
     if isinstance(overrides, dict) and model and provider_id:
-        _orig_at_forms = set()
+        _orig_at_forms = []
         if orig_model.startswith("@") and ":" in orig_model:
-            _orig_at_forms = {orig_model.lower(), orig_model.strip().lower()}
-        _at_key_present = bool(
-            _orig_at_forms
-            and any(
-                isinstance(k, str) and k.strip().lower() in _orig_at_forms
-                for k in overrides
+            _orig_at_forms = [orig_model.lower(), orig_model.strip().lower()]
+        _exact_at_key = None
+        for _key in overrides:
+            if isinstance(_key, str) and _key.strip().lower() in _orig_at_forms:
+                _exact_at_key = _key
+                break
+        if _exact_at_key is not None:
+            # The caller's own @provider:model spelling names the exact routing
+            # lane, so its value is authoritative over BOTH the core result
+            # (core only ever sees the stripped bare id) and the colon-scoped
+            # lookup. Apply it here: checking the key without applying it let
+            # a bare-key hit from core win (greptile P1 2026-11-23).
+            _exact_at_parsed = _parse_reasoning_override_value(
+                overrides[_exact_at_key]
             )
-        )
-        if not _at_key_present:
+            if _exact_at_parsed is not None:
+                per_model = _exact_at_parsed
+        else:
             _scoped_keys = _scoped_reasoning_override_keys_for_model(
                 model,
                 overrides,
