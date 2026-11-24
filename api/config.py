@@ -3519,6 +3519,22 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
     return matches[0] if matches else None
 
 
+def _str_field(entry: dict, key: str) -> str:
+    """Stripped ``entry[key]`` when it is a ``str``, ``''`` otherwise.
+
+    Legacy ``custom_providers`` rows are hand-written YAML, so a field the
+    resolver reads as text (``name``, ``model``, ``base_url``) may arrive as a
+    non-string scalar — ``name: 5``, ``base_url: 9``. Calling ``.strip()`` on
+    such a value raised ``AttributeError`` and took the whole resolution down
+    (#9328). A non-string value is treated as ABSENT, matching the Agent's own
+    legacy-row reader, which skips rows whose ``name``/``base_url`` are not
+    strings. Deliberately NOT ``str(value)``: coercing would mint a provider
+    named "5", a row the user never wrote.
+    """
+    value = entry.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
 def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
@@ -3679,7 +3695,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             _active_custom_slug = config_provider
 
         def _entry_owns_model(entry: dict) -> bool:
-            entry_model = (entry.get('model') or '').strip()
+            entry_model = _str_field(entry, 'model')
             ids = set()
             if entry_model:
                 ids.add(entry_model)
@@ -3712,14 +3728,14 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 return _finalize(
                     model_id,
                     _active_custom_slug,
-                    (_active_owner.get('base_url') or '').strip() or None,
+                    (_str_field(_active_owner, 'base_url')) or None,
                 )
         for entry in custom_providers:
             if not isinstance(entry, dict):
                 continue
-            entry_model = (entry.get('model') or '').strip()
-            entry_name = (entry.get('name') or '').strip()
-            entry_base_url = (entry.get('base_url') or '').strip()
+            entry_model = _str_field(entry, 'model')
+            entry_name = _str_field(entry, 'name')
+            entry_base_url = _str_field(entry, 'base_url')
             entry_model_ids = set()
             if entry_model:
                 entry_model_ids.add(entry_model)
@@ -3894,9 +3910,9 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             _custom_cfg = _custom_provider_entries(cfg)
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
-                    if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
+                    if isinstance(_entry, dict) and _str_field(_entry, "name") == prefix:
                         _slug = _custom_provider_slug_from_name(prefix)
-                        _base = (_entry.get("base_url") or "").strip()
+                        _base = _str_field(_entry, "base_url")
                         return _finalize(model_id, _slug, _base or None)
 
         # If a custom endpoint base_url is configured, don't reroute through OpenRouter
