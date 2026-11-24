@@ -1197,11 +1197,17 @@ from tools.process_registry import process_registry
 peu.ASYNC_DELIVERY_CLAIM_RETRY_SECONDS = 0.05
 first_notes = streaming._drain_webui_process_notifications("webui-session-1")
 first_timers = peu.async_delivery_retry_timer_count()
-with ad._DB_LOCK, ad._connect() as conn:
-    conn.execute(
-        "UPDATE async_delegations SET delivery_claimed_at=? WHERE delegation_id=?",
-        (time.time() - 301, {delegation_id!r}),
-    )
+# Age the claim in the ledger file itself: newer Agent cores no longer expose a
+# connection helper (the ledger sits behind their storage interface).
+import sqlite3
+with ad._DB_LOCK:
+    ledger = sqlite3.connect({str(tmp_path / 'state.db')!r}, timeout=10)
+    with ledger:
+        ledger.execute(
+            "UPDATE async_delegations SET delivery_claimed_at=? WHERE delegation_id=?",
+            (time.time() - 301, {delegation_id!r}),
+        )
+    ledger.close()
 deadline = time.time() + 3
 while process_registry.completion_queue.empty() and time.time() < deadline:
     time.sleep(.01)

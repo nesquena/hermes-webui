@@ -3308,6 +3308,16 @@
   .composer-footer.cf-burger .composer-mobile-config-action{flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
   .composer-footer.cf-burger .composer-mobile-context-action{flex:1 0 100%;}
   .composer-footer.cf-burger .ctx-indicator-wrap{display:none!important;}
+  /* #9101: a ⚡-only YOLO pill: the hide setting while YOLO is on (it can't be
+     hidden then), and every pill at the narrowest stage. Its hit area grows to
+     44px tall with an inset pseudo-element; a wider box would cost the
+     mobile-config button its room. */
+  .yolo-pill.yolo-pill-compact .yolo-pill-label,
+  .composer-footer.cf-burger .yolo-pill-label{display:none;}
+  .yolo-pill.yolo-pill-compact,
+  .composer-footer.cf-burger .yolo-pill{position:relative;}
+  .yolo-pill.yolo-pill-compact::after,
+  .composer-footer.cf-burger .yolo-pill::after{content:'';position:absolute;left:0;right:0;top:50%;height:44px;transform:translateY(-50%);}
 
   /* Show session-toolsets chip ONLY when the composer-footer container is wide
      enough to comfortably accommodate it (workspace+model+reasoning+profile+
@@ -3661,6 +3671,25 @@
 .model-opt-id{display:block;font-size:10px;color:var(--muted);line-height:1.3;opacity:.72;word-break:break-word;}
 .model-provider-hint{margin:2px 14px 6px;padding:7px 9px;border:1px solid var(--border2);border-radius:7px;background:color-mix(in srgb,var(--surface) 90%,var(--warning));color:var(--muted);font-size:11px;line-height:1.35;}
 .model-opt-provider{display:inline-flex;align-items:center;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:600;letter-spacing:.03em;color:var(--muted);background:rgba(255,255,255,.05);border:1px solid var(--border2);margin-left:auto;white-space:nowrap;flex-shrink:0;}
+/* #9074: on Configured rows a long custom provider name ellipsizes instead of
+   wrapping the row onto a second line on narrow phones. A zero basis keeps the
+   pill from forcing a wrap; it grows into the line's free space up to its own
+   width, and margin-left:auto still right-aligns it. */
+.model-opt-provider--configured{display:block;flex:1 1 0;min-width:8em;max-width:max-content;overflow:hidden;text-overflow:ellipsis;}
+/* The pill is a Configured row's only visible provider, and plain --muted fell
+   to 2.5:1 (Nous dark) and 3.5:1 (Catppuccin light). Mixed toward --text it stays
+   >=4.5:1 on plain, hover, highlighted and active rows in every skin, light and dark. */
+.model-opt-provider--configured{color:color-mix(in srgb,var(--muted) 40%,var(--text));}
+/* A short provider name (<=14 characters, class set in ui.js) never shrinks to a
+   stub like "Ope…": it keeps its width and wraps whole. Longer names shrink to
+   the 8em floor above, then wrap. */
+.model-opt-provider--configured.model-opt-provider--fit{flex:0 0 auto;min-width:0;}
+/* #9074: the dark-theme chip colours measured ~1.1:1 on the light dropdown.
+   Mixed from the theme tokens, they stay >=4.5:1 on plain, hover and active rows
+   in every light skin (the tightest are Catppuccin's active row and neon-paint). */
+:root:not(.dark) .model-opt-badge--primary{color:color-mix(in srgb,var(--info) 40%,var(--text));}
+:root:not(.dark) .model-opt-badge--fallback{color:color-mix(in srgb,var(--warning) 30%,var(--text));}
+:root:not(.dark) .model-opt-badge--selected{color:color-mix(in srgb,var(--blue) 40%,var(--text));}
 /* "Show N more" group expander — deliberately distinct from a real model row:
    no model-id line, indented, muted italic label + a subtle + affordance, so it
    reads as an action that expands the list rather than a selectable model. */
@@ -7516,6 +7545,11 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-task-preview-body{font-size:12px;color:var(--muted);line-height:1.45;margin-bottom:6px;}
 .kanban-status-actions{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px;}
 .kanban-status-actions .btn{font-size:11px;padding:4px 8px;}
+/* UX44-F1 touch target: the shared detail status buttons (incl. the Review
+   handoff button) measured 33px tall on phone/tablet, below the 44px touch
+   minimum. Scoped to pointer:coarse per the repo's existing touch precedents
+   so desktop (fine pointer) rendering is unchanged. */
+@media (pointer:coarse){.kanban-status-actions .btn{min-height:44px;}}
 /* Generic styled buttons used throughout the Kanban panel. The Kanban PR
    stack standardised on `.btn` / `.btn.secondary` class names but never
    shipped the matching CSS, so without these rules buttons fall back to

@@ -237,6 +237,62 @@ _yolo_transitions: dict[str, dict] = {}
 _gateway_yolo_handoff_guard = threading.Lock()
 _gateway_yolo_handoffs: dict[str, dict] = {}
 
+# ── Session YOLO revision (#9101) ────────────────────────────────────────────
+# The flag lives in the Agent's memory. WebUI stamps every value it writes or
+# observes with a number from one process-wide counter, and the GET/POST and
+# approval answers carry it, so a POST can be made conditional on what its
+# caller read (``expected_revision`` -> 409 ``yolo_changed`` when it moved).
+# The epoch names this server process: a restart clears the flag and restarts
+# the counter, so revisions from different epochs are never equal. Nothing here
+# is persisted or pushed on a stream.
+_YOLO_EPOCH = uuid.uuid4().hex[:16]
+_yolo_revision_counter = 0
+_yolo_revisions: dict[str, tuple[int, bool]] = {}  # session -> (revision, enabled)
+
+
+def _yolo_state_locked(session_key: str) -> dict:
+    """Current YOLO state of one session; a changed flag takes the next revision.
+
+    Caller holds ``_yolo_transition_lock``. Writers call this right after
+    writing, so revision order is write order.
+    """
+    global _yolo_revision_counter
+    enabled = bool(is_session_yolo_enabled(session_key))
+    entry = _yolo_revisions.get(session_key)
+    moved = (entry[1] != enabled) if entry else enabled
+    if moved:
+        _yolo_revision_counter += 1
+        entry = (_yolo_revision_counter, enabled)
+        _yolo_revisions[session_key] = entry
+    return {
+        "yolo_enabled": enabled,
+        "yolo_revision": entry[0] if entry else 0,
+        "yolo_epoch": _YOLO_EPOCH,
+    }
+
+
+def session_yolo_state(session_key: str) -> dict:
+    """``{yolo_enabled, yolo_revision, yolo_epoch}`` for one session."""
+    session_key = str(session_key or "").strip()
+    with _yolo_transition_lock:
+        return _yolo_state_locked(session_key)
+
+
+def yolo_revision_conflict(session_key: str, expected: tuple[int, str | None] | None) -> dict | None:
+    """Refusal payload when the session's YOLO moved past ``expected``, else None."""
+    if expected is None:
+        return None
+    state = session_yolo_state(session_key)
+    revision, epoch = expected
+    if state["yolo_revision"] == revision and epoch in (None, state["yolo_epoch"]):
+        return None
+    return {
+        "ok": False,
+        "code": "yolo_changed",
+        "error": "YOLO changed since it was read; nothing was toggled.",
+        **state,
+    }
+
 
 @contextmanager
 def gateway_yolo_handoff(session_key: str):
@@ -301,6 +357,7 @@ def finish_session_yolo_transition(session_key: str, token: object | None, *, su
             # The first confirmed relay commits YOLO immediately. Any remaining
             # tokens may fail later but cannot revoke this successful enable.
             enable_session_yolo(session_key)
+            _yolo_state_locked(session_key)
         if transition["tokens"]:
             return
         _yolo_transitions.pop(session_key, None)
@@ -308,6 +365,7 @@ def finish_session_yolo_transition(session_key: str, token: object | None, *, su
             enable_session_yolo(session_key)
         else:
             disable_session_yolo(session_key)
+        _yolo_state_locked(session_key)
 
 
 def set_session_yolo_enabled(session_key: str, enabled: bool) -> None:
@@ -321,6 +379,7 @@ def set_session_yolo_enabled(session_key: str, enabled: bool) -> None:
             enable_session_yolo(session_key)
         else:
             disable_session_yolo(session_key)
+        _yolo_state_locked(session_key)
 
 
 def _approval_sse_subscribe(session_id: str) -> queue.Queue:
