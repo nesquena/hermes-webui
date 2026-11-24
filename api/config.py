@@ -2273,12 +2273,31 @@ _LEGACY_CUSTOM_API_KEY_ENV_WARNED: set[str] = set()
 
 
 def _api_key_env_name(provider_id: object) -> str:
-    """Return the POSIX-safe default API-key env var for a custom provider id."""
-    sanitized = re.sub(r"[^A-Za-z0-9]", "_", str(provider_id or "")).upper().strip("_")
+    """Return the POSIX-safe default API-key env var for a custom provider id.
+
+    The fold replaces every non-alphanumeric character with ``_``, which is
+    lossy for non-ASCII ids: ``custom:晨光-relay`` and ``custom:光芒-relay`` both
+    became ``CUSTOM____RELAY_API_KEY``, one credential for two providers, once
+    #9209 started minting non-ASCII slugs instead of folding them away.
+
+    A non-ASCII id therefore appends a short digest of the id itself, so distinct
+    identities cannot share a namespace. ASCII ids (and ids whose fold is already
+    injective) keep the exact name earlier releases derived -- ``CUSTOM_RELAY_API_KEY``,
+    ``CUSTOM_10_8_71_41_8080_API_KEY`` -- because dropping that suffix is what
+    existing ``~/.hermes/.env`` files and shell exports rely on.
+    """
+    raw = str(provider_id or "")
+    sanitized = re.sub(r"[^A-Za-z0-9]", "_", raw).upper().strip("_")
     if not sanitized:
         sanitized = "CUSTOM"
     if not sanitized.startswith("CUSTOM_"):
         sanitized = f"CUSTOM_{sanitized}"
+    if not raw.isascii():
+        # Only the lossy case gets a namespace of its own: the digest is stable
+        # for a given id (same provider always reads the same variable) and
+        # distinguishes ids whose ASCII fold is identical.
+        digest = hashlib.sha256(raw.strip().lower().encode("utf-8")).hexdigest()[:8].upper()
+        sanitized = f"{sanitized}_{digest}"
     return f"{sanitized}_API_KEY"
 
 
@@ -3661,6 +3680,25 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     if configured_custom_lane:
         return _finalize(model_id, "custom", config_base_url)
 
+    # A named custom route whose OWNER is switched off is terminal here too
+    # (#9209 round 3). The connection selection already refuses it; returning the
+    # ``custom_providers[]`` row's endpoint (or the ambient ``model.base_url``) as
+    # this route's endpoint would let a caller that persists or displays that
+    # value advertise a provider the user took offline. Same verdict, same id.
+    #
+    # The check must not raise up front: a slug collision on the ACTIVE custom
+    # provider may not block a request that resolves to a different provider
+    # (``@openrouter:...``, ``@custom:safe-provider:...``). An ambiguous slug is
+    # left to the point-of-return guard below, which only runs on the slug this
+    # call actually returns.
+    if isinstance(config_provider, str) and config_provider.startswith("custom:"):
+        try:
+            _active_disabled = _custom_provider_identity_disabled(config_provider, cfg)
+        except AmbiguousCustomProviderError:
+            _active_disabled = False
+        if _active_disabled:
+            return _finalize(model_id, config_provider, None)
+
     # Custom providers declared in config.yaml should win over slash-based
     # OpenRouter heuristics. Their model IDs commonly contain '/' too.
     # However, when the active provider is an explicit non-custom provider and
@@ -3750,26 +3788,42 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # never blocks a request that resolves to a different provider.
         if _active_custom_slug:
             _active_key = _custom_provider_slug_key(_active_custom_slug)
-            _active_owner = next(
-                (
-                    e for e in custom_providers
-                    if isinstance(e, dict)
-                    and _entry_owns_model(e)
-                    and _custom_provider_slug_key(e.get('name')) == _active_key
-                ),
-                None,
-            )
-            # Exactly one entry carries the active slug AND owns the model ->
-            # authoritative, even when model.base_url is stale/absent or points at
-            # a different endpoint. An explicit, unambiguous named provider must
-            # never lose to config order: a stale URL is not evidence to discard
-            # it. _finalize() fails closed if the active slug is shared by >=2
-            # entries (endpoint + credential could then split).
-            if _active_owner is not None:
+            # The saved id names its owner through the SAME rule the connection
+            # uses (#9209 round 3): canonical ownership first, the unique legacy
+            # alias of a mixed-script name only when no canonical record claims
+            # the slug. Comparing canonical slugs alone made a saved
+            # ``custom:relay`` invisible as the active provider, so whichever
+            # earlier row listed the model won the route.
+            try:
+                _active_record = _select_custom_provider_record(
+                    _active_custom_slug, _active_key, cfg
+                )[0]
+            except AmbiguousCustomProviderError:
+                # Leave the collision to _finalize()/the scan below: an unrelated
+                # request must not be blocked by an ambiguity on this slug unless
+                # this slug is the one being returned.
+                _active_record = None
+            if _active_record is not None and _entry_owns_model(_active_record):
+                # Name the owner the way its own record does, so the id handed
+                # back is one the Agent resolves (``custom:晨光-relay``), not the
+                # pre-#9209 fold the WebUI used to save.
+                _owner_identity = str(
+                    _active_record.get('name') or _active_record.get('provider_key') or ''
+                ).strip()
+                _owner_slug = (
+                    _custom_provider_slug_from_name(_owner_identity) or _active_custom_slug
+                )
+                # Prefer the record's own endpoint over ``model.base_url``: the
+                # record owns the connection, so it owns the endpoint too (#9209
+                # round 3 endpoint/connection parity). An explicit, unambiguous
+                # named provider must never lose to config order, and a stale URL
+                # is not evidence to discard it. A record that declares no
+                # endpoint keeps this rung's historic silence (None) rather than
+                # borrowing the ambient one.
                 return _finalize(
                     model_id,
-                    _active_custom_slug,
-                    (_active_owner.get('base_url') or '').strip() or None,
+                    _owner_slug,
+                    (_active_record.get('base_url') or '').strip() or None,
                 )
         for entry in custom_providers:
             if not isinstance(entry, dict):
@@ -4902,8 +4956,61 @@ def _native_custom_provider_record(
     return None, False
 
 
+def _custom_record_claim_signature(record: dict) -> tuple:
+    """The PROVIDER a record describes, for de-duplicating equal claims twice.
+
+    Two stores holding the same provider (the WebUI's ``custom_providers[]`` row
+    and the Agent's ``providers:`` record) are one owner described twice, not two
+    authorities competing for an id. Name plus connection fields is what makes a
+    provider the SAME provider: differing endpoints or credentials never collapse,
+    because those really are two providers an old id cannot safely choose between.
+    """
+    if not isinstance(record, dict):
+        return ("", "", "", "", "")
+    return (
+        str(record.get("name") or record.get("provider_key") or "").strip().lower(),
+        _normalize_base_url_for_compare(_custom_record_base_url(record) or ""),
+        str(record.get("api_key") or "").strip(),
+        str(record.get("key_env") or "").strip(),
+        str(record.get("key_cmd") or "").strip(),
+    )
+
+
+def _custom_legacy_owner_disabled(providers_cfg: object, pid: str, slug: str) -> bool:
+    """True when a switched-off record names this identity only through the legacy fold.
+
+    Read-only and non-raising on purpose: it answers "did the user take THIS
+    identity offline?" without adopting a record, so callers that only need the
+    verdict (selection, the env/credential probe, model resolution) never inherit
+    an endpoint or a key from the scan. Canonical ownership is decided by the
+    caller first; this is consulted only when nothing canonical claims the slug.
+    """
+    if not isinstance(providers_cfg, dict) or not slug:
+        return False
+    for key, candidate in providers_cfg.items():
+        if not _is_native_custom_provider_key(key):
+            continue
+        if not isinstance(candidate, dict) or not candidate:
+            continue
+        if _raw_provider_record_enabled(candidate):
+            continue
+        if _custom_record_names_identity(candidate.get("name") or key, key, pid, slug):
+            return True
+        if _custom_record_names_legacy_identity(candidate.get("name") or key, key, pid, slug):
+            return True
+    return False
+
+
 def _custom_provider_identity_disabled(provider_id: str, cfg_data: dict) -> bool:
     """Whether an owned native identity forbids even a persisted-pool probe.
+
+    The verdict follows the SAME ownership rule as the connection selection
+    (#9209 round 3): a canonical ``custom_providers[]`` row or a canonical
+    ``providers:`` record decides first, and only when nothing canonical claims
+    the slug does a record naming it through the legacy fold get a say. A
+    switched-off legacy claim is terminal too -- a saved old id must not read as
+    enabled merely because the record that switched it off is spelled with the
+    Agent's non-ASCII identity.
 
     A legacy winner retains its established precedence. Missing configuration
     is not disabled: explicitly persisted pool-only browsing remains valid.
@@ -4914,8 +5021,15 @@ def _custom_provider_identity_disabled(provider_id: str, cfg_data: dict) -> bool
     slug = _custom_provider_slug_key(pid)
     if not slug or _unique_custom_provider_entry(cfg_data.get("custom_providers"), slug, allow_legacy=False) is not None:
         return False
-    _record, disabled = _native_custom_provider_record(cfg_data.get("providers"), pid, slug, allow_legacy=False)
-    return disabled
+    providers_cfg = cfg_data.get("providers")
+    _record, disabled = _native_custom_provider_record(providers_cfg, pid, slug, allow_legacy=False)
+    if disabled:
+        return True
+    if _record is not None:
+        # A canonical, enabled record owns the identity: its verdict stands even
+        # when some other row folds onto the same old id.
+        return False
+    return _custom_legacy_owner_disabled(providers_cfg, pid, slug)
 
 
 def _select_custom_provider_record(
@@ -5011,6 +5125,12 @@ def _select_custom_provider_record(
         return None, "", False, CUSTOM_SELECTION_MISSING
     if native_record is not None and _raw_provider_record_enabled(native_record) and _custom_record_owns_connection(native_record, pid):
         return native_record, "providers", False, CUSTOM_SELECTION_KEYED
+    if native_record is None and _custom_legacy_owner_disabled(providers_cfg, pid, slug):
+        # A record that names this identity through the legacy fold and was
+        # switched off is just as terminal (#9209 round 3). Without this rung the
+        # fold-free disabled record is invisible here and pass 2 / the catch-alls
+        # below hand the route back out -- a switched-off provider served again.
+        return None, "", False, CUSTOM_SELECTION_MISSING
 
     # 4. Generic providers['custom'] record (if it claims the slug canonically)
     provider_custom = providers_cfg.get("custom", {}) if isinstance(providers_cfg, dict) else {}
@@ -5066,6 +5186,22 @@ def _select_custom_provider_record(
         name_val = record.get("name") or key
         if _custom_record_names_legacy_identity(name_val, key, pid, slug):
             legacy_claims.append((normalized, "providers", False))
+
+    # ONE provider can legitimately be described by both stores -- the WebUI
+    # writes ``custom_providers[]`` while the Agent's own config shape lives
+    # under ``providers:`` -- and both descriptions fold to the same old id.
+    # That is one owner described twice, not two providers competing: counting
+    # it twice refused a route master resolves. Identical claims collapse to the
+    # FIRST one, in the order the canonical pass reads the stores.
+    distinct_legacy_claims: list[tuple[dict, str, bool]] = []
+    seen_claims: set[tuple] = set()
+    for claim in legacy_claims:
+        signature = _custom_record_claim_signature(claim[0])
+        if signature in seen_claims:
+            continue
+        seen_claims.add(signature)
+        distinct_legacy_claims.append(claim)
+    legacy_claims = distinct_legacy_claims
 
     if len(legacy_claims) >= 2:
         names = [
