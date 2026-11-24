@@ -12347,9 +12347,9 @@ function showToast(msg,ms,type){
 // ── Shared app dialogs ───────────────────────────────────────────────────────
 // showConfirmDialog(opts) and showPromptDialog(opts) replace browser-native dialog calls
 // throughout the UI. Both return Promises and support: title, message, confirmLabel,
-// cancelLabel, danger (confirm only), placeholder/value/inputType (prompt only).
+// cancelLabel, dismissIsNull (confirm only: closing with ×, Escape or the backdrop resolves null, the cancel button false), danger (confirm only), placeholder/value/inputType (prompt only).
 
-const APP_DIALOG={resolve:null,kind:null,lastFocus:null};
+const APP_DIALOG={resolve:null,kind:null,lastFocus:null,dismissNull:false};
 let _appDialogBound=false;
 
 function _isAppDialogOpen(){
@@ -12372,12 +12372,19 @@ function _finishAppDialog(result, restoreFocus=true){
   APP_DIALOG.resolve=null;
   APP_DIALOG.kind=null;
   APP_DIALOG.lastFocus=null;
+  APP_DIALOG.dismissNull=false;
   if(overlay){overlay.style.display='none';overlay.setAttribute('aria-hidden','true');}
   if(dialog) dialog.setAttribute('role','dialog');
   if(input){input.value='';input.style.display='none';input.placeholder='';}
   if(confirmBtn){confirmBtn.classList.remove('danger');confirmBtn.textContent=t('dialog_confirm_btn');}
   if(restoreFocus&&lastFocus&&typeof lastFocus.focus==='function'){setTimeout(()=>lastFocus.focus(),0);}
   if(resolve) resolve(result);
+}
+
+// What closing the dialog without choosing a button resolves: null for a prompt, and for a confirm that
+// asked for it (opts.dismissIsNull), so a caller can tell a dismissal from the cancel button.
+function _appDialogDismissResult(){
+  return (APP_DIALOG.kind==='prompt'||APP_DIALOG.dismissNull)?null:false;
 }
 
 function _ensureAppDialogBindings(){
@@ -12389,11 +12396,11 @@ function _ensureAppDialogBindings(){
   const closeBtn=$('appDialogClose');
   if(overlay){
     overlay.addEventListener('click',e=>{
-      if(e.target===overlay) _finishAppDialog(APP_DIALOG.kind==='prompt'?null:false);
+      if(e.target===overlay) _finishAppDialog(_appDialogDismissResult());
     });
   }
   if(cancelBtn) cancelBtn.addEventListener('click',()=>_finishAppDialog(APP_DIALOG.kind==='prompt'?null:false));
-  if(closeBtn)  closeBtn.addEventListener('click',()=>_finishAppDialog(APP_DIALOG.kind==='prompt'?null:false));
+  if(closeBtn)  closeBtn.addEventListener('click',()=>_finishAppDialog(_appDialogDismissResult()));
   if(confirmBtn){
     confirmBtn.addEventListener('click',()=>{
       if(APP_DIALOG.kind==='prompt'){
@@ -12408,7 +12415,7 @@ function _ensureAppDialogBindings(){
     if(!_isAppDialogOpen()) return;
     if(e.key==='Escape'){
       e.preventDefault();
-      _finishAppDialog(APP_DIALOG.kind==='prompt'?null:false);
+      _finishAppDialog(_appDialogDismissResult());
       return;
     }
     if(e.key==='Enter'){
@@ -12417,7 +12424,9 @@ function _ensureAppDialogBindings(){
       const isTextarea=target&&target.tagName==='TEXTAREA';
       if(!isTextarea){
         e.preventDefault();
-        if(target===cancelBtn||target===closeBtn){
+        if(target===closeBtn){
+          _finishAppDialog(_appDialogDismissResult());
+        }else if(target===cancelBtn){
           _finishAppDialog(APP_DIALOG.kind==='prompt'?null:false);
         }else if(APP_DIALOG.kind==='prompt'){
           const input=$('appDialogInput');
@@ -12443,10 +12452,10 @@ function _ensureAppDialogBindings(){
 
 function showConfirmDialog(opts={}){
   _ensureAppDialogBindings();
-  if(APP_DIALOG.resolve) _finishAppDialog(false,false);
+  if(APP_DIALOG.resolve) _finishAppDialog(APP_DIALOG.dismissNull?null:false,false);
   const overlay=$('appDialogOverlay'),dialog=$('appDialog'),title=$('appDialogTitle'),
     desc=$('appDialogDesc'),input=$('appDialogInput'),cancelBtn=$('appDialogCancel'),confirmBtn=$('appDialogConfirm');
-  APP_DIALOG.resolve=null;APP_DIALOG.kind='confirm';APP_DIALOG.lastFocus=document.activeElement;
+  APP_DIALOG.resolve=null;APP_DIALOG.kind='confirm';APP_DIALOG.lastFocus=document.activeElement;APP_DIALOG.dismissNull=!!opts.dismissIsNull;
   if(title) title.textContent=opts.title||t('dialog_confirm_title');
   if(desc) desc.textContent=opts.message||'';
   if(input){input.style.display='none';input.value='';}
@@ -27675,16 +27684,35 @@ function _renderTreeItems(container, entries, depth){
   }
 }
 
+// A workspace write finished after its conversation left the screen. When the
+// conversation now on screen shows the same workspace (same profile) and no switch is
+// pending, refresh its tree so the change is visible; everything tied to the
+// conversation that issued the write (toast, preview, opening the file, follow-up
+// prompts) stays suppressed. A pending switch reloads the tree when it lands.
+async function _refreshTreeAfterOffscreenWrite(session){
+  const visible=S.session;
+  if(!visible||!session||_loadingSessionId) return;
+  if(!visible.workspace||visible.workspace!==session.workspace) return;
+  if((visible.profile||'default')!==(session.profile||'default')) return;
+  try{ await loadDir(S.currentDir||'.',{preservePreview:true,refreshExpanded:true}); }catch(_){}
+}
+
 async function deleteWorkspaceDir(relPath, name){
-  if(!S.session)return;
+  const session=S.session;
+  if(!session)return;
   if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(relPath)){
     showToast(t('external_link_read_only'), 2000);
     return;
   }
   const ok=await showConfirmDialog({title:t('delete_dir_confirm',name),message:'',confirmLabel:'Delete',danger:true,focusCancel:true});
-  if(!ok)return;
+  if(!ok||_sessionLeftScreen(session))return;
   try{
-    await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath,recursive:true})});
+    await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:relPath,recursive:true})});
+    // Another conversation opened while the delete was in flight: the change is in
+    // the captured workspace only. The tree and its cache below belong to the pane
+    // now on screen (S._dirCache is keyed by relative path, not by workspace), and
+    // reopening the captured conversation reloads its tree from the server.
+    if(_sessionLeftScreen(session)){await _refreshTreeAfterOffscreenWrite(session);return;}
     showToast(t('deleted')+name);
     // Remove from expanded dirs cache
     if(S._expandedDirs){S._expandedDirs.delete(relPath);if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();}
@@ -27835,7 +27863,8 @@ function _showFileContextMenu(e, item){
 }
 
 async function _inlineRenameFileItem(item){
-  if(!S.session)return;
+  const session=S.session;
+  if(!session)return;
   if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(item.path)){
     showToast(t('external_link_read_only'), 2000);
     return;
@@ -27853,9 +27882,11 @@ async function _inlineRenameFileItem(item){
     selectStem:!isDirLike,
     selectAll:isDirLike
   });
-  if(!newName||newName===item.name)return;
+  if(!newName||newName===item.name||_sessionLeftScreen(session))return;
   try{
-    await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path,new_name:newName})});
+    await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:item.path,new_name:newName})});
+    // Same as deleteWorkspaceDir: never rename a row in the pane now on screen.
+    if(_sessionLeftScreen(session)){await _refreshTreeAfterOffscreenWrite(session);return;}
     showToast(t('renamed_to')+newName);
     _treeRowRenamed(item.path,newName);
     // Update expanded dirs cache key if renaming a directory
@@ -27873,15 +27904,18 @@ async function _inlineRenameFileItem(item){
 }
 
 async function deleteWorkspaceFile(relPath, name){
-  if(!S.session)return;
+  const session=S.session;
+  if(!session)return;
   if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(relPath)){
     showToast(t('external_link_read_only'), 2000);
     return;
   }
   const _delFile=await showConfirmDialog({title:t('delete_confirm',name),message:'',confirmLabel:'Delete',danger:true,focusCancel:true});
-  if(!_delFile) return;
+  if(!_delFile||_sessionLeftScreen(session)) return;
   try{
-    await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath})});
+    await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:relPath})});
+    // Same as deleteWorkspaceDir: never close a preview in the pane now on screen.
+    if(_sessionLeftScreen(session)){await _refreshTreeAfterOffscreenWrite(session);return;}
     showToast(t('deleted')+name);
     // Close preview if we just deleted the viewed file
     if($('previewPathText').textContent===relPath)$('btnClearPreview').onclick();
@@ -27900,7 +27934,8 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
       if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
-  if(!S.session)return;
+  const session=S.session;
+  if(!session)return;
   if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(targetDir)){
     showToast(t('external_link_read_only'), 2000);
     return;
@@ -27911,10 +27946,12 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
     placeholder:'filename.txt',
     confirmLabel:t('create')
   });
-  if(!name||!name.trim()) return;
+  if(!name||!name.trim()||_sessionLeftScreen(session)) return;
   const relPath=_workspaceJoinTargetPath(targetDir,name);
   try{
-    await api('/api/file/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath,content:''})});
+    await api('/api/file/create',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:relPath,content:''})});
+    // Same as deleteWorkspaceDir: never open the new file in the pane now on screen.
+    if(_sessionLeftScreen(session)){await _refreshTreeAfterOffscreenWrite(session);return;}
     showToast(t('created')+name.trim());
     delete S._dirCache[targetDir || '.'];
     await loadDir(S.currentDir);
@@ -27933,7 +27970,8 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
-  if(!S.session)return;
+  const session=S.session;
+  if(!session)return;
   if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(targetDir)){
     showToast(t('external_link_read_only'), 2000);
     return;
@@ -27944,14 +27982,17 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
     placeholder:'folder-name',
     confirmLabel:t('create')
   });
-  if(!name||!name.trim()) return;
+  if(!name||!name.trim()||_sessionLeftScreen(session)) return;
   const relPath=_workspaceJoinTargetPath(targetDir,name);
   try{
-    await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath})});
+    await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:relPath})});
+    // Same as deleteWorkspaceDir: no reload and no "add as space" prompt over the
+    // conversation now on screen.
+    if(_sessionLeftScreen(session)){await _refreshTreeAfterOffscreenWrite(session);return;}
     showToast(t('folder_created')+name.trim());
     delete S._dirCache[targetDir || '.'];
     await loadDir(S.currentDir);
-    const absPath=S.session.workspace?(targetDir==='.'?`${S.session.workspace}/${name.trim()}`:`${S.session.workspace}/${targetDir}/${name.trim()}`):null;
+    const absPath=session.workspace?(targetDir==='.'?`${session.workspace}/${name.trim()}`:`${session.workspace}/${targetDir}/${name.trim()}`):null;
     if(absPath){
       const addAsSpace=await showConfirmDialog({
         title:t('folder_add_as_space_title'),

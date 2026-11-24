@@ -1575,13 +1575,19 @@ def _skill_category_from_path(
 
 
 def _active_skill_search_dirs(skills_dir: Path) -> list[Path]:
+    """The request profile's local skills root plus its ``skills.external_dirs``.
+
+    The Agent's ``get_external_skills_dirs()`` reads the process profile's config,
+    so external roots are resolved from the files of the profile that owns
+    *skills_dir* (#7842).
+    """
+    from api.skill_runtime import profile_external_skill_dirs
+
     dirs = [skills_dir]
     try:
-        from agent.skill_utils import get_external_skills_dirs
-
-        dirs.extend(Path(p) for p in get_external_skills_dirs())
+        dirs.extend(profile_external_skill_dirs(Path(skills_dir).parent))
     except Exception:
-        pass
+        logger.debug("External skill-directory lookup failed", exc_info=True)
     return [p for p in dirs if p.exists()]
 
 
@@ -9658,10 +9664,33 @@ def _context_lookup_record_urls(record: object) -> tuple:
     )
 
 
+def _context_lookup_record_declares_endpoint(record: object) -> bool:
+    """Whether a ``providers.<key>`` record declares its own endpoint, in any spelling the
+    Agent's ``_entry_url`` reads (``api``, ``url``, ``base_url``; its v12 migration writes
+    ``api``). Any value counts, as the Agent tests these fields for truthiness."""
+    return isinstance(record, dict) and any(record.get(field) for field in api_config._RAW_PROVIDER_URL_FIELDS)
+
+
+def _context_lookup_record_owner(provider_key: object, record: object, provider: str) -> str:
+    """The provider whose fixed metadata hosts a ``providers.<key>`` record's key owns, or "".
+
+    Only a record that is ``provider``'s own: not a ``custom:`` record, and one that declares
+    no endpoint of its own. The Agent routes a provider id through an enabled record that
+    declares one, so that record's key is a credential for its own endpoint and owns only
+    the URLs it declares.
+    """
+    if str(provider_key or "").strip().lower().startswith("custom:"):
+        return ""
+    if _context_lookup_record_declares_endpoint(record):
+        return ""
+    return provider
+
+
 def _context_lookup_owned_origins(*urls: object, own_provider: str = "") -> frozenset:
     """Origins a key may go to: its own source's URLs, plus the fixed hosts of the
-    provider it belongs to (``own_provider``: a built-in record, the model block
-    configured for that provider, or a caller that passed no URL)."""
+    provider it belongs to (``own_provider``: a built-in record that declares no
+    endpoint of its own, the model block configured for that provider, or a caller
+    that passed no URL)."""
     owned = set()
     for url in urls:
         origin = _context_lookup_origin(url)
@@ -9917,6 +9946,22 @@ def _context_lookup_provider_disabled(provider: str, providers_cfg: dict, reques
     return isinstance(exact, dict) and not api_config._raw_provider_record_enabled(exact)
 
 
+def _context_lookup_keyed_provider_record(providers_cfg: object, provider: str) -> tuple | None:
+    """``(config key, record, key)`` of the record the config selection takes its key from:
+    the first enabled ``providers`` record matching ``provider`` that declares a key."""
+    if not isinstance(providers_cfg, dict):
+        return None
+    for provider_key, provider_cfg in providers_cfg.items():
+        if not isinstance(provider_cfg, dict) or not _providers_match_for_context(provider_key, provider):
+            continue
+        if not api_config._raw_provider_record_enabled(provider_cfg):
+            continue
+        api_key = _context_lookup_record_key(provider_cfg)
+        if api_key:
+            return provider_key, provider_cfg, api_key
+    return None
+
+
 def _context_length_config_api_key_and_owner(
     provider: str | None,
     cfg: dict | None,
@@ -9927,7 +9972,9 @@ def _context_length_config_api_key_and_owner(
 
     The key's own origins are its source's base URL, plus the provider's fixed
     metadata hosts when the source is that provider's own: a built-in
-    ``providers.<id>`` record, or the model block configured for that provider (#8822).
+    ``providers.<id>`` record that declares no endpoint of its own
+    (:func:`_context_lookup_record_owner`), or the model block configured for that
+    provider (#8822).
 
     When the session's provider is switched off (``enabled: false`` on its
     authoritative record, :func:`_context_lookup_provider_disabled`), the selection
@@ -9953,23 +10000,15 @@ def _context_length_config_api_key_and_owner(
 
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        matching = [
-            (provider_key, provider_cfg)
-            for provider_key, provider_cfg in providers_cfg.items()
-            if isinstance(provider_cfg, dict) and _providers_match_for_context(provider_key, provider)
-        ]
         if _context_lookup_provider_disabled(provider, providers_cfg, requested):
             return "", frozenset()
-        for provider_key, provider_cfg in matching:
-            if not api_config._raw_provider_record_enabled(provider_cfg):
-                continue
-            api_key = _context_lookup_record_key(provider_cfg)
-            if api_key:
-                builtin = not str(provider_key or "").strip().lower().startswith("custom:")
-                return api_key, _context_lookup_owned_origins(
-                    *_context_lookup_record_urls(provider_cfg),
-                    own_provider=provider if builtin else "",
-                )
+        keyed = _context_lookup_keyed_provider_record(providers_cfg, provider)
+        if keyed:
+            provider_key, provider_cfg, api_key = keyed
+            return api_key, _context_lookup_owned_origins(
+                *_context_lookup_record_urls(provider_cfg),
+                own_provider=_context_lookup_record_owner(provider_key, provider_cfg, provider),
+            )
 
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
@@ -10004,10 +10043,10 @@ def _context_lookup_same_value_origins(api_key: object, cfg: dict | None) -> fro
     source already sends this exact credential there, so the lookup exposes
     nothing new. A holder is a source that declares the key itself (``api_key``
     or ``key_env``): a ``providers.<id>`` record, a ``custom_providers`` entry, or
-    the model block. Each grants the URLs it declares; a built-in record, or the
-    model block configured for a built-in provider, also grants that provider's
-    own fixed hosts, never another provider's. Blanks, unresolved references and
-    token sources grant nothing.
+    the model block. Each grants the URLs it declares; a built-in record that
+    declares no endpoint of its own, or the model block configured for a built-in
+    provider, also grants that provider's own fixed hosts, never another provider's.
+    Blanks, unresolved references and token sources grant nothing.
 
     A record the user switched off (``enabled: false``) is no holder (#8938): the
     Agent refuses a session on it, so it sends its key nowhere. A legacy
@@ -10029,10 +10068,11 @@ def _context_lookup_same_value_origins(api_key: object, cfg: dict | None) -> fro
                 continue
             if _context_lookup_record_key(provider_cfg) != value:
                 continue
-            builtin = not str(provider_key or "").strip().lower().startswith("custom:")
             owned |= _context_lookup_owned_origins(
                 *_context_lookup_record_urls(provider_cfg),
-                own_provider=_canonical_context_provider(provider_key) if builtin else "",
+                own_provider=_context_lookup_record_owner(
+                    provider_key, provider_cfg, _canonical_context_provider(provider_key)
+                ),
             )
     custom_providers = cfg.get("custom_providers")
     if isinstance(custom_providers, list):
@@ -10171,18 +10211,26 @@ def _context_length_lookup_inputs_for_model(
     provider_context_length = None
     providers_cfg = (cfg.get("providers") or {}) if isinstance(cfg, dict) else {}
     if isinstance(providers_cfg, dict):
-        for provider_key, provider_cfg in providers_cfg.items():
-            if not isinstance(provider_cfg, dict):
-                continue
-            if not _providers_match_for_context(provider_key, effective_provider):
-                continue
+        matching = [
+            provider_cfg
+            for provider_key, provider_cfg in providers_cfg.items()
+            if isinstance(provider_cfg, dict) and _providers_match_for_context(provider_key, effective_provider)
+        ]
+        if matching:
             if not effective_base_url:
-                effective_base_url = str(provider_cfg.get("base_url") or "").strip()
+                effective_base_url = str(matching[0].get("base_url") or "").strip()
             provider_context_length = _models_config_context_length(
-                provider_cfg.get("models"),
+                matching[0].get("models"),
                 bare_model or model_for_lookup,
             )
-            break
+        # A caller key that came with no URL owns its provider's fixed hosts only while
+        # no enabled record named like that provider declares its own endpoint: the
+        # Agent routes the id through such a record, so the key may be that record's.
+        if any(
+            api_config._raw_provider_record_enabled(record) and _context_lookup_record_declares_endpoint(record)
+            for record in matching
+        ):
+            caller_provider = ""
 
     custom_context_length = None
     # #8822: a key that isn't a string (a ``key_cmd`` token source the Agent mints
@@ -10192,7 +10240,8 @@ def _context_length_lookup_inputs_for_model(
         api_key if (api_key and not isinstance(api_key, str)) else str(api_key or "").strip()
     )
     # A caller's key owns the URL it came with. It owns its provider's fixed hosts
-    # only when it came with no URL: a pair with a URL can carry another source's
+    # only when it came with no URL (and no record named like the provider declares
+    # its own endpoint, above): a pair with a URL can carry another source's
     # key under the provider's label (a model alias's own endpoint, or the Agent's
     # pair after a fallback switched its endpoint and key), so the label alone
     # doesn't make the key that provider's credential.
@@ -10257,6 +10306,13 @@ def _context_length_lookup_inputs_for_model(
         effective_api_key, effective_api_key_owned = _context_length_config_api_key_and_owner(
             effective_provider, cfg, requested_provider=requested_provider
         )
+        if effective_api_key and not effective_base_url:
+            # Ask a record's key at its own endpoint: the URL of the record the key was
+            # selected from, in every spelling (the Agent's precedence), not the first
+            # record matching the provider (an alias-keyed block can come first).
+            keyed = _context_lookup_keyed_provider_record(providers_cfg, effective_provider)
+            if keyed and keyed[2] == effective_api_key:
+                effective_base_url = next(iter(_context_lookup_record_urls(keyed[1])), "")
 
     # #8822: a key goes only where its own source sends it. The Agent contacts the
     # base URL's host plus the provider's fixed metadata hosts; if any of those is
@@ -10286,13 +10342,22 @@ def _context_length_lookup_inputs_for_model(
         else str(fallback_api_key or "").strip()
     )
     if not effective_api_key and fallback_key:
-        fallback_owned = _context_lookup_owned_origins(
-            fallback_base_url,
-            own_provider=(
-                "" if str(fallback_base_url or "").strip()
-                else _canonical_context_provider(fallback_provider)
-            ),
+        fallback_own_provider = (
+            "" if str(fallback_base_url or "").strip()
+            else _canonical_context_provider(fallback_provider)
         )
+        # The caller-key rule above, for the fallback's own provider: with no URL the key owns
+        # that provider's fixed hosts only while no enabled record named like it declares its
+        # own endpoint (the Agent then routes the id through that record).
+        if fallback_own_provider and isinstance(providers_cfg, dict) and any(
+            isinstance(record, dict)
+            and _providers_match_for_context(record_key, fallback_own_provider)
+            and api_config._raw_provider_record_enabled(record)
+            and _context_lookup_record_declares_endpoint(record)
+            for record_key, record in providers_cfg.items()
+        ):
+            fallback_own_provider = ""
+        fallback_owned = _context_lookup_owned_origins(fallback_base_url, own_provider=fallback_own_provider)
         if _context_lookup_contacted_origins(effective_provider, effective_base_url) <= fallback_owned:
             effective_api_key = fallback_key
 
