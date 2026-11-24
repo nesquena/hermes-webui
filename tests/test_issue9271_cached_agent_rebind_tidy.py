@@ -15,6 +15,7 @@ Four points from the issue:
 
 import logging
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -51,6 +52,18 @@ class FailingHook:
         raise RuntimeError("controlled hook failure")
 
 
+class RaisingHook:
+    """Hook that raises a caller-chosen exception on every call."""
+
+    def __init__(self, exc):
+        self.exc = exc
+        self.calls = 0
+
+    def bind_session_state(self, session_db, session_id):
+        self.calls += 1
+        raise self.exc
+
+
 def _agent(existing, hook):
     return SimpleNamespace(
         _session_db=existing,
@@ -78,6 +91,23 @@ def _bind_warning_records(caplog):
     ]
 
 
+def _slow_flag_set(monkeypatch, delay=0.05):
+    """Widen the read-then-write gap of a one-shot flag claim.
+
+    ``_claim_agent_flag`` reads the flag and then writes it. Without the claim
+    lock every thread passes the read before any write lands, so the race is
+    only observable when that gap is wide enough to overlap.
+    """
+    original_set = streaming._set_agent_flag
+
+    def slow_set(target, name, value):
+        time.sleep(delay)
+        original_set(target, name, value)
+
+    monkeypatch.setattr(streaming, "_set_agent_flag", slow_set)
+    return original_set
+
+
 def test_three_failing_turns_log_one_warning_and_one_traceback(caplog):
     caplog.set_level(logging.DEBUG, logger=streaming.logger.name)
     hook = FailingHook()
@@ -101,7 +131,32 @@ def test_three_failing_turns_log_one_warning_and_one_traceback(caplog):
     assert sum(1 for record in debug_records if record.exc_info) == 1
 
 
-def test_flag_claim_has_a_single_winner_under_simulated_concurrency():
+def test_a_later_failure_of_a_different_exception_keeps_its_detail(caplog):
+    caplog.set_level(logging.DEBUG, logger=streaming.logger.name)
+    handle = Handle()
+    agent = _agent(handle, RaisingHook(RuntimeError("first boom")))
+
+    assert streaming._rebind_context_engine_session(agent, handle) is False
+    agent.context_compressor = RaisingHook(ValueError("second boom"))
+    assert streaming._rebind_context_engine_session(agent, handle) is False
+
+    warnings = _bind_warning_records(caplog)
+    assert len(warnings) == 1
+    assert "RuntimeError" in warnings[0].getMessage()
+
+    debug_records = _bind_debug_records(caplog)
+    assert len(debug_records) == 2
+    later = debug_records[1]
+    # The retry still must not repeat the traceback, but a *different* failure
+    # has to stay diagnosable: the DEBUG record carries its own type and text.
+    assert not later.exc_info
+    detail = later.getMessage()
+    assert "ValueError" in detail
+    assert "second boom" in detail
+
+
+def test_flag_claim_has_a_single_winner_under_simulated_concurrency(monkeypatch):
+    _slow_flag_set(monkeypatch)
     agent = SimpleNamespace()
     barrier = threading.Barrier(8)
     winners = []
@@ -122,11 +177,12 @@ def test_flag_claim_has_a_single_winner_under_simulated_concurrency():
         thread.join(timeout=10)
 
     assert errors == []
-    assert getattr(agent, "_one_shot_flag") is True
+    assert agent._one_shot_flag is True
     assert len(winners) == 1
 
 
-def test_concurrent_failing_rebinds_log_one_warning(caplog):
+def test_concurrent_failing_rebinds_log_one_warning(caplog, monkeypatch):
+    _slow_flag_set(monkeypatch)
     caplog.set_level(logging.DEBUG, logger=streaming.logger.name)
     gate = threading.Barrier(2)
 

@@ -13839,7 +13839,10 @@ def _rebind_context_engine_session(agent, session_db):
                     type(exc).__name__,
                 )
             logger.debug(
-                "context engine bind_session_state during cached adoption failed",
+                "context engine bind_session_state during cached adoption "
+                "failed (%s: %s)",
+                type(exc).__name__,
+                exc,
                 exc_info=first_failure,
             )
             _set_agent_flag(agent, _BIND_FAILED_ATTR, True)
