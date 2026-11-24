@@ -3308,6 +3308,16 @@
   .composer-footer.cf-burger .composer-mobile-config-action{flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
   .composer-footer.cf-burger .composer-mobile-context-action{flex:1 0 100%;}
   .composer-footer.cf-burger .ctx-indicator-wrap{display:none!important;}
+  /* #9101: a ⚡-only YOLO pill: the hide setting while YOLO is on (it can't be
+     hidden then), and every pill at the narrowest stage. Its hit area grows to
+     44px tall with an inset pseudo-element; a wider box would cost the
+     mobile-config button its room. */
+  .yolo-pill.yolo-pill-compact .yolo-pill-label,
+  .composer-footer.cf-burger .yolo-pill-label{display:none;}
+  .yolo-pill.yolo-pill-compact,
+  .composer-footer.cf-burger .yolo-pill{position:relative;}
+  .yolo-pill.yolo-pill-compact::after,
+  .composer-footer.cf-burger .yolo-pill::after{content:'';position:absolute;left:0;right:0;top:50%;height:44px;transform:translateY(-50%);}
 
   /* Show session-toolsets chip ONLY when the composer-footer container is wide
      enough to comfortably accommodate it (workspace+model+reasoning+profile+
@@ -7524,6 +7534,11 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-task-preview-body{font-size:12px;color:var(--muted);line-height:1.45;margin-bottom:6px;}
 .kanban-status-actions{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px;}
 .kanban-status-actions .btn{font-size:11px;padding:4px 8px;}
+/* UX44-F1 touch target: the shared detail status buttons (incl. the Review
+   handoff button) measured 33px tall on phone/tablet, below the 44px touch
+   minimum. Scoped to pointer:coarse per the repo's existing touch precedents
+   so desktop (fine pointer) rendering is unchanged. */
+@media (pointer:coarse){.kanban-status-actions .btn{min-height:44px;}}
 /* Generic styled buttons used throughout the Kanban panel. The Kanban PR
    stack standardised on `.btn` / `.btn.secondary` class names but never
    shipped the matching CSS, so without these rules buttons fall back to
