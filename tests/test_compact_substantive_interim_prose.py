@@ -507,7 +507,10 @@ def test_content_part_rows_mark_inline_visibility():
     first = src.index(anchor)
     assert "row._inline_prose_visible=false" in src[first:first + 500]
     second = src.index(anchor, first + 1)
-    assert "if(part.type!=='text') row._inline_prose_visible=false" in src[second:second + 500]
+    # The content-part branch carries a short explanatory comment before the
+    # marker, so allow the window to reach past it.
+    assert ("row._inline_prose_visible=part.type==='text'"
+            "&&_anchorSceneMessageShowsTextInline(message,text)") in src[second:second + 1500]
 
 
 def _js_function_body(source: str, name: str) -> str:
