@@ -132,6 +132,11 @@ The WebUI's `auto_title_refresh_every` setting remains a separate control for
 periodic refreshes of already-generated titles; it does not re-enable
 automatic generation when the auxiliary flag is off.
 
+In the built-in WebUI chat backend, a model title saved by Hermes Agent can
+also replace a provisional title. It appears in the session list when the
+Agent finishes naming the session, even if the reply has already finished.
+Manual titles and existing model-generated WebUI titles keep precedence.
+
 ### Pinning the title language
 
 `auxiliary.title_generation.language` pins the language generated titles are

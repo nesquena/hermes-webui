@@ -24,6 +24,7 @@ import unicodedata
 import copy
 import inspect
 from collections.abc import Mapping
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Optional
 
@@ -7434,7 +7435,54 @@ def _human_title_failure_reason(status) -> str:
 _TITLE_RECOVERY_MAX_EXCHANGES = 3
 
 
-def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None, stream_owner_id: str = None):
+def _agent_title_callback(session_id, profile, settled, title_state):
+    """Mirror an Agent model title after its WebUI turn has settled."""
+    def on_title(title, source):
+        if source != 'llm' or not isinstance(title, str):
+            return
+        title = title.strip()
+        if not title or _looks_invalid_generated_title(title):
+            return
+
+        def apply_after_settle(turn):
+            if turn.cancelled():
+                return
+            try:
+                session = get_session(session_id)
+            except KeyError:
+                return
+            with _get_session_agent_lock(session_id):
+                with LOCK:
+                    session = SESSIONS.get(session_id, session)
+                if (
+                    session.session_id != session_id
+                    or (session.profile or 'default') != profile
+                    or not session.path.is_file()
+                    or session_has_manual_title(session)
+                    or not session.messages
+                    or session.pre_compression_snapshot
+                    or session.title == title
+                ):
+                    return
+                if (
+                    not _background_title_generation_eligible(session)
+                    and session.title != title_state['fallback_title']
+                ):
+                    return
+                session.title = title
+                mark_session_title_generated(session)
+                session.save(touch_updated_at=False)
+
+            # The Agent can finish after the per-turn stream has closed.
+            from api.session_events import publish_session_list_changed
+            publish_session_list_changed('agent_title', profile=profile, session_id=session_id)
+
+        settled.add_done_callback(apply_after_settle)
+
+    return on_title
+
+
+def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None, stream_owner_id: str = None, *, agent_title_state=None):
     """Generate and publish a better title after `done`, then end the stream.
 
     ``session_id`` is the title target (the canonical/continuation session the
@@ -7566,6 +7614,8 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                     s.save(touch_updated_at=False)
                     effective_title = s.title
                     wrote_title = True
+                    if source == 'fallback' and agent_title_state is not None:
+                        agent_title_state['fallback_title'] = effective_title
 
         if wrote_title:
             if source == 'fallback':
@@ -14545,6 +14595,8 @@ def _run_agent_streaming(
     """
     _turn_route_model = model
     _turn_route_provider = model_provider
+    agent_title_settled = Future()
+    agent_title_state = {'fallback_title': None}
     cancel_event = threading.Event()
     q = peek_stream(stream_id)
     if q is not None:
@@ -17029,7 +17081,17 @@ def _run_agent_streaming(
             _run_conversation_projected_history = _agent_replay_settle_projection(
                 _run_conversation_kwargs.get("conversation_history") or []
             )
-            result = agent.run_conversation(**_run_conversation_kwargs)
+            if not ephemeral and getattr(agent, 'session_id', None) == session_id:
+                prior_title_callback = getattr(agent, '_on_session_title', None)
+                agent._on_session_title = _agent_title_callback(
+                    session_id, s.profile or 'default', agent_title_settled, agent_title_state,
+                )
+                try:
+                    result = agent.run_conversation(**_run_conversation_kwargs)
+                finally:
+                    agent._on_session_title = prior_title_callback
+            else:
+                result = agent.run_conversation(**_run_conversation_kwargs)
             _remember_pending_steer_result(result)
             # #7237 review round-N+1 residual (nesquena-hermes, 2026-09-28):
             # wholesale-replacement authority for the settle must come from the
@@ -18817,11 +18879,13 @@ def _run_agent_streaming(
                 # misbehaving log handler here would otherwise skip the
                 # background-title thread spawn below. (#4923 gate hardening)
                 pass
+            if not ephemeral and s.session_id == session_id:
+                agent_title_settled.set_result(None)
             if _bg_title_inputs:
                 threading.Thread(
                     target=_run_background_title_update,
                     args=(s.session_id, *_bg_title_inputs, str(s.title or '').strip(), put, agent),
-                    kwargs={'stream_owner_id': session_id},
+                    kwargs={'stream_owner_id': session_id, 'agent_title_state': agent_title_state},
                     daemon=True,
                 ).start()
             else:
@@ -18834,6 +18898,7 @@ def _run_agent_streaming(
                 # so it doesn't block the stream.
                 _maybe_schedule_title_refresh(s, put, agent)
         finally:
+            agent_title_settled.cancel()
             # #4729: guaranteed-exit flush of any reasoning tail still buffered. On the
             # normal path the on_token/on_tool/post-run flushes already emptied it (no-op
             # here); on an exception or retry path that bypassed those, this emits the tail

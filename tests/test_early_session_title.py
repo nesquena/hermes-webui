@@ -1,4 +1,7 @@
+from concurrent.futures import Future
 from pathlib import Path
+
+import pytest
 
 
 def test_prepare_chat_start_sets_provisional_title_for_default_session(tmp_path, monkeypatch):
@@ -165,3 +168,72 @@ def test_messages_js_applies_chat_start_title():
     assert "_sessionTitleProvisionalBySid" in src
     assert "rememberProvisional:true" in src
     assert "provisionalText:displayText.slice(0,64)" in src
+
+
+@pytest.mark.parametrize('timing', ['early', 'late', 'after_fallback', 'manual', 'cancelled'])
+def test_agent_title_reaches_saved_session_and_sidebar(tmp_path, monkeypatch, timing):
+    from api import models, streaming
+    from api.session_events import subscribe_session_events, unsubscribe_session_events
+    from api.session_ops import apply_session_title_rename
+
+    monkeypatch.setattr(models, 'SESSION_DIR', tmp_path)
+    monkeypatch.setattr(models, 'SESSION_INDEX_FILE', tmp_path / '_index.json')
+    monkeypatch.setattr(models, 'SESSIONS', models.SESSIONS.copy())
+    monkeypatch.setattr(streaming, 'SESSIONS', models.SESSIONS)
+
+    prompt = 'Investigate why the title in the sidebar contains my opening sentence'
+    messages = [
+        {'role': 'user', 'content': prompt, 'timestamp': 123},
+        {'role': 'assistant', 'content': 'The two stores disagree.', 'timestamp': 124},
+    ]
+    provisional = models.title_from(messages)
+    session = models.Session(
+        session_id='agent-title-session', profile='work', title=provisional, messages=messages,
+    )
+    session.save()
+    models.SESSIONS[session.session_id] = session
+    updated_at = session.updated_at
+    fallback = {'fallback_title': None}
+    settled = Future()
+    events = subscribe_session_events()
+    summary = 'Investigate sidebar title synchronization'
+    try:
+        on_title = streaming._agent_title_callback(session.session_id, 'work', settled, fallback)
+        on_title(provisional, 'derived')
+        assert events.empty()
+        if timing == 'early':
+            on_title(summary, 'llm')
+            assert models.Session.load(session.session_id).title == provisional
+            assert events.empty()
+        if timing == 'after_fallback':
+            session.title = 'Local automatic summary'
+            session.llm_title_generated = True
+            fallback['fallback_title'] = session.title
+            session.save(touch_updated_at=False)
+        if timing == 'manual':
+            apply_session_title_rename(session, 'Keep my title')
+            session.save(touch_updated_at=False)
+        if timing == 'cancelled':
+            settled.cancel()
+        else:
+            settled.set_result(None)
+        if timing != 'early':
+            on_title(summary, 'llm')
+
+        saved = models.Session.load(session.session_id)
+        assert saved.updated_at == updated_at
+        assert saved.messages == messages
+        if timing in ('manual', 'cancelled'):
+            assert saved.title == ('Keep my title' if timing == 'manual' else provisional)
+            assert events.empty()
+        else:
+            assert saved.title == summary
+            assert saved.llm_title_generated and not saved.manual_title
+            event = events.get_nowait()
+            assert event['reason'] == 'agent_title'
+            assert event['profile'] == 'work'
+            assert event['session_id'] == session.session_id
+            on_title(summary, 'llm')
+            assert events.empty()
+    finally:
+        unsubscribe_session_events(events)
