@@ -110,6 +110,7 @@ def test_held_goal_resumes_when_last_completion_lands_inside_an_ordinary_turn(tm
     """A held continuation is released by the next settled turn once no subagent is live."""
     sid = "sid-held-ordinary-turn"
     _real_schema_db(tmp_path, [("d1", sid, sid, sid, "running")])
+    monkeypatch.setattr(goals, "_active_goal_identity", lambda *_a, **_kw: ("go", 1.0))
     held = goals._hold_while_delegations_run(
         dict(CONTINUE), sid, tmp_path, remember=True, owner="stream-judge"
     )

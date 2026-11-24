@@ -2359,6 +2359,7 @@ def test_stop_of_an_older_turn_keeps_a_newer_owners_hold(tmp_path, monkeypatch):
     """Newer-owner control: a late cancelled teardown retires only its own hold."""
     sid = "sid-held-newer-owner"
     finish = _live_delegation_db(tmp_path, sid)
+    monkeypatch.setattr(webui_goals, "_active_goal_identity", lambda *_a, **_kw: ("g", 1.0))
     for owner in ("stream-old", "stream-new"):
         webui_goals._hold_while_delegations_run(
             dict(_LEASE_DECISION), sid, tmp_path, remember=True, owner=owner
@@ -2475,3 +2476,50 @@ def test_release_skips_a_hold_re_set_with_identical_content(monkeypatch, tmp_pat
     assert started == []
     assert webui_goals._HELD_GOAL_CONTINUATIONS[sid]["owner"] == "stream-judge"
     assert webui_goals.peek_pending_goal_continuation_id(sid) is None
+
+
+def _clear_during_judge(monkeypatch, tmp_path, sid):
+    """/goal clear completes while the judge runs with a live delegation."""
+    _session, holder, _kickoffs = _goal_command_env(monkeypatch, tmp_path, sid)
+    webui_goals.clear_pending_goal_continuation(sid)
+    finish = _live_delegation_db(tmp_path, sid)
+    holder["state"].created_at = 1.0
+    cleared = []
+
+    def _judge(self, _last_response, **_kw):
+        cleared.append(routes._handle_goal_command(object(), {"session_id": sid, "args": "clear"})["status"])
+        return {**_LEASE_DECISION, "continuation_prompt": "CLEARED GOAL: keep going"}
+
+    monkeypatch.setattr(webui_goals.GoalManager, "evaluate_after_turn", _judge, raising=False)
+    out = webui_goals.evaluate_goal_after_turn(sid, "r", profile_home=tmp_path, owner="stream-judge")
+    assert cleared == [200] and holder["state"] is None
+    assert out["should_continue"] is False
+    return holder, finish
+
+
+def test_goal_clear_during_judge_with_live_delegation_leaves_no_hold(monkeypatch, tmp_path):
+    """Review 6019931937 (1): a clear that finishes before the judge returns publishes nothing."""
+    sid = "sid-clear-during-judge"
+    _clear_during_judge(monkeypatch, tmp_path, sid)
+    assert sid not in webui_goals._HELD_GOAL_CONTINUATIONS
+    assert webui_goals.peek_pending_goal_continuation_id(sid) is None
+
+
+def test_cleared_goal_prompt_never_launches_under_a_new_goal(monkeypatch, tmp_path):
+    """Review 6019931937 (2): new goal, Stopped kickoff, delegation done, ordinary turn: nothing starts."""
+    sid = "sid-clear-during-judge-new-goal"
+    holder, finish = _clear_during_judge(monkeypatch, tmp_path, sid)
+    started = []
+    monkeypatch.setattr(
+        webui_goals, "start_detached_goal_continuation", lambda *a, **k: started.append(a)
+    )
+    holder["state"] = SimpleNamespace(
+        goal="replace helpers with native code", status="active", created_at=2.0, turns_used=0,
+        max_turns=100, last_verdict=None, last_reason=None, paused_reason=None,
+    )
+    webui_goals.settle_goal_continuation_after_turn(sid, "", "", cancelled=True, owner="stream-kickoff")
+    finish()
+    webui_goals.settle_goal_continuation_after_turn(sid, "", "", cancelled=False, owner="stream-ordinary")
+    assert started == []
+    assert webui_goals.peek_pending_goal_continuation_id(sid) is None
+    assert sid not in webui_goals._HELD_GOAL_CONTINUATIONS

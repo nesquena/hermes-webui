@@ -913,6 +913,19 @@ def retire_held_goal_continuation(session_id: str, owner: str) -> bool:
         return True
 
 
+def _active_goal_identity(session_id: str, profile_home) -> Optional[tuple]:
+    """(goal text, created_at) of the session's active goal, or None when none is active."""
+    mgr = _manager(session_id, profile_home=profile_home)
+    try:
+        if mgr is None or not mgr.is_active():
+            return None
+        state = getattr(mgr, "state", None)
+        return (getattr(state, "goal", None), getattr(state, "created_at", None))
+    except Exception as exc:
+        logger.debug("goal identity read failed for session=%s: %s", session_id, exc)
+        return None
+
+
 def _hold_while_delegations_run(
     decision: Dict[str, Any],
     session_id: str,
@@ -920,6 +933,7 @@ def _hold_while_delegations_run(
     *,
     remember: bool = False,
     owner: str = "",
+    goal_identity: Optional[tuple] = None,
 ) -> Dict[str, Any]:
     """Defer a continuation while subagents run; their completion wakeup re-evaluates the goal."""
     sid = str(session_id or "")
@@ -934,10 +948,20 @@ def _hold_while_delegations_run(
     prompt = str(decision.get("continuation_prompt") or "").strip()
     if remember and prompt and owner:
         # The last completion may be folded into an ordinary turn that never re-judges.
+        # /goal clear runs the native clear, then drops holds under this lock, so checking the
+        # goal here fences a judge that finished after the clear (or a same-text re-set).
         with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
-            _locked_set_held(
-                sid, {"prompt": prompt, "profile_home": profile_home, "owner": str(owner)}
-            )
+            current = _active_goal_identity(sid, profile_home)
+            if current is not None and goal_identity in (None, current):
+                _locked_set_held(
+                    sid,
+                    {
+                        "prompt": prompt,
+                        "profile_home": profile_home,
+                        "owner": str(owner),
+                        "goal_identity": current,
+                    },
+                )
     return {
         **decision,
         "should_continue": False,
@@ -1545,7 +1569,8 @@ def _release_held_goal_continuation(session_id: str) -> bool:
     profile_home = held["profile_home"]
     if _state_db_live_delegations(sid, profile_home) > 0:
         return False
-    if not has_active_goal(sid, profile_home=profile_home):
+    identity = _active_goal_identity(sid, profile_home)
+    if identity is None or identity != held.get("goal_identity"):
         return False
     record = {"prompt": held["prompt"], "continuation_id": uuid.uuid4().hex, "detached_owned": True}
     with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
@@ -1670,6 +1695,11 @@ def evaluate_goal_after_turn(
                     eval_kwargs["active_delegations"] = active_deleg
         except Exception:
             pass
+        try:
+            state = getattr(mgr, "state", None)
+            goal_identity = (getattr(state, "goal", None), getattr(state, "created_at", None))
+        except Exception:
+            goal_identity = None
         decision = mgr.evaluate_after_turn(str(last_response or ""), **eval_kwargs)
     except Exception as exc:
         logger.debug("goal evaluation failed for session=%s: %s", sid, exc)
@@ -1689,7 +1719,7 @@ def evaluate_goal_after_turn(
     decision = dict(decision)
     decision = _goal_decision_payload(decision, getattr(mgr, "state", None))
     return _hold_while_delegations_run(
-        decision, sid, profile_home, remember=True, owner=owner
+        decision, sid, profile_home, remember=True, owner=owner, goal_identity=goal_identity
     )
 
 
