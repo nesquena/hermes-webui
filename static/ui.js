@@ -28736,8 +28736,12 @@ function _showUploadTooLarge(file){
 // same generic name ("image.jpg"). Dropping a file just because its name is
 // taken silently loses the second photo. Only skip a true duplicate (same
 // name, size and mtime); otherwise keep the file under a collision-free name.
-function _pendingFileUniqueName(name, alsoTaken){
-  const taken=new Set((S.pendingFiles||[]).map(p=>p&&p.name));
+function _pendingFileUniqueName(name, alsoTaken, basePending){
+  // The base view is the tray that actually receives the file. During a New
+  // Chat / profile handoff the visible tray still belongs to the departing
+  // chat, so names already staged there are not collisions for the destination.
+  const base=Array.isArray(basePending)?basePending:(S.pendingFiles||[]);
+  const taken=new Set(base.map(p=>p&&p.name));
   for(const p of (alsoTaken||[])) if(p&&p.name)taken.add(p.name);
   if(!taken.has(name))return name;
   // Keep compound archive extensions whole (.tar.gz etc.) so the renamed copy
@@ -28782,15 +28786,27 @@ function addFiles(files){
   // tray plus any batches the active New Chat handoff already buffered. Both
   // duplicate suppression and collision naming must use this same view.
   const buffered=_pendingFilesBufferedByTransition();
+  const handoffOwnsComposer=!!(
+    typeof _composerOwnershipTransition!=='undefined'&&_composerOwnershipTransition
+  );
+  // While a handoff owns the composer the visible tray (and `S.pendingFiles`)
+  // still belongs to the departing chat: those files stay with it. A drop in
+  // this window lands in the new chat, so it must be measured against the
+  // destination's buffered view only — otherwise dropping a file the departing
+  // chat already holds is skipped as a "duplicate" and never reaches the chat
+  // the user is creating.
+  const pendingView=handoffOwnsComposer
+    ?buffered
+    :(Array.isArray(S.pendingFiles)?S.pendingFiles:[]);
   for(const f of files){
     if(f&&f.size>MAX_UPLOAD_BYTES){_showUploadTooLarge(f);continue;}
     // True duplicate: same original name, size and mtime as ANY pending file,
     // including one already renamed to a collision-free alias.
-    if(S.pendingFiles.some(p=>_pendingFileOrigName(p)===f.name&&p.size===f.size&&p.lastModified===f.lastModified))continue;
+    if(pendingView.some(p=>_pendingFileOrigName(p)===f.name&&p.size===f.size&&p.lastModified===f.lastModified))continue;
     if(buffered.some(p=>_pendingFileOrigName(p)===f.name&&p.size===f.size&&p.lastModified===f.lastModified))continue;
     if(accepted.some(p=>_pendingFileOrigName(p)===f.name&&p.size===f.size&&p.lastModified===f.lastModified))continue;
-    if(S.pendingFiles.some(p=>p.name===f.name)||buffered.some(p=>p.name===f.name)||accepted.some(p=>p.name===f.name)){
-      const copy=new File([f],_pendingFileUniqueName(f.name,[...buffered,...accepted]),{type:f.type,lastModified:f.lastModified});
+    if(pendingView.some(p=>p.name===f.name)||accepted.some(p=>p.name===f.name)){
+      const copy=new File([f],_pendingFileUniqueName(f.name,[...buffered,...accepted],pendingView),{type:f.type,lastModified:f.lastModified});
       try{Object.defineProperty(copy,'_origName',{value:f.name});}catch(_){}
       accepted.push(copy);
       continue;

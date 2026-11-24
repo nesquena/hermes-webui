@@ -1907,6 +1907,67 @@ def test_files_dropped_in_separate_events_during_new_session_pending_share_the_t
     assert destination_saves[-1]["files"] == ["repeat.txt", "repeat-2.txt"]
 
 
+def test_handoff_drop_of_a_file_still_pending_on_the_departing_chat_reaches_the_new_chat():
+    """A file the departing chat already stages must still reach the new chat.
+
+    During a held New Chat the visible tray belongs to the departing chat; a
+    drop in that window is buffered for the destination. Deduping against the
+    visible tray therefore swallowed a re-drop of the same file, and the chat
+    being created ended up without the attachment.
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    assert node is not None
+
+    source = _add_files_function()
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const S = {{pendingFiles: []}};
+        const MAX_UPLOAD_BYTES = 1024;
+        let trayRenders = 0;
+        const elements = {{msg: {{value: ''}}}};
+        const $ = id => elements[id] || null;
+        function renderTray() {{ trayRenders += 1; }}
+        function _showUploadTooLarge() {{ throw new Error('unexpected large file'); }}
+        {authority}
+        {source}
+
+        const sourceFile = {{name: 'shared.txt', size: 4, lastModified: 7}};
+        S.pendingFiles = [sourceFile];
+        const token = _beginComposerOwnershipTransition('old-session', 'default');
+        addFiles([new File(['aaaa'], 'shared.txt', {{type: 'text/plain', lastModified: 7}})]);
+        const bufferedAfterDuplicate = _pendingFilesBufferedByTransition().map(item => item.name);
+        const sourceTrayBeforeDrain = S.pendingFiles.map(item => item.name);
+        addFiles([new File(['bbbbbb'], 'shared.txt', {{type: 'text/plain', lastModified: 8}})]);
+        const bufferedAfterCollision = _pendingFilesBufferedByTransition().map(item => item.name);
+        // _restoreComposerDraft clears the departing tray before the drain.
+        S.pendingFiles = [];
+        _drainComposerOwnershipTransition(token);
+        process.stdout.write(JSON.stringify({{
+          bufferedAfterDuplicate,
+          bufferedAfterCollision,
+          sourceTrayBeforeDrain,
+          settled: S.pendingFiles.map(item => item.name),
+          origNames: S.pendingFiles.map(item => (item && item._origName) || item.name),
+        }}));
+        """
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["bufferedAfterDuplicate"] == ["shared.txt"], (
+        "a drop during the handoff must not be skipped because the departing "
+        "chat still stages the same file"
+    )
+    assert result["bufferedAfterCollision"] == ["shared.txt", "shared-2.txt"]
+    assert result["sourceTrayBeforeDrain"] == ["shared.txt"]
+    assert result["settled"] == ["shared.txt", "shared-2.txt"]
+    assert result["origNames"] == ["shared.txt", "shared.txt"]
+
+
 def test_pending_file_validation_uses_one_view_for_ordinary_within_batch_and_transition():
     """Ordinary, within-batch and transition drops share the same rules.
 
