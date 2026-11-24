@@ -964,7 +964,9 @@ def _profile_home_config_source(
 
 
 def get_config_for_profile_home(
-    profile_home: "Path | str | None", *, isolate_config_override: bool = False,
+    profile_home: "Path | str | None", *,
+    isolate_config_override: bool = False,
+    own_environment: bool = False,
 ) -> dict:
     """Return the config dict for an explicit profile home directory.
 
@@ -995,6 +997,16 @@ def get_config_for_profile_home(
     isolated: a nonexistent home returns ``{}`` and an existing home without a
     ``config.yaml`` yields defaults — neither ever falls back to the ambient
     config (profiles-are-islands).
+
+    ``own_environment=True`` resolves the profile file's ``${VAR}`` references
+    under that profile's OWN env binding (``api.profiles.load_profile_config``)
+    instead of the live process env. Callers on detached worker threads need
+    this: the file is the session profile's (file authority, above), but the
+    live env there holds whichever profile last mirrored into it, so a provider
+    identity built from ``${VAR}`` would expand against a foreign profile's
+    values (or stay unresolved) and be missed (#7905). The ambient-source
+    branch keeps ``get_config()`` so a root/external ``HERMES_CONFIG_PATH``
+    override and in-memory overrides keep their existing authority.
     """
     source = _profile_home_config_source(
         profile_home, isolate_config_override=isolate_config_override
@@ -1006,7 +1018,14 @@ def get_config_for_profile_home(
     # Read the profile file directly and apply documented defaults locally so the
     # returned dict matches ambient get_config() shape (including built-in
     # personalities) without mutating any global cache state.
-    profile_cfg = _load_yaml_config_file(source)
+    if own_environment:
+        # The approved reader: parses the profile file and expands every
+        # ``${VAR}`` under ``profile_env_binding`` for THAT home (#8032).
+        from api.profiles import load_profile_config
+
+        profile_cfg = load_profile_config(profile_home)
+    else:
+        profile_cfg = _load_yaml_config_file(source)
     _apply_config_defaults(profile_cfg)
     return profile_cfg
 

@@ -297,7 +297,9 @@ def _gateway_model_field(
     identities are resolved from that profile's ``config.yaml``, never from
     the ambient config, so a ``custom:<name>`` defined only in the profile
     still keeps its slug instead of being peeled into the generic lane
-    (#7905 CR CORE 3). ``session_provider`` is the session's stored
+    (#7905 CR CORE 3), and the file's ``${VAR}`` references expand under that
+    profile's own env binding (#7905 gate). ``session_provider`` is the
+    session's stored
     ``model_provider`` — the positive evidence that a ``@custom:<seg>:<tag>``
     string belongs to the GENERIC lane (#7904); without it master's parse
     stands.
@@ -322,15 +324,23 @@ def _gateway_profile_config(profile) -> dict | None:
     profile name and read straight off disk, so a provider configured only in
     that profile is visible here. The home is the SESSION's profile, so an
     override outside that profile's home must not win (mirroring the contract
-    in ``api.config``). Returns ``None`` (ambient config) only when the
-    profile itself cannot be resolved.
+    in ``api.config``). ``own_environment=True`` expands the profile file's
+    ``${VAR}`` references under that profile's own env binding, not the live
+    process env: this runs on a detached Gateway worker thread where the live
+    env mirrors whichever profile started the run, so an identity built from
+    ``${VAR}`` (``custom_providers: [{name: ${OMNI_SLUG}}]``) would otherwise
+    resolve against a foreign profile — or not at all (#7905 gate).
+    Returns ``None`` (ambient config) only when the profile itself cannot be
+    resolved.
     """
     try:
         from api import profiles as _profiles
         from api.config import get_config_for_profile_home
 
         home = _profiles.get_hermes_home_for_profile(str(profile or "").strip())
-        cfg = get_config_for_profile_home(home, isolate_config_override=True)
+        cfg = get_config_for_profile_home(
+            home, isolate_config_override=True, own_environment=True
+        )
         return cfg if isinstance(cfg, dict) else None
     except Exception:
         logger.debug("gateway model field profile config lookup failed", exc_info=True)

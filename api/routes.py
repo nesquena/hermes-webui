@@ -10823,7 +10823,9 @@ def _resolve_compatible_session_model_state(
         # Only safe when the model itself does not carry an ``@provider:model``
         # qualifier — qualified strings require the catalog to decide whether
         # the qualifier matches the active provider (see slow path below).
-        bare_model, explicit_provider = _split_provider_qualified_model(model)
+        bare_model, explicit_provider = _split_provider_qualified_model(
+            model, session_provider=requested_provider
+        )
         model_prefix = model.split("/", 1)[0].strip().lower() if "/" in model else ""
         stale_codex_openai_slash_id = (
             requested_provider == "openai-codex"
@@ -10893,7 +10895,10 @@ def _resolve_compatible_session_model_state(
     # active_provider / default_model. This preserves the repair path
     # (stale models still get normalized) but normalizes to the profile's
     # default model under the profile's provider rather than the global default.
-    bare_model, explicit_provider = _split_provider_qualified_model(model) if model else ("", None)
+    bare_model, explicit_provider = (
+        _split_provider_qualified_model(model, session_provider=requested_provider)
+        if model else ("", None)
+    )
     if profile_provider and not explicit_provider:
         _profile_provider_normalized = _normalize_provider_id(profile_provider)
         _profile_default = str(profile_default_model or "").strip()
@@ -10976,10 +10981,14 @@ def _resolve_compatible_session_model_state(
     # is stale relative to this unknown active provider. (#1023)
     raw_active_provider = str(catalog.get("active_provider") or "").strip().lower()
     if not active_provider and not raw_active_provider:
-        bare_model, explicit_provider = _split_provider_qualified_model(model)
+        bare_model, explicit_provider = _split_provider_qualified_model(
+            model, session_provider=requested_provider
+        )
         return model, explicit_provider or requested_provider, False
 
-    bare_for_context, explicit_provider = _split_provider_qualified_model(model)
+    bare_for_context, explicit_provider = _split_provider_qualified_model(
+        model, session_provider=requested_provider
+    )
     if requested_provider and not explicit_provider:
         model_prefix = model.split("/", 1)[0].strip().lower() if "/" in model else ""
         stale_codex_openai_slash_id = (
@@ -11517,7 +11526,17 @@ def _session_model_state_from_request(
         else None
     )
     if model_value:
-        _bare, explicit_provider = _split_provider_qualified_model(model_value)
+        # #7904: the session's own lane is the positive evidence for a
+        # ``@custom:<seg>:<tag>`` string. Without it the bare parse takes
+        # ``custom:<seg>`` as a named provider and overwrites the requested
+        # generic ``custom`` lane here — before the resolver ever runs — so
+        # session creation and model switches persisted a provider identity
+        # that exists nowhere and the colon tag was lost. Requested provider
+        # wins; a switch that carries only a model inherits the stored one.
+        evidence_provider = provider or _clean_session_model_provider(current_provider)
+        _bare, explicit_provider = _split_provider_qualified_model(
+            model_value, session_provider=evidence_provider
+        )
         if explicit_provider:
             provider = explicit_provider
         elif requested_provider is None:
