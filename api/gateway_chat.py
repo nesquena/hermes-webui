@@ -2808,7 +2808,7 @@ def _gateway_compacted_context_prefix(session, msg_text, turn_started_at, prefil
         return None
     from api.models import get_state_db_session_messages
     from api.session_ops import _MERGED_SUMMARY_DELIMITER
-    from api.streaming import _is_context_compression_marker, _message_text, _normalize_user_text
+    from api.streaming import _is_context_compression_marker, _message_content_part_text, _message_text, _normalize_user_text
 
     raw_prompt = str(msg_text or "").strip()
     prompt = _normalize_user_text(raw_prompt)
@@ -2837,10 +2837,18 @@ def _gateway_compacted_context_prefix(session, msg_text, turn_started_at, prefil
         if not projected:
             continue
         item = projected[0]
+        # The Gateway's /v1/runs parser reads each history row as str(content), so a
+        # part list would reach the model as its Python repr (media bytes included).
+        # Adopted rows carry their text only, the shape WebUI context rows always have.
         content = item.get("content")
-        text = _message_text(content)
-        if not text.strip() and not (isinstance(content, list) and content):
+        if isinstance(content, list):
+            content = "\n".join(
+                _message_content_part_text(part) for part in content
+                if isinstance(part, dict) and str(part.get("type") or "").lower() in ("", "text", "input_text", "output_text")
+            )
+        if not isinstance(content, str) or not content.strip():
             continue
+        item["content"] = content
         if _is_summary(item):
             written_at = row.get("timestamp")
             if (

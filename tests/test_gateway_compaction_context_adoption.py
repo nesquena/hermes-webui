@@ -322,11 +322,11 @@ def test_a_structured_summary_carrier_is_split_from_the_live_ask(structured):
     if structured:
         # The compressor prepends the summary as its own text part ahead of the ask and the image.
         assert [part.get("type") for part in carrier] == ["text", "text", "image_url"]
-        summary_part = carrier[0]["text"]
-        expected_carrier = [carrier[0], IMAGE_PART]
+        summary_part = carrier[0]["text"].rstrip()
     else:
         summary_part = carrier[: -len("live ask")].rstrip()
-        expected_carrier = summary_part
+    # Adopted rows are plain text: the Gateway's history parser reads str(content).
+    expected_carrier = summary_part
     assert summary_part.startswith(NATIVE_SUMMARY)
 
     sent = [row for row in CAPTURED_BODIES[-1]["conversation_history"] if row.get("role") != "system"]
@@ -334,6 +334,50 @@ def test_a_structured_summary_carrier_is_split_from_the_live_ask(structured):
     assert not {"q0", "a0", "q1", "a1"} & {c for c in contents if isinstance(c, str)}
     assert contents == [expected_carrier, "live ask", "turn answer"]
     assert _texts(saved.messages) == ["q0", "a0", "q1", "a1", "live ask", "turn answer", "follow up"]
+
+
+def _received_history(body):
+    """What the Gateway's /v1/runs admission parser makes of a request body's history."""
+    pytest.importorskip("aiohttp", reason="the Gateway's HTTP runtime is not installed")
+    runs = pytest.importorskip("gateway.platforms.api_server_runs", reason="hermes-agent gateway not importable")
+    history, _, _, error = runs._resolve_conversation_history(
+        None, body, body.get("input"), _openai_error=lambda *a, **k: ("error", a),
+    )
+    assert error is None
+    return history
+
+
+# Native persistence -> WebUI settlement/adoption -> next request -> the receiving parser.
+# The request body alone does not prove meaning: the receiver reads each row as str(content).
+@pytest.mark.requires_agent_modules
+@pytest.mark.parametrize(
+    "case",
+    ["merged-carrier", "summary-carrier", "text-plus-image-carrier"],
+)
+def test_the_receiving_gateway_reads_adopted_history_as_the_compacted_text(case):
+    pytest.importorskip("aiohttp", reason="the Gateway's HTTP runtime is not installed")
+    pytest.importorskip("gateway.platforms.api_server_runs", reason="hermes-agent gateway not importable")
+    sid = f"receiver-{case}"
+    if case == "merged-carrier":
+        compacted, _ = _run_native_turns(sid, NATIVE_OLD, 2, 4)
+        summary_text = compacted[2]["content"]
+        expected = [("user", "q0"), ("assistant", "a0"), ("user", summary_text), ("assistant", "a2")]
+    else:
+        history = [{"role": "system", "content": "sys"}] + NATIVE_OLD[:4]
+        prompt_content = [{"type": "text", "text": "live ask"}, IMAGE_PART] if case.startswith("text-plus") else None
+        compacted, _ = _run_native_turns(sid, history, 1, 5, prompt_content)
+        carrier = compacted[-1]["content"]
+        summary_text = (carrier[0]["text"] if isinstance(carrier, list) else carrier[: -len("live ask")]).rstrip()
+        expected = [("user", summary_text)]
+    expected += [("user", "live ask"), ("assistant", "turn answer")]
+
+    received = _received_history(CAPTURED_BODIES[-1])
+    pairs = [(row["role"], row["content"]) for row in received if row["role"] != "system"]
+    assert pairs == expected
+    for _, content in pairs:
+        # No stringified part list (Python repr) and no inline media reach the model.
+        assert not content.startswith("[{") and "image_url" not in content and "base64" not in content
+    assert NATIVE_SUMMARY in summary_text
 
 
 # Adoption -> display edit -> next send: the adopted rows no longer align row-for-row with
