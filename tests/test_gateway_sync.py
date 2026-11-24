@@ -514,6 +514,32 @@ def test_compression_chain_collapses_to_latest_tip_in_sidebar():
         post('/api/settings', {'show_cli_sessions': False})
 
 
+def _append_state_rows(db, session_id, rows):
+    """Write fixture rows one at a time: ``append_message`` exists on every Agent's
+    ``SessionDB``, while ``append_messages_batch`` is gone from the stand-in newer
+    Agents keep for plugins."""
+    for row in rows:
+        db.append_message(session_id, row['role'], row['content'], timestamp=row['timestamp'])
+
+
+def _promote_state_session_to_reset(db, db_path, session_id):
+    """End ``session_id`` as a session reset the way the installed Agent does it.
+
+    Older Agents expose ``SessionDB.promote_to_session_reset``; newer ones keep a
+    stand-in without it and do the same write through the storage interface.
+    """
+    promote = getattr(db, 'promote_to_session_reset', None)
+    if callable(promote):
+        return promote(session_id)
+    from persistence_assembly import open_persistence, profile_scope
+
+    handle = open_persistence(profile_scope(home=pathlib.Path(db_path).parent), eager=True)
+    try:
+        return handle.sessions.promote_to_reset(session_id)
+    finally:
+        handle.close()
+
+
 @pytest.mark.parametrize('reset_marker_origin', ('creation', 'reopen'))
 def test_reopen_then_recompress_reset_child_stays_independent_across_readers(
     tmp_path, monkeypatch, reset_marker_origin
@@ -556,14 +582,16 @@ def test_reopen_then_recompress_reset_child_stays_independent_across_readers(
     db = hermes_state.SessionDB(db_path=db_path)
     try:
         db.create_session(parent_id, source='telegram', model='test-model', **routing)
-        db.append_messages_batch(
+        _append_state_rows(
+            db,
             parent_id,
             [
                 {'role': 'user', 'content': 'before reset', 'timestamp': 100.0},
                 {'role': 'assistant', 'content': 'answer before reset', 'timestamp': 101.0},
             ],
         )
-        assert db.promote_to_session_reset(parent_id) is True
+        assert _promote_state_session_to_reset(db, db_path, parent_id) is True
+        assert db.get_session(parent_id)['end_reason'] == 'session_reset'
         child_model_config = (
             {'_reset_from': parent_id} if reset_marker_origin == 'creation' else None
         )
@@ -575,7 +603,8 @@ def test_reopen_then_recompress_reset_child_stays_independent_across_readers(
             model_config=child_model_config,
             **routing,
         )
-        db.append_messages_batch(
+        _append_state_rows(
+            db,
             child_id,
             [
                 {'role': 'user', 'content': 'after reset', 'timestamp': 200.0},
@@ -601,7 +630,8 @@ def test_reopen_then_recompress_reset_child_stays_independent_across_readers(
         assert json.loads(db.get_session(child_id)['model_config']) == expected_child_config
         reopened = db.get_session(parent_id)
         assert reopened['ended_at'] is None and reopened['end_reason'] is None
-        db.append_messages_batch(
+        _append_state_rows(
+            db,
             parent_id,
             [{'role': 'user', 'content': 'resumed parent', 'timestamp': 300.0}],
         )

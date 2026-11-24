@@ -466,7 +466,7 @@ def test_the_import_title_queue_refuses_a_session_loaded_from_a_copy(store, monk
     from api import models, routes
 
     monkeypatch.setattr(routes, "generate_session_title_for_session", lambda session: ("Generated title", "llm", "raw"))
-    monkeypatch.setattr(routes, "_sync_session_title_to_insights", lambda session: None)
+    monkeypatch.setattr(routes, "_sync_session_title_to_insights", lambda session, **_kw: None)
     monkeypatch.setattr(routes, "_publish_session_list_changed", lambda *a, **k: None)
     _victim(store)
     victim = models.Session.load(VICTIM)
