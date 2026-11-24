@@ -27,7 +27,11 @@
 
 ### Security
 
+- **A named profile's Skills panel no longer shows another profile's external skill folders (#7842, @Notaloop763).** The skills list, skill view, linked files and the on/off toggle used to take the external skill folders (`skills.external_dirs`) from the profile the server started with, whichever profile made the request. So a named profile could list, open and toggle skills that were configured only for another profile. Each request now reads those folders from its own profile's `config.yaml`, with variables resolved for that profile. A missing or broken profile config lists no external folders and never hides the profile's own skills.
+
 - **Closing the "already shared" dialog no longer refreshes the public share (#9260, @JayPokale, fixes #9259).** When a chat already had a public link, dismissing the dialog with ×, Escape or a click outside it counted as "Refresh snapshot", so backing out republished every message added since the last share. Now only the "Refresh snapshot" button refreshes the snapshot; dismissing the dialog does nothing.
+
+- **Dialogs now act on the conversation they were opened for (#9316, fixes #9315).** Share and Stop sharing in the conversation panel, Clear conversation, the outside-link prompt and the workspace delete, rename, new-file and new-folder dialogs used to act on whichever conversation was on screen when you answered. If you switched conversations with one of them open, they could share, revoke, clear or change the wrong one. Each dialog now remembers its conversation when it opens, and an answer given after that conversation has left the screen is dropped. Going back or forward in the browser closes an open dialog first. The J/K and Cmd/Ctrl+K shortcuts do nothing while a dialog is open. Copying a share link falls back to the older copy method when the clipboard API refuses, and a failed copy now says so.
 
 - **A switched-off provider entry no longer routes a model or supplies its address (#9248, @chhxbchhxb, refs #8954).** With two spellings of one built-in provider in `providers` (for example `OpenAI` with `enabled: false` and `openai`), and the switched-off one listing the chat's model, WebUI picked that entry's `base_url` while Hermes Agent authenticated with the enabled entry's key. So the enabled entry's key went to the switched-off entry's address. The model lookup now skips switched-off entries, so the chat routes as if that entry didn't list the model. Enabled entries, the `enabled` default and its string forms, `custom:` entries and the active-provider guard are unchanged.
 
@@ -40,6 +44,8 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **Switching chats while a message is still being sent no longer hands that message to the chat you switched to (#9284, refs #9237).** The turn now stays with the chat that sent it, with that chat's model, workspace and profile, and the chat you moved to is left as it was. If the send then fails to start after you have moved away, its text is saved in its own chat as a draft and a short notice names that chat. When the chat was compressed into a continuation meanwhile, the text is restored exactly as before and the notice names the chat without saying where the text went. A chat that is still busy queues the message and takes you back to it, as before, and sending while you stay on the chat is unchanged.
 
 - **Saving a default model from a provider's pinned model group in Settings no longer breaks every later chat (#9304, fixes #9300).** The picker can send the group's id (for example `nous:meituan/longcat-2.5`) as the provider; it was written into `config.yaml` unchanged, and the WebUI and the CLI then refused every turn with an unknown-provider error until the file was edited by hand. The save now keeps only the provider (`nous`), and a provider your config declares under a name with a colon (for example `openrouter:eu`) is kept as is. Thanks @zhangkom.
 
