@@ -1269,15 +1269,23 @@ function _composerProducerOwnerState(producerHandle){
   let _micPointerDown=false;
   let _micStartSeq=0;
   let _micSettlementPromise=Promise.resolve();
+  // Every unfinished capture settles independently. Waiting only for the
+  // newest promise lets an older server transcription land after a profile
+  // switch saved the source draft, which drops those words (409 under the new
+  // cookie). Track the whole backlog instead.
+  const _pendingMicSettlements=new Set();
   const _micHoldThresholdMs=300;
 
   function _beginMicSettlement(){
     let settled=false;
     let resolveSettlement;
-    _micSettlementPromise=new Promise(resolve=>{ resolveSettlement=resolve; });
+    const promise=new Promise(resolve=>{ resolveSettlement=resolve; });
+    _pendingMicSettlements.add(promise);
+    _micSettlementPromise=promise;
     return ()=>{
       if(settled)return;
       settled=true;
+      _pendingMicSettlements.delete(promise);
       resolveSettlement();
     };
   }
@@ -1577,9 +1585,12 @@ function _composerProducerOwnerState(producerHandle){
   window._stopMic=_stopMic; // expose for send-guard above
 
   async function _stopAndSettleComposerDictation(){
-    const settlement=_micSettlementPromise;
+    // Snapshot the whole backlog BEFORE stopping: the current capture's
+    // settlement is already in it, and an older recording may still be
+    // transcribing on the server.
+    const settlements=[..._pendingMicSettlements];
     if(window._micActive||_isRecording)_stopMic();
-    await settlement;
+    await Promise.all(settlements);
   }
   window._stopAndSettleComposerDictation=_stopAndSettleComposerDictation;
 

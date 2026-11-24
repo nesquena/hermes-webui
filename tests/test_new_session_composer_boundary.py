@@ -4176,8 +4176,14 @@ def test_dictation_settlement_waits_for_server_transcription_completion():
     recorder_end = BOOT_JS.index("\n      _activeCaptureMode=captureMode", recorder_start)
     recorder = BOOT_JS[recorder_start:recorder_end]
 
-    assert "const settlement=_micSettlementPromise" in stop
-    assert "await settlement" in stop
+    assert "const settlements=[..._pendingMicSettlements]" in stop, (
+        "the switch waits only for the newest recording; an older "
+        "transcription can land after the source draft was saved"
+    )
+    assert "await Promise.all(settlements)" in stop
+    assert "_pendingMicSettlements.add(promise)" in BOOT_JS, (
+        "each capture's settlement must be tracked until it resolves"
+    )
     assert "window._micPendingSend=false" not in stop
     switch = _function(PANELS_JS, "switchToProfile", "\n\nfunction openProfileCreate")
     assert "Promise.race([" in switch
