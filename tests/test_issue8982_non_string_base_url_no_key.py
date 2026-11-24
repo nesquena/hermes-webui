@@ -129,8 +129,11 @@ def test_legacy_custom_providers_entry_non_string_base_url_enters_no_lookup(
 def test_providers_record_non_string_base_url_enters_no_lookup(monkeypatch):
     """(b) A raw ``providers:`` record with an int base_url yields no URL/key.
 
-    This is the shape that used to reach ``get_model_context_length()`` with
-    ``base_url="123"`` and the record's api_key beside it.
+    The ``relay`` key is not the id ``custom:relay``, so
+    ``_providers_match_for_context`` never matches it: this case measures the
+    record boundary (``_custom_record_base_url``) that the bundle and the merge
+    consult. The matching-key read in ``_context_length_lookup_inputs_for_model``
+    is covered by (c).
     """
     _apply_config(monkeypatch, _providers_cfg(123))
     calls = _install_fake_context_resolver(monkeypatch)
@@ -175,6 +178,112 @@ def test_string_base_url_still_resolves_url_and_key(monkeypatch, cfg_builder, pr
     )
     assert calls[-1]["base_url"] == _GOOD_URL
     assert calls[-1]["api_key"] == _API_KEY
+
+
+def _matching_providers_cfg(base_url):
+    """A ``providers:`` record whose key IS the provider the lookup asks for.
+
+    The legacy shape above uses a ``relay`` key for ``custom:relay``, which
+    ``_providers_match_for_context`` never matches, so it exercises the record
+    boundary (``_custom_record_base_url``) only. Here the key and the provider id
+    are the same, which is what reaches the ``matching[0]`` read in
+    ``_context_length_lookup_inputs_for_model``.
+    """
+    return {
+        "model": {"default": _MODEL, "provider": "openrouter"},
+        "providers": {
+            "openrouter": {"base_url": base_url, "api_key": _API_KEY, "models": [_MODEL]},
+        },
+        "custom_providers": [],
+    }
+
+
+def _model_block_cfg(base_url):
+    """The global ``model:`` block declaring the endpoint for its own provider."""
+    return {
+        "model": {"default": _MODEL, "provider": "openrouter", "base_url": base_url},
+        "providers": {},
+        "custom_providers": [],
+    }
+
+
+@pytest.mark.parametrize("malformed", [123, True, {"host": "omni"}, ["https://x"]])
+def test_matching_providers_record_non_string_base_url_fills_no_slot(monkeypatch, malformed):
+    """(c) A matching ``providers:<id>`` record with a non-string base_url fills no URL.
+
+    Measured on the slot the lookup owns: a non-string declares no endpoint, so
+    the record's ``models`` overrides still apply and its ``api_key`` is still the
+    provider's own key — what changes is that no ``"123"`` is presented as a
+    user-configured endpoint. Key ownership is covered at the bundle/route
+    boundary by (a) and (b) above.
+    """
+    cfg = _matching_providers_cfg(malformed)
+    _apply_config(monkeypatch, cfg)
+
+    inputs = routes._context_length_lookup_inputs_for_model(_MODEL, "openrouter", cfg=cfg)
+
+    assert inputs.base_url == ""
+
+
+def test_matching_providers_record_string_base_url_fills_the_slot(monkeypatch):
+    """Control for (c): a string endpoint still fills the slot, so (c) is not vacuous."""
+    cfg = _matching_providers_cfg(_GOOD_URL)
+    _apply_config(monkeypatch, cfg)
+
+    inputs = routes._context_length_lookup_inputs_for_model(_MODEL, "openrouter", cfg=cfg)
+
+    assert inputs.base_url == _GOOD_URL
+
+
+@pytest.mark.parametrize("malformed", [123, True, {"host": "omni"}, ["https://x"]])
+def test_model_block_non_string_base_url_fills_no_slot(monkeypatch, malformed):
+    """(d) The ``model:`` block with a non-string base_url fills no URL either.
+
+    Same rule one site over: the block owns the slot (its provider is the
+    session's provider), so its value is exactly the one that used to be
+    stringified into an endpoint.
+    """
+    cfg = _model_block_cfg(malformed)
+    _apply_config(monkeypatch, cfg)
+
+    inputs = routes._context_length_lookup_inputs_for_model(_MODEL, "openrouter", cfg=cfg)
+
+    assert inputs.base_url == ""
+
+
+def test_model_block_string_base_url_fills_the_slot(monkeypatch):
+    """Control for (d): the ownership predicate still lets a string endpoint through."""
+    cfg = _model_block_cfg(_GOOD_URL)
+    _apply_config(monkeypatch, cfg)
+
+    inputs = routes._context_length_lookup_inputs_for_model(_MODEL, "openrouter", cfg=cfg)
+
+    assert inputs.base_url == _GOOD_URL
+
+
+def test_resolved_base_url_non_string_fills_no_slot(monkeypatch):
+    """(e) ``resolve_model_provider`` hands its value through; the state drops a non-str.
+
+    ``resolve_model_provider`` returns the ``model:`` block's raw value (measured:
+    it returns the ``int`` 123 unchanged), so this is the line that actually
+    decides whether ``"123"`` reaches the lookup on the GET /api/session path.
+    """
+    _apply_config(monkeypatch, _model_block_cfg(123))
+
+    model, provider, base_url, api_key = routes._session_context_length_lookup_state(
+        _MODEL, "openrouter"
+    )
+
+    assert (provider, base_url, api_key) == ("openrouter", "", "")
+
+
+def test_resolved_base_url_string_is_kept(monkeypatch):
+    """Control for (e): a string endpoint from the same resolver is kept."""
+    _apply_config(monkeypatch, _model_block_cfg(_GOOD_URL))
+
+    _, provider, base_url, _ = routes._session_context_length_lookup_state(_MODEL, "openrouter")
+
+    assert (provider, base_url) == ("openrouter", _GOOD_URL)
 
 
 def test_empty_string_base_url_behaviour_is_unchanged(monkeypatch):
