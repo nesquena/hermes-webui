@@ -2295,13 +2295,43 @@ def _detach_active_children(agent: Any) -> list:
         return []
 
 
+def _run_native_release_phase(module_name: str, function_name: str, *args: Any) -> bool:
+    """Call one module-level cleanup phase of the native release, best-effort.
+
+    Native ``AIAgent.release_clients()`` imports these lazily (``from
+    agent.prepared_compaction import release_for_agent``), so an Agent older than
+    the phase simply does not have the module.  A missing module, a missing
+    function or a raising phase must never turn a shed into an error: the
+    provider decision has already been made by the time these run, and the phase
+    itself is optional by the Agent's own contract.
+    """
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:
+        return False
+    phase = getattr(module, function_name, None)
+    if not callable(phase):
+        return False
+    try:
+        phase(*args)
+        return True
+    except Exception:
+        logger.debug("native %s.%s failed on a shed agent", module_name, function_name, exc_info=True)
+        return False
+
+
 def _release_llm_client_phases(agent: Any) -> bool:
     """Run the LLM-client phases of ``AIAgent.release_clients()``, without the
     memory release that follows them.
 
     The phases are the native ones (the caller has already detached the child
     agents): retire the shared client, close the per-request clients, close the
-    Codex child.  An Agent shape that exposes none of them cannot be split —
+    Codex child, cancel a pending prompt-cache warming, and drop prepared
+    compaction state.  The last two are LLM *work* the released agent would
+    otherwise keep paying for — the native method runs them regardless of the
+    provider, so a clients-only release must not drop them (#8810 P2).
+
+    An Agent shape that exposes none of the client phases cannot be split —
     nothing runs and False is returned, because falling back to
     ``release_clients()`` would tear down a provider a live peer still uses.
     """
@@ -2328,6 +2358,13 @@ def _release_llm_client_phases(agent: Any) -> bool:
             ran = True
         except Exception:
             logger.debug("closing a shed agent's Codex child failed", exc_info=True)
+    # Native LLM-work phases, independent of provider teardown.  They do not set
+    # ``ran``: that flag answers "can this shape be split at all", which the
+    # client phases above decide.
+    _run_native_release_phase(
+        "agent.prompt_cache_lifecycle", "cancel_prompt_cache_warming", agent, "release_clients"
+    )
+    _run_native_release_phase("agent.prepared_compaction", "release_for_agent", agent)
     return ran
 
 

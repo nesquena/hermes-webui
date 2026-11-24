@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -267,3 +268,98 @@ def test_an_aborted_release_that_keeps_the_handle_never_touches_the_provider(
     assert provider.client.is_closed is False
     agent.save("the pending extraction can still be delivered")
     assert provider.writes == ["the pending extraction can still be delivered"]
+
+
+# ── (d) native LLM work that is independent of provider teardown (#8810 P2) ──
+
+def test_a_running_prepared_compaction_pass_is_cancelled_by_the_shed(
+    hc, homes, holder_registry
+):
+    """Native ``release_clients()`` also drops prepared-compaction state, which
+    cancels the running pass. A clients-only release that copied only the client
+    phases left that pass running (and its prepared transcript attached) while
+    the session was shed; the peer's provider must still survive."""
+    pc = pytest.importorskip("agent.prepared_compaction")
+    provider = SharedInstanceProvider()
+    first = _build_phased(homes["alpha"], lambda: provider, "8810-compact-a")
+    peer = _build_phased(homes["alpha"], lambda: provider, "8810-compact-b")
+
+    state = pc.PreparedCompaction()
+    window = pc._Window(
+        session_id="8810-compact-a", compress_start=0, compress_end=2, identities=()
+    )
+    token = pc._PendingPass(window)
+    state._pending = token
+    first.context_compressor = SimpleNamespace(prepared_compaction=state)
+
+    # The pass in flight: it can only publish until its cancellation event fires.
+    woke = threading.Event()
+    pass_thread = threading.Thread(
+        target=lambda: (token.cancelled.wait(10), woke.set()),
+        name="8810-prepared-pass",
+        daemon=True,
+    )
+    pass_thread.start()
+
+    governance.soft_release_transcript(first, session_id="8810-compact-a")
+
+    assert token.cancelled.is_set(), "the pending prepared-compaction pass kept running"
+    assert token.cancel_reason == "agent_released"
+    assert state._pending is None, "the prepared pass stayed attached to the compressor"
+    assert woke.wait(10), "the pass never observed its cancellation"
+    assert provider.shutdowns == 0, "the peer's provider was torn down with the shed"
+
+    peer.save("the peer still owns the provider")
+    assert provider.writes == ["the peer still owns the provider"]
+
+
+@pytest.fixture
+def prepared_compaction_phase(monkeypatch):
+    """Record every native ``release_for_agent`` call the adapter makes."""
+    pc = pytest.importorskip("agent.prepared_compaction")
+    calls: list = []
+    monkeypatch.setattr(pc, "release_for_agent", lambda agent: calls.append(agent), raising=False)
+    return calls
+
+
+def test_every_clients_only_branch_cancels_prepared_compaction(
+    hc, homes, holder_registry, prepared_compaction_phase
+):
+    """The phase is part of the release contract, not of the last-holder path:
+    a shared provider, queued memory work, an aborted release and a refused
+    teardown all go through the clients-only cleanup and must all carry it."""
+    calls = prepared_compaction_phase
+
+    # (1) shared provider: another agent still holds the instance.
+    provider = SharedInstanceProvider()
+    shared_first = _build_phased(homes["alpha"], lambda: provider, "8810-b-shared-a")
+    _build_phased(homes["alpha"], lambda: provider, "8810-b-shared-b")
+    governance.soft_release_transcript(shared_first, session_id="8810-b-shared-a")
+    assert calls == [shared_first], "the shared-holder branch skipped release_for_agent"
+    assert provider.shutdowns == 0
+
+    # (2) queued memory work: the teardown is refused and the release retained.
+    paused = _pause_saves(SharedInstanceProvider())
+    queued = _build_phased(homes["alpha"], lambda: paused, "8810-b-queued")
+    _queue_paused_save(queued, paused, "the shed turn", hc)
+    governance.soft_release_transcript(queued, session_id="8810-b-queued")
+    assert calls[-1] is queued, "the queued-work branch skipped release_for_agent"
+    assert paused.shutdowns == 0
+    paused.save_resume.set()
+    assert paused.save_landed.wait(30)
+
+    # (3) aborted release: the handle is kept for a pending extraction.
+    aborted = _build_phased(homes["alpha"], lambda: SharedInstanceProvider(), "8810-b-aborted")
+    governance._release_agent_clients(
+        aborted, session_id="8810-b-aborted", release_provider=False
+    )
+    assert calls[-1] is aborted, "the aborted branch skipped release_for_agent"
+
+    # (4) refused teardown: the provider's profile home cannot be resolved.
+    unscoped_provider = SharedInstanceProvider()
+    unscoped = _build_phased(homes["alpha"], lambda: unscoped_provider, "8810-b-unscoped")
+    unscoped._memory_manager._bound_scope = {}
+    unscoped._memory_manager._home_key = None
+    governance.soft_release_transcript(unscoped, session_id="8810-b-unscoped")
+    assert calls[-1] is unscoped, "the refused-teardown branch skipped release_for_agent"
+    assert unscoped_provider.shutdowns == 0, "a refused teardown still closed the provider"
