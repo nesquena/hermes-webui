@@ -20,18 +20,65 @@ from api import yaml_compat as yaml
 
 logger = logging.getLogger(__name__)
 
-# ``$VAR`` and ``${VAR}``, as ``os.path.expandvars`` accepts both.
-_PATH_ENV_VAR = re.compile(r'\$(?:\{([^}]+)\}|([A-Za-z_][A-Za-z0-9_]*))')
+# The tokenizer ``os.path.expandvars`` compiles, per platform, so the profile-bound
+# expansion gives the same result the Agent would get from the process environment
+# (#9321). They are ``posixpath._varpattern`` and ``ntpath._varpattern``; both are
+# byte-identical on CPython 3.11-3.14, so the behaviour does not depend on the
+# interpreter the WebUI happens to run under.
+#   POSIX:   $name over ``\w+`` (so a bare ``$1abc`` is a reference) and ${name}.
+#   Windows: additionally %NAME% (hyphens included), bare hyphenated $NAME,
+#            ``$$`` -> ``$`` and ``%%`` -> ``%``, and single-quoted runs untouched.
+_POSIX_EXPAND_VAR = re.compile(r'\$(\w+|\{[^}]*\}?)', re.ASCII)
+_WINDOWS_EXPAND_VAR = re.compile(r"'[^']*'?|%(%|[^%]*%?)|\$(\$|[-\w]+|\{[^}]*\}?)", re.ASCII)
 
 
-def profile_external_skill_dirs(profile_home: Path) -> list[Path]:
+def expand_path_vars(value: str, env: dict[str, str], *, windows: bool | None = None) -> str:
+    """Expand *value* exactly as ``os.path.expandvars`` does, using only *env*.
+
+    *env* is the caller's binding — this helper never reads the live process
+    environment, so a named profile keeps resolving against its own ``.env``.
+    The expansion is a single pass: a name the binding does not hold stays
+    literal text, and a value is not expanded again.
+
+    *windows* selects the ``ntpath`` rules; it defaults to the running platform
+    (``os.name == 'nt'``), so both behaviours are testable from one host.
+    """
+    if windows is None:
+        windows = os.name == 'nt'
+    pattern = _WINDOWS_EXPAND_VAR if windows else _POSIX_EXPAND_VAR
+
+    def expand_var(match):
+        group = match.lastindex
+        if group is None:
+            return match.group(0)  # Windows: a single-quoted run stays as it is
+        name = match.group(group)
+        if windows and group == 1:
+            if name == '%':
+                return name  # %% is one literal percent sign
+            if not name.endswith('%'):
+                return match.group(0)  # unclosed %NAME
+            name = name[:-1]
+        elif name == '$':
+            return name  # Windows: $$ is one literal dollar sign
+        elif name.startswith('{'):
+            if not name.endswith('}'):
+                return match.group(0)  # unclosed ${NAME
+            name = name[1:-1]
+        return env.get(name, match.group(0))
+
+    return pattern.sub(expand_var, value)
+
+
+def profile_external_skill_dirs(profile_home: Path, *, windows: bool | None = None) -> list[Path]:
     """Existing external skill roots configured for the profile at *profile_home*.
 
     Like the Agent: an unreadable or malformed config lists none, entries are
-    expanded in a single pass (an unknown variable stays literal text), relative
-    paths start at the profile home, the profile's own ``skills/`` dir and
-    duplicates are dropped, and an entry that is not a directory is skipped.
-    The live process environment is never read.
+    expanded in a single pass as ``os.path.expandvars`` would (an unknown
+    variable stays literal text), relative paths start at the profile home, the
+    profile's own ``skills/`` dir and duplicates are dropped, and an entry that
+    is not a directory is skipped. The live process environment is never read.
+    *windows* overrides the platform the expansion follows (tests, and a caller
+    that knows better than ``os.name``).
     """
     from api.paths import HOME
     from api.profiles import profile_env_binding
@@ -61,14 +108,11 @@ def profile_external_skill_dirs(profile_home: Path) -> list[Path]:
     env = profile_env_binding(profile_home)
     env['HOME'] = str(HOME)
 
-    def expand_var(match):
-        return env.get(match.group(1) or match.group(2), match.group(0))
-
     local_skills = (profile_home / 'skills').resolve()
     roots: list[Path] = []
     for entry in entries:
         try:
-            expanded = _PATH_ENV_VAR.sub(expand_var, entry)
+            expanded = expand_path_vars(entry, env, windows=windows)
             if expanded == '~' or expanded.startswith('~/'):
                 expanded = str(HOME) + expanded[1:]
             else:
