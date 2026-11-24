@@ -569,7 +569,7 @@ def _same_config_file(a: Path | None, b: Path | None) -> bool:
         pass
     try:
         return Path(a).expanduser().resolve(strict=False) == Path(b).expanduser().resolve(strict=False)
-    except OSError:
+    except (OSError, RuntimeError):
         return False
 
 
