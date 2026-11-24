@@ -27,7 +27,7 @@
 
 ### Security
 
-- **Redaction runs in linear time on very long or unusual text (#9339).** Two of the WebUI's fallback redaction patterns could take quadratic time on some inputs. Both now finish in one pass, and they redact exactly what they redacted before.
+- **Two of the WebUI's fallback redaction patterns now run in linear time (#9339).** On some long inputs they could take quadratic time. Both now finish in one pass, and they redact exactly what they redacted before.
 
 - **A named profile's Skills panel no longer shows another profile's external skill folders (#7842, @Notaloop763).** The skills list, skill view, linked files and the on/off toggle used to take the external skill folders (`skills.external_dirs`) from the profile the server started with, whichever profile made the request. So a named profile could list, open and toggle skills that were configured only for another profile. Each request now reads those folders from its own profile's `config.yaml`, with variables resolved for that profile. A missing or broken profile config lists no external folders and never hides the profile's own skills.
 
