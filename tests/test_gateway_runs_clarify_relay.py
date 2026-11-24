@@ -552,6 +552,46 @@ def test_status_republished_generation_replaces_outdated_clarify_card(_endpoint)
     assert calls[0][1] == {"request_id": "clar-a", "execution_generation": 4, "answer": "blue"}
 
 
+@pytest.mark.parametrize("outcome", [
+    _http_error(409, "stale_generation"),
+    {"run_id": RUN, "status": "already_resolved", "prompt_id": "clar-a"},
+])
+def test_outdated_answer_settling_late_keeps_newer_generation_card(_endpoint, outcome):
+    """A generation-3 POST still in flight while status republishes generation 4
+    retires only its own card; the generation-4 card stays answerable."""
+    old_cid = _surface(prompt_id="clar-a", generation=3)
+    entered, release = threading.Event(), threading.Event()
+
+    def held(req):
+        entered.set()
+        assert release.wait(5)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return _FakeResp(outcome)
+
+    out = {}
+    with patch.object(HttpRunnerClient, "_opener", lambda self: _Opener(held)):
+        worker = threading.Thread(
+            target=lambda: out.update(_respond({"session_id": SID, "clarify_id": old_cid, "response": "x"})))
+        worker.start()
+        assert entered.wait(5)
+        events = []
+        gateway_chat._sync_gateway_run_clarify_from_status(
+            SID, RUN, {"status": "running", "pending_controls": [_parked("clar-a", 4)]}, "http://gw:8642", "k",
+            put_gateway_event=lambda e, d: events.append((e, d)))
+        release.set()
+        worker.join(5)
+    assert out["status"] == 409 and out["payload"]["stale"] is True
+    new_cid = clarify.gateway_run_clarify_id(RUN, "clar-a", 4)
+    assert clarify.gateway_run_prompt_keys(SID, RUN) == {("clar-a", 4)}
+    assert clarify.get_pending(SID)["clarify_id"] == new_cid
+    calls, ctx = _gateway_post({"run_id": RUN, "status": "resolved", "prompt_id": "clar-a"})
+    with ctx:
+        out = _respond({"session_id": SID, "clarify_id": new_cid, "response": "blue"})
+    assert out["status"] == 200
+    assert calls[0][1] == {"request_id": "clar-a", "execution_generation": 4, "answer": "blue"}
+
+
 def test_restart_does_not_resurrect_settled_clarify(monkeypatch):
     """clarify.settled writes no journal row; only the status says which prompts live."""
     events, seen = [], []

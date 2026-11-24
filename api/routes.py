@@ -35956,16 +35956,16 @@ def _resolve_gateway_run_clarify(sid: str, clarify_id: str, response: str) -> bo
         logger.info("Gateway rejected clarify answer for run %s: %s", run_id, exc.code or exc.status)
         if exc.code in _GATEWAY_CLARIFY_DEAD_CODES:
             # The Gateway proved this prompt can no longer be answered: retire
-            # the card so it does not linger, and report the answer as stale.
-            settle_gateway_run_pending(sid, run_id, prompt_id)
+            # this generation's card only, and report the answer as stale.
+            settle_gateway_run_pending(sid, run_id, prompt_id, generation=generation)
             return False
         raise GatewayClarifyUnavailable(str(exc)) from exc
     except (ValueError, OSError) as exc:
         logger.debug("Gateway clarify relay failed for run %s", run_id, exc_info=True)
         raise GatewayClarifyUnavailable(str(exc)) from exc
     status = str((result or {}).get("status") or "") if isinstance(result, dict) else ""
-    # Either way the Gateway no longer has this prompt parked.
-    settle_gateway_run_pending(sid, run_id, prompt_id)
+    # Either way this generation is no longer parked; a republished newer card stays.
+    settle_gateway_run_pending(sid, run_id, prompt_id, generation=generation)
     return status == "resolved"
 
 
