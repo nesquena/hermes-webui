@@ -39,6 +39,32 @@ _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
 })
 
 
+# Storage full (#9167): a write that hits ENOSPC/EDQUOT is not an internal bug, and the
+# user can fix it by freeing space. Report it instead of the generic 500.
+_STORAGE_FULL_ERRNOS = frozenset(
+    code for code in (errno.ENOSPC, getattr(errno, "EDQUOT", None)) if code is not None)
+STORAGE_FULL_MESSAGE = "Storage on the server is full. Free up space and try again."
+
+
+def is_storage_full(exc: BaseException | None) -> bool:
+    """True when ``exc`` or an exception it was raised from is ENOSPC/EDQUOT."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, OSError) and exc.errno in _STORAGE_FULL_ERRNOS:
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def send_server_error(handler, exc: BaseException | None) -> None:
+    """The last-resort error response: 507 for storage full, generic 500 otherwise."""
+    if is_storage_full(exc):
+        j(handler, {'error': STORAGE_FULL_MESSAGE}, status=507)
+    else:
+        j(handler, {'error': 'Internal server error'}, status=500)
+
+
 # Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
 # connections often end this way when a browser tab sleeps, a phone switches
 # networks, or Tailscale leaves the socket half-closed.
