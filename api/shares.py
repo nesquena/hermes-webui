@@ -72,10 +72,11 @@ def _scrub_registered_values(text):
 def _scrub_message_prose(message):
     """``message`` with registered exact values masked in its prose.
 
-    A share publishes a message's text parts joined, so they are joined here
-    (into the first text part, other parts kept in place) and scrubbed whole:
-    a value split across parts must be found before any pattern pass masks
-    part of it.
+    A share publishes a message's text parts joined, so they are scrubbed
+    joined: a value split across parts must be found before any pattern pass
+    masks part of it. Only when that masks something are the text parts
+    replaced by the scrubbed text (in the first text part, other parts kept
+    in place); otherwise the message is left exactly as it is.
     """
     content = message.get("content") if isinstance(message, dict) else None
     if isinstance(content, str):
@@ -85,11 +86,14 @@ def _scrub_message_prose(message):
     is_text = [isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str) for p in content]
     if not any(is_text):
         return message
-    joined = _scrub_registered_values("".join(p["text"] for p, t in zip(content, is_text) if t))
+    text = "".join(p["text"] for p, t in zip(content, is_text, strict=True) if t)
+    joined = _scrub_registered_values(text)
+    if joined == text:
+        return message
     first = is_text.index(True)
     return {**message, "content": [
         {**p, "text": joined} if i == first else p
-        for i, (p, t) in enumerate(zip(content, is_text))
+        for i, (p, t) in enumerate(zip(content, is_text, strict=True))
         if i == first or not t
     ]}
 
@@ -108,7 +112,7 @@ def _with_source_schema(walked, source):
     if isinstance(parts, list) and isinstance(source_parts, list) and len(parts) == len(source_parts):
         out["content"] = [
             {**p, "type": sp["type"]} if isinstance(p, dict) and isinstance(sp, dict) and "type" in sp else p
-            for p, sp in zip(parts, source_parts)
+            for p, sp in zip(parts, source_parts, strict=True)
         ]
     return out
 
@@ -304,12 +308,6 @@ _SHARE_ALLOWED_MIME_TYPES: frozenset[str] = frozenset({
     "image/gif",
     "image/webp",
 })
-# The image data _embed_share_media writes into a snapshot, matched only inside
-# the exact tag it emits. A snapshot build replaces content-supplied data: URIs
-# with a placeholder before the embed (_placeholder_inline_data_uris).
-_EMBEDDED_IMAGE_DATA_RE = re.compile(
-    r'(?<=<img src=")data:(image/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=]*)(?=" class="msg-media-img" alt=")'
-)
 
 # SVG namespace URI used during sanitisation.
 _SVG_NS = "http://www.w3.org/2000/svg"
@@ -1111,40 +1109,15 @@ def _sanitize_message(
     return sanitized
 
 
-def _is_embedded_image(m: re.Match) -> bool:
-    try:
-        data = base64.b64decode(m.group(2), validate=True)
-    except ValueError:
-        return False
-    return _check_image_magic(data, m.group(1))
-
-
-def _scrub_stored_share_text(text):
-    """A stored message's text with registered exact values masked, embedded images excepted.
-
-    A snapshot is written once, so a value registered after it was published
-    has to be masked when the snapshot is served. Only the image data of an
-    ``<img>`` tag exactly as _embed_share_media writes it, holding a decodable
-    image of its declared type, is left as written: a short registered value
-    can occur in base64 by chance, and replacing it only breaks the image.
-    """
-    if not isinstance(text, str) or not text or not _EXACT_VALUE_SCRUBBERS:
-        return text
-    out, pos = [], 0
-    for m in _EMBEDDED_IMAGE_DATA_RE.finditer(text):
-        if _is_embedded_image(m):
-            out += [_scrub_registered_values(text[pos:m.start()]), m.group(0)]
-            pos = m.end()
-    out.append(_scrub_registered_values(text[pos:]))
-    return "".join(out)
-
-
 def _public_share_payload(payload: dict) -> dict:
     messages = payload.get("messages")
     if not isinstance(messages, list):
         messages = []
+    # A snapshot is written once, so a value registered after it was published
+    # is masked when it is served: in the whole title and the whole text of
+    # each message, embedded images included.
     messages = [
-        {**m, "content": _scrub_stored_share_text(m["content"])}
+        {**m, "content": _scrub_registered_values(m["content"])}
         if isinstance(m, dict) and isinstance(m.get("content"), str)
         else m
         for m in messages
@@ -1207,7 +1180,7 @@ def build_share_snapshot(session) -> dict:
     _allowed_roots_tuple: tuple[Path, ...] = tuple(_allowed_roots)
     walked = safe_session.get("messages") or []
     if isinstance(source.get("messages"), list) and len(source["messages"]) == len(walked):
-        walked = [_with_source_schema(w, s) for w, s in zip(walked, source["messages"])]
+        walked = [_with_source_schema(w, s) for w, s in zip(walked, source["messages"], strict=True)]
     safe_messages = []
     for raw in walked:
         sanitized = _sanitize_message(
@@ -1222,7 +1195,9 @@ def build_share_snapshot(session) -> dict:
     # /api/session/import) must not be str()'d into the public snapshot.
     _raw_title = safe_session.get("title")
     _raw_title = _raw_title if isinstance(_raw_title, str) else "Untitled"
-    title = _force_redact_credentials(_raw_title or "Untitled")
+    # The fallback title never went through the prose pre-scrub, and the
+    # pattern pass memoizes it, so the exact values go first here as well.
+    title = _force_redact_credentials(_scrub_registered_values(_raw_title or "Untitled"))
     title = _placeholder_inline_data_uris(title)
     title = _redact_share_paths(title, redact_paths) or "Untitled"
     return {

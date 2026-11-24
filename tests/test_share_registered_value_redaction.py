@@ -15,9 +15,11 @@ stored snapshot was served as written:
 
 Shares now run the exact values first, on the prose a share publishes (title
 and message text, with a message's text parts joined as the share joins them),
-when a snapshot is built and when a stored one is served. On a read only the
-image data inside the exact tag the build's media embed writes, holding a real
-image, is left as written.
+when a snapshot is built and when a stored one is served. A read scrubs the
+whole stored title and the whole text of each message, embedded images
+included: a registered value inside image data is masked there too, which
+only breaks that image. When no registered value occurs in a message, the
+build leaves its parts exactly as they are.
 Roles, part types and other schema fields are never scrubbed, so a short
 registered value such as "user" or "text" cannot break a share. In prose such
 a value is masked like any other registered value, as the Agent does. In-app
@@ -277,6 +279,33 @@ def test_exact_values_run_in_the_agents_order(vault, secret_sources):
     assert _texts(_snapshot("t", [{"role": "user", "content": text}]))[1] == expected
 
 
+def test_new_share_masks_a_registered_fallback_title(registry, redaction_setting):
+    """The fallback title is masked when the build writes it, not only when a share is read."""
+    register, mask = registry
+    messages = [{"role": "user", "content": "DUMMYhello"}]
+    assert _snapshot("", messages)["title"] == "Untitled"  # memoized before the registration
+
+    register("Untitled")
+    assert _snapshot("", messages)["title"] == mask
+    assert _snapshot(None, messages)["title"] == mask
+
+
+def test_new_share_without_registered_values_keeps_text_parts_as_they_are(vault, redaction_setting, monkeypatch):
+    """With nothing registered, a message's text parts are walked one by one, as without the scrub."""
+    from api import shares
+
+    head = "DUMMYprefix ghp_" + "A" * 36
+    messages = [{"role": "user", "content": [{"type": "text", "text": head}, {"type": "text", "text": "DUMMYTAIL"}]}]
+    if hasattr(shares, "_bind_exact_value_scrubbers"):
+        assert shares._EXACT_VALUE_SCRUBBERS, "precondition: the scrubbers are bound"
+    published = _snapshot("t", messages)
+    if redaction_setting:  # the walker masks the token in the first part alone
+        assert published["messages"][0]["content"] == helpers._redact_text(head, _enabled=True) + "DUMMYTAIL"
+
+    monkeypatch.setattr(shares, "_EXACT_VALUE_SCRUBBERS", (), raising=False)
+    assert published == _snapshot("t", messages)
+
+
 # ── Serving a stored share ──────────────────────────────────────────────────
 
 
@@ -314,29 +343,79 @@ def _embed_tag(payload, alt="pic.png"):
     return f'<img src="data:image/png;base64,{payload}" class="msg-media-img" alt="{alt}" loading="lazy">'
 
 
-def test_stored_share_read_keeps_a_genuine_embedded_image(state, vault, tmp_path):
-    """An image the build embedded from the workspace is served as written; the prose is scrubbed."""
+def _built_share_with_image(state, prose):
+    """A snapshot the build wrote with ``pic.png`` embedded from the workspace: ``(token, content, b64)``."""
     from api import shares
 
-    workspace = tmp_path / "ws"
+    workspace = state / "ws"
     workspace.mkdir()
     (workspace / "pic.png").write_bytes(_png_bytes())
     b64 = base64.b64encode(_png_bytes()).decode()
-    messages = [{"role": "assistant", "content": f"look MEDIA:pic.png and {_VAULT_VALUE}"}]
-    snapshot = shares.build_share_snapshot(
-        types.SimpleNamespace(session_id=SID, title="Pic", messages=messages, workspace=str(workspace))
-    )
+    snapshot = shares.build_share_snapshot(types.SimpleNamespace(
+        session_id=SID, title="Pic", messages=[{"role": "assistant", "content": prose}], workspace=str(workspace),
+    ))
     content = snapshot["messages"][0]["content"]
     assert _embed_tag(b64) in content, "precondition: the build embedded the file"
     _save_session("Pic", [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}])
-    token = shares.write_share_snapshot(snapshot, source_session_id=SID)["share_token"]
+    return shares.write_share_snapshot(snapshot, source_session_id=SID)["share_token"], content, b64
 
-    vault.register_vault_redaction_value(b64[24:36])  # occurs in the image data only
+
+def test_stored_share_read_keeps_a_genuine_embedded_image(state, vault):
+    """An image the build embedded is served as written when no registered value occurs in it."""
+    token, content, b64 = _built_share_with_image(state, f"look MEDIA:pic.png and {_VAULT_VALUE}")
     vault.register_vault_redaction_value(_VAULT_VALUE)
+    vault.register_vault_redaction_value("DUMMYnotinimage")
+    assert "DUMMYnotinimage" not in content and _VAULT_VALUE not in b64
 
     served = _public_read(token)["messages"][0]["content"]
     assert served == content.replace(_VAULT_VALUE, _VAULT_MASK)
     assert _embed_tag(b64) in served
+
+
+def test_stored_share_read_masks_a_registered_value_inside_image_data(state, registry):
+    """A registered value inside an embedded image's data is masked too; only that image breaks."""
+    from api import shares
+
+    register, mask = registry
+    token, content, b64 = _built_share_with_image(state, "look MEDIA:pic.png here")
+    chunk = b64[24:36]
+    assert content.count(chunk) == 1, "precondition: the value occurs in the image data only"
+    register(chunk)
+
+    share = _public_read(token)
+    assert share["messages"][0]["content"] == content.replace(chunk, mask)
+    assert shares.load_share(token)["messages"] == share["messages"]
+
+
+@pytest.mark.parametrize("complete", [True, False], ids=["complete-tag", "unfinished-tag"])
+def test_stored_share_read_masks_a_hand_written_embed_tag(state, registry, complete):
+    """Text shaped like the embed tag, with a PNG signature in its data, is scrubbed like any text."""
+    from api import shares
+
+    register, mask = registry
+    value = "DUMMYTOKEN12"
+    tag = _embed_tag("iVBORw0KGgoA" + value)
+    text = tag if complete else tag.split("pic.png")[0]
+    _save_session("Tag", [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}])
+    token = shares.write_share_snapshot(
+        {"title": "Tag", "messages": [{"role": "assistant", "content": text}], "message_count": 1},
+        source_session_id=SID,
+    )["share_token"]
+    register(value)
+
+    assert _public_read(token)["messages"][0]["content"] == text.replace(value, mask)
+
+
+@pytest.mark.parametrize("where", ["prose-into-tag", "image-data-into-tag"])
+def test_stored_share_read_masks_a_value_across_an_embed_tag_boundary(state, registry, where):
+    """A registered value that starts in prose or image data and ends in the tag around it is masked."""
+    register, mask = registry
+    token, content, b64 = _built_share_with_image(state, "DUMMYprefixMEDIA:pic.png")
+    value = 'DUMMYprefix<img src="data:' if where == "prose-into-tag" else b64[-8:] + '" class="msg'
+    assert content.count(value) == 1, "precondition: the build wrote the value across the tag boundary"
+    register(value)
+
+    assert _public_read(token)["messages"][0]["content"] == content.replace(value, mask)
 
 
 @pytest.mark.parametrize("prefix", ["X", "_", "meta"])
@@ -355,34 +434,6 @@ def test_stored_share_read_masks_data_uri_lookalikes(state, registry, prefix):
 
     masked = f"{prefix}data:image/png;base64,{mask}"
     assert _texts(_public_read(token)) == [masked, masked, "ok"]
-
-
-def test_stored_share_read_exempts_only_the_embed_tag_with_an_image(state, vault):
-    """A stored snapshot (as an older build may have written it): only a real embed tag keeps its data.
-
-    The exact tag holding no image, a real image outside the tag, and the tag
-    in a title are all scrubbed.
-    """
-    from api import shares
-
-    b64 = base64.b64encode(_png_bytes()).decode()
-    chunk = b64[24:36]
-    content = f"{_embed_tag(b64)}\n{_embed_tag(_VAULT_VALUE)}\nsee data:image/png;base64,{b64} here"
-    _save_session("Images", [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}])
-    token = shares.write_share_snapshot(
-        {"title": _embed_tag(b64), "messages": [{"role": "assistant", "content": content}], "message_count": 1},
-        source_session_id=SID,
-    )["share_token"]
-
-    vault.register_vault_redaction_value(chunk)
-    vault.register_vault_redaction_value(_VAULT_VALUE)
-
-    share = _public_read(token)
-    masked_b64 = b64.replace(chunk, _VAULT_MASK)
-    assert share["title"] == _embed_tag(masked_b64)
-    assert share["messages"][0]["content"] == (
-        f"{_embed_tag(b64)}\n{_embed_tag(_VAULT_MASK)}\nsee data:image/png;base64,{masked_b64} here"
-    )
 
 
 # ── Short registered values never rewrite the schema ────────────────────────
@@ -440,22 +491,30 @@ def test_share_keeps_roles_and_types_the_walker_masked(state, vault, plugin_patt
     """
     for word in ("user", "text"):
         vault.register_vault_redaction_value(word)
+    image = {"type": "image_url", "image_url": {"url": "https://example.invalid/x.png"}}
     messages = [
         {"role": "user", "content": [{"type": "text", "text": "hello"}], "timestamp": 100},
         {"role": "assistant", "content": "the user said hi", "timestamp": 101},
+        # Nothing registered occurs: the parts are walked as they are.
+        {"role": "user", "content": [{"type": "text", "text": "hel"}, image, {"type": "text", "text": "lo"}]},
+        # A registered word occurs: the text parts are scrubbed joined.
+        {"role": "user", "content": [{"type": "text", "text": "the "}, image, {"type": "text", "text": "user said"}]},
     ]
     if redaction_setting:
         walked = helpers.redact_session_data({"messages": messages})["messages"]
         assert walked[0]["role"] == _VAULT_MASK, "precondition: the walker masks the role here"
+        assert walked[2]["content"][0]["type"] == _VAULT_MASK, "precondition: and the part type"
 
     expected = [
         {"role": "user", "content": "hello", "timestamp": 100},
         {"role": "assistant", "content": f"the {_VAULT_MASK} said hi", "timestamp": 101},
+        {"role": "user", "content": "hello"},
+        {"role": "user", "content": f"the {_VAULT_MASK} said"},
     ]
     assert _snapshot("Hello", messages)["messages"] == expected
     _save_session("Hello", messages)
     share = _public_read(_publish())
-    assert share["messages"] == expected and share["message_count"] == 2
+    assert share["messages"] == expected and share["message_count"] == 4
 
 
 def test_in_app_session_response_does_not_use_the_share_scrub(state, vault, monkeypatch):
