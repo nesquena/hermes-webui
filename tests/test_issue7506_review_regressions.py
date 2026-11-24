@@ -56,14 +56,18 @@ class _VirtualTimeThreading:
 
     A timed ``wait`` blocks in real time until the event is set, then returns
     whether it was set within ``timeout`` virtual seconds of the wait starting.
-    That is what the real wait returns when CPU work takes no time, so the
-    product's own slice and deadline arithmetic still decides the outcome.
+    A wait that expires on the virtual clock is recorded in ``expired``.
+    Because the wait blocks, the event is already set when an expired wait
+    returns, so code that re-checks ``is_set()`` could still take the
+    in-time branch; tests must assert that no timed wait expired (and none
+    got stuck), not rely on the returned catalog alone.
     Threads, locks and untimed waits stay real.
     """
 
     def __init__(self, clock):
         self.timed_waits = 0
         self.stuck = []
+        self.expired = []
         harness = self
 
         class Event:
@@ -91,7 +95,10 @@ class _VirtualTimeThreading:
                 if not self._real.wait(_REAL_SAFETY_SECONDS):
                     harness.stuck.append(timeout)
                     return False
-                return self._set_at <= started + timeout
+                in_time = self._set_at <= started + timeout
+                if not in_time:
+                    harness.expired.append((started, timeout, self._set_at))
+                return in_time
 
         self.Event = Event
 
@@ -172,7 +179,10 @@ def test_real_slow_healthy_endpoint_is_listed_and_cached(
         monkeypatch.setattr(cfg, "time", clock)
         monkeypatch.setattr(cfg, "threading", events)
         monkeypatch.setattr(urllib.request, "urlopen", urlopen_with_latency)
-        for catalog in (cfg.get_available_models(), cfg.get_available_models()):
+        catalogs = (cfg.get_available_models(), cfg.get_available_models())
+        assert not events.stuck, events.stuck
+        assert not events.expired, events.expired
+        for catalog in catalogs:
             provider = "lmstudio" if fast_active == "alone" else "custom:gateway"
             assert "healthy-model" in _models_by_provider(catalog).get(provider, [])
             assert "unreachable" not in json.dumps(catalog)
