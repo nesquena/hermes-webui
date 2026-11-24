@@ -7912,7 +7912,14 @@ function renderModelDropdown(){
   if(!dd._modelPickerKeyBound){
     dd._modelPickerKeyBound=true;
     dd.addEventListener('keydown',e=>{
-      if(e.target!==dd) return;
+      // Escape belongs to the picker even when focus sits on a DESCENDANT that
+      // deliberately keeps it — the pin star is the click case. Letting it
+      // bubble to the document handler closes the whole Settings panel or
+      // clears the session filter behind an open picker. Handle the boundary
+      // before the target guard and route through the slot so the CURRENT
+      // render's closeDropdown runs (it owns returning focus to the chip). The
+      // search input's own handler still consumes its keys first.
+      if(e.target!==dd&&e.key!=='Escape') return;
       if(typeof dd._modelPickerKey==='function') dd._modelPickerKey(e);
     });
   }
