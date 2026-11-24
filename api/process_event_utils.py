@@ -672,11 +672,26 @@ def _mark_legacy_async_delivery_complete(delegation_id: str) -> bool:
 
 
 def _is_transient_ledger_error(exc: BaseException) -> bool:
-    """SQLite lock contention (busy/locked) clears on its own; anything else does not."""
-    if not isinstance(exc, sqlite3.OperationalError):
-        return False
-    message = str(exc).lower()
-    return "locked" in message or "busy" in message
+    """SQLite lock contention (busy/locked) clears on its own; anything else does not.
+
+    Agents whose ledger runs behind the storage interface raise its
+    ``StoreContention`` (the SQLite error chained as the cause) instead of the
+    bare ``sqlite3.OperationalError``; both are matched, following the chain
+    the way a traceback shows it.
+    """
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen and len(seen) < 8:
+        seen.add(id(exc))
+        if any(cls.__name__ == "StoreContention" for cls in type(exc).__mro__):
+            return True
+        if isinstance(exc, sqlite3.OperationalError):
+            message = str(exc).lower()
+            if "locked" in message or "busy" in message:
+                return True
+        exc = exc.__cause__ if exc.__cause__ is not None else (
+            None if exc.__suppress_context__ else exc.__context__
+        )
+    return False
 
 
 def _complete_event_delivery_with_retry(complete_fn: Any, evt: Any, claim_id: str) -> None:

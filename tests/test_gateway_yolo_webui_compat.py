@@ -28,6 +28,11 @@ except ImportError:
     APPROVAL_AVAILABLE = False
 
 
+def _unversioned(payload):
+    """A YOLO answer without its #9101 revision fields (checked elsewhere)."""
+    return {k: v for k, v in payload.items() if k not in ("yolo_revision", "yolo_epoch")}
+
+
 def _js_block(source, start_marker, end_marker):
     start = source.index(start_marker)
     return source[start:source.index(end_marker, start)]
@@ -250,7 +255,7 @@ def test_card_yolo_drains_all_run_backed_and_local_approvals(monkeypatch):
         )
 
         assert response["status"] == 200
-        assert response["payload"] == {
+        assert _unversioned(response["payload"]) == {
             "ok": True,
             "choice": "once",
             "relayed": True,
@@ -1231,7 +1236,7 @@ def test_yolo_post_serializes_post_snapshot_gateway_approval(monkeypatch):
             worker.join(timeout=1)
             assert not worker.is_alive()
         assert response["status"] == 200
-        assert response["payload"] == {"ok": True, "yolo_enabled": True}
+        assert _unversioned(response["payload"]) == {"ok": True, "yolo_enabled": True}
         assert worker_results == [(True, None, 0)]
         assert auto_approved == [True]
         assert route_approvals.gateway_pending_mirror(sid) is None
@@ -1414,7 +1419,7 @@ def test_yolo_disable_linearizes_after_selected_gateway_autoapproval(monkeypatch
         assert disable_handoff_acquired.is_set()
         assert worker_results == [(True, None, 0)]
         assert events == ["approval-started", "approval-finished", "disable-response"]
-        assert response["payload"] == {"ok": True, "yolo_enabled": False}
+        assert _unversioned(response["payload"]) == {"ok": True, "yolo_enabled": False}
         assert is_session_yolo_enabled(sid) is False
     finally:
         release_approval.set()
@@ -1486,7 +1491,7 @@ def test_disable_that_wins_handoff_precedes_enable_drain(monkeypatch):
         disable_worker.start()
         disable_worker.join(timeout=1)
         assert not disable_worker.is_alive()
-        assert responses["yolo-disable"]["payload"] == {"ok": True, "yolo_enabled": False}
+        assert _unversioned(responses["yolo-disable"]["payload"]) == {"ok": True, "yolo_enabled": False}
         assert not entry.event.is_set()
 
         allow_enable_handoff.set()
@@ -1590,7 +1595,7 @@ def test_yolo_post_first_relay_serializes_next_gateway_approval(monkeypatch):
             worker.join(timeout=1)
             assert not worker.is_alive()
         assert response["status"] == 200
-        assert response["payload"] == {
+        assert _unversioned(response["payload"]) == {
             "ok": True,
             "choice": "once",
             "relayed": True,

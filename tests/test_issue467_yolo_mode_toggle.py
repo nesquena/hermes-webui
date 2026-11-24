@@ -158,11 +158,12 @@ class TestYoloEndpointPost:
         data = _get(f"/api/session/yolo?session_id={sid_b}")
         assert data.get("yolo_enabled") is False
 
-    def test_yolo_post_defaults_to_enabled(self):
-        """POST without 'enabled' key defaults to True."""
+    def test_yolo_post_without_enabled_is_rejected(self):
+        """#9101: POST without a boolean 'enabled' is a 400 and changes nothing."""
         sid = "test-yolo-default-001"
         data = _post("/api/session/yolo", {"session_id": sid})
-        assert data.get("yolo_enabled") is True
+        assert "enabled" in (data.get("error") or "")
+        assert _get(f"/api/session/yolo?session_id={sid}").get("yolo_enabled") is False
 
 
 # ── Frontend JS tests (static file analysis — no server needed) ──

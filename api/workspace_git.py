@@ -8,6 +8,7 @@ pathspecs, and keeps all Git subprocess calls shell-free and bounded.
 from __future__ import annotations
 
 import difflib
+import locale
 import logging
 import os
 import shutil
@@ -189,6 +190,7 @@ def _run_git(
     disable_filter_attributes: bool = False,
     neutralize_filter_programs: bool = False,
     neutralize_remote_helpers: bool = False,
+    preserve_output_newlines: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     cwd = ctx_or_cwd.repo_root if isinstance(ctx_or_cwd, GitContext) else ctx_or_cwd
     run_env = _clean_git_env(env)
@@ -252,7 +254,7 @@ def _run_git(
             cwd=str(cwd),
             shell=False,
             capture_output=True,
-            text=True,
+            text=not preserve_output_newlines,
             timeout=timeout,
             env=run_env,
             creationflags=windows_hide_flags(),
@@ -268,6 +270,12 @@ def _run_git(
             Path(path).unlink(missing_ok=True)
         for path in temporary_dirs:
             shutil.rmtree(path, ignore_errors=True)
+    if preserve_output_newlines:
+        # Same codec text=True would use, minus universal-newline translation:
+        # a CR inside a changed line stays inside that line.
+        encoding = locale.getpreferredencoding(False)
+        result.stdout = result.stdout.decode(encoding)
+        result.stderr = result.stderr.decode(encoding)
     if check and result.returncode != 0:
         message = (result.stderr or result.stdout or "Git command failed").strip()
         raise GitWorkspaceError(message, _classify_git_error(message, args))
@@ -1212,10 +1220,35 @@ def git_stash_and_checkout(
     }
 
 
+def _iter_lf_records(text: str):
+    """Yield the LF-delimited records of ``text`` one at a time (same records as
+    ``text.split("\\n")``) without building the whole list: the counts cover the
+    full patch, which can hold millions of lines."""
+    start = 0
+    while True:
+        end = text.find("\n", start)
+        if end < 0:
+            yield text[start:]
+            return
+        yield text[start:end]
+        start = end + 1
+
+
 def _diff_stats(diff_text: str) -> tuple[int, int]:
     additions = deletions = 0
-    for line in diff_text.splitlines():
-        if line.startswith("+++") or line.startswith("---"):
+    in_hunk = False
+    # Patch records end at LF only. str.splitlines() also breaks on CR, VT, FF,
+    # NEL and U+2028/9, which turned changed content into phantom +/- records.
+    # Every file header starts with "diff " (--git, --cc, --combined), so the
+    # header state resets for combined diffs of unmerged paths too.
+    for line in _iter_lf_records(diff_text):
+        if line.startswith("diff "):
+            in_hunk = False
+            continue
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if not in_hunk and (line.startswith("+++ ") or line.startswith("--- ")):
             continue
         if line.startswith("+"):
             additions += 1
@@ -1285,13 +1318,19 @@ def git_diff(workspace: str | Path, path: str, kind: str = "unstaged") -> dict:
     if kind == "staged":
         args.append("--cached")
     args.extend(["--", repo_rel])
-    result = _run_git(ctx, args, check=True, neutralize_filter_programs=True)
-    diff = result.stdout
+    result = _run_git(
+        ctx, args, check=True, neutralize_filter_programs=True, preserve_output_newlines=True)
+    # Count from git's own LF-delimited records; the payload keeps the
+    # universal-newline form it always had (CRLF and lone CR become LF).
+    raw = result.stdout
+    diff = raw.replace("\r\n", "\n").replace("\r", "\n")
     binary = "Binary files " in diff or "GIT binary patch" in diff
+    # Count the whole patch: cutting the raw text at the payload limit would
+    # reach fewer lines than the payload whenever it still holds CRs.
+    additions, deletions = _diff_stats(raw)
     too_large = len(diff.encode("utf-8", errors="replace")) > DIFF_SIZE_LIMIT
     if too_large:
         diff = diff[:DIFF_SIZE_LIMIT]
-    additions, deletions = _diff_stats(diff)
     return {
         "path": workspace_rel,
         "kind": kind,
