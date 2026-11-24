@@ -3,9 +3,10 @@
 The lookup hands (URL, key, provider) to the Agent's ``get_model_context_length``. The Agent contacts the URL's
 host, plus fixed metadata hosts for some providers (``_CONTEXT_LOOKUP_FIXED_HOSTS``). A key may go only to hosts
 its own config source owns: every URL that source declares (``api``, ``url`` or ``base_url``), plus the provider's
-fixed hosts when the source is that provider's own (a built-in record, the model block configured for it, or a
-caller key that came with no URL). Otherwise the lookup sends no key. It never changes the URL, and a key that isn't
-a string (a ``key_cmd`` token source) passes through untouched.
+fixed hosts when the source is that provider's own (a built-in record that declares no endpoint of its own, the
+model block configured for it, or a caller key that came with no URL while no record named like the provider
+declares an endpoint). Otherwise the lookup sends no key. It never changes the URL, and a key that isn't a string
+(a ``key_cmd`` token source) passes through untouched.
 
 The two streaming sites ask the lookup for the config key first, as v0.52.544 did, and offer the Agent's own key
 only as its fallback, under the same rule; nothing is added after the lookup.
@@ -271,11 +272,13 @@ def test_a_legacy_key_never_reaches_a_providers_fixed_host():
 
 
 @pytest.mark.parametrize("follows_url", [False, True])
-def test_a_key_with_its_own_url_still_owns_codex_s_fixed_host_only_if_it_is_codex_s_own(follows_url, monkeypatch):
+def test_a_key_with_its_own_url_never_owns_codex_s_fixed_host(follows_url, monkeypatch):
+    """A record (or legacy entry) that declares its own URL is that endpoint's, not Codex's own: the Agent routes the
+    id through it. Its key goes only to that URL, so an Agent whose Codex catalog ignores the URL gets no key."""
     monkeypatch.setattr(routes, "_agent_codex_catalog_follows_url", lambda: follows_url)
     own = _lookup({"model": {"provider": "openai-codex"},
                    "providers": {"openai-codex": {"base_url": B, "api_key": "KB"}}}, "openai-codex")
-    assert (own.base_url, own.api_key) == (B, "KB")
+    assert (own.base_url, own.api_key) == (B, "KB" if follows_url else "")
     legacy = _lookup({"model": {"provider": "openai-codex"},
                       "custom_providers": [{"name": "openai-codex", "base_url": L, "api_key": "KL"}]}, "openai-codex")
     assert legacy.base_url == L
@@ -293,6 +296,119 @@ def test_the_fixed_host_table_names_every_measured_host():
     assert table["copilot"]["with_url_unless"] == table["copilot-acp"]["with_url_unless"] == (
         "_agent_copilot_lookup_follows_url")
     assert table["openai-codex"]["no_url"] == table["openai-codex"]["with_url"] == ("chatgpt.com",)
+
+
+# ── A record that declares its own endpoint ────────────────────────────────────
+#
+# The Agent routes a provider id through an enabled ``providers`` record that declares its own endpoint, in any
+# spelling its ``_entry_url`` reads (``api``, ``url``, ``base_url``; its v12 config migration writes ``api`` for a
+# legacy entry named like a built-in). Such a record's key is a credential for that endpoint, not the built-in
+# provider's, so it owns only the URLs the record declares, and the lookup asks it at the URL of the record it came
+# from, not of the first record matching the id (an alias-keyed tuning block can come first). A record that declares
+# no endpoint is the provider's own and still owns its fixed hosts. The Agent's view is stubbed, so no Agent is needed.
+
+_ALIASES = {"anthropic": "claude", "novita": "novita-ai", "openai-codex": "chatgpt"}
+_SPELLINGS = ("api", "url", "base_url")
+
+
+def _endpoint_records(pid, key):
+    """``providers`` shapes in which a record named like ``pid`` declares its own endpoint L, by shape name."""
+    shapes = {}
+    for field in _SPELLINGS:
+        shapes[field] = {pid: {field: L, "api_key": key}}
+        shapes[f"alias-first-{field}"] = {_ALIASES[pid]: {"request_timeout_seconds": 60}, pid: {field: L, "api_key": key}}
+    return shapes
+
+
+_ENDPOINT_CASES = [(pid, shape) for pid in sorted(_ALIASES) for shape in _endpoint_records(pid, "")]
+
+
+def _all_fixed_origins(pid):
+    row = routes._CONTEXT_LOOKUP_FIXED_HOSTS.get(pid, {})
+    return frozenset(f"{host}:443" for host in (*row.get("no_url", ()), *row.get("with_url", ())))
+
+
+def _agent_view(monkeypatch, *, codex_follows_url=True):
+    """The installed Agent's view, stubbed: L is a custom endpoint, so its lookup returns before the provider step
+    (Codex's excepted), and its Codex catalog follows the URL unless told otherwise."""
+    monkeypatch.setattr(routes, "_agent_reaches_provider_step_with_url",
+                        lambda provider, url: str(provider or "").lower() == "openai-codex")
+    monkeypatch.setattr(routes, "_agent_codex_catalog_follows_url", lambda: codex_follows_url)
+    monkeypatch.setattr(routes, "_agent_inferred_context_provider", lambda url: "")
+
+
+@pytest.mark.parametrize("pid,shape", _ENDPOINT_CASES, ids=[f"{p}-{s}" for p, s in _ENDPOINT_CASES])
+def test_a_record_with_its_own_endpoint_owns_only_that_endpoint(pid, shape, monkeypatch):
+    _agent_view(monkeypatch)
+    cfg = {"model": {"provider": pid}, "providers": _endpoint_records(pid, "KL")[shape], "custom_providers": []}
+    own = frozenset({routes._context_lookup_origin(L)})
+    assert routes._context_length_config_api_key_and_owner(pid, cfg) == ("KL", own)
+    assert routes._context_lookup_same_value_origins("KL", cfg) == own
+    got = _lookup(cfg, pid)
+    assert (got.base_url, got.api_key) == (L, "KL")
+    assert not routes._context_lookup_contacted_origins(got.provider, got.base_url) & _all_fixed_origins(pid)
+
+
+@pytest.mark.parametrize("field", _SPELLINGS)
+def test_a_custom_record_is_asked_at_its_own_endpoint_in_every_spelling(field, monkeypatch):
+    _agent_view(monkeypatch)
+    cfg = {"model": {"provider": "custom:my-proxy"}, "providers": {"custom:my-proxy": {field: L, "api_key": "KL"}}}
+    assert routes._context_length_config_api_key_and_owner("custom:my-proxy", cfg) == (
+        "KL", frozenset({routes._context_lookup_origin(L)}))
+    assert (_lookup(cfg, "custom:my-proxy").base_url, _lookup(cfg, "custom:my-proxy").api_key) == (L, "KL")
+
+
+def test_a_codex_record_with_its_own_endpoint_gets_no_key_where_the_catalog_ignores_the_url(monkeypatch):
+    _agent_view(monkeypatch, codex_follows_url=False)
+    cfg = {"model": {"provider": "openai-codex"}, "providers": {"openai-codex": {"api": L, "api_key": "KL"}}}
+    got = _lookup(cfg, "openai-codex")
+    assert (got.base_url, got.api_key) == (L, "")
+
+
+@pytest.mark.parametrize("key_name", ["own", "alias"])
+@pytest.mark.parametrize("pid", sorted(_ALIASES))
+def test_a_record_without_an_endpoint_still_owns_its_providers_fixed_hosts(pid, key_name, monkeypatch):
+    _agent_view(monkeypatch)
+    cfg = {"model": {"provider": pid}, "providers": {pid if key_name == "own" else _ALIASES[pid]: {"api_key": "K"}}}
+    key, owned = routes._context_length_config_api_key_and_owner(pid, cfg)
+    assert key == "K" and routes._context_lookup_fixed_origins(pid, with_url=False) <= owned
+    assert (_lookup(cfg, pid).base_url, _lookup(cfg, pid).api_key) == ("", "K")
+
+
+@pytest.mark.parametrize("pid", sorted(_ALIASES))
+def test_a_switched_off_record_with_an_endpoint_sends_no_key(pid, monkeypatch):
+    _agent_view(monkeypatch)
+    cfg = {"model": {"provider": pid}, "providers": {pid: {"api": L, "api_key": "KL", "enabled": False}}}
+    assert routes._context_length_config_api_key_and_owner(pid, cfg) == ("", frozenset())
+    assert routes._context_lookup_same_value_origins("KL", cfg) == frozenset()
+    assert _lookup(cfg, pid).api_key == ""
+
+
+@pytest.mark.parametrize("field", _SPELLINGS)
+@pytest.mark.parametrize("pid", sorted(_ALIASES))
+def test_a_caller_key_without_a_url_does_not_own_the_fixed_host_of_an_id_a_record_routes_away(pid, field,
+                                                                                              monkeypatch):
+    """A caller key with no URL under a label the Agent routes through a record's own endpoint may be that record's.
+    Here the selected record (an alias-keyed block with a key but no endpoint) leaves the URL empty, so only the
+    caller-key rule stands between the key and the fixed host."""
+    _agent_view(monkeypatch)
+    cfg = {"model": {"provider": pid}, "providers": {_ALIASES[pid]: {"api_key": "K-TUNE"}, pid: {field: L}}}
+    got = _lookup(cfg, pid, api_key="KC")
+    assert (got.base_url, got.api_key) == ("", "")
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize("field", _SPELLINGS)
+@pytest.mark.parametrize("pid", sorted(_ALIASES))
+def test_a_fallback_key_without_a_url_follows_the_caller_key_rule_for_a_routed_id(pid, field, enabled, monkeypatch):
+    """The Agent's fallback key with no URL owns its provider's fixed hosts only while no ENABLED record named like that
+    provider declares its own endpoint, the same rule as a caller key. A switched-off record leaves it owning them."""
+    _agent_view(monkeypatch)
+    record = {field: L} if enabled else {field: L, "enabled": False}
+    cfg = {"model": {"provider": pid}, "providers": {_ALIASES[pid]: {"request_timeout_seconds": 60}, pid: record}}
+    got = _lookup(cfg, pid, fallback_api_key="AGENT-KEY", fallback_base_url="", fallback_provider=pid)
+    assert got.base_url == ""
+    assert got.api_key == ("" if enabled else "AGENT-KEY")
 
 
 # ── The Copilot row with a URL (#8822 d-i) ─────────────────────────────────────
@@ -643,6 +759,25 @@ def recorded_agent_requests(monkeypatch, tmp_path):
     return state
 
 
+def _clear_agent_caches():
+    """Empty the installed Agent's in-memory metadata caches, so the next lookup contacts its hosts again."""
+    import agent.model_metadata as mm
+    import hermes_cli.models as hm
+
+    for module in (mm, hm):
+        for name, value in list(vars(module).items()):
+            if "cache" not in name.lower() or name.isupper():
+                continue
+            if isinstance(value, (dict, set, list)):
+                value.clear()
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                # A cache's timestamp: older Agents keep the GitHub model catalog behind a TTL checked against
+                # ``time.monotonic()``, and an emptied catalog with a fresh timestamp reads as "cached empty",
+                # so a second probe with the same key would contact nothing. -inf makes every TTL expired,
+                # whatever the host's uptime (a fresh CI runner can be younger than the TTL).
+                setattr(module, name, float("-inf") if "time" in name.lower() else 0)
+
+
 def _agent_keyed_hosts(state, url, key, provider):
     """Hosts the installed Agent sends ``key`` to for (url, provider), over both endpoint modes.
 
@@ -653,25 +788,13 @@ def _agent_keyed_hosts(state, url, key, provider):
     import shutil
 
     import agent.model_metadata as mm
-    import hermes_cli.models as hm
     from hermes_constants import get_hermes_home
 
     home = pathlib.Path(get_hermes_home()).resolve()
     assert state["home"] in (home, *home.parents), f"the Agent's HERMES_HOME {home} is not the test's temp dir"
     hosts = set()
     for mode in ("miss", "hit"):
-        for module in (mm, hm):
-            for name, value in list(vars(module).items()):
-                if "cache" not in name.lower() or name.isupper():
-                    continue
-                if isinstance(value, (dict, set, list)):
-                    value.clear()
-                elif isinstance(value, (int, float)) and not isinstance(value, bool):
-                    # A cache's timestamp: older Agents keep the GitHub model catalog behind a TTL checked against
-                    # ``time.monotonic()``, and an emptied catalog with a fresh timestamp reads as "cached empty",
-                    # so a second probe with the same key would contact nothing. -inf makes every TTL expired,
-                    # whatever the host's uptime (a fresh CI runner can be younger than the TTL).
-                    setattr(module, name, float("-inf") if "time" in name.lower() else 0)
+        _clear_agent_caches()
         shutil.rmtree(home, ignore_errors=True)
         home.mkdir(parents=True)
         state["mode"] = mode
@@ -844,21 +967,163 @@ def _agent_named_route(provider_id, cfg, monkeypatch):
 
 @requires_agent
 @pytest.mark.parametrize("provider_id", sorted(routes._CONTEXT_LOOKUP_FIXED_HOSTS))
-def test_a_caller_key_for_a_fixed_host_id_is_that_providers_own(provider_id, recorded_agent_requests, monkeypatch):
-    """Why a caller key that came with no URL may go to its provider's fixed host (source identity, #8822 note §3b).
+def test_a_record_the_agent_routes_a_fixed_host_id_through_owns_no_fixed_host(provider_id, recorded_agent_requests,
+                                                                              monkeypatch):
+    """Why a key the lookup takes as a provider's own may go to its fixed host (source identity, #8822 note §3b),
+    checked against the installed Agent's own routing.
 
-    A caller key with a URL owns only that URL. One with no URL owns its provider's fixed hosts, on the premise
-    that it's the Agent's own credential for that provider. Wherever the installed Agent contacts a fixed host for
-    this id, a ``custom_providers`` / ``providers`` entry merely NAMED like the id must not capture the runtime route;
-    otherwise that key could be the entry's and the fixed host would not be its own.
+    A key owns its provider's fixed hosts only when it comes from that provider's own source: a ``providers``
+    record that declares no endpoint, or a caller key that came with no URL. The Agent routes the id through a
+    ``providers`` record under that name that declares its own endpoint (in any spelling), so wherever it does, that
+    record's key, and a no-URL caller key under the id, must own no fixed host. A legacy ``custom_providers`` entry
+    merely named like the id must not capture the route at all; its key never owns a fixed host either way.
     """
     contacts_fixed_host = bool(_agent_keyed_hosts(recorded_agent_requests, "", "K-synthetic", provider_id)
                                | _agent_keyed_hosts(recorded_agent_requests, "", _jwt("K-synthetic"), provider_id))
     if not contacts_fixed_host:
         pytest.skip(f"the installed Agent contacts no fixed host for {provider_id}")
-    for cfg in ({"custom_providers": [{"name": provider_id, "base_url": L, "api_key": "KL-synthetic"}]},
-                {"providers": {provider_id: {"base_url": L, "api_key": "KL-synthetic"}}}):
-        assert not _agent_named_route(provider_id, cfg, monkeypatch), (
-            f"a custom entry named {provider_id!r} captures the runtime route on an Agent that sends that "
-            "id's key to its fixed host"
+    legacy = {"custom_providers": [{"name": provider_id, "base_url": L, "api_key": "KL-synthetic"}]}
+    assert not _agent_named_route(provider_id, legacy, monkeypatch), (
+        f"a legacy entry named {provider_id!r} captures the runtime route on an Agent that sends that id's key to "
+        "its fixed host"
+    )
+    fixed = _all_fixed_origins(provider_id)
+    for field in _SPELLINGS:
+        cfg = {"model": {"provider": provider_id}, "custom_providers": [],
+               "providers": {provider_id: {field: L, "api_key": "KL-synthetic"}}}
+        if not _agent_named_route(provider_id, cfg, monkeypatch):
+            continue   # the Agent keeps the built-in route: nothing to guard
+        assert not routes._context_length_config_api_key_and_owner(provider_id, cfg)[1] & fixed, field
+        assert not routes._context_lookup_same_value_origins("KL-synthetic", cfg) & fixed, field
+        got = _lookup(cfg, provider_id, api_key="KC-synthetic")
+        assert not (got.api_key and routes._context_lookup_contacted_origins(got.provider, got.base_url) & fixed), (
+            f"{field}: a no-URL caller key under {provider_id!r} reaches a fixed host the Agent routes away from"
         )
+
+
+# ── End to end: session reload, model switch and chat start under the recorder ──
+#
+# The three entry points that take the lookup's key from config (GET /api/session, the model switch and chat
+# start), run against the installed Agent with every request recorded and none leaving the process. The streaming
+# sites always pass the chat's own URL with its key and are covered above.
+
+_E2E_FIXED_HOSTS = frozenset(host for row in routes._CONTEXT_LOOKUP_FIXED_HOSTS.values()
+                             for host in (*row.get("no_url", ()), *row.get("with_url", ())))
+
+
+def _agent_key(pid, name):
+    """A synthetic key in the shape the Agent's lookup sends for ``pid`` (Codex reads a JWT)."""
+    return _jwt(name) if pid == "openai-codex" else name
+
+
+def _get_session(pid):
+    """The real GET /api/session handler for a stored session on ``pid`` with no context length yet; only the
+    display and message helpers around the lookup are stubbed."""
+    from unittest.mock import MagicMock, patch
+
+    s = MagicMock()
+    s.session_id, s.title, s.workspace, s.model, s.model_provider, s.profile = "s8822", "t", "/tmp", "m-x", pid, None
+    s.messages, s.tool_calls, s.active_stream_id, s.pending_user_message = [], [], None, None
+    s.pending_attachments, s.pending_started_at = [], None
+    s.context_length, s.threshold_tokens, s.last_prompt_tokens, s.input_tokens, s.output_tokens = 0, 0, 0, 0, 0
+    s.read_only, s._loaded_metadata_only = False, False
+    s.compact.return_value = {"session_id": s.session_id, "title": "t", "workspace": "/tmp", "model": "m-x",
+                              "model_provider": pid, "message_count": 0, "context_length": 0,
+                              "threshold_tokens": 0, "last_prompt_tokens": 0}
+    statuses = []
+
+    def fake_j(_handler, data, status=200, **_kw):
+        statuses.append(status)
+        return True
+
+    with patch("api.routes.get_session", return_value=s), \
+         patch("api.routes.j", side_effect=fake_j), \
+         patch("api.routes._resolve_effective_session_model_for_display", return_value="m-x"), \
+         patch("api.routes._resolve_effective_session_model_provider_for_display", return_value=pid), \
+         patch("api.routes._session_visible_to_active_profile", return_value=True), \
+         patch("api.routes._clear_stale_stream_state", return_value=None), \
+         patch("api.routes._session_requires_cli_metadata_lookup", return_value=False), \
+         patch("api.routes._is_messaging_session_record", return_value=False), \
+         patch("api.routes.get_state_db_session_messages", return_value=[]), \
+         patch("api.routes._webui_sidecar_lineage_messages_for_display", return_value=[]), \
+         patch("api.routes.merge_session_messages_append_only", return_value=[]), \
+         patch("api.routes._merged_webui_lineage_messages_for_display", return_value=[]), \
+         patch("api.routes._active_stream_ids", return_value=set()):
+        routes.handle_get(MagicMock(), urllib.parse.urlparse("/api/session?session_id=s8822&messages=1"))
+    assert statuses == [200]
+
+
+def _switch_route(pid, *, already_resolved):
+    """The route change the model switch (POST /api/session/update) and chat start make, with their arguments."""
+    s = types.SimpleNamespace(model="m-old", model_provider=pid, last_used_model=None, gateway_routing=None,
+                              context_length=0, threshold_tokens=0, last_prompt_tokens=0)
+    assert routes._invalidate_session_route_state_if_changed(
+        s, model="m-x", provider=pid, provider_specified=True, already_resolved=already_resolved)
+
+
+_ENTRY_POINTS = {
+    "session-reload": _get_session,
+    "model-switch": lambda pid: _switch_route(pid, already_resolved=False),
+    "chat-start": lambda pid: _switch_route(pid, already_resolved=True),
+}
+
+
+def _keyed_hosts_by_entry_point(pid, cfg, key, state, monkeypatch):
+    """{entry point: hosts that received ``key``}, each run cold in both endpoint modes, with ``cfg`` bound for
+    WebUI and the Agent alike (the Agent's own ``HERMES_HOME`` holds it as config.yaml)."""
+    import shutil
+
+    import yaml
+
+    import api.config as config
+    import hermes_cli.runtime_provider as hrp
+
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "NOVITA_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    home = state["home"] / "e2e"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    (home / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    monkeypatch.setattr(config, "cfg", cfg)
+    monkeypatch.setattr(config, "get_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(hrp, "load_config", lambda *a, **k: cfg)
+    found = {}
+    for name, run in _ENTRY_POINTS.items():
+        hosts = set()
+        for mode in ("miss", "hit"):
+            _clear_agent_caches()
+            for child in home.iterdir():
+                if child.name != "config.yaml":
+                    shutil.rmtree(child, ignore_errors=True) if child.is_dir() else child.unlink()
+            state.update(mode=mode, blocked=0)
+            state["seen"].clear()
+            run(pid)
+            assert state["blocked"] == 0, f"{name}: a request bypassed the recorded clients"
+            hosts |= {host for host, values, full in state["seen"] if any(key in v for v in values) or key in full}
+        found[name] = hosts
+    return found
+
+
+@requires_agent
+@pytest.mark.parametrize("pid,shape", _ENDPOINT_CASES, ids=[f"{p}-{s}" for p, s in _ENDPOINT_CASES])
+def test_a_records_key_reaches_only_its_own_endpoint_from_every_entry_point(pid, shape, recorded_agent_requests,
+                                                                            monkeypatch):
+    key = _agent_key(pid, "KL-synthetic")
+    cfg = {"model": {"provider": pid, "default": "m-x"}, "providers": _endpoint_records(pid, key)[shape],
+           "custom_providers": []}
+    found = _keyed_hosts_by_entry_point(pid, cfg, key, recorded_agent_requests, monkeypatch)
+    for name, hosts in found.items():
+        assert not hosts & _E2E_FIXED_HOSTS, f"{name}: the record's key reached {sorted(hosts & _E2E_FIXED_HOSTS)}"
+    assert found == {name: {urllib.parse.urlsplit(L).hostname} for name in _ENTRY_POINTS}
+
+
+@requires_agent
+@pytest.mark.parametrize("pid", sorted(_ALIASES))
+def test_a_providers_own_record_key_still_reaches_its_fixed_host_from_every_entry_point(pid, recorded_agent_requests,
+                                                                                       monkeypatch):
+    """Control: a record with no endpoint of its own is the provider's own credential, and the recorder sees it."""
+    key = _agent_key(pid, "K-synthetic")
+    cfg = {"model": {"provider": pid, "default": "m-x"}, "providers": {pid: {"api_key": key}}, "custom_providers": []}
+    found = _keyed_hosts_by_entry_point(pid, cfg, key, recorded_agent_requests, monkeypatch)
+    own = set(routes._CONTEXT_LOOKUP_FIXED_HOSTS[pid]["no_url"])
+    assert found == {name: own for name in _ENTRY_POINTS}
