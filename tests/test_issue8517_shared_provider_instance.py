@@ -47,6 +47,11 @@ if not callable(getattr(mm_mod, "claim_instance", None)):  # pragma: no cover - 
     pytest.skip("installed Agent predates claim_instance", allow_module_level=True)
 
 
+# Third-party packages the real Agent import chain needs that a WebUI-only environment
+# does not install. Keep this list explicit: a missing first-party module must fail.
+_AGENT_ONLY_DEPENDENCIES = frozenset({"psutil", "requests"})
+
+
 def _original_claim():
     fn = mm_mod.claim_instance
     while getattr(fn, "__wrapped__", None) is not None:
@@ -203,11 +208,16 @@ def test_real_memory_manager_refuses_a_shared_instance_for_a_second_profile(hc, 
     try:
         require_ai_agent_class()  # every WebUI construction site resolves the Agent class here
     except ModuleNotFoundError as exc:
-        # A WebUI-only environment can hold the Agent's source without its own third-party
-        # dependencies. Production treats that as "Agent unavailable" (get_ai_agent_class);
-        # skip only then, so a broken WebUI or Agent module still fails here.
+        # A WebUI-only environment can hold the Agent's source without the Agent's own
+        # third-party dependencies. Production treats that as "Agent unavailable"
+        # (get_ai_agent_class). Skip only for a known Agent-only dependency that is truly
+        # absent; any other missing module (run_agent, an Agent root module, a WebUI
+        # import) still fails here.
         missing = (exc.name or "").split(".")[0]
-        if not missing or importlib.util.find_spec(missing) is not None:
+        if (
+            missing not in _AGENT_ONLY_DEPENDENCIES
+            or importlib.util.find_spec(missing) is not None
+        ):
             raise
         pytest.skip(
             f"the Agent's dependency {missing!r} is not installed in this environment"
