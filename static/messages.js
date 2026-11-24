@@ -1590,6 +1590,94 @@ function _setComposerAfterCliOnlyExplainer(value,owner){
   }
 }
 
+let _skillCreatedSessionSid = null;
+// True only when this send actually resolved a skill. Other continuing slash
+// branches (/moa, bundles) may create a session themselves; the navigation
+// guard below must not mistake that legitimate session for a user switch.
+let _skillResolutionRan = false;
+
+// #5896 re-gate blocker 2: resolve a `/skill-name [args]` command into its
+// model-facing expansion. This must run for skill sends with OR without staged
+// files: the slash block inside send() is gated on `!S.pendingFiles.length`,
+// so a skill + attachment send never reaches it. Returns null when the command
+// is not a known skill or the resolver is unavailable. `pickerClaim` is the
+// send's captured `_sendProjectPickerClaim` (module scope cannot read
+// send()'s locals).
+async function _resolveSkillAgentMessage(text, parsedCmd, pickerClaim, options){
+  if(!parsedCmd || typeof loadSkillCommands!=='function' || typeof resolveSkillCommand!=='function') return null;
+  // Bind the resolution to the session the SEND owns, not to whatever is on
+  // screen when an await lands: a switch A->B->A during the resolve must still
+  // template ${HERMES_SESSION_ID} with A.
+  const _ownerSid=options&&Object.prototype.hasOwnProperty.call(options,'ownerSid')
+    ? options.ownerSid
+    : ((S.session&&S.session.session_id)||null);
+  // The session the send observed when it entered the resolver. A first-message
+  // send started with none; if one appears during the cache await, the USER
+  // opened it, so this send must abandon instead of resolving/provenance-
+  // recording against a conversation it does not own.
+  const _entrySid=(S.session&&S.session.session_id)||null;
+  try{
+    const cache = await loadSkillCommands();
+    const slug = typeof _skillCommandSlug==='function'
+      ? _skillCommandSlug(parsedCmd.name)
+      : String(parsedCmd.name||'').toLowerCase();
+    if(!Array.isArray(cache) || !slug || !cache.find(s => s.name === slug)) return null;
+    _skillResolutionRan = true;
+    // Bundle metadata owns dispatch when a slug is shared. The slash block
+    // already checks this on the no-attachment path; the with-attachment path
+    // calls this helper directly, so repeat the priority check here instead of
+    // letting a colliding skill shadow the bundle. Run it AFTER the cache match
+    // so a navigation during this await still hits the send guard.
+    if(typeof getBundleCommandMetadata==='function'){
+      try{
+        const _bundleMeta=await getBundleCommandMetadata(parsedCmd.name);
+        if(_bundleMeta) return null;
+      }catch(_e){}
+    }
+    if(typeof getAgentCommandMetadata==='function'){
+      try{
+        const _agentMeta=await getAgentCommandMetadata(parsedCmd.name);
+        if(_agentMeta&&_agentMeta.command) return null;
+      }catch(_e){}
+    }
+    // First-message skill sends must resolve against a real session so the
+    // ${HERMES_SESSION_ID} template expands correctly (#5896 gate-fail #3),
+    // and the captured picker generation must be forwarded so a delayed
+    // newSession() cannot claim and close a picker opened meanwhile
+    // (#5896 re-gate #3). Record the sid THIS call created: send() binds the
+    // expected owner to it, so a conversation opened after the creation still
+    // aborts instead of stealing the send.
+    let _createdSid = null;
+    if(!S.session){
+      // Regeneration must never create a chat: if the conversation was closed
+      // while the cache loaded, there is nothing left to regenerate.
+      if(options&&options.createSession===false) return null;
+      // A send that owned a chat and lost it must abandon, never be re-homed
+      // into a brand-new session the user did not ask for.
+      if(_ownerSid) return null;
+      await newSession(false,{pickerClaimEpoch:pickerClaim});
+      _createdSid = S.session && S.session.session_id || null;
+      _skillCreatedSessionSid = _createdSid;
+      await renderSessionList();
+    } else if(_ownerSid===null && _entrySid===null){
+      // A conversation appeared while the cache loaded; the user opened it.
+      // Return without resolving: the send guard sees _skillResolutionRan and
+      // abandons, and no provenance is recorded on the other conversation.
+      return null;
+    }
+    if(_ownerSid && ((S.session&&S.session.session_id)||null)!==_ownerSid) return null;
+    // Resolve against the session this send owns, never against a conversation
+    // the user may have opened during the creation/listing awaits.
+    const _resolutionSid = _createdSid || _ownerSid || (S.session && S.session.session_id) || null;
+    const resolved = await resolveSkillCommand(text, _resolutionSid);
+    const message = String(resolved&&resolved.message||'').trim();
+    return message || null;
+  }catch(_e){
+    // Fail open: send the raw text; the agent may still call skill_view itself.
+    return null;
+  }
+}
+
 async function send(){
   if(S.session&&S.session.chat_read_only_reason){
     return;
@@ -1778,12 +1866,15 @@ async function send(){
     return;
   }
   let _slashDisplayTextOverride=null;
+  let _skillAgentMessage=null;
   let _pendingMoaConfig=null;
   // #8717: the session and composer text that issued a slash command,
   // captured before the metadata awaits in the intercept below. Composer
   // writes after those awaits go through
   // _setComposerAfterCliOnlyExplainer(value,_slashOwner).
   const _slashOwner={sid:S.session&&S.session.session_id||null,text};
+  _skillCreatedSessionSid=null;
+  _skillResolutionRan=false;
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -1979,6 +2070,15 @@ async function send(){
           $('msg').value='';autoResize();hideCmdDropdown();return;
         }
       }
+      // ── Skill commands: `/skill-name [args]` resolved server-side ──
+      // The RAW slash command stays the user-visible/persisted message; the
+      // server-side expansion travels separately (agent_message) so the model
+      // sees the skill content without corrupting the transcript (#5896 re-gate).
+      // Match the cached skill by normalized slug (`/my_skill` == `my-skill`),
+      // mirroring the Agent contract's `_` → `-` normalization.
+      if(!_bundleCmd && !_agentCmd && _parsedCmd && typeof loadSkillCommands==='function'){
+        _skillAgentMessage = await _resolveSkillAgentMessage(text, _parsedCmd, _sendProjectPickerClaim, {ownerSid:_slashOwner.sid});
+      }
       // #7683 [CORE]: the fail-closed guard runs LAST, after every dispatch
       // branch above has had its chance. `_agentCmdName` is only meaningful
       // once those branches have run, and a bundle command that resolved must
@@ -2025,6 +2125,26 @@ async function send(){
         hideCmdDropdown();return;
       }
     }
+  }
+  // #5896 re-gate blocker 2: the slash block above only runs when
+  // `S.pendingFiles` is empty, so a `/skill` send with a staged file never
+  // resolves there. Resolve it here; the upload below appends the attachment
+  // paths to the expansion so the model receives both.
+  if(text.startsWith('/') && S.pendingFiles.length && !literalSlash && !_skillAgentMessage){
+    _skillAgentMessage = await _resolveSkillAgentMessage(text, parseCommand(text), _sendProjectPickerClaim, {ownerSid:_slashOwner.sid});
+  }
+  // #5896 re-gate P1 (Greptile): the skill resolver awaits the skill cache and
+  // the resolve endpoint. If the user switches conversations during that await,
+  // abandon this send instead of firing it (and its A-scoped
+  // ${HERMES_SESSION_ID} expansion) into the newly opened session. The expected
+  // owner is the session the send started on, or — for a first-message send —
+  // the one the resolver created; any other session at this point means the
+  // user navigated away, including after the first-message session was created.
+  const _expectedSid=_skillCreatedSessionSid||_slashOwner.sid;
+  const _nowSid=S.session&&S.session.session_id||null;
+  if(_skillResolutionRan && _nowSid!==_expectedSid){
+    _sendInProgress=false;_sendInProgressSid=null;
+    return;
   }
   if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
 
@@ -2087,12 +2207,25 @@ async function send(){
   let msgText=text;
   if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
+  // #5896 re-gate blocker 2: the model-facing skill expansion must carry the
+  // same attachment context as the raw text it replaces. The streaming worker
+  // prefers `agent_message` over `msgText`, so paths appended only to msgText
+  // never reach the model and a skill send with a non-image upload loses the
+  // file location. Extend the expansion (never the visible/title row).
+  if(_skillAgentMessage&&uploaded.length&&text){
+    _skillAgentMessage=`${_skillAgentMessage}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
+  }
+  let _forcedDirectiveApplied=false;
+  // The turn text BEFORE the model-only `/use` prefix: `/moa`'s prompt, a
+  // bundle's expansion, and the attachment-path text must survive for replay.
+  const _turnTextNoDirective=msgText;
   if(_forcedSkillDirectivePending){
     const _pending=_forcedSkillDirectivePending;
     if(!_pending.sessionId||_pending.sessionId===activeSid){
       const _directivePayload = await _pending.promise;
       if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
       if(_directivePayload){
+        _forcedDirectiveApplied=true;
         const _directive = typeof _directivePayload==='string'
           ? _directivePayload
           : String(_directivePayload.directive||'').trim();
@@ -2105,7 +2238,14 @@ async function send(){
         const _forcedSkillBlock = _forcedSkillName&&_forcedSkillContent
           ? `[FORCED SKILL CONTEXT: ${_forcedSkillName}]\n${_forcedSkillContent}\n[/FORCED SKILL CONTEXT]`
           : '';
-        msgText=`${_directive}${_forcedSkillBlock?`\n\n${_forcedSkillBlock}`:''}\n\n${msgText||''}`.trim();
+        const _directivePrefix=`${_directive}${_forcedSkillBlock?`\n\n${_forcedSkillBlock}`:''}`;
+        msgText=`${_directivePrefix}\n\n${msgText||''}`.trim();
+        if(_skillAgentMessage){
+          // The worker prefers agent_message for the model turn, so carry the
+          // forced directive there too or the override is silently dropped
+          // (#5896 re-gate).
+          _skillAgentMessage=`${_directivePrefix}\n\n${_skillAgentMessage}`.trim();
+        }
       }
     }
   }
@@ -2116,6 +2256,12 @@ async function send(){
   // upload window. _composerDraftClearPromise / _submittedDraftFilesForClear are
   // set there; nothing to re-declare here.
   const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
+  // #5896 re-gate: the forced `/use` prefix is model-facing, not user-visible.
+  // Persisting it made a `/skill` turn's saved row start with the directive, so
+  // regeneration could no longer recognize the skill. Keep the raw display text
+  // as `message` and carry the model text (prefix included) in agent_message.
+  const _persistedMessage=_forcedDirectiveApplied?_turnTextNoDirective:msgText;
+  const _agentMessage=_skillAgentMessage||(_forcedDirectiveApplied?msgText:null);
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000,_pending:true};
   // #7882 (greptile round-4 P2): visible-length of the transcript BEFORE the
   // optimistic push — the local tail the server could already know. Passed to
@@ -2246,7 +2392,7 @@ async function send(){
     if(_pendingPickMatch && typeof _clearPendingSessionModel==='function') _clearPendingSessionModel(activeSid);
     explicitPickForPostStart=_explicitPick;
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
-      session_id:activeSid,message:msgText,
+      session_id:activeSid,message:_persistedMessage,
       // S.session.model remains authoritative; the helper only resolves a
       // matching provider fallback for the same outgoing model.
       model:_modelState.model,workspace:_ownerOnScreenBeforeStart?S.session.workspace:_ownerWorkspace,
@@ -2266,7 +2412,8 @@ async function send(){
       // (#6885 again). The explicit empty string keeps the key present so the
       // server can tell "genuine turn" from "pre-upgrade tab that must still
       // get marker admission".
-      goal_continuation_id:_goalContinuationId||''
+      goal_continuation_id:_goalContinuationId||'',
+      agent_message:_agentMessage||undefined
     })});
     _pendingMoaConfig=null;
     postStartData = startData;
@@ -2475,6 +2622,12 @@ async function send(){
 async function startRegeneration(sessionId, regenerationRevision){
   const sid=String(sessionId||'');
   if(!sid||!regenerationRevision||!S.session||S.session.session_id!==sid)return;
+  // Claim the chat BEFORE the skill-resolution await: a send that starts
+  // during the wait would otherwise run first, and this regeneration's error
+  // path would restore the old snapshot over the newer send (#5896 re-gate).
+  if(_sendInProgress)return;
+  _sendInProgress=true;_sendInProgressSid=sid;
+  try{
   const snapshot=Array.isArray(S.messages)?S.messages.slice():[];
   let assistantIndex=-1;
   let userIndex=-1;
@@ -2486,12 +2639,25 @@ async function startRegeneration(sessionId, regenerationRevision){
   const retained=Object.assign({},snapshot[userIndex],{_pending:true});
   S.messages=snapshot.slice(0,userIndex+1);
   S.messages[userIndex]=retained;
+  // #5896 re-gate: a regenerated `/skill …` turn must reach the model with the
+  // same expansion as the original turn. The server replays the raw persisted
+  // text, so resolve the skill here and forward it as agent_message.
+  let _regenAgentMessage=null;
+  const _regenText=String(retained.content||'');
+  if(_regenText.startsWith('/')){
+    const _regenPickerClaim=(typeof _projectPickerOpenEpoch==='number')?_projectPickerOpenEpoch:0;
+    try{
+      _regenAgentMessage=await _resolveSkillAgentMessage(_regenText,parseCommand(_regenText),_regenPickerClaim,{createSession:false,ownerSid:sid});
+    }catch(_e){}
+    if(!S.session||S.session.session_id!==sid)return;
+  }
   renderMessages();setBusy(true);
   if(typeof ensureLiveWorklogShell==='function')ensureLiveWorklogShell();
   else if(typeof appendThinking==='function')appendThinking('',{pending:true});
   try{
     const response=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
-      session_id:sid,regenerate:true,regeneration_revision:regenerationRevision
+      session_id:sid,regenerate:true,regeneration_revision:regenerationRevision,
+      agent_message:_regenAgentMessage||undefined
     })});
     if(!S.session||S.session.session_id!==sid)return;
     const streamId=response&&response.stream_id;
@@ -2515,6 +2681,9 @@ async function startRegeneration(sessionId, regenerationRevision){
       removeThinking();renderMessages();setBusy(false);setComposerStatus('');
     }
     throw error;
+  }
+  }finally{
+    if(_sendInProgressSid===sid){_sendInProgress=false;_sendInProgressSid=null;}
   }
 }
 

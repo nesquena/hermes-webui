@@ -14554,6 +14554,22 @@ def _content_identity_for_key(content):
     return identity
 
 
+def _session_message_raw_display_text(msg: dict):
+    """The raw display text recorded on a model-context skill row, else None.
+
+    ``_rewrite_context_user_turn()`` stores the expansion in ``content`` and
+    links it to the raw user turn in ``_skill_raw_user_text``. Every sidecar /
+    state.db identity layer must key that row on the raw turn, exactly like the
+    display row it represents, or reconciliation sees two different turns.
+    """
+    if not isinstance(msg, dict) or msg.get("role") != "user":
+        return None
+    raw = msg.get("_skill_raw_user_text")
+    if isinstance(raw, str) and raw:
+        return raw
+    return None
+
+
 def _session_message_merge_key(msg: dict):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
@@ -14570,10 +14586,13 @@ def _session_message_merge_key(msg: dict):
     # every state.db tool-call after the first one registered by the sidecar.
     _tc = msg.get("tool_calls")
     _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
+    raw_display = _session_message_raw_display_text(msg)
     return _session_message_key_with_sidecar((
         "legacy",
         str(msg.get("role") or ""),
-        _content_identity_for_key(msg.get("content")),
+        _content_identity_for_key(
+            raw_display if raw_display is not None else msg.get("content")
+        ),
         _normalized_message_timestamp_for_key(msg.get("timestamp")),
         str(msg.get("tool_call_id") or ""),
         str(msg.get("tool_name") or msg.get("name") or ""),
@@ -15266,10 +15285,13 @@ def _session_message_dedup_key(msg: dict):
     # are never collapsed into one.  (#3346 regression)
     _tc = msg.get("tool_calls")
     _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
+    raw_display = _session_message_raw_display_text(msg)
     return _session_message_key_with_sidecar((
         "legacy",
         str(msg.get("role") or ""),
-        _content_identity_for_key(msg.get("content")),
+        _content_identity_for_key(
+            raw_display if raw_display is not None else msg.get("content")
+        ),
         str(msg.get("timestamp") or ""),
         str(msg.get("tool_call_id") or ""),
         str(msg.get("tool_name") or msg.get("name") or ""),
@@ -15304,7 +15326,17 @@ def _session_message_content_key(
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
     role = str(msg.get("role") or "")
-    content = _normalized_session_message_content(msg)
+    raw_display = _session_message_raw_display_text(msg)
+    content = (
+        " ".join(raw_display.split())
+        if raw_display is not None
+        else _normalized_session_message_content(msg)
+    )
+    # #5896 re-gate: the sidecar context stores the EXPANSION on the user row and
+    # records the raw turn in `_skill_raw_user_text`. state.db stores the RAW
+    # prompt. Key the sidecar row on the raw text, or the mirrored-prefix proof
+    # fails, the state.db row is re-appended, and the display merge eventually
+    # backfills the skill body.
     if role == "user" and normalize_workspace_prefix and isinstance(content, str):
         # WebUI sends the model a workspace-prefixed user_message
         # ("[Workspace::v1: /path]\n<text>") while the visible/optimistic
@@ -15347,7 +15379,12 @@ def _session_message_visible_key(
     _tc = msg.get("tool_calls")
     _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
     role = str(msg.get("role") or "")
-    content = _normalized_session_message_content(msg)
+    raw_display = _session_message_raw_display_text(msg)
+    content = (
+        " ".join(raw_display.split())
+        if raw_display is not None
+        else _normalized_session_message_content(msg)
+    )
     if role == "user" and normalize_workspace_prefix and isinstance(content, str):
         # state.db stores the model-facing workspace-prefixed prompt while the
         # WebUI sidecar owns the bare visible text. Fold that protocol wrapper

@@ -2824,14 +2824,21 @@ def _active_turn_boundary(result_messages, previous_context, identity, msg_text)
     ):
         candidate_start = len(previous_context)
     expected_text = identity.get('text') if isinstance(identity, dict) else None
-    expected = _normalize_user_text(expected_text if expected_text is not None else msg_text)
-    if expected:
+    expected_values = {
+        _normalize_user_text(expected_text if expected_text is not None else msg_text)
+    }
+    # The returned row may have been normalized to the raw display text while
+    # the identity text is the model-facing representation (or vice versa).
+    # Both identify the same turn (#5896).
+    expected_values.add(_normalize_user_text(msg_text))
+    expected_values.discard('')
+    if expected_values:
         for idx in range(len(result_messages) - 1, candidate_start - 1, -1):
             message = result_messages[idx]
             if (
                 isinstance(message, dict)
                 and message.get('role') == 'user'
-                and _normalize_user_text(_message_text(message.get('content'))) == expected
+                and _normalize_user_text(_message_text(message.get('content'))) in expected_values
             ):
                 return idx
     return 0
@@ -2907,23 +2914,39 @@ def _settle_existing_current_turn_user_row(result_messages, previous_context, id
     # HISTORICAL user row; claiming it as this turn's row inverts the
     # self-heal ownership proof
     # (test_compression_snapshot_revision::test_self_heal_repeated_prompt_never_accepts_shifted_historical_row).
-    if not (
-        previous_context
-        and len(result_messages) > len(previous_context)
-        and _messages_have_prefix(result_messages, previous_context)
-    ):
-        return None
-    candidate_start = len(previous_context)
+    #
+    # An EMPTY pre-turn context has no historical row to confuse: the Agent
+    # was sent no conversation history, so the returned user row can only be
+    # this turn's row (or a contract-violating replay, which the exact-prefix
+    # authority path already treats as current). Recognizing it here prevents
+    # the settle from materializing a second raw copy beside it (#5896).
+    if previous_context:
+        if not (
+            len(result_messages) > len(previous_context)
+            and _messages_have_prefix(result_messages, previous_context)
+        ):
+            return None
+        candidate_start = len(previous_context)
+    else:
+        candidate_start = 0
     expected_text = identity.get('text') if isinstance(identity, dict) else None
-    expected = _normalize_user_text(expected_text if expected_text is not None else msg_text)
-    if not expected:
+    expected_values = {
+        _normalize_user_text(expected_text if expected_text is not None else msg_text)
+    }
+    # The identity text can be the model-facing representation (the Agent's
+    # trusted input) while the settle has already normalized the returned row
+    # back to the raw display text. Both are THE SAME turn (#5896), so the
+    # already-present-row probe must accept either representation.
+    expected_values.add(_normalize_user_text(msg_text))
+    expected_values.discard('')
+    if not expected_values:
         return None
     for idx in range(len(result_messages) - 1, candidate_start - 1, -1):
         message = result_messages[idx]
         if (
             isinstance(message, dict)
             and message.get('role') == 'user'
-            and _normalize_user_text(_message_text(message.get('content'))) == expected
+            and _normalize_user_text(_message_text(message.get('content'))) in expected_values
         ):
             return idx
     return None
@@ -3127,6 +3150,68 @@ def _annotate_media_snapshots_for_settled_messages(messages) -> None:
         logger.debug("Media snapshot annotation failed during settle", exc_info=True)
 
 
+def _normalize_settled_current_user_text(result_messages, msg_text, agent_message):
+    """Collapse the current turn's model-facing user row to its raw display text.
+
+    An Agent that ignores ``persist_user_message`` returns the model-facing
+    (usually workspace-prefixed) expansion as the current user row. Settling
+    that row beside the raw checkpoint creates two model-context copies, and
+    ``_rewrite_context_user_turn()`` then rewrites the raw one too, leaving the
+    skill body duplicated in the next turn's history (#5896 re-gate). The
+    settle owns exactly one representation per turn: keep the raw row when the
+    Agent returned both, otherwise rewrite the model row back to ``msg_text``.
+    """
+    if not agent_message or not msg_text or agent_message == msg_text:
+        return result_messages
+    messages = list(result_messages or [])
+    last_user_idx = None
+    for idx in range(len(messages) - 1, -1, -1):
+        row = messages[idx]
+        if isinstance(row, dict) and row.get("role") == "user":
+            last_user_idx = idx
+            break
+    if last_user_idx is None:
+        return messages
+    row = messages[last_user_idx]
+    if not _looks_like_current_user_turn(row, agent_message):
+        return messages
+    if last_user_idx:
+        previous = messages[last_user_idx - 1]
+        if (
+            isinstance(previous, dict)
+            and previous.get("role") == "user"
+            and _looks_like_current_user_turn(previous, msg_text)
+        ):
+            # The Agent returned its own model row after echoing the raw
+            # checkpoint. Drop the model copy, keep the raw one, but carry any
+            # stable identity the model row minted onto the survivor.
+            model_row = messages[last_user_idx]
+            for key in (
+                "id",
+                "message_id",
+                "timestamp",
+                "_row_id",
+                "_active_turn_token",
+                "_source",
+            ):
+                if previous.get(key) is None and model_row.get(key) is not None:
+                    previous[key] = model_row[key]
+            if isinstance(model_row.get("content"), list):
+                # The raw checkpoint is text-only; keep the model row's native
+                # image parts while normalizing its text back to the raw turn.
+                previous["content"] = _replace_user_text_content(
+                    model_row.get("content"), msg_text
+                )
+            del messages[last_user_idx]
+            return messages
+    normalized = copy.deepcopy(row)
+    normalized["content"] = _replace_user_text_content(
+        normalized.get("content"), msg_text
+    )
+    messages[last_user_idx] = normalized
+    return messages
+
+
 def _settle_result_messages(
     session,
     previous_messages,
@@ -3137,7 +3222,11 @@ def _settle_result_messages(
     active_turn_identity,
     projected_history=None,
     compression_authorized=False,
+    agent_message=None,
 ):
+    result_messages = _normalize_settled_current_user_text(
+        result_messages, msg_text, agent_message
+    )
     (
         result_messages,
         next_context_messages,
@@ -3215,6 +3304,7 @@ def _settle_result_messages(
         msg_text,
         source=source,
         verification_nudge_provenance=verification_nudge_provenance,
+        model_user_text=agent_message,
     )
     trusted_agent_input = (
         active_turn_identity.get('trusted_agent_input_text')
@@ -3264,6 +3354,110 @@ def _settle_result_messages(
     _compact_session_image_parts_for_persistence(session)
     _advance_truncation_watermark_after_commit(session)  # #3831
     return result_messages
+
+
+def _replace_user_text_content(content, text: str):
+    """Replace a user row's text without dropping native multimodal parts."""
+    if not isinstance(content, list):
+        return text
+    replaced = False
+    parts = []
+    for part in content:
+        if (
+            isinstance(part, dict)
+            and str(part.get("type") or "").lower()
+            in {"", "text", "input_text", "output_text"}
+            and not replaced
+        ):
+            parts.append({**part, "text": text})
+            replaced = True
+        else:
+            parts.append(part)
+    if not replaced:
+        parts.insert(0, {"type": "text", "text": text})
+    return parts
+
+
+def _rewrite_context_user_turn(session, expanded_text: str, msg_text: str) -> None:
+    """Keep the model context on the expanded skill payload after a RAW split.
+
+    The RAW/agent-only split (#5896) persists the raw ``/skill …`` command as the
+    visible user row (``persist_user_message``) while feeding the full expansion
+    to the model via ``user_message``. Because the agent persists the RAW text,
+    ``result_messages`` — and therefore ``session.context_messages`` after the
+    settle — carry RAW. Rewrite the CURRENT turn's user row in the context (as a
+    deep copy, so the display rows in ``session.messages`` are untouched) with the
+    expansion, so the skill content survives into the next turn's
+    ``conversation_history`` (gate-fail #5).
+    """
+    if not expanded_text or not msg_text:
+        return
+    context = list(getattr(session, "context_messages", None) or [])
+    # Prefer the LAST user row when it already carries the model-facing text.
+    # Rewriting an earlier raw checkpoint beside it is how the same turn ended
+    # up with two context copies (raw rewritten to expansion, plus the Agent's
+    # own expansion row). The settle normalizes that shape now; this guard
+    # keeps a self-heal/legacy caller from recreating it.
+    last_user_idx = None
+    for i in range(len(context) - 1, -1, -1):
+        row = context[i]
+        if isinstance(row, dict) and row.get("role") == "user":
+            last_user_idx = i
+            break
+    if last_user_idx is not None and _looks_like_current_user_turn(
+        context[last_user_idx], expanded_text
+    ):
+        rewritten = copy.deepcopy(context[last_user_idx])
+        rewritten["content"] = _replace_user_text_content(
+            rewritten.get("content"), expanded_text
+        )
+        rewritten["_skill_raw_user_text"] = msg_text
+        context[last_user_idx] = rewritten
+        session.context_messages = context
+        return
+    idx = None
+    fallback_idx = None
+    for i in range(len(context) - 1, -1, -1):
+        m = context[i]
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        if _looks_like_current_user_turn(m, msg_text):
+            idx = i
+            break
+        if fallback_idx is None:
+            text = " ".join(str(_message_text(m.get("content", "")) or "").split())
+            if text and text == " ".join(str(expanded_text).split()):
+                fallback_idx = i
+        if fallback_idx is None and _looks_like_current_user_turn(m, expanded_text):
+            # The live Agent returns its own user row (the model-facing text,
+            # workspace-prefixed) alongside the persisted RAW row. Match that
+            # representation too, or this rewrite silently no-ops and the skill
+            # body stays unlinked in the context (#5896 re-gate).
+            fallback_idx = i
+    if idx is None:
+        # The context already carries the model representation (canonical
+        # Gateway history, or a previous rewrite): stamp the raw link on it so
+        # the display merge still keys the row on the raw turn instead of
+        # treating the expansion as a context-only row.
+        idx = fallback_idx
+    if idx is None:
+        return
+    rewritten = copy.deepcopy(context[idx])
+    if not isinstance(rewritten, dict):
+        return
+    rewritten["content"] = _replace_user_text_content(
+        rewritten.get("content"), expanded_text
+    )
+    # Model-representation ownership (#5896 re-gate): this context row is the
+    # EXPANSION of the raw user turn `msg_text`. Record the raw text on the row
+    # so the display merge keys it on its DISPLAY representation instead of the
+    # expansion. Without this link `_merge_display_messages_after_agent_result`
+    # treats the expansion as a context-only turn and backfills it into
+    # `session.messages`, which then leaks through cold reload and the
+    # older-message GET.
+    rewritten["_skill_raw_user_text"] = msg_text
+    context[idx] = rewritten
+    session.context_messages = context
 
 
 def _current_turn_already_has_visible_assistant_answer(messages, *, active_turn_identity=None):
@@ -10435,6 +10629,25 @@ def _message_identity(msg):
     )
 
 
+def _display_identity_for_context_row(msg):
+    """Identity of a MODEL-context row as its DISPLAY counterpart is keyed.
+
+    ``_rewrite_context_user_turn()`` replaces a user row's visible text with the
+    resolved skill expansion and records the original raw text in
+    ``_skill_raw_user_text``. That row is a model-only representation of the
+    same turn the display still carries as ``/skill …``. The display backfill
+    (which decides whether a context row is already present in the transcript)
+    must key such a row on the raw text, or the expansion looks like a
+    context-only turn and is backfilled into ``session.messages`` (#5896
+    re-gate).
+    """
+    if isinstance(msg, dict):
+        raw = msg.get('_skill_raw_user_text')
+        if isinstance(raw, str) and raw and msg.get('role') == 'user':
+            return _message_identity({'role': 'user', 'content': raw})
+    return _message_identity(msg)
+
+
 # Fields that participate in the model-facing row comparison for an EXACT prefix
 # proof. These are the keys the Agent actually sent to the provider; comparing
 # them verbatim (no whitespace normalization, no 500-char truncation) is the
@@ -10540,6 +10753,16 @@ def _messages_have_prefix(messages, prefix, *, key_fn=None):
 
 def _message_replay_key(msg):
     """Return a stable comparison key for replay/overlap de-duplication."""
+    # A `_skill_raw_user_text` context row is the model-facing representation
+    # of the raw display turn. Replay/overlap identity is about the LOGICAL
+    # turn, so key it exactly like the display row (and ignore the provider
+    # sidecar, which the display counterpart never carries).
+    if (
+        isinstance(msg, dict)
+        and msg.get("role") == "user"
+        and isinstance(msg.get("_skill_raw_user_text"), str)
+    ):
+        return _display_identity_for_context_row(msg)
     identity = _message_identity(msg)
     # ``api_content`` is a provider-facing replay sidecar.  It must participate
     # in context/replay overlap identity or two same-visible turns can collapse
@@ -12035,6 +12258,7 @@ def _merge_display_messages_after_agent_result(
     msg_text,
     source: str = "webui",
     verification_nudge_provenance=None,
+    model_user_text: str | None = None,
 ):
     """Keep UI transcript durable while allowing model context to compact.
 
@@ -12195,7 +12419,7 @@ def _merge_display_messages_after_agent_result(
             return _display_identity_by_durable_tool_row.get(_durable)
 
         _context_id_set = {
-            _message_identity(m)
+            _display_identity_for_context_row(m)
             for m in previous_context
             if not _is_displayed_native_image_context_row(m)
             if _displayed_durable_tool_twin_identity(m) is None
@@ -12211,7 +12435,8 @@ def _merge_display_messages_after_agent_result(
                     continue
                 _twin_identity = _displayed_durable_tool_twin_identity(m)
                 context_keys.append(
-                    _twin_identity if _twin_identity is not None else _message_identity(m)
+                    _twin_identity if _twin_identity is not None
+                    else _display_identity_for_context_row(m)
                 )
             # Precompute display keys once; avoids repeated json.dumps calls inside
             # the inner any() loop (was O(D²·C) — see perf fix below).
@@ -12366,7 +12591,9 @@ def _merge_display_messages_after_agent_result(
     seen = {_message_identity(m) for m in merged}
     current_user_key = _message_identity({'role': 'user', 'content': msg_text})
     current_user_in_candidates = any(
-        _message_identity(m) == current_user_key or _looks_like_current_user_turn(m, msg_text)
+        _message_identity(m) == current_user_key
+        or _looks_like_current_user_turn(m, msg_text)
+        or (model_user_text and _looks_like_current_user_turn(m, model_user_text))
         for m in candidates
     )
     current_user_already_checkpointed = (
@@ -12457,7 +12684,9 @@ def _merge_display_messages_after_agent_result(
                 continue
             msg = display_row
         key = _message_identity(msg)
-        is_current_user_turn = _looks_like_current_user_turn(msg, msg_text)
+        is_current_user_turn = _looks_like_current_user_turn(msg, msg_text) or bool(
+            model_user_text and _looks_like_current_user_turn(msg, model_user_text)
+        )
         if (
             not is_active_image_row
             and ((key is not None and key == current_user_key) or is_current_user_turn)
@@ -12465,6 +12694,7 @@ def _merge_display_messages_after_agent_result(
             and (
                 _message_identity(merged[-1]) == current_user_key
                 or _looks_like_current_user_turn(merged[-1], msg_text)
+                or (model_user_text and _looks_like_current_user_turn(merged[-1], model_user_text))
             )
         ):
             # Eager session-save mode can checkpoint the current user turn
@@ -12642,6 +12872,7 @@ def _merged_transcript_lacks_final_assistant_answer(
     source: str = "webui",
     drop_replayed_assistant: bool = False,
     active_turn_identity=None,
+    model_user_text: str | None = None,
 ) -> bool:
     """Return True when the current turn still lacks a final assistant answer."""
     previous_display = list(previous_display or [])
@@ -12661,6 +12892,7 @@ def _merged_transcript_lacks_final_assistant_answer(
             'verification_nudge_seen': _verification_nudge_seen,
             'active_turn_identity': active_turn_identity,
         },
+        model_user_text=model_user_text,
     )
     return _turn_transcript_lacks_final_assistant_answer(
         merged_messages,
@@ -14537,6 +14769,7 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    agent_message=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -16925,9 +17158,10 @@ def _run_agent_streaming(
                 session_id,
                 pending_async_acceptances=_pending_async_acceptances,
             )
-            _agent_msg_text = msg_text
+            _model_msg_text = agent_message or msg_text
+            _agent_msg_text = _model_msg_text
             if _process_notifications:
-                _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
+                _agent_msg_text = "\n\n".join([*_process_notifications, _model_msg_text]).strip()
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg, active_provider=(resolved_provider or ""), active_model=(resolved_model or ""), requested_provider=(_session_requested_provider or ""), profile=(getattr(s, "profile", None) or Path(_profile_home)))
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             with _agent_lock:
@@ -16983,10 +17217,10 @@ def _run_agent_streaming(
                         _process_notifications.remove(_notification)
                     except ValueError:
                         pass
-                _agent_msg_text = msg_text
+                _agent_msg_text = _model_msg_text
                 if _process_notifications:
                     _agent_msg_text = "\n\n".join(
-                        [*_process_notifications, msg_text]
+                        [*_process_notifications, _model_msg_text]
                     ).strip()
                 user_message = _build_native_multimodal_message(
                     workspace_ctx,
@@ -17219,7 +17453,13 @@ def _run_agent_streaming(
                         _active_turn_identity,
                         _run_conversation_projected_history,
                         compression_authorized=_compressed_this_turn,
+                        agent_message=agent_message,
                     )
+                    if agent_message:
+                        # RAW/agent-only split: display/persisted rows already
+                        # carry the RAW command; keep the model context on the
+                        # expansion so skill content survives across turns.
+                        _rewrite_context_user_turn(s, agent_message, msg_text)
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
                 # in the raw response text; this must be removed before the content is
@@ -17360,6 +17600,7 @@ def _run_agent_streaming(
                     source=getattr(s, 'pending_user_source', None) or 'webui',
                     drop_replayed_assistant=_drop_replayed_assistant,
                     active_turn_identity=_active_turn_identity,
+                    model_user_text=agent_message,
                 )
                 if (
                     not _all_result_messages
@@ -17724,7 +17965,10 @@ def _run_agent_streaming(
                                     compression_authorized=_producer_committed_compression(
                                         agent, session_id
                                     ),
+                                    agent_message=agent_message,
                                 )
+                                if agent_message:
+                                    _rewrite_context_user_turn(s, agent_message, msg_text)
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
                                 _assistant_added = True  # prevent re-entering guard
@@ -19252,7 +19496,10 @@ def _run_agent_streaming(
                                         compression_authorized=_producer_committed_compression(
                                             _heal_agent, session_id
                                         ),
+                                        agent_message=agent_message,
                                     )
+                                    if agent_message:
+                                        _rewrite_context_user_turn(s, agent_message, msg_text)
                                     # Terminal self-heal success must finalize the
                                     # turn exactly once: clear the pending markers
                                     # so the last-resort recovery sync in the outer

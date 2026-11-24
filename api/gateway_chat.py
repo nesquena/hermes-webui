@@ -1296,7 +1296,7 @@ def _run_gateway_runs_api_streaming(
     session_id, msg_text, model, workspace, stream_id,
     base_url, api_key, prefill_messages, body_extras,
     *, put_gateway_event, cancel_event,
-    attachments=None, cfg=None, session=None,
+    attachments=None, cfg=None, session=None, agent_message=None,
     active_provider: str = "",
     on_run_id=None,
     on_seq=None,
@@ -1305,15 +1305,16 @@ def _run_gateway_runs_api_streaming(
     try:
         url_runs = f"{base_url.rstrip('/')}/v1/runs"
         headers = _gateway_run_headers(session_id, api_key)
-        message_content: Any = str(msg_text or "")
+        model_text = str(agent_message or msg_text or "")
+        message_content: Any = model_text
         if attachments:
             try:
                 from api.streaming import _build_native_multimodal_message
 
-                message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg, active_provider=active_provider, active_model=(model or ""), requested_provider=active_provider, profile=getattr(session, "profile", None))
+                message_content = _build_native_multimodal_message("", model_text, attachments, str(workspace), cfg=cfg, active_provider=active_provider, active_model=(model or ""), requested_provider=active_provider, profile=getattr(session, "profile", None))
             except Exception:
                 logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
-                message_content = str(msg_text or "")
+                message_content = model_text
         from api.streaming import (
             _active_turn_authority,
             _active_turn_token_matches,
@@ -1454,7 +1455,14 @@ def _run_gateway_runs_api_streaming(
         # Persist the exact body first: a restart before the run id is saved replays this admission.
         if on_run_id is not None:
             try:
-                on_run_id("", request=run_body)
+                _record_extra = {}
+                if agent_message:
+                    # Store the model-facing text on the run record (NOT inside
+                    # `request`): a crash replay sends `request` back to the
+                    # Gateway verbatim, and a strict endpoint must not receive
+                    # an internal `agent_message` field.
+                    _record_extra["agent_message"] = str(agent_message)
+                on_run_id("", request=run_body, **_record_extra)
             except GatewayHandoffCancelled:
                 # Cancelled before the handoff was durable: never submit the run (#7293).
                 from api.streaming import _server_settle_reason, _worker_cancel_event_payload
@@ -1471,7 +1479,10 @@ def _run_gateway_runs_api_streaming(
 
     _publish_gateway_run_id(stream_id, run_id)
     if on_run_id is not None:
-        on_run_id(run_id)
+        on_run_id(
+            run_id,
+            **({"agent_message": str(agent_message)} if agent_message else {}),
+        )
 
     # Watchdog consume loop (#7978, ported onto the relay-helper architecture):
     # the browser-facing turn must never outlive its gateway run. A single SSE
@@ -2470,6 +2481,23 @@ def _resume_gateway_run_for_session(session) -> bool:
     register_stream_owner(stream_id, sid)
     register_session_writeback_owner(sid, stream_id)
     _mark_gateway_run_starting(stream_id)
+    # #5896 re-gate: a reattached session-RPC turn replays its saved
+    # `session_request.text` (the skill expansion). Carry it as agent_message so
+    # the terminal canonical display can restore the raw command row.
+    _reattach_agent_message = run.get("agent_message")
+    _saved_session_request = run.get("session_request")
+    if not _reattach_agent_message and isinstance(_saved_session_request, dict):
+        _reattach_agent_message = _saved_session_request.get("text")
+    if not _reattach_agent_message:
+        _saved_request = run.get("request")
+        if isinstance(_saved_request, dict):
+            _reattach_agent_message = _saved_request.get("agent_message")
+    # Session-RPC saves carry the model-facing text for EVERY turn; an ordinary
+    # turn's text equals the raw pending prompt. Do not classify those turns as
+    # skill expansions (it would stamp `_skill_raw_user_text` on every resumed
+    # turn and run the expansion-only rewrite path for no reason).
+    if _reattach_agent_message == str(session.pending_user_message or ""):
+        _reattach_agent_message = None
     try:
         threading.Thread(
             target=_run_gateway_chat_streaming,
@@ -2482,6 +2510,7 @@ def _resume_gateway_run_for_session(session) -> bool:
                 "reattach_run": run,
                 "reattach_endpoint": endpoint,
                 "reattach_claim_token": claim_token,
+                "agent_message": _reattach_agent_message,
             },
             name=f"gateway-reattach-{stream_id[:12]}",
             daemon=True,
@@ -3160,6 +3189,7 @@ def _run_gateway_chat_streaming(
     reattach_run=None,
     reattach_endpoint=None,
     reattach_claim_token=None,
+    agent_message=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -3385,6 +3415,10 @@ def _run_gateway_chat_streaming(
                     final_text, usage, canonical_snapshot = run_session(
                         s, stream_id, msg_text, emit=put_gateway_event, cancel=cancel_event,
                         record=record_run, saved=reattach_run,
+                        # #5896 re-gate: the session RPC carries the same
+                        # model-facing text as the runs API (skill expansion
+                        # when present); `msg_text` stays the raw turn.
+                        model_text=str(agent_message or msg_text or ""),
                     )
                 elif reattach_run:
                     run_id = str(reattach_run.get("run_id") or "").strip()
@@ -3412,6 +3446,7 @@ def _run_gateway_chat_streaming(
                         cfg=cfg,
                         session=s,
                         active_provider=(model_provider or ""),
+                        agent_message=agent_message,
                         on_run_id=record_run,
                     )
             except SessionTransportDisconnected as exc:
@@ -3472,15 +3507,16 @@ def _run_gateway_chat_streaming(
                 # Scope Gateway long-term continuity to this WebUI conversation
                 # without exposing the browser's auth cookie or CSRF material.
                 headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
-            message_content: Any = str(msg_text or "")
+            model_text = str(agent_message or msg_text or "")
+            message_content: Any = model_text
             if attachments:
                 try:
                     from api.streaming import _build_native_multimodal_message
 
-                    message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg, active_provider=(model_provider or ""), active_model=(model or ""), requested_provider=(model_provider or ""), profile=getattr(s, "profile", None))
+                    message_content = _build_native_multimodal_message("", model_text, attachments, str(workspace), cfg=cfg, active_provider=(model_provider or ""), active_model=(model or ""), requested_provider=(model_provider or ""), profile=getattr(s, "profile", None))
                 except Exception:
                     logger.debug("Failed to build gateway multimodal attachment payload", exc_info=True)
-                    message_content = str(msg_text or "")
+                    message_content = model_text
             body = {
                 "model": _gateway_model_field(model) or "default",
                 "stream": True,
@@ -3727,6 +3763,7 @@ def _run_gateway_chat_streaming(
                     verification_nudge_provenance={
                         "active_turn_identity": active_turn_identity,
                     },
+                    model_user_text=agent_message,
                 )
             except Exception:
                 logger.debug("Failed to merge gateway display transcript", exc_info=True)
@@ -3752,12 +3789,66 @@ def _run_gateway_chat_streaming(
                 # a messaging sidecar may start empty; never replace its older turns
                 # with just this WebUI user/assistant pair, or append a recovered pair twice.
                 canonical_messages = canonical_snapshot.get("messages") or []
-                s.context_messages = list(canonical_messages)
-                from api.gateway_sessions import display_history
+                # #5896 re-gate: earlier `/skill` turns are stored in the Gateway
+                # as their model-facing expansion. Keep the raw <-> expansion map
+                # from the sidecar context so the canonical adoption does not turn
+                # every earlier skill bubble back into the skill body.
+                _expansion_to_raw = {}
+                from api.streaming import _message_text
+
+                def _display_text_for_skill_map(value):
+                    return " ".join(_message_text(value).split())
+
+                for _prior in (s.context_messages or []):
+                    if (
+                        isinstance(_prior, dict)
+                        and _prior.get("role") == "user"
+                        and isinstance(_prior.get("_skill_raw_user_text"), str)
+                    ):
+                        _exp = _display_text_for_skill_map(_prior.get("content"))
+                        if _exp:
+                            _expansion_to_raw[_exp] = _prior["_skill_raw_user_text"]
+                s.context_messages = [
+                    dict(_m) if isinstance(_m, dict) else _m for _m in canonical_messages
+                ]
+                if _expansion_to_raw:
+                    for _row in s.context_messages:
+                        if isinstance(_row, dict) and _row.get("role") == "user":
+                            _raw = _expansion_to_raw.get(_display_text_for_skill_map(_row.get("content")))
+                            if _raw:
+                                _row["_skill_raw_user_text"] = _raw
+                from api.gateway_sessions import display_history, restore_raw_display_turn
                 s.messages = display_history(canonical_snapshot)
+                if _expansion_to_raw:
+                    for _row in s.messages:
+                        if isinstance(_row, dict) and _row.get("role") == "user":
+                            _raw = _expansion_to_raw.get(_display_text_for_skill_map(_row.get("content")))
+                            if _raw:
+                                from api.streaming import _replace_user_text_content
+
+                                _row["content"] = _replace_user_text_content(
+                                    _row.get("content"), _raw
+                                )
+                                if "text" in _row:
+                                    _row["text"] = _raw
+                # The Gateway stores prompt.submit.text, which is the skill
+                # expansion. Restore the raw command on THIS turn's display row
+                # so the transcript keeps the raw/model split even when the
+                # canonical snapshot is authoritative (#5896 re-gate).
+                restore_raw_display_turn(s.messages, agent_message, msg_text)
                 info = canonical_snapshot.get("info") or {}
                 persisted_model = info.get("model") or s.model
                 persisted_model_provider = info.get("provider") or s.model_provider
+            if agent_message:
+                # RAW/agent-only split: the display/persisted rows carry the raw
+                # command; keep the model context on the resolved skill payload
+                # so it survives into the next turn (round-3 re-gate).
+                try:
+                    from api.streaming import _rewrite_context_user_turn
+
+                    _rewrite_context_user_turn(s, agent_message, str(msg_text or ""))
+                except Exception:
+                    logger.debug("Failed to rewrite gateway model-context user row", exc_info=True)
             s.active_stream_id = None
             s.gateway_run = None
             s.pending_user_message = None

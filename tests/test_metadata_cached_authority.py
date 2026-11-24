@@ -65,6 +65,7 @@ const stored=new Map();
 const c={
   S:{session:{session_id:'A',message_count:spec.initialTotal,regeneration_revision:'old-revision'},messages:cached,toolCalls:[],pendingFiles:[],busy:false,lastUsage:{}},
   INFLIGHT:{}, window:{}, console,
+  _sendInProgress:false, _sendInProgressSid:null,
   _loadingSessionId:null, _loadSessionGeneration:0,
   _messagesTruncated:spec.offset>0, _oldestIdx:spec.offset, _loadingOlder:false,
   _sameSessionForceReloadHint:null, _pendingCarryForwardSnapshot:null,

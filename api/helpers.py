@@ -26,6 +26,7 @@ _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
     "state_db_row_id",
     "_active_turn_token",
     "_active_turn_user",
+    "_skill_raw_user_text",
     "_fork_child_turn",
     "_pending_journal_recovery",
     "_journal_retry_stream_id",

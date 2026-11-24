@@ -264,3 +264,30 @@ def test_second_reattach_of_the_same_stream_is_refused(monkeypatch):
     assert STREAM_ID not in config.ACTIVE_RUNS, (
         "the refused reattach published an active run it does not own"
     )
+
+
+def test_reattach_marks_only_a_model_facing_turn_as_agent_message(monkeypatch):
+    """A session-RPC save records `text` for every turn. A plain turn's text
+    equals the pending raw prompt and must NOT be classified as a skill
+    expansion; a differing model text must be carried."""
+    monkeypatch.setattr(gateway_chat.threading, "Thread", _RecordingThread)
+    _RecordingThread.launched = []
+
+    plain = _FakeSession(pending_started_at=time.time() - 3600)
+    plain.gateway_run["session_request"] = {"text": "hello"}
+    assert gateway_chat._resume_gateway_run_for_session(plain) is True
+    assert _RecordingThread.launched[-1].kwargs.get("agent_message") is None
+
+    _reset_registries()
+    _RecordingThread.launched = []
+    skill = _FakeSession(pending_started_at=time.time() - 3600)
+    skill.gateway_run["session_request"] = {"text": "EXPANSION"}
+    assert gateway_chat._resume_gateway_run_for_session(skill) is True
+    assert _RecordingThread.launched[-1].kwargs.get("agent_message") == "EXPANSION"
+
+    _reset_registries()
+    _RecordingThread.launched = []
+    runs_api = _FakeSession(pending_started_at=time.time() - 3600)
+    runs_api.gateway_run["agent_message"] = "EXPANSION"
+    assert gateway_chat._resume_gateway_run_for_session(runs_api) is True
+    assert _RecordingThread.launched[-1].kwargs.get("agent_message") == "EXPANSION"
