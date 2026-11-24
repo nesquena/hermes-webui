@@ -1025,25 +1025,26 @@ def _sync_gateway_run_clarify_from_status(session_id, run_id, status, base_url, 
     if not isinstance(controls, list):
         return
     parked = [c for c in controls if isinstance(c, dict) and c.get("kind") == "clarify"]
-    live_ids = {_gateway_prompt_identity(c) for c in parked}
-    from api.clarify import gateway_run_prompt_ids
+    # A prompt's identity is (id, generation): a republished generation replaces the old card.
+    live = {(_gateway_prompt_identity(c), c.get("execution_generation")) for c in parked}
+    from api.clarify import gateway_run_prompt_keys
 
-    queued = gateway_run_prompt_ids(session_id, run_id)
-    for prompt_id in queued - live_ids:
-        _settle_gateway_run_clarify(session_id, run_id, prompt_id)
+    queued = gateway_run_prompt_keys(session_id, run_id)
+    for prompt_id, generation in queued - live:
+        _settle_gateway_run_clarify(session_id, run_id, prompt_id, generation=generation)
     for control in parked:
-        if _gateway_prompt_identity(control) not in queued:
+        if (_gateway_prompt_identity(control), control.get("execution_generation")) not in queued:
             _relay_gateway_run_clarify(
                 session_id, run_id, control, base_url, api_key, put_gateway_event=put_gateway_event,
             )
 
 
-def _settle_gateway_run_clarify(session_id, run_id, prompt_id=None) -> int:
+def _settle_gateway_run_clarify(session_id, run_id, prompt_id=None, *, generation=None) -> int:
     """Retire a Gateway run's clarify cards (one prompt, or every one on run end)."""
     try:
         from api.clarify import settle_gateway_run_pending
 
-        return settle_gateway_run_pending(session_id, run_id, prompt_id)
+        return settle_gateway_run_pending(session_id, run_id, prompt_id, generation=generation)
     except Exception:
         logger.debug("Failed to settle gateway clarify mirrors for run %s", run_id, exc_info=True)
         return 0

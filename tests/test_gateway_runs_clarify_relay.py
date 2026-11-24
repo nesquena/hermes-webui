@@ -535,6 +535,23 @@ def test_restart_restored_clarify_is_answerable(_endpoint):
     assert calls[0][1] == {"request_id": "clar-a", "execution_generation": 3, "answer": "blue"}
 
 
+def test_status_republished_generation_replaces_outdated_clarify_card(_endpoint):
+    """Same prompt id at a newer generation: the old card goes, the answer carries the new one."""
+    _relay([_request("clar-a", 3)], [])
+    events = []
+    gateway_chat._sync_gateway_run_clarify_from_status(
+        SID, RUN, {"status": "running", "pending_controls": [_parked("clar-a", 4)]}, "http://gw:8642", "k",
+        put_gateway_event=lambda e, d: events.append((e, d)))
+    assert clarify.gateway_run_prompt_keys(SID, RUN) == {("clar-a", 4)}
+    cid = events[-1][1]["clarify_id"]
+    assert cid == clarify.gateway_run_clarify_id(RUN, "clar-a", 4)
+    calls, ctx = _gateway_post({"run_id": RUN, "status": "resolved", "prompt_id": "clar-a"})
+    with ctx:
+        out = _respond({"session_id": SID, "clarify_id": cid, "response": "blue"})
+    assert out["status"] == 200
+    assert calls[0][1] == {"request_id": "clar-a", "execution_generation": 4, "answer": "blue"}
+
+
 def test_restart_does_not_resurrect_settled_clarify(monkeypatch):
     """clarify.settled writes no journal row; only the status says which prompts live."""
     events, seen = [], []

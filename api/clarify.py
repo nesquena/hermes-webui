@@ -334,7 +334,19 @@ def gateway_run_prompt_ids(session_key: str, run_id: str) -> set[str]:
         }
 
 
-def settle_gateway_run_pending(session_key: str, run_id: str, prompt_id: str | None = None) -> int:
+def gateway_run_prompt_keys(session_key: str, run_id: str) -> set[tuple[str, object]]:
+    """``(prompt_id, execution_generation)`` of the run's clarify mirrors still queued."""
+    with _lock:
+        return {
+            (str(entry.data.get("_gateway_prompt_id") or ""), entry.data.get("_gateway_execution_generation"))
+            for entry in _gateway_queues.get(session_key) or []
+            if str(entry.data.get("_gateway_run_id") or "") == str(run_id or "")
+        }
+
+
+def settle_gateway_run_pending(
+    session_key: str, run_id: str, prompt_id: str | None = None, *, generation: object = None,
+) -> int:
     """Retire the Gateway run's clarify mirrors (one prompt, or all of the run's).
 
     Notifies clarify SSE subscribers so the visible card is taken down.
@@ -351,6 +363,7 @@ def settle_gateway_run_pending(session_key: str, run_id: str, prompt_id: str | N
             entry for entry in q
             if str(entry.data.get("_gateway_run_id") or "") == run_id
             and (prompt_id is None or str(entry.data.get("_gateway_prompt_id") or "") == str(prompt_id))
+            and (generation is None or entry.data.get("_gateway_execution_generation") == generation)
         ]
         if not targets:
             return 0
