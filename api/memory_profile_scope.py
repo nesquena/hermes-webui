@@ -996,8 +996,27 @@ def call_as_session_owner(
 # through its startup-warning sink. Fresh instances (the documented provider
 # contract) and single-profile installs never see a second home: no change.
 
-_instance_owners: dict[int, tuple[Callable[[], Any], str]] = {}
+# ``_instance_owners`` maps ``id(provider)`` to ``(identity, key, anchors)``:
+#   * ``identity`` tells whether the tracked id still belongs to the SAME instance
+#     (it is the provider itself, weakly when the provider allows it);
+#   * ``key`` is the profile home that owns the instance;
+#   * ``anchors`` are the LIFETIME signals: the entry dies with them.
+# For a provider that supports weak references the provider is its own anchor, so
+# the entry disappears when the provider is collected. A provider without weak
+# reference support (a ``__slots__`` provider) cannot be the anchor — the
+# guard's own strong reference would keep it alive forever and the entry would
+# never be pruned (#9061 item 1). The memory manager that holds such a provider
+# IS the anchor then: the Agent releases the claim with its last manager
+# (agent c9de6070+, memory_caller_scope.claim_instance), so the entry dies with
+# the managers, exactly like the Agent's own claim table does.
+_instance_owners: dict[int, tuple[Callable[[], Any], str, tuple[Callable[[], Any], ...]]] = {}
 _instance_owners_lock = threading.Lock()
+# The GC weak-reference callbacks never WAIT for the table lock: a callback fires
+# from inside a GC, possibly on a thread that holds a logging handler's lock,
+# while another thread holds the table lock and is logging. A busy lock means the
+# work is queued and applied by the next locked table operation.
+_pending_instance_forgets: list[tuple[int, Callable[[], Any]]] = []
+_draining_pending_instance_forgets = False
 _install_lock = threading.Lock()
 _GUARD_MARK = "_webui_issue8517_shared_instance_guard"
 _PRUNE_AT = 64
@@ -1012,11 +1031,115 @@ def _instance_ref(provider: Any) -> Callable[[], Any]:
         return lambda: provider
 
 
+def _forget_instance_owner(pid: int, ref: Callable[[], Any]) -> None:
+    """Weak-reference callback: the manager that held a tracked instance is gone.
+
+    The entry leaves the table with the LAST manager that held it, so the guard
+    stops claiming the profile home for an instance nobody serves any more
+    (#9061 item 1). Without this the entry lived for the whole WebUI process.
+
+    NEVER waits for the lock: the callback fires from inside a GC, possibly on a
+    thread that holds a logging handler's lock. A busy lock means the work is
+    queued and applied by the next locked table operation.
+    """
+    if not _instance_owners_lock.acquire(blocking=False):
+        _pending_instance_forgets.append((pid, ref))
+        return
+    try:
+        _drain_pending_instance_forgets_locked()
+        _forget_instance_owner_locked(pid, ref)
+    finally:
+        _instance_owners_lock.release()
+
+
+def _forget_instance_owner_locked(pid: int, ref: Callable[[], Any]) -> None:
+    """The manager is gone: drop the entry if it is still anchored on it."""
+    entry = _instance_owners.get(pid)
+    if entry is None:
+        return
+    anchors = entry[2]
+    # Only this anchor's death frees the entry: another manager may still hold
+    # the same instance.
+    if not any(anchor is ref for anchor in anchors):
+        return
+    if any(anchor() is not None for anchor in anchors):
+        return
+    del _instance_owners[pid]
+
+
+def _drain_pending_instance_forgets_locked() -> None:
+    """Apply the forget operations queued while the table lock was busy."""
+    global _draining_pending_instance_forgets
+    if _draining_pending_instance_forgets:
+        return
+    _draining_pending_instance_forgets = True
+    try:
+        while _pending_instance_forgets:
+            pid, ref = _pending_instance_forgets.pop()
+            _forget_instance_owner_locked(pid, ref)
+    finally:
+        _draining_pending_instance_forgets = False
+
+
+def _instance_anchors(
+    provider: Any, manager: Any, existing: tuple[Callable[[], Any], ...] | None = None
+) -> tuple[Callable[[], Any], ...]:
+    """The lifetime signals of a tracked instance.
+
+    A provider that supports weak references is its own anchor and the managers
+    are not needed: the entry dies with the provider. A provider without weak
+    reference support is anchored on the managers that hold it — every manager
+    that claimed this instance keeps one weak reference, so the entry survives
+    as long as ANY manager is alive and dies with the last one (#9061 item 1).
+
+    ``existing`` are the anchors the entry already has. They are kept, and the
+    new manager's anchor is added to them: the entry belongs to every manager
+    that holds the instance. The strong-reference fallback is the one anchor
+    that never dies, so it is dropped as soon as a real anchor exists — it
+    would keep the entry alive forever.
+    """
+    pid = id(provider)
+    try:
+        return (weakref.ref(provider, lambda dead: _forget_instance_owner(pid, dead)),)
+    except TypeError:
+        pass
+    anchors: list[Callable[[], Any]] = []
+    if existing:
+        anchors.extend(ref for ref in existing if ref() is not None and ref() is not provider)
+    if manager is not None:
+        try:
+            ref = weakref.ref(manager, lambda dead: _forget_instance_owner(pid, dead))
+        except TypeError:
+            ref = None
+        if ref is not None and not any(anchor() is manager for anchor in anchors):
+            anchors.append(ref)
+    if not anchors:
+        # Nothing to anchor on: fall back to a strong reference so the id can
+        # never be reused while the entry is tracked.
+        anchors.append(lambda: provider)
+    return tuple(anchors)
+
+
+def _claimed_manager(kwargs: dict[str, Any]) -> Any:
+    """The memory manager the Agent passed with its claim, or None.
+
+    Agent c9de6070+ calls ``claim_instance(provider, home, *, manager=self)``; an
+    Agent before it passes none. The manager is the lifetime signal for a
+    provider that cannot be weakly referenced (#9061 item 1), so the guard needs
+    it wherever the Agent's call shape puts it.
+
+    Only the ``manager=`` keyword is read: the Agent's call shape is known
+    (it is keyword-only since c9de6070), and guessing from the positional
+    arguments would read an unrelated argument as a manager.
+    """
+    return kwargs.get("manager")
+
+
 def _prune_dead_owners() -> None:
     if len(_instance_owners) < _PRUNE_AT:
         return
-    for pid, (ref, _key) in list(_instance_owners.items()):
-        if ref() is None:
+    for pid, (_identity, _key, anchors) in list(_instance_owners.items()):
+        if all(ref() is None for ref in anchors):
             del _instance_owners[pid]
 
 
@@ -1074,7 +1197,32 @@ def _claim_for_profile(
                 return False
             if owner is None:
                 _prune_dead_owners()
-                _instance_owners[pid] = (_instance_ref(provider), key)
+                # #9061 (item 1): the entry's lifetime follows the instance for a
+                # provider that supports weak references, and the managers that hold
+                # it for one that does not (a ``__slots__`` provider). The manager is
+                # the Agent's own ``manager=`` argument (#9060), which reaches this
+                # wrapper unchanged.
+                _instance_owners[pid] = (
+                    _instance_ref(provider),
+                    key,
+                    _instance_anchors(provider, _claimed_manager(kwargs)),
+                )
+            elif entry is not None and _claimed_manager(kwargs) is not None:
+                # #9061 (item 1): the entry keeps the anchors it has and the new
+                # manager's anchor JOINS them. The entry belongs to every manager
+                # that holds the instance: it must survive as long as ANY manager
+                # is alive and die with the last one. (The Agent's own claim keeps
+                # a LIST of manager leases for the same reason, agent c9de6070+.)
+                # Replacing the anchors would release the entry while a live agent
+                # still writes through the instance, and that is exactly the
+                # cross-profile mix the #8517 guard exists to prevent.
+                #
+                # The strong-reference fallback (the only anchor that never dies on
+                # its own) is dropped here: a real anchor exists now, and keeping
+                # the fallback would keep the entry alive for the whole process.
+                anchors = _instance_anchors(provider, _claimed_manager(kwargs), entry[2])
+                if anchors != entry[2]:
+                    _instance_owners[pid] = (entry[0], entry[1], anchors)
             return True
     name = getattr(provider, "name", "?")
     refusals = _construction_refusals.get()
