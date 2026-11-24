@@ -162,7 +162,8 @@ def test_the_last_holder_is_released_and_the_instance_is_claimable_again(
 
     governance.soft_release_transcript(agent, session_id="8810-sole")
 
-    assert agent.native_releases == 1, "the last holder's release never ran"
+    assert agent.llm_clients >= 1, "the last holder kept its LLM clients"
+    assert agent.native_releases == 0, "the release re-ran the native method"
     assert provider.shutdowns == 1
     assert provider.client.is_closed is True
 
