@@ -12,6 +12,11 @@ The checks below run the real `_populateTtsVoices`, `_speechSetting` and
 against a node model of a native `<select>` (an assigned value with no matching
 option leaves the control on its first option, exactly like the browser's
 selectedness algorithm). No browser, no network.
+
+They also pin the two behaviours the fix must not trade away: an explicit edit
+to Default still saves `""`, and a voice edited for one engine is never saved
+for another engine that cannot represent it (in both switch directions), while
+the original edit is recovered when the user switches back.
 """
 
 import pathlib
@@ -134,6 +139,12 @@ class Select extends FakeEl {
     if(node) node.parentElement = this;
     this.children.push(node);
     if(!this._selected) this._selected = this.options[0] || null;
+    return node;
+  }
+  removeChild(node){
+    const idx = this.children.indexOf(node);
+    if(idx !== -1) this.children.splice(idx, 1);
+    if(this._selected === node) this._selected = this.options[0] || null;
     return node;
   }
 }
@@ -266,7 +277,38 @@ store.set('hermes-tts-engine', 'browser');
   assert.strictEqual(ttsVoiceSel.value, 'Third Voice', 'browser voice must come back after engine switch');
   assert.strictEqual(payloadFor().tts_voice, 'Third Voice', 'intent survived the engine switch');
 
-  // 7. An intentional edit to Default must still persist Default and must not
+  // 7. Edit-then-switch, browser -> edge: the voice just edited for browser must
+  // not be saved for Edge, whose control shows its own labelled Default.
+  userPicksVoice('First Voice');
+  assert.strictEqual(payloadFor().tts_voice, 'First Voice', 'the browser edit is saved for browser');
+  selectEngine('edge');
+  window._populateTtsVoices();
+  assert.strictEqual(ttsVoiceSel.value, '', 'edge cannot represent the edited browser voice');
+  assert.deepStrictEqual(unavailable(), [], 'no browser voice may be faked in the edge list');
+  const edgeAfterEdit = payloadFor();
+  assert.strictEqual(edgeAfterEdit.tts_engine, 'edge');
+  assert.strictEqual(edgeAfterEdit.tts_voice, '', 'an edited browser voice must not be saved for edge');
+
+  // 8. Switching back to browser recovers that edit instead of losing it.
+  selectEngine('browser');
+  window._populateTtsVoices();
+  assert.strictEqual(ttsVoiceSel.value, 'First Voice', 'the browser edit is recovered');
+  assert.strictEqual(payloadFor().tts_voice, 'First Voice', 'browser keeps its own voice');
+
+  // 9. Edit-then-switch, edge -> browser: the same rule in the other direction.
+  selectEngine('edge');
+  window._populateTtsVoices();
+  userPicksVoice('en-US-GuyNeural');
+  assert.strictEqual(payloadFor().tts_voice, 'en-US-GuyNeural', 'the edge edit is saved for edge');
+  selectEngine('browser');
+  window._populateTtsVoices();
+  assert.strictEqual(ttsVoiceSel.value, '', 'browser cannot represent the edge voice');
+  assert.strictEqual(payloadFor().tts_voice, '', 'an edited edge voice must not be saved for browser');
+  selectEngine('edge');
+  window._populateTtsVoices();
+  assert.strictEqual(ttsVoiceSel.value, 'en-US-GuyNeural', 'the edge edit is recovered');
+
+  // 10. An intentional edit to Default must still persist Default and must not
   // resurrect the previous voice on the next rebuild.
   userPicksVoice('');
   assert.strictEqual(payloadFor().tts_voice, '', 'explicit Default must be persisted as Default');
@@ -275,8 +317,10 @@ store.set('hermes-tts-engine', 'browser');
   assert.deepStrictEqual(unavailable(), [], 'explicit Default clears the unavailable option');
   assert.strictEqual(payloadFor().tts_voice, '', 'explicit Default must not be resurrected');
 
-  // 8. Refused storage mirror: the payload omits the key so the durable server
+  // 11. Refused storage mirror: the payload omits the key so the durable server
   // value survives, and the select still shows the accepted voice.
+  selectEngine('browser');
+  window._populateTtsVoices();
   store.set('hermes-tts-voice', 'Third Voice');
   REFUSE = true;
   __REHYDRATE__
@@ -286,6 +330,21 @@ store.set('hermes-tts-engine', 'browser');
     !Object.prototype.hasOwnProperty.call(payloadFor(), 'tts_voice'),
     'refused mirror must omit tts_voice instead of writing the stale cache'
   );
+
+  // 12. The temporary "(unavailable)" option is a placeholder only: an explicit
+  // pick drops it immediately instead of leaving it in the list until the next
+  // catalog rebuild.
+  REFUSE = false;
+  _voices = ALL_VOICES.filter((v) => v.name !== 'Third Voice');
+  window._populateTtsVoices();
+  assert.deepStrictEqual(
+    unavailable(),
+    ['Third Voice (unavailable)'],
+    'missing voice is still shown while it is the accepted one'
+  );
+  userPicksVoice('Second Voice');
+  assert.deepStrictEqual(unavailable(), [], 'placeholder must be dropped by the next explicit pick');
+  assert.strictEqual(payloadFor().tts_voice, 'Second Voice', 'the explicit pick is what gets saved');
 }
 
 process.stdout.write('ok');

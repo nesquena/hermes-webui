@@ -9939,13 +9939,19 @@ function _preferencesPayloadFromUi(){
 function _ttsVoicePayloadFromUi(ttsVoiceSel){
   const shown=String((ttsVoiceSel&&ttsVoiceSel.value!==undefined?ttsVoiceSel.value:'')||'');
   if(shown) return shown;
+  const engineSel=$('settingsTtsEngine');
+  const engine=String((engineSel&&engineSel.value)||'browser');
+  const known=_settingsTtsVoiceKnownEngine;
+  // #9113: which engine accepted the voice is decided before the edited value is
+  // consulted. An edit made for one engine must not be saved for another one
+  // whose rebuild has no matching option: the control then shows that engine's
+  // labelled Default, and Default is what gets saved.
+  if(known&&known!==engine) return '';
   if(_settingsSpeechChangedKeys.has('tts_voice')){
     const desired=Object.prototype.hasOwnProperty.call(_settingsSpeechDesiredValues,'tts_voice')?_settingsSpeechDesiredValues['tts_voice']:'';
     return (desired===undefined||desired===null)?'':String(desired);
   }
-  const engineSel=$('settingsTtsEngine');
-  const engine=String((engineSel&&engineSel.value)||'browser');
-  if(_settingsTtsVoiceKnownEngine&&_settingsTtsVoiceKnownEngine===engine){
+  if(known===engine){
     let stored=null;
     try{stored=localStorage.getItem('hermes-tts-voice');}catch(_){stored=null;}
     if(stored) return stored;
@@ -11042,6 +11048,9 @@ async function loadSettingsPanel(){
         const unavailableOpt=document.createElement('option');
         unavailableOpt.value=current;
         unavailableOpt.textContent=current+' (unavailable)';
+        // Placeholder only: the voice onchange drops it as soon as the user picks
+        // a real option, instead of leaving a stale entry until the next rebuild.
+        unavailableOpt.dataset.ttsUnavailable='1';
         ttsVoiceSel.appendChild(unavailableOpt);
       }
       // Sync only to an offered voice: a value with no option blanks the native
@@ -11055,6 +11064,11 @@ async function loadSettingsPanel(){
         if(engine==='browser') window._populateTtsVoices();
       },{once:false});
       ttsVoiceSel.onchange=function(){
+        // #9113: drop the "(unavailable)" placeholder once a real option is
+        // picked; keeping it would leave a stale entry in the list.
+        Array.from(this.options||[]).forEach(function(opt){
+          if(opt&&opt.dataset&&opt.dataset.ttsUnavailable&&opt.value!==ttsVoiceSel.value&&opt.parentElement===ttsVoiceSel) ttsVoiceSel.removeChild(opt);
+        });
         const mirrorOk=_writeSettingsStorageMirror('hermes-tts-voice',this.value);
         _markSpeechPreferenceChanged('tts_voice');
         // #9113: the voice now belongs to the engine that is selected, so it may
