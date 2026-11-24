@@ -7678,7 +7678,8 @@ def _provider_is_config_declared(provider_id: str, config_obj: dict) -> bool:
     kept as written so the Agent refuses it, not rewritten to the public
     built-in (#9323). The file this save loaded counts both raw and
     ``${VAR}``-expanded (with the live profile env), so a name given as a
-    reference matches once expanded. The runtime config counts too: a source
+    reference matches once expanded. So does the Agent's managed-scope config
+    merged over it (raw and expanded). The runtime config counts too: a source
     can only keep a name, never strip one, so a runtime config older than the
     file fails toward keeping it, and the Agent refuses an id it can't route.
     Any spelling the Agent routes to the record counts (see
@@ -7690,15 +7691,16 @@ def _provider_is_config_declared(provider_id: str, config_obj: dict) -> bool:
     if not wanted:
         return False
     try:
-        if (
-            _named_custom_provider_slug_for_provider(provider_id, config_obj)
-            or _named_custom_provider_slug_for_provider(provider_id, cfg)
-        ):
+        # The Agent resolves providers with its managed-scope config.yaml merged over the profile's, so a record
+        # declared only there counts too.
+        managed = _with_managed_scope(config_obj)
+        views = (config_obj, cfg) if managed is config_obj else (config_obj, cfg, managed)
+        if any(_named_custom_provider_slug_for_provider(provider_id, view) for view in views):
             return True
-        return any(
-            wanted in _declared_provider_names(source)
-            for source in (config_obj, _expand_env_vars(config_obj), cfg)
-        )
+        sources = [config_obj, _expand_env_vars(config_obj), cfg]
+        if managed is not config_obj:
+            sources += [managed, _expand_env_vars(managed)]
+        return any(wanted in _declared_provider_names(source) for source in sources)
     except Exception:
         return True
 

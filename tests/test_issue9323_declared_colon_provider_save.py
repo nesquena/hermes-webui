@@ -345,3 +345,33 @@ def test_enabled_declaration_resolves_to_its_own_record_after_save(monkeypatch, 
     assert (runtime.get("provider"), runtime.get("base_url"), runtime.get("api_key")) == (
         "custom", EU, RECORD_KEY,
     ), runtime
+
+
+MANAGED_SHAPES = {
+    "name_alias": {"providers": {"eu": {"name": "openrouter:eu", "base_url": EU, "api_key": RECORD_KEY}}},
+    "key": {"providers": {"openrouter:eu": {"base_url": EU, "api_key": RECORD_KEY}}},
+    "legacy": {"custom_providers": [{"name": "openrouter:eu", "base_url": EU, "api_key": RECORD_KEY}]},
+}
+
+
+@pytest.mark.parametrize("shape", sorted(MANAGED_SHAPES))
+def test_managed_scope_declaration_is_kept_and_resolves_to_its_record(monkeypatch, tmp_path, shape):
+    """A record declared only in the Agent's managed-scope config.yaml keeps the id, which the Agent then routes to
+    that record."""
+    managed_scope = pytest.importorskip("hermes_cli.managed_scope")
+    managed_dir = tmp_path / "managed"
+    managed_dir.mkdir()
+    (managed_dir / "config.yaml").write_text(yaml.safe_dump(MANAGED_SHAPES[shape]), encoding="utf-8")
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed_dir))
+    managed_scope.invalidate_managed_cache()
+    try:
+        path = _write_config({})
+        resolve = _isolate_runtime(monkeypatch, path)
+        result = set_hermes_default_model("gpt-x", provider="openrouter:eu")
+        saved = _saved_model(path)
+        assert result["provider"] == "openrouter:eu", result
+        assert saved["provider"] == "openrouter:eu", saved
+        runtime = resolve()
+        assert (runtime.get("base_url"), runtime.get("api_key")) == (EU, RECORD_KEY), runtime
+    finally:
+        managed_scope.invalidate_managed_cache()
