@@ -58,6 +58,25 @@ custom_providers:
 """
 
 
+# Non-OpenRouter active provider, so the slash-form cross-provider scan (which
+# reads `name` and then `base_url` of the matching row) is actually reached.
+# Row 1 has a non-string `name`, row 2 matches the `eu/` prefix with a
+# non-string `base_url`: reverting either guard turns this call into the same
+# AttributeError.
+SLASH_LEGACY_YAML = """
+model:
+  provider: anthropic
+  default: claude-base
+custom_providers:
+  - name: 5
+    base_url: "https://ignored.example/v1"
+  - name: eu
+    base_url: 9
+  - name: proxy
+    base_url: "https://proxy.example/v1"
+"""
+
+
 def _install_config(tmp_path, monkeypatch, yaml_text: str) -> "os.PathLike[str]":
     """Write ``yaml_text`` to an isolated config.yaml and load it into ``cfg``.
 
@@ -85,6 +104,11 @@ def legacy_store(tmp_path, monkeypatch):
 @pytest.fixture()
 def active_custom_store(tmp_path, monkeypatch):
     yield from _install_config(tmp_path, monkeypatch, ACTIVE_LEGACY_YAML)
+
+
+@pytest.fixture()
+def slash_legacy_store(tmp_path, monkeypatch):
+    yield from _install_config(tmp_path, monkeypatch, SLASH_LEGACY_YAML)
 
 
 def test_bare_model_resolves_with_non_string_legacy_rows(legacy_store):
@@ -119,6 +143,21 @@ def test_valid_row_still_resolves_with_its_base_url(legacy_store):
 def test_active_custom_provider_with_non_string_base_url(active_custom_store):
     """The active-slug branch reads ``base_url`` through the same guard."""
     assert config.resolve_model_provider("eu-only") == ("eu-only", "custom:eu", None)
+
+
+def test_slash_form_prefix_scan_with_non_string_fields(slash_legacy_store):
+    """Slash-form routing skips non-string ``name`` and ``base_url`` alike.
+
+    The active provider is ``anthropic``, so ``eu/model`` falls through to the
+    cross-provider custom-name scan: row ``{name: 5}`` must not crash the
+    ``name`` comparison, and the matching ``eu`` row's integer ``base_url`` must
+    be treated as absent rather than raising.
+    """
+    assert config.resolve_model_provider("eu/model") == (
+        "eu/model",
+        "custom:eu",
+        None,
+    )
 
 
 def test_yaml_source_is_really_a_legacy_store(legacy_store):
