@@ -7592,6 +7592,12 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         model_cfg["api_key"] = api_key
 
 
+def _str_field(entry: dict, key: str) -> str:
+    """Stripped ``entry[key]`` when it is a ``str``, ``''`` otherwise (#9314/Item 3)."""
+    value = entry.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _provider_is_config_declared(provider_id: str, config_obj: dict) -> bool:
     """True when *provider_id* names a provider declared in this profile's config.
 
@@ -7603,6 +7609,19 @@ def _provider_is_config_declared(provider_id: str, config_obj: dict) -> bool:
     once expanded. A lookup failure keeps it verbatim.
     """
     try:
+        wanted = str(provider_id or "").strip().lower()
+        if not wanted:
+            return False
+        # Item 3 (#9314): a provider declared by name: inside providers: is verbatim.
+        for source in (config_obj, cfg):
+            if isinstance(source, dict):
+                providers_sec = source.get("providers")
+                if isinstance(providers_sec, dict):
+                    for record in providers_sec.values():
+                        if isinstance(record, dict):
+                            entry_name = _str_field(record, "name").strip().lower()
+                            if entry_name and entry_name == wanted:
+                                return True
         return bool(
             _named_custom_provider_slug_for_provider(provider_id, config_obj)
             or _named_custom_provider_slug_for_provider(provider_id, cfg)
@@ -7725,14 +7744,16 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
             and _is_undeclared_pinned_provider(requested_provider, config_data)
         ):
             if not _model_id_carries_provider_pin(selected_model, model_pin):
-                # #9314: an undeclared ``<built-in>:<suffix>`` whose suffix is
-                # NOT the selected model is a stale/broken provider written by
-                # hand (or before exp-v0.52.742), not a picker pin. Splitting it
-                # here would hide the breakage and could re-route traffic, so
-                # name it and leave the config untouched.
-                raise ValueError(
-                    _undeclared_provider_error(requested_provider, provider_prefix)
-                )
+                # Item 1 (#9314): do not refuse when re-saving the stored broken provider (repair save).
+                if requested_provider.strip().lower() != previous_provider.strip().lower():
+                    # #9314: an undeclared ``<built-in>:<suffix>`` whose suffix is
+                    # NOT the selected model is a stale/broken provider written by
+                    # hand (or before exp-v0.52.742), not a picker pin. Splitting it
+                    # here would hide the breakage and could re-route traffic, so
+                    # name it and leave the config untouched.
+                    raise ValueError(
+                        _undeclared_provider_error(requested_provider, provider_prefix)
+                    )
             # The picker may send a built-in provider's pinned catalog group.
             # Keep the provider selection without persisting its model pin.
             requested_provider = provider_prefix

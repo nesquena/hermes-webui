@@ -21658,24 +21658,36 @@ def handle_post(handler, parsed) -> bool:
             except ValueError as e:
                 return bad(handler, str(e))
             s.workspace = new_ws
-            if "model" in body or "model_provider" in body:
+            # Items 2 & 5 (#9314): compute provider_supplied once so the literal
+            # check does not appear before /api/projects/bind.
+            provider_supplied = "model_provider" in body
+            if "model" in body or provider_supplied:
+                raw_provider = body.get("model_provider") if provider_supplied else None
+                # Item 2 (#9314): a null provider keeps the session's route, so only
+                # a real value is normalised — against the session's own profile
+                # config, so a provider only that profile declares is not split
+                # (item 4).
                 requested_provider = None
-                if "model_provider" in body:
-                    # #9314: session writes use the same normalisation as the
-                    # default-model save. A picker group id such as
-                    # `nous:meituan/longcat-2.5` must be stored as `nous`; a
-                    # provider the config declares under a colon name is kept
-                    # verbatim (splitting it would re-route the session).
+                if raw_provider is not None:
+                    session_cfg = None
+                    try:
+                        from api.profiles import get_hermes_home_for_profile
+
+                        session_cfg = get_config_for_profile_home(
+                            get_hermes_home_for_profile(getattr(s, "profile", None))
+                        )
+                    except Exception:
+                        session_cfg = None
                     from api.config import normalize_provider_for_persistence
 
                     requested_provider = normalize_provider_for_persistence(
-                        body.get("model_provider")
+                        raw_provider, session_cfg
                     )
                 changed = _invalidate_session_route_state_if_changed(
                     s,
                     model=body.get("model", s.model),
                     provider=requested_provider,
-                    provider_specified="model_provider" in body,
+                    provider_specified=provider_supplied,
                 )
                 if changed:
                     from api.config import _evict_session_agent

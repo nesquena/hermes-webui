@@ -107,6 +107,11 @@ def _post(path: str, body: dict) -> tuple[dict, int]:
 
 
 BROKEN = {"model": {"provider": "openrouter:eu", "default": "old-model"}}
+# A healthy profile: the refusal cases below request a pin that is NOT the value
+# already stored, which is the shape the maintainer kept as an error
+# (2026-11-23T18:24:00Z). Re-saving the stored value itself must repair it — see
+# tests/test_issue9314_regate_ownership.py.
+HEALTHY = {"model": {"provider": "nous", "default": "old-model"}}
 
 
 # ── Gap 1: a broken saved provider is named, not silently kept ──────────────
@@ -114,7 +119,7 @@ BROKEN = {"model": {"provider": "openrouter:eu", "default": "old-model"}}
 def test_save_names_an_undeclared_builtin_pin_and_points_to_main_model_options(_isolate_config):
     """``openrouter:eu`` with no declaration is not a picker pin: refuse and name it."""
     config_file = _isolate_config
-    _seed_config(config_file, BROKEN)
+    _seed_config(config_file, HEALTHY)
 
     with pytest.raises(ValueError) as excinfo:
         set_hermes_default_model("new-model", provider="openrouter:eu")
@@ -125,7 +130,7 @@ def test_save_names_an_undeclared_builtin_pin_and_points_to_main_model_options(_
     assert "Save" in message, message
     # The error must not rewrite the config on its own.
     saved = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    assert saved["model"]["provider"] == "openrouter:eu"
+    assert saved["model"]["provider"] == "nous"
     assert saved["model"]["default"] == "old-model"
 
 
@@ -147,7 +152,7 @@ def test_save_without_provider_refuses_to_keep_a_broken_stored_provider(_isolate
 
 def test_default_model_route_returns_400_with_the_bad_value(_isolate_config):
     config_file = _isolate_config
-    _seed_config(config_file, BROKEN)
+    _seed_config(config_file, HEALTHY)
 
     payload, status = _post(
         "/api/default-model", {"model": "new-model", "provider": "openrouter:eu"}
@@ -157,13 +162,13 @@ def test_default_model_route_returns_400_with_the_bad_value(_isolate_config):
     assert "openrouter:eu" in payload["error"], payload
     assert "Main model options" in payload["error"], payload
     saved = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    assert saved["model"]["provider"] == "openrouter:eu"
+    assert saved["model"]["provider"] == "nous"
     assert saved["model"]["default"] == "old-model"
 
 
 def test_model_set_main_route_returns_400_with_the_bad_value(_isolate_config):
     config_file = _isolate_config
-    _seed_config(config_file, BROKEN)
+    _seed_config(config_file, HEALTHY)
 
     payload, status = _post(
         "/api/model/set",
@@ -174,7 +179,7 @@ def test_model_set_main_route_returns_400_with_the_bad_value(_isolate_config):
     assert "openrouter:eu" in payload["error"], payload
     assert "Main model options" in payload["error"], payload
     saved = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    assert saved["model"]["provider"] == "openrouter:eu"
+    assert saved["model"]["provider"] == "nous"
 
 
 def test_picker_pin_save_still_repairs_a_poisoned_provider(_isolate_config):
