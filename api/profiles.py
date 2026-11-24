@@ -1320,8 +1320,10 @@ def load_profile_config(home, *, env: Optional[dict] = None) -> dict:
     config_path = Path(home).expanduser() / 'config.yaml'
     try:
         raw = yaml.safe_load(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
-    except Exception:
-        logger.debug("Failed to load profile config from %s", config_path, exc_info=True)
+    except Exception as exc:
+        # #9322: no traceback/snippet — the parser's message quotes the bad line,
+        # which may hold a value the operator does not want in a log file.
+        logger.debug("Failed to load profile config %s: %s", config_path, type(exc).__name__)
         return {}
     if not isinstance(raw, dict) or not raw:
         return {}
