@@ -2969,6 +2969,14 @@ $('msg').addEventListener('input',()=>{
     _saveComposerDraft(sid, $('msg').value, S.pendingFiles ? [...S.pendingFiles] : []);
   }
   const text=$('msg').value;
+  // A draft typed while a turn was finishing holds the queue back — setBusy(false)
+  // never replaces unsent composer content. Erasing that draft must reopen the
+  // drain, or the queued turn waits for an unrelated action to restart it.
+  if(!text.trim()
+    &&!(typeof S!=='undefined'&&S&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length)
+    &&typeof _resumeQueuedSessionMessageIfComposerEmpty==='function'){
+    _resumeQueuedSessionMessageIfComposerEmpty();
+  }
   // The user edited the text, so an earlier pick/Escape no longer holds the list closed (#8050).
   if(typeof clearSlashDropdownDismissed==='function') clearSlashDropdownDismissed();
   const _slashIdx=typeof _activeSlashCommandOffset==='function'?_activeSlashCommandOffset(text):-1;

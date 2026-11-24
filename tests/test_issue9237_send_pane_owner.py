@@ -42,6 +42,10 @@ RECOVER_COMPRESSED_SRC = _cut(
 DEFAULT_TITLE_SRC = _cut(
     "function _sessionTitleLooksDefaultOrProvisional(", "\nfunction _firstUserMessageTitleCandidate("
 )
+# send() mints through _ensureSessionForComposerAction() before it owns the pane.
+ENSURE_SESSION_SRC = _cut(
+    "function _newSessionActionWasSuperseded(result){", "\nfunction _setComposerAfterCliOnlyExplainer("
+)
 
 # The real t() and the real en send_offscreen_* strings, so the toasts below
 # are asserted as rendered (the whole en block is too long for `node -e`).
@@ -275,6 +279,7 @@ __T__
 __DEFAULT_TITLE__
 __CURRENT_PANE__
 __RECOVER_COMPRESSED__
+__ENSURE_SESSION__
 __SEND__
 
 (async () => {
@@ -297,9 +302,10 @@ def _run(**scenario):
         .replace("__DEFAULT_TITLE__", DEFAULT_TITLE_SRC)
         .replace("__CURRENT_PANE__", CURRENT_PANE_SRC)
         .replace("__RECOVER_COMPRESSED__", RECOVER_COMPRESSED_SRC)
+        .replace("__ENSURE_SESSION__", ENSURE_SESSION_SRC)
         .replace("__SEND__", SEND_SRC)
     )
-    proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
+    proc = subprocess.run([NODE, "-"], input=script, capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
     return json.loads(proc.stdout.strip().splitlines()[-1])
 

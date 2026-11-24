@@ -122,9 +122,13 @@ function _forgetComposerPendingFiles(sid) {
   }
 }
 
-function _restoreComposerPendingFiles(sid) {
+function _peekComposerPendingFiles(sid) {
   const key = _composerPendingFilesOwnerKey(sid);
-  const remembered = key ? (_composerPendingFilesByOwner.get(key) || []) : [];
+  return key ? (_composerPendingFilesByOwner.get(key) || []).slice() : [];
+}
+
+function _restoreComposerPendingFiles(sid) {
+  const remembered = _peekComposerPendingFiles(sid);
   const current = Array.isArray(S.pendingFiles) ? S.pendingFiles : [];
   const unchanged = current.length === remembered.length
     && current.every((file, index) => file === remembered[index]);
@@ -715,6 +719,13 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
 
   // Restore process-local File references only for their owning session. The
   // server metadata shape cannot recreate browser File objects.
+  // Read the owner's remembered files BEFORE the tray repaint below: renderTray()
+  // syncs S.pendingFiles into the owner map, and _rememberComposerPendingFiles
+  // drops the key for an empty list — so repainting the cleared tray first would
+  // delete exactly the entry this restore is about to read.
+  const rememberedOwnerFiles = (!useLocalFallback && !remembered && restoreSid)
+    ? _peekComposerPendingFiles(restoreSid)
+    : null;
   S.pendingFiles = useLocalFallback ? localFallback.files.slice() : [];
   if (typeof renderTray === 'function') renderTray();
 
@@ -730,6 +741,9 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
       S.pendingFiles = [...files];
       if (typeof renderTray === 'function') renderTray();
     }
+  } else if (rememberedOwnerFiles && rememberedOwnerFiles.length) {
+    S.pendingFiles = [...rememberedOwnerFiles];
+    if (typeof renderTray === 'function') renderTray();
   } else {
     _restoreComposerPendingFiles(restoreSid);
   }
@@ -2904,11 +2918,22 @@ async function newSession(flash, options={}){
       if(previousSid&&sourceDraftServerWritable&&!sourceDraftAlreadySaved
          &&(sourceComposerText||sourceComposerFiles.length)
          &&typeof _saveComposerDraftNow==='function'){
+        // A restored goal continuation belongs to the exact text it was stored
+        // with. Flushing the departing draft with an empty token would clear it,
+        // so returning to this chat would retry as an ordinary message.
+        let sourceContinuationId='';
+        if(typeof _peekRestoredGoalContinuationDraft==='function'){
+          const _peeked=_peekRestoredGoalContinuationDraft();
+          if(_peeked&&_peeked.id
+             &&String(_peeked.text||'').trim()===String(sourceComposerText||'').trim()){
+            sourceContinuationId=_peeked.id;
+          }
+        }
         await _saveComposerDraftNow(
           previousSid,
           sourceComposerText,
           sourceComposerFiles,
-          '',
+          sourceContinuationId,
           {rejectOnError:true, ownerProfile:previousProfile, syncOnly:true}
         );
       }

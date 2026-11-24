@@ -7809,7 +7809,10 @@ async function switchToProfile(name) {
   // _maybeReplayChatTodosRailSync). typeof-tolerant like the other counter ops
   // because the frontend test harnesses eval these statements in isolation.
   if (typeof _profileSwitchInFlight === 'number') _profileSwitchInFlight++;
-  const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
+  // The sidebar's cross-profile click passes its intent with THIS call (fourth
+  // argument). A shared module flag would survive the await and could label an
+  // unrelated later switch as a sidebar open.
+  const _openingExistingSidebarSession = !!(arguments[3] && arguments[3].openingExistingSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
   // Optimistic name update — shows the target name right away
