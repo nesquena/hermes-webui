@@ -318,6 +318,8 @@
 
 ### Internal
 
+- **The slow-endpoint model-catalog test no longer fails on a busy machine (test-only, #9331).** `test_real_slow_healthy_endpoint_is_listed_and_cached` timed a real 2.5 s endpoint against the rebuild window, so on a loaded runner the rest of the rebuild could use up the slack and fail it. The test keeps the real HTTP server but runs the window on a virtual clock that moves only by the endpoint's latency, and it fails if any timed wait expires, so a shortened wait or slice is still caught.
+
 - **The context-length contract tests check behaviour again (#9254, closes #8900).** Thanks @chhxbchhxb. An earlier byte-for-byte revert of two test files also dropped later behavioural cases, which had degraded to source-string checks. They are back: the per-profile config re-read on every lookup, and safe handling of a null, empty or malformed `providers:` section.
 
 - **A test now pins that the profile secret-scope setter is inspected again when it is replaced (#9234, refs #9096).** Thanks @chhxbchhxb. Replacing `set_secret_scope` on the same Agent module (an Agent reload, or a plugin that wraps the setter) has to re-check whether the new setter accepts `profile_home`; nothing guarded that half of the cache before.
