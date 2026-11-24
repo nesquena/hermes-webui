@@ -6689,8 +6689,8 @@ function _sessionInternalReferenceForSession(session){
 
 async function _copyTextToClipboard(text){
   if(navigator&&navigator.clipboard&&typeof navigator.clipboard.writeText==='function'){
-    await navigator.clipboard.writeText(text);
-    return true;
+    // A denied or unavailable clipboard permission rejects: use the textarea copy below.
+    try{ await navigator.clipboard.writeText(text); return true; }catch(_){}
   }
   const ta=document.createElement('textarea');
   ta.value=text;
@@ -6699,8 +6699,13 @@ async function _copyTextToClipboard(text){
   ta.style.left='-9999px';
   ta.style.top='0';
   document.body.appendChild(ta);
+  ta.focus({preventScroll:true});
   ta.select();
-  try{return document.execCommand('copy');}
+  // execCommand reports failure by returning false: surface it so callers show the link instead.
+  try{
+    if(!document.execCommand('copy')) throw new Error('copy failed');
+    return true;
+  }
   finally{ta.remove();}
 }
 
@@ -6925,7 +6930,18 @@ function _syncSessionShareState(session, nextSession){
   void renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
 }
 
-async function _createOrRefreshSessionShare(session){
+// An action bound to the conversation on screen when it was clicked checks this once
+// its dialog is answered: true if that conversation is no longer on screen or a switch
+// to another conversation is in flight. The caller then fails closed.
+// Known gap (rare, left as is): a profile switch on an EMPTY conversation retags its
+// workspace in place (panels.js, profile switch: same session id, no pending load),
+// so this stays false across that workspace change.
+function _sessionLeftScreen(session){
+  if(!session||!(S.session&&S.session.session_id===session.session_id)) return true;
+  return !!(_loadingSessionId&&_loadingSessionId!==session.session_id);
+}
+
+async function _createOrRefreshSessionShare(session, opts){
   if(!session||!session.session_id) return;
   const existing=_sessionPublicShareUrl(session);
   if(existing){
@@ -6934,7 +6950,11 @@ async function _createOrRefreshSessionShare(session){
       message:t('share_session_existing_confirm'),
       confirmLabel:t('share_session_copy_existing'),
       cancelLabel:t('share_session_refresh_snapshot'),
+      dismissIsNull:true,
     });
+    // Closing the dialog (×, Escape, backdrop) is not "Refresh snapshot": do nothing.
+    if(reuse===null) return;
+    if(opts&&opts.requireActive&&_sessionLeftScreen(session)) return;
     if(reuse){
       let copied=true;
       try{ await _copyTextToClipboard(existing); }catch(_){ copied=false; }
@@ -6954,12 +6974,12 @@ async function _createOrRefreshSessionShare(session){
   if(copied){
     showToast(existing?t('share_session_link_copied'):t('share_session_created'));
   }else{
-    showToast((existing?t('share_session_created'):t('share_session_created'))+' — '+href,6000);
+    showToast(t('share_session_created')+' — '+href,6000);
   }
   window.open(href,'_blank','noopener');
 }
 
-async function _revokeSessionShare(session){
+async function _revokeSessionShare(session, opts){
   if(!session||!session.session_id||!session.share_token) return;
   const ok=await showConfirmDialog({
     title:t('stop_sharing_session'),
@@ -6967,7 +6987,7 @@ async function _revokeSessionShare(session){
     confirmLabel:t('stop_sharing_session'),
     danger:true,
   });
-  if(!ok) return;
+  if(!ok||(opts&&opts.requireActive&&_sessionLeftScreen(session))) return;
   const res=await api('/api/share/revoke',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
   if(res&&res.session) _syncSessionShareState(session,res.session);
   showToast(t('share_session_revoked'));
@@ -12563,6 +12583,8 @@ if(typeof window!=='undefined'){
       if(typeof showToast==='function') showToast('Finish the current turn before switching sessions.',3000);
       return;
     }
+    // An open app dialog belongs to this conversation: dismiss it first.
+    if(typeof _isAppDialogOpen==='function'&&_isAppDialogOpen()) _finishAppDialog(_appDialogDismissResult());
     void loadSession(sid);
   });
 }
@@ -14841,6 +14863,8 @@ function navigateSession(dir){
 document.addEventListener('keydown',(e)=>{
   if(e.key!=='j'&&e.key!=='k') return;
   if(e.ctrlKey||e.metaKey||e.altKey) return;
+  // A shared app dialog is modal: never switch the conversation underneath it.
+  if(typeof _isAppDialogOpen==='function'&&_isAppDialogOpen()) return;
   // Title buttons retain focus after opening; J/K must remain available there.
   const onSessionTitle=e.target instanceof Element&&e.target.matches('.session-open-control');
   if(!onSessionTitle&&typeof _isInteractiveSwipeTarget==='function'&&_isInteractiveSwipeTarget(e.target)) return;
