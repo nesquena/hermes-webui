@@ -47,12 +47,17 @@ def _node_env() -> dict:
 
 
 def _run_node(script: str) -> subprocess.CompletedProcess:
+    # Feed the script over stdin, not argv: the prelude embeds a large slice of
+    # static/sessions.js and Linux caps a single argv string at 128 KiB
+    # (MAX_ARG_STRLEN), which surfaced on CI as E2BIG from the node exec.
     return subprocess.run(
-        [NODE, "-e", script],
+        [NODE, "-"],
+        input=script,
         capture_output=True,
         text=True,
         check=False,
         env=_node_env(),
+        timeout=120,
     )
 
 
