@@ -4435,12 +4435,18 @@ def _core_row_conflicts_with_pending_turn(row, session) -> bool:
     if (
         row_ts is not None
         and math.isfinite(row_ts)
+        and row_ts > 0
         and pending_ts is not None
         and math.isfinite(pending_ts)
+        and pending_ts > 0
         and row_ts != pending_ts
     ):
-        # Both timestamps are finite and distinct: the row is a different,
-        # older turn even though its text matches.
+        # Both timestamps are positive and finite, and distinct: the row is a
+        # different, older turn even though its text matches. A non-positive
+        # timestamp is a MISSING time, not turn identity — the token builder
+        # (``build_active_turn_token``) rejects ``started <= 0`` for the same
+        # reason, and persisted ``pending_started_at = 0`` legacy shapes must
+        # keep their reuse behaviour instead of duplicating the prompt.
         return True
     if _source_conflicts(
         row.get('_source'), getattr(session, 'pending_user_source', None)
