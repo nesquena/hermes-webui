@@ -7942,6 +7942,14 @@ async function switchToProfile(name) {
     // server transcription, so settle it before snapshotting the source draft
     // and before changing the profile cookie.
     setProfileSwitchComposerPending(true);
+    // Voice Mode is a separate producer: it keeps recognition alive and can
+    // write the composer while the awaited draft save is in flight. Stop it
+    // before the snapshot, but keep the words already in the composer (the
+    // context-switch variant does not clear the textarea).
+    if(typeof window!=='undefined'
+      &&typeof window._voiceModeSuspendForContextSwitch==='function'){
+      window._voiceModeSuspendForContextSwitch();
+    }
     const _sendInProgressAtSettle=typeof _sendInProgress!=='undefined'&&_sendInProgress;
     if(typeof window!=='undefined'
       &&typeof window._stopAndSettleComposerDictation==='function'){

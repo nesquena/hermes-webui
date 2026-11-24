@@ -4188,6 +4188,29 @@ def test_dictation_settlement_waits_for_server_transcription_completion():
     )
 
 
+def test_profile_switch_suspends_voice_mode_before_saving_the_draft():
+    """Voice Mode keeps writing the composer while the switch awaits the draft
+    save. It must stop before the snapshot, and stopping it must not clear the
+    words that snapshot is about to persist."""
+    switch = _function(PANELS_JS, "switchToProfile", "\n\nfunction openProfileCreate")
+    suspend = switch.index("window._voiceModeSuspendForContextSwitch()")
+    settle = switch.index("window._stopAndSettleComposerDictation()")
+    save = switch.index("await _saveComposerDraftNow(")
+    assert suspend < settle < save, (
+        "Voice Mode must be suspended before the dictation settle and the "
+        "source draft snapshot"
+    )
+    suspend_body = _function(
+        BOOT_JS, "_suspendForContextSwitch", "\n\n  modeBtn.onclick=()=>{"
+    )
+    assert "_composerSetText" not in suspend_body, (
+        "the context-switch suspend must keep the dictated text; the full "
+        "deactivate path clears the textarea"
+    )
+    assert "_recognition.abort()" in suspend_body
+    assert "window._voiceModeSuspendForContextSwitch=_suspendForContextSwitch" in BOOT_JS
+
+
 @pytest.mark.parametrize("reject_replacement", [False, True])
 def test_profile_switch_restores_send_state_and_prior_focus(reject_replacement):
     result = _run_profile_switch_settlement_harness(

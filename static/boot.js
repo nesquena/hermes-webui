@@ -2912,6 +2912,31 @@ window.renderTranscript=function(container, messages, opts){
     autoResize();
   }
 
+  // A profile/chat switch persists the composer draft before changing the
+  // cookie. Voice Mode must stop listening before that snapshot: a result
+  // landing during the awaited save writes text the save never sees. Unlike
+  // _deactivate(), this keeps the composer text: those words are exactly the
+  // draft the switch is about to persist.
+  function _suspendForContextSwitch(){
+    const wasActive=_voiceModeActive;
+    _voiceModeActive=false;
+    _voiceModeState='idle';
+    _voiceModeThinkingSid=null;
+    _browserTtsSuppressNextErrorRearm=false;
+    if(wasActive){
+      modeBtn.classList.remove('active');
+      _setButtonTooltip(modeBtn, t('voice_mode_toggle'));
+      bar.style.display='none';
+    }
+    clearTimeout(_silenceTimer);
+    _clearBrowserTtsRecovery();
+    _clearVoiceMicRearm();
+    try{ if(_recognition) _recognition.abort(); }catch(_){}
+    _recognition=null;
+    if(typeof stopTTS==='function') stopTTS();
+    if(_origAutoRead) window.autoReadLastAssistant=_origAutoRead;
+  }
+
   modeBtn.onclick=()=>{
     if(_voiceModeActive){
       _deactivate();
@@ -2924,6 +2949,7 @@ window.renderTranscript=function(container, messages, opts){
   // Expose for external use
   window._voiceModeActive=()=>_voiceModeActive;
   window._voiceModeDeactivate=_deactivate;
+  window._voiceModeSuspendForContextSwitch=_suspendForContextSwitch;
   window._voiceModeImmediateSend=_voiceModeSend;
 })();
 function _currentSessionIsReusableEmptyChat(){
