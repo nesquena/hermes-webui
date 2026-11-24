@@ -10,6 +10,7 @@ import time
 import pytest
 
 from api import config, models, routes
+from tests.conftest import requires_agent_modules
 
 
 def test_empty_session():
@@ -77,6 +78,7 @@ def test_preview_joins_text_parts_truncates_and_redacts(monkeypatch):
     assert turns[1]["preview"] == "b" * 80
 
 
+@requires_agent_modules
 @pytest.mark.parametrize("separator", [" ", "\t", "\n"], ids=["space", "tab", "newline"])
 def test_preview_normalizes_bearer_headers_before_redaction(monkeypatch, separator):
     monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
@@ -114,6 +116,22 @@ def test_preview_normalizes_and_truncates_ordinary_text():
     assert len(preview) <= 80
 
 
+def test_preview_redactor_sees_raw_then_normalized_text_everywhere(monkeypatch):
+    monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
+    calls = []
+
+    def record_redaction(text):
+        calls.append(text)
+        return text
+
+    monkeypatch.setattr(routes, "_redact_text", record_redaction)
+    raw = "first line\nsecond\tline"
+    preview = routes._session_turn_index([{"role": "user", "content": raw}])["turns"][0]["preview"]
+
+    assert calls == [raw, "first line second line"]
+    assert preview == "first line second line"
+
+
 @pytest.mark.parametrize("prefix_length", [60, 61, 70])
 def test_preview_redacts_complete_credentials_before_truncation(monkeypatch, prefix_length):
     monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
@@ -126,6 +144,7 @@ def test_preview_redacts_complete_credentials_before_truncation(monkeypatch, pre
     assert len(preview) <= 80
 
 
+@requires_agent_modules
 @pytest.mark.parametrize(
     "assignment",
     [
@@ -148,6 +167,26 @@ def test_preview_redacts_line_starting_secrets_across_whitespace_collapse(monkey
     assert secret not in preview
     assert preview.startswith("first line ")
     assert "..." in preview
+    assert len(preview) <= 80
+
+
+@requires_agent_modules
+def test_preview_redacts_line_starting_secret_in_second_text_part(monkeypatch):
+    monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
+    secret = "supersecretvalue-second-text-part"
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "ordinary first part"},
+            {"type": "image", "source": "ignored"},
+            {"type": "text", "text": f"password={secret} trailing text"},
+        ],
+    }]
+
+    preview = routes._session_turn_index(messages)["turns"][0]["preview"]
+
+    assert secret not in preview
+    assert preview.startswith("ordinary first part ")
     assert len(preview) <= 80
 
 

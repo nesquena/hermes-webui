@@ -39,8 +39,9 @@ Each entry in `turns` carries:
   non-numeric.
 - `preview` — the user row's text, redacted, whitespace-normalized to single
   spaces, redacted a second time, and truncated to at most 80 characters. For
-  list-shaped content, only the `type: "text"` parts are joined; images and
-  other parts are ignored.
+  list-shaped content, only the `type: "text"` parts are joined with newlines
+  before the first redaction (the visible preview still normalizes them to
+  spaces); images and other parts are ignored.
 - `n_msgs` — the number of merged rows inside this turn after the user row
   itself, up to the next visible user row or the end of the transcript.
 

@@ -17469,7 +17469,18 @@ def _session_turn_index(messages):
     turns = []
     for k, start in enumerate(starts):
         message = messages[start]
-        text = _session_search_message_text(message)
+        content = message.get("content") if isinstance(message, dict) else ""
+        if isinstance(content, list):
+            # Keep text-part boundaries as newlines until after the first
+            # redaction. A space join can hide a line-start credential at the
+            # beginning of the second part from line-anchored patterns.
+            text = "\n".join(
+                str(part.get("text", ""))
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+        else:
+            text = _session_search_message_text(message)
         # Line-start-anchored redactor patterns only match while the original
         # newlines are intact (#9048 gate review): redact the raw text first,
         # normalize whitespace, then redact again so split
