@@ -113,7 +113,11 @@ def test_model_dropdown_is_treated_as_an_interactive_swipe_target():
 
 def test_printable_key_on_the_container_is_redirected_into_search():
     body = _function_body(UI_JS, "renderModelDropdown")
-    assert "if(e.target!==dd) return;" in body
+    # Container-only for printable keys. Escape is the one boundary exception:
+    # the picker consumes it for a focused DESCENDANT (the pin star after a
+    # click) so it cannot reach the page handler and close Settings or clear
+    # the session filter behind an open picker.
+    assert "if(e.target!==dd&&e.key!=='Escape') return;" in body
     # Printable only: navigation keys and shortcuts keep their behaviour.
     assert "e.key.length===1" in body
     assert "!e.ctrlKey&&!e.metaKey&&!e.altKey" in body
@@ -135,8 +139,10 @@ def test_keyboard_navigation_survives_container_focus():
     # detached search input.
     assert "if(!dd._modelPickerKeyBound){" in body
     # Only handle keys when the CONTAINER itself holds focus, so events bubbling
-    # from the inputs are never handled twice.
-    assert "if(e.target!==dd) return;" in body
+    # from the inputs are never handled twice. Escape is the boundary exception:
+    # it is consumed for descendant controls (the pin star) so the page-level
+    # handler cannot act behind the open picker.
+    assert "if(e.target!==dd&&e.key!=='Escape') return;" in body
 
 
 def test_typing_focus_is_preserved_across_rerenders():
