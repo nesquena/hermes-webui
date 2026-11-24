@@ -2872,19 +2872,28 @@ window.renderTranscript=function(container, messages, opts){
   // We override autoReadLastAssistant so that if voice mode is active, we use our
   // own speak-and-resume flow instead of the default auto-read.
   const _origAutoRead=(typeof autoReadLastAssistant==='function')?autoReadLastAssistant:null;
-  window.autoReadLastAssistant=function(){
+  const _voiceAutoReadHook=function(){
     if(_voiceModeActive&&_voiceModeState==='thinking'){
       _speakResponse();
       return;
     }
     if(_origAutoRead) _origAutoRead.apply(this,arguments);
   };
+  // The hook has to outlive both _deactivate() and a context switch. Removing it
+  // leaves the next _activate() without a completion signal, so the following
+  // reply would never leave 'thinking'. Re-installing is idempotent: the wrapper
+  // is a pass-through while Voice Mode is inactive.
+  function _installAutoReadHook(){
+    window.autoReadLastAssistant=_voiceAutoReadHook;
+  }
+  _installAutoReadHook();
 
   function _activate(){
     if(_micOriginNeedsSecureContext()){
       showToast(t('mic_insecure_origin'));
       return;
     }
+    _installAutoReadHook();
     _voiceModeActive=true;
     modeBtn.classList.add('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle_active'));
@@ -2913,8 +2922,9 @@ window.renderTranscript=function(container, messages, opts){
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     if(typeof stopTTS==='function') stopTTS();
-    // Restore original autoReadLastAssistant
-    if(_origAutoRead) window.autoReadLastAssistant=_origAutoRead;
+    // Keep the completion hook installed: _activate() relies on it, and it is a
+    // pass-through while Voice Mode is inactive.
+    _installAutoReadHook();
     // Clear textarea if it was only voice input
     if(typeof _composerSetText==='function')_composerSetText(
       '','',null,_voiceComposerProducerToken
@@ -2945,7 +2955,9 @@ window.renderTranscript=function(container, messages, opts){
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     if(typeof stopTTS==='function') stopTTS();
-    if(_origAutoRead) window.autoReadLastAssistant=_origAutoRead;
+    // A context switch only suspends recognition. The completion hook stays
+    // installed so a later _activate() still resumes listening on the next reply.
+    _installAutoReadHook();
   }
 
   modeBtn.onclick=()=>{

@@ -4332,6 +4332,95 @@ def test_profile_switch_suspends_voice_mode_before_saving_the_draft():
     assert "window._voiceModeSuspendForContextSwitch=_suspendForContextSwitch" in BOOT_JS
 
 
+def test_voice_mode_completion_hook_survives_suspend_and_reactivation():
+    """A context switch only suspends recognition; it must not strip the
+    response-completion hook. Otherwise enabling Voice Mode afterwards leaves
+    the next reply in 'thinking' with no listen restart."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = BOOT_JS.index("const _origAutoRead=")
+    end = BOOT_JS.index("  function _activate(){", start)
+    hook_install = BOOT_JS[start:end]
+    activate = _function(BOOT_JS, "_activate", "\n\n  function _deactivate")
+    deactivate = _function(
+        BOOT_JS, "_deactivate", "\n\n  // A profile/chat switch persists"
+    )
+    suspend = _function(
+        BOOT_JS, "_suspendForContextSwitch", "\n\n  modeBtn.onclick=()=>{"
+    )
+
+    # Static guards: the suspend path must keep the hook, and activation must
+    # reinstall it defensively.
+    assert "_origAutoRead" not in suspend, (
+        "the context-switch suspend must not restore the original "
+        "autoReadLastAssistant; the completion hook has to stay installed"
+    )
+    assert "_installAutoReadHook()" in suspend
+    assert "_installAutoReadHook()" in activate
+
+    script = textwrap.dedent(
+        f"""
+        global.window={{}};
+        let _voiceModeActive=false;
+        let _voiceModeState='idle';
+        let _voiceModeThinkingSid=null;
+        let _browserTtsSuppressNextErrorRearm=false;
+        let _recognition=null;
+        let _silenceTimer=null;
+        const _voiceComposerProducerToken={{producerToken:'voice'}};
+        const ta={{value:''}};
+        const modeBtn={{classList:{{add(){{}},remove(){{}}}},onclick:null}};
+        const bar={{style:{{}}}};
+        const S={{busy:false,session:{{session_id:'s'}}}};
+        let baseReads=0,speaks=0,listens=0;
+        function autoReadLastAssistant(){{baseReads++;}}
+        function _speakResponse(){{speaks++;}}
+        function _micOriginNeedsSecureContext(){{return false;}}
+        function _startListening(){{listens++;_voiceModeState='listening';}}
+        function _setState(value){{_voiceModeState=value;}}
+        function showToast(){{}}
+        function t(value){{return value;}}
+        function _setButtonTooltip(){{}}
+        function _clearBrowserTtsRecovery(){{}}
+        function _clearVoiceMicRearm(){{}}
+        function stopTTS(){{}}
+        function _composerSetText(){{}}
+        function autoResize(){{}}
+        function _voiceModeSend(){{}}
+        {hook_install}
+        {activate}
+        {deactivate}
+        {suspend}
+        _activate();
+        const listensOnActivate=listens;
+        _suspendForContextSwitch();
+        const afterSuspend=window.autoReadLastAssistant;
+        window.autoReadLastAssistant();
+        const baseAfterSuspend=baseReads;
+        _activate();
+        _voiceModeState='thinking';
+        window.autoReadLastAssistant();
+        process.stdout.write(JSON.stringify({{
+          listensOnActivate,
+          afterSuspendIsBase:afterSuspend===autoReadLastAssistant,
+          baseAfterSuspend,
+          speaks,
+          speaksCalledBase:baseReads,
+        }}));
+        """
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "listensOnActivate": 1,
+        "afterSuspendIsBase": False,
+        "baseAfterSuspend": 1,
+        "speaks": 1,
+        "speaksCalledBase": 1,
+    }
+
+
 @pytest.mark.parametrize("reject_replacement", [False, True])
 def test_profile_switch_restores_send_state_and_prior_focus(reject_replacement):
     result = _run_profile_switch_settlement_harness(
