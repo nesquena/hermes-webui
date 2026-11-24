@@ -28288,16 +28288,35 @@ function _renderTreeItems(container, entries, depth){
   }
 }
 
+// A workspace write finished after its conversation left the screen. When the
+// conversation now on screen shows the same workspace (same profile) and no switch is
+// pending, refresh its tree so the change is visible; everything tied to the
+// conversation that issued the write (toast, preview, opening the file, follow-up
+// prompts) stays suppressed. A pending switch reloads the tree when it lands.
+async function _refreshTreeAfterOffscreenWrite(session){
+  const visible=S.session;
+  if(!visible||!session||_loadingSessionId) return;
+  if(!visible.workspace||visible.workspace!==session.workspace) return;
+  if((visible.profile||'default')!==(session.profile||'default')) return;
+  try{ await loadDir(S.currentDir||'.',{preservePreview:true,refreshExpanded:true}); }catch(_){}
+}
+
 async function deleteWorkspaceDir(relPath, name){
-  if(!S.session)return;
+  const session=S.session;
+  if(!session)return;
   if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(relPath)){
     showToast(t('external_link_read_only'), 2000);
     return;
   }
   const ok=await showConfirmDialog({title:t('delete_dir_confirm',name),message:'',confirmLabel:'Delete',danger:true,focusCancel:true});
-  if(!ok)return;
+  if(!ok||_sessionLeftScreen(session))return;
   try{
-    await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath,recursive:true})});
+    await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:relPath,recursive:true})});
+    // Another conversation opened while the delete was in flight: the change is in
+    // the captured workspace only. The tree and its cache below belong to the pane
+    // now on screen (S._dirCache is keyed by relative path, not by workspace), and
+    // reopening the captured conversation reloads its tree from the server.
+    if(_sessionLeftScreen(session)){await _refreshTreeAfterOffscreenWrite(session);return;}
     showToast(t('deleted')+name);
     // Remove from expanded dirs cache
     if(S._expandedDirs){S._expandedDirs.delete(relPath);if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();}
@@ -28448,7 +28467,8 @@ function _showFileContextMenu(e, item){
 }
 
 async function _inlineRenameFileItem(item){
-  if(!S.session)return;
+  const session=S.session;
+  if(!session)return;
   if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(item.path)){
     showToast(t('external_link_read_only'), 2000);
     return;
@@ -28466,9 +28486,11 @@ async function _inlineRenameFileItem(item){
     selectStem:!isDirLike,
     selectAll:isDirLike
   });
-  if(!newName||newName===item.name)return;
+  if(!newName||newName===item.name||_sessionLeftScreen(session))return;
   try{
-    await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path,new_name:newName})});
+    await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:item.path,new_name:newName})});
+    // Same as deleteWorkspaceDir: never rename a row in the pane now on screen.
+    if(_sessionLeftScreen(session)){await _refreshTreeAfterOffscreenWrite(session);return;}
     showToast(t('renamed_to')+newName);
     _treeRowRenamed(item.path,newName);
     // Update expanded dirs cache key if renaming a directory
@@ -28486,15 +28508,18 @@ async function _inlineRenameFileItem(item){
 }
 
 async function deleteWorkspaceFile(relPath, name){
-  if(!S.session)return;
+  const session=S.session;
+  if(!session)return;
   if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(relPath)){
     showToast(t('external_link_read_only'), 2000);
     return;
   }
   const _delFile=await showConfirmDialog({title:t('delete_confirm',name),message:'',confirmLabel:'Delete',danger:true,focusCancel:true});
-  if(!_delFile) return;
+  if(!_delFile||_sessionLeftScreen(session)) return;
   try{
-    await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath})});
+    await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:session.session_id,path:relPath})});
+    // Same as deleteWorkspaceDir: never close a preview in the pane now on screen.
+    if(_sessionLeftScreen(session)){await _refreshTreeAfterOffscreenWrite(session);return;}
     showToast(t('deleted')+name);
     // Close preview if we just deleted the viewed file
     if($('previewPathText').textContent===relPath)$('btnClearPreview').onclick();
@@ -28540,7 +28565,13 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
     const refreshDir=S.currentDir;
     try{
       await api('/api/file/create',{method:'POST',body:JSON.stringify({session_id:owner.sid,path:relPath,content:''})});
-      if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
+      if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary)){
+        // Master-side behaviour kept inside the transaction: a write that settles
+        // after its conversation left the screen still refreshes the visible tree
+        // when it shows the same workspace; open/toast/preview stay suppressed.
+        if(typeof _refreshTreeAfterOffscreenWrite==='function')await _refreshTreeAfterOffscreenWrite(owner.session);
+        return;
+      }
       showToast(t('created')+name.trim());
       delete S._dirCache[targetDir || '.'];
       const refreshCommitted=await loadDir(refreshDir);
@@ -28587,7 +28618,12 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
     const refreshDir=S.currentDir;
     try{
       await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:owner.sid,path:relPath})});
-      if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary))return;
+      if(!_workspaceRepaintBoundaryIsCurrent(repaintBoundary)){
+        // Same as promptNewFile: keep master's offscreen tree refresh, suppress
+        // the rest of the conversation-bound follow-ups.
+        if(typeof _refreshTreeAfterOffscreenWrite==='function')await _refreshTreeAfterOffscreenWrite(owner.session);
+        return;
+      }
       showToast(t('folder_created')+name.trim());
       delete S._dirCache[targetDir || '.'];
       const refreshCommitted=await loadDir(refreshDir);

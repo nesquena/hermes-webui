@@ -36,7 +36,11 @@ def test_the_send_path_creates_the_session_without_awaiting_a_list_render():
     assert body.count("await _ensureSessionForComposerAction(") >= 9
     start = MESSAGES_JS.index("async function _ensureSessionForComposerAction(")
     helper = MESSAGES_JS[start:MESSAGES_JS.index("\n}\n", start)]
-    assert "await newSession(false,options||undefined)" in helper
+    # The helper mints through the canonical newSession() path (passing options
+    # only when the caller supplied them, keeping master's zero-argument shape)
+    # and never renders the list itself.
+    assert "await newSession(" in helper
+    assert "_newSessionActionWasSuperseded(result)" in helper
     assert "renderSessionList" not in helper
 
 
