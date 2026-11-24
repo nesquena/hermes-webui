@@ -22,8 +22,6 @@ assertion being measured.
 """
 import threading
 
-import pytest
-
 from api import config, profiles
 
 GENERIC_ROOT = (

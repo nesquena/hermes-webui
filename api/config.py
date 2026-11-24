@@ -963,6 +963,23 @@ def _profile_home_config_source(
     return target / "config.yaml"
 
 
+def _is_ambient_config_named_owner(profile_home: "Path | str | None") -> bool:
+    """True when the ambient config file is this named profile's own YAML config."""
+    if not profile_home:
+        return False
+    try:
+        from api.workspace import _safe_resolve as _cfg_safe_resolve
+        from api.profiles import get_hermes_home_for_profile
+
+        target = _cfg_safe_resolve(Path(profile_home).expanduser())
+        root_home = _cfg_safe_resolve(get_hermes_home_for_profile("default"))
+        if target == root_home:
+            return False
+        return _cfg_safe_resolve(_get_config_path().parent) == target
+    except Exception:
+        return False
+
+
 def get_config_for_profile_home(
     profile_home: "Path | str | None", *,
     isolate_config_override: bool = False,
@@ -1012,6 +1029,16 @@ def get_config_for_profile_home(
         profile_home, isolate_config_override=isolate_config_override
     )
     if source is _AMBIENT_CONFIG:
+        if (
+            own_environment
+            and not _cfg_has_in_memory_overrides()
+            and _is_ambient_config_named_owner(profile_home)
+        ):
+            from api.profiles import load_profile_config
+
+            profile_cfg = load_profile_config(profile_home)
+            _apply_config_defaults(profile_cfg)
+            return profile_cfg
         return get_config()
     if source is None:
         return {}
