@@ -214,7 +214,8 @@ def test_the_explicit_workspace_opt_out_is_still_shipped_in_newSession():
 
 def test_the_sibling_switch_to_workspace_opt_out_is_unchanged():
     src = _read("static/panels.js")
-    assert "await newSession(false,{workspace:path});" in src
+    assert "await newSession(false,{" in src
+    assert "workspace:path," in src
 
 
 def test_panels_js_parses():

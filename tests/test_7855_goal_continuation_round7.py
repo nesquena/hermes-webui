@@ -51,6 +51,7 @@ pytestmark = pytest.mark.skipif(
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 
 
@@ -123,7 +124,7 @@ def test_the_background_failed_send_persist_carries_the_token() -> None:
     # locals, and the token travels on the single save call for both the
     # visible and background paths — still only for the exact text it was
     # restored for.
-    assert "_saveComposerDraftNow(sid,persistedText,persistedFiles,_persistContId)" in body, (
+    assert "sid,persistedText,persistedFiles,_persistContId" in body, (
         "the failed-send persist drops the continuation token, so "
         "a return to that session and a retry posts no id and admission "
         "scores goal_related=false (#7855 round-7 CORE)"
@@ -199,10 +200,10 @@ def test_the_signature_pin_matches_the_save_helper() -> None:
     stays red on a file this PR does not otherwise touch."""
     pin_file = REPO_ROOT / "tests" / "test_composer_draft_after_send.py"
     text = pin_file.read_text(encoding="utf-8")
-    assert "function _saveComposerDraftNow(sid, text, files, goalContinuationId)" in text, (
+    assert "function _saveComposerDraftNow(sid, text, files, goalContinuationId, options)" in text, (
         "the signature pin still names the 3-argument form, so the "
         "_block() lookup raises ValueError and shard 4 fails (#7855 round-7 CI)"
     )
-    assert "function _saveComposerDraftNow(sid, text, files, goalContinuationId)" in SESSIONS_JS, (
+    assert "function _saveComposerDraftNow(sid, text, files, goalContinuationId, options)" in SESSIONS_JS, (
         "the save helper's real signature does not match the pin"
     )

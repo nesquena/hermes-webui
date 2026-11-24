@@ -2420,10 +2420,12 @@ def test_send_carries_the_originating_picker_generation_into_delayed_new_session
     send_end = messages.index("\nfunction ", send_start + 1)
     send_body = messages[send_start:send_end]
     assert "const _sendProjectPickerClaim=" in send_body
-    assert "newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim})" in send_body
+    assert "await _ensureSessionForComposerAction({pickerClaimEpoch:_sendProjectPickerClaim})" in send_body
     metadata_paths = send_body[send_body.index("const _agentCmd="):]
     assert "await newSession();" not in metadata_paths
-    assert metadata_paths.count("newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim})") >= 6
+    assert metadata_paths.count(
+        "await _ensureSessionForComposerAction({pickerClaimEpoch:_sendProjectPickerClaim})"
+    ) >= 6
 
     new_start = SESSIONS_JS.index("async function newSession(")
     new_end = SESSIONS_JS.index("\n// #2971", new_start)
@@ -2462,6 +2464,9 @@ async function getAgentCommandMetadata(){return null;}
 async function getBundleCommandMetadata(){return {name:'bundle'};}
 async function resolveBundleCommand(){resolverStartedResolve();await resolverGate;throw new Error('held resolver failed');}
 async function newSession(_flash,options){claims.push(options&&options.pickerClaimEpoch);S.session={session_id:'new-session'};}
+// The send path creates its first session through this helper; mirror its
+// contract so the picker claim still travels with the delayed newSession().
+async function _ensureSessionForComposerAction(options){ if(S.session)return true; await newSession(false,options||undefined); return !!S.session; }
 function renderMessages(){}
 function autoResize(){}
 function hideCmdDropdown(){}
