@@ -10740,6 +10740,47 @@ def _looks_like_current_user_turn_scan(messages, msg_text):
     return last_strong_match
 
 
+# #9233: on an expired provider prompt cache the Agent's proactive tool-result
+# prune (``agent/turn_proactive_prune.py``, ``prune_tool_results_only``) shortens
+# old tool results to a summary naming the archived original. It never adds,
+# drops or reorders rows and raises no compression signal. Local mirror of the
+# Agent's ``tools.tool_result_storage._ARCHIVE_POINTER_RE``.
+_AGENT_PRUNE_ARCHIVE_POINTER_RE = re.compile(r" \u2014 full result: \S*cache/pruned/[A-Za-z0-9_.-]+")
+
+
+def _agent_pruned_tool_row_equal(actual, expected):
+    """True iff returned ``actual`` is the Agent's prune stub of projected tool row ``expected``.
+
+    Every model-facing field except ``content`` (and ``api_content``) is identical,
+    both bodies are plain strings, and the returned body is shorter and carries the
+    archive pointer while the projected one does not. Anything else is a divergence.
+    """
+    if not isinstance(actual, dict) or not isinstance(expected, dict):
+        return False
+    if actual.get('role') != 'tool' or not actual.get('tool_call_id'):
+        return False
+    fields = (set(_EXACT_PREFIX_MODEL_FIELDS) | {'api_content'}) - {'content'}
+    if any(actual.get(field) != expected.get(field) for field in fields):
+        return False
+    body, projected_body = actual.get('content'), expected.get('content')
+    if not isinstance(body, str) or not isinstance(projected_body, str):
+        return False
+    if len(body) >= len(projected_body) or _AGENT_PRUNE_ARCHIVE_POINTER_RE.search(projected_body):
+        return False
+    return _AGENT_PRUNE_ARCHIVE_POINTER_RE.search(body) is not None
+
+
+def _restore_agent_pruned_tool_rows(result_messages, projection):
+    """Copy of ``result_messages`` with each Agent prune stub inside the projected
+    prefix put back to WebUI's own projected row, so the strict proof still checks
+    every other row exactly and the stub is never adopted (#9233)."""
+    restored = list(result_messages or [])
+    for idx, expected in enumerate(list(projection or [])[:len(restored)]):
+        if _agent_pruned_tool_row_equal(restored[idx], expected):
+            restored[idx] = expected
+    return restored
+
+
 def _proven_current_turn_suffix(projected_history, result_messages):
     """Return the proven current-turn suffix of ``result_messages``, else None.
 
@@ -10790,7 +10831,7 @@ def _proven_current_turn_suffix(projected_history, result_messages):
         # Not supplied: no proof available.
         return None
     projection = list(projected_history)
-    result_messages = list(result_messages or [])
+    result_messages = _restore_agent_pruned_tool_rows(result_messages, projection)
     if not projection:
         # Explicitly empty: the Agent was sent no history. The full returned
         # list (if any) is the current-turn suffix. An empty result is also
@@ -11598,7 +11639,7 @@ def _proven_tail_merge_exchange(
     verified tail-merge and the settle must fail closed.
     """
     projection = list(projected_history or [])
-    result = list(result_messages or [])
+    result = _restore_agent_pruned_tool_rows(result_messages, projection[:-1])
     if len(projection) < 1 or len(result) < len(projection):
         return None
     # All projected rows before the tail must match exactly — this is what makes
