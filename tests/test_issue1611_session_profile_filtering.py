@@ -204,10 +204,10 @@ def test_static_sessions_js_switches_profile_before_opening_all_profiles_row():
     open_body = src[open_idx:src.index("function _isReadOnlySession", open_idx)]
 
     assert (
-        "await switchToProfile(targetProfile,undefined,paneNavigationGeneration);"
+        "await switchToProfile(targetProfile,undefined,paneNavigationGeneration,{openingExistingSession:true});"
         in ensure_body
-    )
-    assert "_profileSwitchOpeningExistingSession=true;" in ensure_body
+    ), "the sidebar intent must travel with this call, not a shared in-flight flag"
+    assert "_profileSwitchOpeningExistingSession" not in ensure_body
     assert (
         open_body.index(
             "await _ensureSidebarSessionProfile(session,paneNavigationGeneration);"

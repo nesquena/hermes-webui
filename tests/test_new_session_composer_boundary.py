@@ -1200,6 +1200,85 @@ def test_failed_newer_profile_intent_restores_original_profile():
     assert result["switches"] == ["beta", "default", "gamma"]
 
 
+def _run_sidebar_then_direct_profile_claim_harness() -> dict:
+    """A sidebar open holds a pane claim across an await. A direct profile
+    choice made meanwhile must mint a NEW claim and retire the sidebar's, so
+    the older click cannot reopen its conversation afterwards."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    script = textwrap.dedent(
+        f"""
+        {_wait_for_new_session_navigation_function()}
+        {_switch_to_profile_function()}
+        function deferred(){{let resolve,reject;const promise=new Promise((r,j)=>{{resolve=r;reject=j;}});return {{promise,resolve,reject}};}}
+        async function spinUntil(predicate){{for(let i=0;i<200;i++){{if(predicate())return;await Promise.resolve();}}throw new Error('timeout');}}
+        const switches=[];const S={{session:{{session_id:'source-session',profile:'default',workspace:'/workspace-a'}},messages:[],activeProfile:'default',activeProfileIsDefault:true,_pendingSessionToolsets:null}};
+        let _profileSwitchOpeningExistingSession=false;
+        let _profileSwitchGeneration=0;let _workspacePanelMode='closed';
+        let _renamingSid=null;let _skillsData=null;let _workspaceList=null;let _sessionListSkeletonActive=false;
+        const window={{}};const localStorage={{removeItem(){{}}}};
+        const elements={{profileChip:{{classList:{{add(){{}},remove(){{}}}},disabled:false}},profileChipLabel:{{textContent:'default'}},titlebarProfileBtn:{{classList:{{add(){{}},remove(){{}}}},disabled:false}},titlebarProfileLabel:{{textContent:'default'}}}};
+        const $=id=>elements[id]||null;
+        function api(path,options){{
+          if(path!=='/api/profile/switch')throw new Error(`unexpected ${{path}}`);
+          const name=JSON.parse(options.body).name;const d=deferred();switches.push({{name,d}});
+          return d.promise;
+        }}
+        function closeSessionActionMenu(){{}} function _invalidateSessionListRenders(){{}}
+        function _setProfileSwitchListEmbargo(){{}} function showSessionListSkeleton(){{}}
+        function bumpWorkspaceTreeGen(){{}} function t(k){{return k;}} function startGatewaySSE(){{}}
+        function applyBotName(){{}} function _clearPersistedModelState(){{}}
+        function refreshProfileTransitionReasoningChip(){{}} function animateNextSessionListRefresh(){{}}
+        function renderSessionList(){{return Promise.resolve();}} function _openProfileSwitchSessionBrowser(){{}}
+        function syncTopbar(){{}} function clearWorkspaceTreeSkeleton(){{}}
+        function showToast(){{}} function _profileSwitchPanelLoad(){{return Promise.resolve();}}
+        function _refreshProfileSwitchBackground(){{}} function renderSessionListFromCache(){{}}
+        function _newSessionResultWasSuperseded(){{return false;}}
+        async function newSession(){{
+          S.session={{session_id:'replacement',profile:S.activeProfile,workspace:null}};
+          S.messages=[];
+          return {{status:'committed',session:S.session}};
+        }}
+        (async()=>{{
+          const sidebarGeneration=_claimPaneNavigation();
+          // The legacy flow held a module flag across the await; keep it true
+          // here so a regression to that shared flag fails this test.
+          _profileSwitchOpeningExistingSession=true;
+          const sidebar=switchToProfile('beta',undefined,sidebarGeneration,{{openingExistingSession:true}});
+          await spinUntil(()=>switches.length===1);
+          const direct=switchToProfile('gamma');
+          _profileSwitchOpeningExistingSession=false;
+          const sidebarClaimRetired=!_paneNavigationClaimIsCurrent(sidebarGeneration);
+          switches[0].d.resolve({{active:'beta',is_default:false,default_model:null,default_workspace:null}});
+          await spinUntil(()=>switches.length===2);
+          if(switches[1].name==='default')switches[1].d.resolve({{active:'default',is_default:true,default_model:null,default_workspace:null}});
+          else switches[1].d.resolve({{active:'gamma',is_default:false,default_model:null,default_workspace:null}});
+          await spinUntil(()=>switches.length===3);
+          switches[2].d.resolve({{active:'gamma',is_default:false,default_model:null,default_workspace:null}});
+          await Promise.all([sidebar,direct]);
+          process.stdout.write(JSON.stringify({{sidebarClaimRetired,finalProfile:S.activeProfile,switches:switches.map(x=>x.name)}}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+def test_direct_profile_choice_retires_a_sidebar_open_claim():
+    result = _run_sidebar_then_direct_profile_claim_harness()
+    assert result["sidebarClaimRetired"] is True, (
+        "the direct choice borrowed the sidebar's claim; the older sidebar "
+        "click could still reopen its conversation after the switch"
+    )
+    assert result["finalProfile"] == "gamma"
+    assert result["switches"] == ["beta", "default", "gamma"], (
+        "the abandoned sidebar switch rolls back to the previous profile "
+        "before the direct choice applies"
+    )
+
+
 def _run_stale_context_repaint_harness(
     entry: str, *, navigate_directory: bool = False, advance_tree_generation: bool = False
 ) -> dict:

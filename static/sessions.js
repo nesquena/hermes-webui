@@ -4366,12 +4366,10 @@ async function _ensureSidebarSessionProfile(session,paneNavigationGeneration){
   const activeProfile=S.activeProfile||'default';
   if(_profileMatchesActiveProfile(targetProfile,activeProfile)) return false;
   if(typeof switchToProfile!=='function') return false;
-  _profileSwitchOpeningExistingSession=true;
-  try{
-    await switchToProfile(targetProfile,undefined,paneNavigationGeneration);
-  }finally{
-    _profileSwitchOpeningExistingSession=false;
-  }
+  // Pass the sidebar intent with THIS call. A shared module flag survives the
+  // await and would make a direct profile choice issued meanwhile look like a
+  // sidebar open, so that choice could not retire this click's pane claim.
+  await switchToProfile(targetProfile,undefined,paneNavigationGeneration,{openingExistingSession:true});
   return _profileMatchesActiveProfile(targetProfile,S.activeProfile||'default');
 }
 
@@ -6370,7 +6368,7 @@ const NO_PROJECT_FILTER = '__none__';
 let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FILTER = unassigned only)
 const SHOW_ALL_PROFILES_STORAGE_KEY = 'hermes-show-all-profiles';
 let _showAllProfiles = false;  // false = filter to active profile only
-let _profileSwitchOpeningExistingSession = false;  // true while cross-profile sidebar click switches profile before loadSession()
+
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
 let _archivedWebuiCount = 0;      // archived WebUI sessions not fetched until requested
 let _archivedCliCount = 0;        // archived non-WebUI sessions not fetched until requested

@@ -7764,13 +7764,18 @@ function _openProfileSwitchSessionBrowser(){
 
 async function switchToProfile(name) {
   const contextIntent=arguments[1];
+  const switchOptions=arguments[3]&&typeof arguments[3]==='object'?arguments[3]:{};
+  // A sidebar click that opens a concrete session in another profile passes
+  // its intent per call. A shared in-flight flag could not tell it apart from
+  // a direct profile choice made while that click was still awaiting.
+  const openingExistingSession=!!switchOptions.openingExistingSession;
   let paneNavigationGeneration=arguments[2]!=null?arguments[2]
     :(typeof _paneNavigationGeneration==='number'?_paneNavigationGeneration:null);
   // A direct profile choice claims the pane when requested, even if its
   // serialized context work must wait for an older New Chat to settle.
   // Sidebar opens already carry their own pane claim into the profile switch.
   if(!contextIntent
-    &&!(typeof _profileSwitchOpeningExistingSession!=='undefined'&&_profileSwitchOpeningExistingSession)
+    &&!openingExistingSession
     &&name&&name!==S.activeProfile&&typeof _claimPaneNavigation==='function'){
     paneNavigationGeneration=_claimPaneNavigation();
   }
@@ -7872,7 +7877,7 @@ async function switchToProfile(name) {
   // _maybeReplayChatTodosRailSync). typeof-tolerant like the other counter ops
   // because the frontend test harnesses eval these statements in isolation.
   if (typeof _profileSwitchInFlight === 'number') _profileSwitchInFlight++;
-  const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
+  const _openingExistingSidebarSession = openingExistingSession;
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
   // Optimistic name update — shows the target name right away
