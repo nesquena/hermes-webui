@@ -28,6 +28,7 @@ def _isolate(tmp_path, monkeypatch):
     old_cache = config._available_models_cache
     old_cache_ts = config._available_models_cache_ts
     config_file = tmp_path / "config.yaml"
+    monkeypatch.setattr(config, "_cfg_path", config_file)
     config_file.write_text("model:\n  provider: openrouter\n  default: gpt-x\n", encoding="utf-8")
     monkeypatch.setattr(config, "_get_config_path", lambda: Path(str(config_file)))
     config.cfg.clear()
@@ -404,5 +405,37 @@ def test_env_name_from_a_request_profiles_own_env_is_kept(monkeypatch, tmp_path,
         result = set_hermes_default_model("gpt-x", provider="openrouter:eu")
         assert result["provider"] == "openrouter:eu", result
         assert _saved_model(path)["provider"] == "openrouter:eu"
+    finally:
+        profiles.clear_request_profile()
+
+
+@pytest.mark.parametrize("declared", [
+    {"providers": {"eu": {"name": "openrouter:openai/gpt-4o", "base_url": EU, "api_key": RECORD_KEY}}},
+    {"providers": {"openrouter:openai/gpt-4o": {"base_url": EU, "api_key": RECORD_KEY}}},
+], ids=["name", "key"])
+def test_another_profiles_runtime_config_declares_nothing(monkeypatch, tmp_path, declared):
+    """The runtime config caches whichever profile loaded last. A name only another profile declares doesn't keep a
+    picker pin saved in this profile; the pin is still stripped to its built-in."""
+    from api import profiles
+
+    base = tmp_path / ".hermes"
+    profile_home = base / "profiles" / "b"
+    profile_home.mkdir(parents=True)
+    root_config = base / "config.yaml"
+    root_config.write_text(yaml.safe_dump({"model": {"provider": "anthropic", "default": "claude-x"}, **declared}))
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(config, "_get_config_path", _REAL_CONFIG_PATH)
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    monkeypatch.setattr(config, "_cfg_path", root_config)
+    config.cfg.clear()
+    config.cfg.update(yaml.safe_load(root_config.read_text()))
+    profiles.set_request_profile("b")
+    try:
+        path = config._get_config_path()
+        assert path.parent == profile_home, path
+        path.write_text(yaml.safe_dump({"model": {"provider": "openrouter", "default": "openai/gpt-4o"}}))
+        result = set_hermes_default_model("openai/gpt-4o", provider="openrouter:openai/gpt-4o")
+        assert result["provider"] == "openrouter", result
+        assert _saved_model(path)["provider"] == "openrouter"
     finally:
         profiles.clear_request_profile()
