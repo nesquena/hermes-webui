@@ -57,6 +57,83 @@ function _composerPendingText(){
   if(!tx)return '';
   return String(tx.destinationText||'');
 }
+// What a producer that is about to send would be sending: the buffered
+// destination text when a handoff owns the composer, else the visible textarea.
+function _composerPendingOrVisibleText(){
+  const pending=_composerPendingText();
+  if(pending)return pending;
+  const input=$('msg');
+  return input?String(input.value||''):'';
+}
+// Programmatic composer producers (dictation, Voice Mode) own their text through
+// the same transaction as every other mutation. While a New Session handoff is
+// pending the text belongs to the destination and stays buffered there; without
+// a transition it lands in the visible textarea. `replace-all` declares the value
+// as the whole composer text rather than a segment appended after an earlier
+// producer's write.
+function _composerRecordProducerText(value, producerToken){
+  const tx=_composerOwnershipTransition;
+  if(!tx)return false;
+  const next=String(value||'');
+  const baseline=String(tx.nativeBaseline==null?'':tx.nativeBaseline);
+  // A producer that builds on the visible text (append dictation) contributes
+  // only its addition: the source chat's own draft must not follow the user
+  // into the new conversation.
+  const delta=baseline&&next.startsWith(baseline)
+    ?next.slice(baseline.length)
+    :next;
+  _composerTransitionRecord('text-set',delta,null,next,{
+    semantics:'replace-all',producerToken:String(producerToken||'producer'),
+  });
+  return true;
+}
+function _composerCommitProducerText(value, producerToken){
+  const next=String(value||'');
+  const token=String(producerToken||'producer');
+  if(_composerRecordProducerText(next,token))return false;
+  const visible=S.session||{};
+  const ownerSid=visible.session_id||null;
+  const ownerProfile=String(
+    visible.profile||S.activeProfile||'default'
+  ).trim()||'default';
+  return _composerSetText(next,next,ownerSid,token,ownerProfile,'replace-all');
+}
+// Native keystrokes/paste/IME are a composer producer too. During a handoff the
+// textarea still shows the source chat, so an edit is the newest user intent: its
+// addition is buffered for the destination with one stable token, while the text
+// that was already there stays with the source. Aborting restores the whole live
+// value. The synthetic input event `_appendComposerText()` dispatches leaves the
+// value unchanged, so it is not mistaken for a keystroke.
+function _composerRecordNativeText(){
+  const tx=_composerOwnershipTransition;
+  const input=$('msg');
+  if(!tx||!input)return false;
+  // Only the pane the transition actually owns may buffer. If navigation has
+  // already moved to a different owner, this textarea belongs to that owner and
+  // its draft save below is the right place for the keystroke.
+  const visibleSid=(S.session&&S.session.session_id)||null;
+  const visibleProfile=String(
+    (S.session&&S.session.profile)||S.activeProfile||'default'
+  ).trim()||'default';
+  if(tx.sourceSid){
+    if(visibleSid!==tx.sourceSid)return false;
+    if(!_composerProfilesMatch(visibleProfile,tx.sourceProfile))return false;
+  }else if(visibleSid){
+    return false;
+  }
+  const value=String(input.value||'');
+  const previous=String(tx.lastNativeValue==null?'':tx.lastNativeValue);
+  if(value===previous)return false;
+  const baseline=String(tx.nativeBaseline==null?'':tx.nativeBaseline);
+  const delta=baseline&&value.startsWith(baseline)
+    ?value.slice(baseline.length)
+    :value;
+  tx.lastNativeValue=value;
+  _composerTransitionRecord('text-set',delta,null,value,{
+    semantics:'replace-all',producerToken:'native-input',
+  });
+  return true;
+}
 function _rememberComposerOwnerState(sid,profile,state,generation){
   if(!sid||!state)return null;
   const snapshot={
@@ -183,7 +260,8 @@ function _composerRenderDestinationText(tx){
   for(const token of tx.destinationOrder){
     const slot=tx.destinationSlots.get(token);
     if(!slot)continue;
-    text=slot.semantics==='block-append'
+    if(slot.semantics==='replace-all')text=String(slot.value||'');
+    else text=slot.semantics==='block-append'
       ? _composerBlockJoin(text,slot.value)
       : text+String(slot.value||'');
   }
@@ -199,7 +277,8 @@ function _composerRenderAbortText(tx){
   for(const token of tx.abortTextOrder){
     const slot=slots.get(token);
     if(!slot)continue;
-    if(slot.semantics==='block-append')text=_composerBlockJoin(text,slot.value);
+    if(slot.semantics==='replace-all')text=String(slot.value||'');
+    else if(slot.semantics==='block-append')text=_composerBlockJoin(text,slot.value);
     else text+=String(slot.value||'');
   }
   tx.abortState.text=text;
@@ -258,6 +337,8 @@ function _beginComposerOwnershipTransition(sourceSid,sourceProfile,options={}){
       revision:0,
     },
     abortBaseText:input?String(input.value||''):'',
+    lastNativeValue:input?String(input.value||''):'',
+    nativeBaseline:input?String(input.value||''):'',
     abortTextSlots:new Map(),
     abortTextOrder:[],
     destinationSlots:new Map(),
@@ -327,7 +408,10 @@ function _composerTransitionRecord(kind,value,ownerSid,abortValue,options={}){
     _composerApplyRecordToState(state,record,true);
     state.dirty=true;
     _rememberComposerOwnerState(tx.sourceSid,tx.sourceProfile,state,tx.generation);
-    if(kind.startsWith('text-')){const input=$('msg');if(input)input.value=state.text;}
+    if(kind.startsWith('text-')){
+      const input=$('msg');
+      if(input){input.value=state.text;tx.lastNativeValue=state.text;tx.nativeBaseline=state.text;}
+    }
     else S.pendingFiles=[...state.files];
     return true;
   }
@@ -367,16 +451,16 @@ function _composerMutateNonVisibleOwner(kind,value,ownerSid,ownerProfile,semanti
   }
   return true;
 }
-function _composerSetText(value,transitionValue,ownerSid,producerToken,ownerProfile){
+function _composerSetText(value,transitionValue,ownerSid,producerToken,ownerProfile,semantics){
   const context=_composerProducerContext(ownerSid,producerToken,ownerProfile);
   if(context.drop)return false;
   ownerSid=context.ownerSid;producerToken=context.producerToken;ownerProfile=context.ownerProfile;
   const next=String(value||'');
   const buffered=arguments.length>1?String(transitionValue||''):next;
   if(_composerTransitionRecord('text-set',buffered,ownerSid,next,{
-    semantics:'producer-set',producerToken,ownerProfile,
+    semantics:semantics||'producer-set',producerToken,ownerProfile,
   }))return false;
-  if(_composerMutateNonVisibleOwner('text-set',next,ownerSid,ownerProfile,'producer-set'))return false;
+  if(_composerMutateNonVisibleOwner('text-set',next,ownerSid,ownerProfile,semantics||'producer-set'))return false;
   const input=$('msg');if(input)input.value=next;
   return true;
 }
@@ -12277,7 +12361,8 @@ function unlockComposerForClarify(){
 
 function _composerHasContent(){
   const msg=$('msg');
-  return !!((msg&&msg.value.trim().length>0)||S.pendingFiles.length>0||(typeof window._hasPendingSelections==='function'&&window._hasPendingSelections()));
+  const pending=typeof _composerPendingText==='function'?_composerPendingText():'';
+  return !!((msg&&msg.value.trim().length>0)||String(pending||'').trim().length>0||S.pendingFiles.length>0||(typeof window._hasPendingSelections==='function'&&window._hasPendingSelections()));
 }
 
 function _getExplicitBusyCommandAction(text){

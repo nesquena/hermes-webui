@@ -2635,23 +2635,11 @@ function _setNewSessionPending(pending){
     btn.disabled=!!pending;
     btn.setAttribute('aria-busy',pending?'true':'false');
   }
-  // Native controls are one producer class. Programmatic producers use the
-  // ownership transaction and buffer mutations for the destination owner.
-  const composerIds=['msg','fileInput','btnAttach','btnSavedPrompts','btnMic','btnVoiceMode'];
-  for(let i=0;i<composerIds.length;i++){
-    const control=$(composerIds[i]);
-    if(!control) continue;
-    if(typeof _composerControlSetDisabledReason==='function'){
-      _composerControlSetDisabledReason(control,'new-session',!!pending);
-    }else control.disabled=!!pending;
-  }
-  if(typeof document!=='undefined'&&document.querySelectorAll){
-    document.querySelectorAll('#attachTray button').forEach(control=>{
-      if(typeof _composerControlSetDisabledReason==='function'){
-        _composerControlSetDisabledReason(control,'new-session',!!pending);
-      }else control.disabled=!!pending;
-    });
-  }
+  // The composer is deliberately NOT frozen while the create is pending. Unsent
+  // input is the newest user intent, and every producer (keystrokes, paste,
+  // drops, saved prompts, dictation, Voice Mode) already buffers through the
+  // ownership transaction, so refusing input here would only drop it. Only the
+  // New Chat controls freeze, so the same create cannot be requested twice.
   const statusEl=$('composerStatus');
   const pendingText=_newSessionPendingText();
   if(pending){

@@ -1329,7 +1329,14 @@ function _micToastKeyForRecognitionError(error){
       // Replace mode (explicit): dictated text overwrites the composer.
       committed = clean;
     }
-    ta.value=committed;
+    // Dictation is a composer producer like any other: while a New Session
+    // handoff owns the composer the transcript is buffered for the destination
+    // instead of being painted into a textarea the settle is about to repaint.
+    if(typeof _composerCommitProducerText==='function'){
+      _composerCommitProducerText(committed,'dictation');
+    }else{
+      ta.value=committed;
+    }
     autoResize();
     if(window._micPendingSend){
       window._micPendingSend=false;
@@ -1528,7 +1535,11 @@ function _micToastKeyForRecognitionError(error){
         if(event.results[i].isFinal){ final+=t; _finalText=final; }
         else{ interim+=t; }
       }
-      ta.value=_prefix+(final||interim);
+      if(typeof _composerCommitProducerText==='function'){
+        _composerCommitProducerText(_prefix+(final||interim),'dictation');
+      }else{
+        ta.value=_prefix+(final||interim);
+      }
       autoResize();
     };
 
@@ -1538,7 +1549,11 @@ function _micToastKeyForRecognitionError(error){
             ? _prefix+' '+_finalText.trimStart()
             : _prefix+_finalText)
         : ta.value;
-      ta.value=committed;
+      if(typeof _composerCommitProducerText==='function'){
+        _composerCommitProducerText(committed,'dictation');
+      }else{
+        ta.value=committed;
+      }
       autoResize();
       // Mobile / opt-in continuity: a natural pause ends this recognition run but
       // the user is still dictating, so restart to keep the session alive. Desktop
@@ -2245,7 +2260,11 @@ window.renderTranscript=function(container, messages, opts){
         if(event.results[i].isFinal){ final+=txt; _finalText=final; }
         else{ interim+=txt; }
       }
-      ta.value=final||interim;
+      if(typeof _composerCommitProducerText==='function'){
+        _composerCommitProducerText(final||interim,'voice-mode');
+      }else{
+        ta.value=final||interim;
+      }
       autoResize();
 
       // Auto-send on silence after final result
@@ -2296,7 +2315,8 @@ window.renderTranscript=function(container, messages, opts){
 
   function _voiceModeSend(){
     if(!_voiceModeActive) return;
-    const text=(ta.value||'').trim();
+    const text=((typeof _composerPendingOrVisibleText==='function'
+      ? _composerPendingOrVisibleText() : ta.value)||'').trim();
     if(!text){
       ta.value='';
       setTimeout(()=>{ if(_voiceModeActive) _startListening(); },300);
@@ -2963,9 +2983,15 @@ $('modelSelect').onchange=async()=>{
 $('msg').addEventListener('input',()=>{
   updateSendBtn();
   scheduleComposerAutoResize();
+  // A keystroke during a New Session handoff is the newest unsent input: buffer
+  // it for the destination owner so the settle cannot repaint over it. The
+  // ownership layer persists both sides at settle, so also writing the live
+  // source draft here would duplicate the destination delta.
+  const bufferedTransition=typeof _composerRecordNativeText==='function'
+    && _composerRecordNativeText();
   // Persist composer draft to server (debounced in _saveComposerDraft).
   const sid = S && S.session && S.session.session_id;
-  if (sid && typeof _saveComposerDraft === 'function') {
+  if (!bufferedTransition && sid && typeof _saveComposerDraft === 'function') {
     _saveComposerDraft(sid, $('msg').value, S.pendingFiles ? [...S.pendingFiles] : []);
   }
   const text=$('msg').value;

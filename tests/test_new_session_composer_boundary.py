@@ -1601,7 +1601,7 @@ def test_programmatic_input_arriving_in_flight_moves_only_the_delta_to_new_sessi
     }
 
 
-def test_new_session_pending_freezes_and_restores_composer_controls():
+def test_new_session_pending_freezes_only_the_new_chat_controls():
     node = shutil.which("node")
     if not node:
         pytest.skip("node is required for the browser behavior harness")
@@ -1636,11 +1636,200 @@ def test_new_session_pending_freezes_and_restores_composer_controls():
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
 
-    assert all(result["during"].values())
+    assert result["during"]["btnNewChat"] is True
+    assert result["during"]["btnTitlebarNewChat"] is True
+    # Unsent input must keep flowing: refusing keystrokes during the create is
+    # the input-retention defect this boundary has to avoid, and every composer
+    # producer buffers through the ownership transaction instead.
+    for producer in ("msg", "fileInput", "btnAttach", "btnSavedPrompts", "btnVoiceMode"):
+        assert result["during"][producer] is False, producer
     assert result["after"]["msg"] is False
-    assert result["after"]["fileInput"] is False
-    assert result["after"]["btnAttach"] is False
+    assert result["after"]["btnNewChat"] is False
     assert result["after"]["btnMic"] is True, "pre-existing disabled state must survive"
+
+
+def _dictation_production_helpers() -> str:
+    # The real producer, not a test double: _commitTranscript() is what the
+    # composer mic calls when a transcript lands (server STT or browser SR).
+    return _function(BOOT_JS, "_commitTranscript", "\n  function _isServerSttUnavailable")
+
+
+def _run_dictation_harness(schedule: str) -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    authority = _composer_authority_helpers()
+    commit = _dictation_production_helpers()
+    script = textwrap.dedent(
+        f"""
+        const ta={{value:'source draft'}};
+        const S={{
+          session:{{session_id:'old-session',profile:'default'}},
+          pendingFiles:[],activeProfile:'default'
+        }};
+        const $=id=>id==='msg'?ta:null;
+        {authority}
+        {commit}
+        let _dictationAppend=true;
+        let _prefix='source draft';
+        const window={{_micPendingSend:false}};
+        function autoResize(){{}}
+        function send(){{}}
+        function showToast(){{}}
+        function t(k){{return k;}}
+        function renderTray(){{}}
+        function _rememberComposerPendingFiles(){{}}
+        const saves=[];
+        function _saveComposerDraftNow(sid,text,files,cont,opts){{
+          saves.push({{sid,text}});return Promise.resolve();
+        }}
+        const schedule={json.dumps(schedule)};
+        const tx=schedule==='direct'
+          ?null
+          :_beginComposerOwnershipTransition('old-session','default',{{persistSourceDraft:true}});
+        _commitTranscript('voice addition','source draft');
+        const afterCommit=ta.value;
+        if(tx){{
+          _bindComposerOwnershipDestination(tx,'new-session','default');
+          if(schedule==='settle'){{
+            // The settle restores the destination draft, then drains the buffer.
+            ta.value=''; S.pendingFiles=[];
+            _drainComposerOwnershipTransition(tx);
+          }}else{{
+            _abortComposerOwnershipTransition(tx);
+          }}
+        }}
+        process.stdout.write(JSON.stringify({{afterCommit,settled:ta.value,saves}}));
+        """
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_dictation_commit_during_new_session_pending_is_retained():
+    result = _run_dictation_harness("settle")
+
+    # While the create is pending the transcript is buffered, not painted over
+    # the source composer; the settle must land it in the new chat's composer.
+    # Only the addition moves: the source chat keeps its own draft text, which
+    # was already flushed at the create boundary.
+    assert result["afterCommit"] == "source draft"
+    assert result["settled"] == " voice addition"
+
+
+def test_dictation_commit_without_a_transition_still_writes_the_composer():
+    result = _run_dictation_harness("direct")
+
+    assert result["afterCommit"] == "source draft voice addition"
+    assert result["settled"] == "source draft voice addition"
+
+
+def test_dictation_commit_is_restored_when_the_create_fails():
+    result = _run_dictation_harness("abort")
+
+    assert result["afterCommit"] == "source draft"
+    assert result["settled"] == "source draft voice addition"
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves and source_saves[-1]["text"] == "source draft voice addition"
+
+
+def _run_native_input_harness(schedule: str) -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const ta={{value:'source draft'}};
+        const S={{
+          session:{{session_id:'old-session',profile:'default'}},
+          pendingFiles:[],activeProfile:'default'
+        }};
+        const $=id=>id==='msg'?ta:null;
+        {authority}
+        function renderTray(){{}}
+        function autoResize(){{}}
+        function updateSendBtn(){{}}
+        const saves=[];
+        function _saveComposerDraftNow(sid,text,files,cont,opts){{
+          saves.push({{sid,text}});return Promise.resolve();
+        }}
+        const schedule={json.dumps(schedule)};
+        const tx=_beginComposerOwnershipTransition('old-session','default',{{persistSourceDraft:true}});
+        // A real keystroke/paste while the create request is held.
+        ta.value='source draft typed';
+        const recorded=_composerRecordNativeText();
+        // A saved-prompt append dispatches a synthetic input event without
+        // changing the textarea; it must not be mistaken for a keystroke.
+        const recordedAgain=_composerRecordNativeText();
+        _bindComposerOwnershipDestination(tx,'new-session','default');
+        if(schedule==='settle'){{
+          ta.value=''; S.pendingFiles=[];
+          _drainComposerOwnershipTransition(tx);
+        }}else{{
+          _abortComposerOwnershipTransition(tx);
+        }}
+        process.stdout.write(JSON.stringify({{
+          recorded,recordedAgain,settled:ta.value,saves
+        }}));
+        """
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_native_keystrokes_during_new_session_pending_survive_the_settle():
+    result = _run_native_input_harness("settle")
+
+    assert result["recorded"] is True
+    # The addition is retained for the new chat; the pre-click text stays with
+    # the source chat rather than leaking into the destination.
+    assert result["settled"] == " typed"
+
+
+def test_synthetic_producer_input_event_is_not_recorded_as_a_keystroke():
+    result = _run_native_input_harness("settle")
+
+    assert result["recordedAgain"] is False
+
+
+def test_native_keystrokes_are_restored_when_the_create_fails():
+    result = _run_native_input_harness("abort")
+
+    assert result["settled"] == "source draft typed"
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves and source_saves[-1]["text"] == "source draft typed"
+
+
+def test_dictation_and_voice_mode_writes_route_through_the_composer_transaction():
+    commit = _dictation_production_helpers()
+    assert "_composerCommitProducerText(committed,'dictation')" in commit
+    assert commit.count("ta.value=committed") == 1
+    else_index = commit.index("}else{")
+    assert commit.index("_composerCommitProducerText(committed,'dictation')") > 0
+
+    voice_start = BOOT_JS.index("_recognition.onresult=(event)=>{")
+    voice_end = BOOT_JS.index("_recognition.onend=()=>{", voice_start)
+    voice_result = BOOT_JS[voice_start:voice_end]
+    assert "_composerCommitProducerText(final||interim,'voice-mode')" in voice_result
+    assert voice_result.count("ta.value=final||interim") == 1
+    assert voice_result.index("_composerCommitProducerText") < voice_result.index(
+        "}else{\n        ta.value=final||interim"
+    )
+
+    send_start = BOOT_JS.index("function _voiceModeSend(){")
+    send_end = BOOT_JS.index("function _speakResponse(){", send_start)
+    assert "_composerPendingOrVisibleText()" in BOOT_JS[send_start:send_end]
+
+    input_start = BOOT_JS.index("$('msg').addEventListener('input',()=>{")
+    input_end = BOOT_JS.index("// #5514/#5515", input_start)
+    input_handler = BOOT_JS[input_start:input_end]
+    assert "_composerRecordNativeText()" in input_handler
+    assert "if (!bufferedTransition && sid" in input_handler
+
+    assert else_index > 0
 
 
 def test_files_dropped_while_new_session_is_pending_are_replayed_after_settlement():
