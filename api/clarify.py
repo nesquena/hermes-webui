@@ -28,13 +28,16 @@ _clarify_sse_subscribers: dict[str, list[queue.Queue]] = {}
 class _ClarifyEntry:
     """One pending clarify request inside a session."""
 
-    __slots__ = ("event", "data", "result", "clarify_id")
+    __slots__ = ("event", "data", "result", "clarify_id", "gateway_owner")
 
     def __init__(self, data: dict):
         self.event = threading.Event()
         self.data = data
         self.result: Optional[str] = None
         self.clarify_id: str = data.get("clarify_id", "") or uuid.uuid4().hex[:12]
+        # Server-owned (base_url, api_key) of the Gateway that parked a Runs
+        # API prompt. Never part of ``data``, which is serialised to clients.
+        self.gateway_owner: tuple[str, str] | None = None
 
 
 def register_gateway_notify(session_key: str, cb) -> None:
@@ -271,18 +274,26 @@ def gateway_run_clarify_id(run_id: str, prompt_id: str, execution_generation: in
     return f"{GATEWAY_RUN_CLARIFY_PREFIX}{run_id}:{execution_generation}:{prompt_id}"
 
 
-def submit_gateway_run_pending(session_key: str, data: dict) -> tuple[dict | None, int]:
+def submit_gateway_run_pending(
+    session_key: str, data: dict, owner: tuple[str, str] | None = None,
+) -> tuple[dict | None, int]:
     """Mirror one Gateway run clarify prompt; a replay of a mirrored id is a no-op.
 
-    Returns ``(head, total)`` for the session's clarify queue after the call.
+    ``owner`` is the (base_url, api_key) of the Gateway the prompt was read
+    from. It is kept on the server-side entry only, so an answer can be
+    delivered to exactly that Gateway. Returns ``(head, total)``.
     """
     clarify_id = str(data.get("clarify_id") or "")
     with _lock:
         q = _gateway_queues.get(session_key) or []
         if any(entry.clarify_id == clarify_id for entry in q):
             return dict(q[0].data), len(q)
-    submit_pending(session_key, data)
+    entry = submit_pending(session_key, data)
     with _lock:
+        if entry.clarify_id == clarify_id and entry.gateway_owner is None and owner:
+            base_url, api_key = owner
+            if str(base_url or "").strip():
+                entry.gateway_owner = (str(base_url), str(api_key or ""))
         q = _gateway_queues.get(session_key) or []
         return (dict(q[0].data) if q else None), len(q)
 
@@ -295,6 +306,21 @@ def gateway_run_pending(session_key: str, clarify_id: str) -> dict | None:
         for entry in _gateway_queues.get(session_key) or []:
             if entry.clarify_id == clarify_id and entry.data.get("_gateway_run_id"):
                 return dict(entry.data)
+    return None
+
+
+def gateway_run_owner(session_key: str, clarify_id: str) -> tuple[str, str] | None:
+    """(base_url, api_key) of the Gateway that parked this prompt, or None.
+
+    None means ownership cannot be established; callers must fail closed and
+    never substitute a default or process-wide Gateway.
+    """
+    if not str(clarify_id or "").startswith(GATEWAY_RUN_CLARIFY_PREFIX):
+        return None
+    with _lock:
+        for entry in _gateway_queues.get(session_key) or []:
+            if entry.clarify_id == clarify_id and entry.data.get("_gateway_run_id"):
+                return entry.gateway_owner
     return None
 
 

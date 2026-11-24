@@ -35921,7 +35921,12 @@ def _resolve_gateway_run_clarify(sid: str, clarify_id: str, response: str) -> bo
     ``GatewayClarifyUnavailable`` when the Gateway failed without proving the
     prompt dead, so the card stays answerable for a retry.
     """
-    from api.clarify import GATEWAY_RUN_CLARIFY_PREFIX, gateway_run_pending, settle_gateway_run_pending
+    from api.clarify import (
+        GATEWAY_RUN_CLARIFY_PREFIX,
+        gateway_run_owner,
+        gateway_run_pending,
+        settle_gateway_run_pending,
+    )
 
     if not str(clarify_id or "").startswith(GATEWAY_RUN_CLARIFY_PREFIX):
         return None
@@ -35933,11 +35938,17 @@ def _resolve_gateway_run_clarify(sid: str, clarify_id: str, response: str) -> bo
     generation = entry.get("_gateway_execution_generation")
     if not run_id or not prompt_id or type(generation) is not int:
         return False
-    from api.gateway_chat import gateway_run_endpoint
+    # Deliver only to the Gateway that parked this prompt, bound server-side
+    # when it was relayed. No owner -> fail closed: never fall back to the
+    # process/default Gateway (wrong host, wrong profile, wrong credential).
+    owner = gateway_run_owner(sid, clarify_id)
+    if not owner:
+        logger.info("Refusing clarify answer for run %s: owning Gateway unknown", run_id)
+        return False
+    base_url, api_key = owner
     from api.runner_client import HttpRunnerClient, RunnerClientError
 
     try:
-        base_url, api_key = gateway_run_endpoint(run_id)
         result = HttpRunnerClient(base_url=base_url, api_key=api_key).respond_clarify(
             run_id, prompt_id, response, execution_generation=generation,
         )

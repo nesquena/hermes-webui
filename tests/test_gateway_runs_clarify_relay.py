@@ -397,6 +397,59 @@ def test_respond_wrong_session_never_posts(_endpoint):
     assert clarify.get_pending(SID)["clarify_id"] == cid
 
 
+def _gateway_post_with_auth(outcome):
+    calls = []
+
+    def fake(req):
+        calls.append((req.full_url, req.get_header("Authorization"), json.loads(req.data)))
+        return _FakeResp(outcome)
+
+    return calls, patch.object(HttpRunnerClient, "_opener", lambda self: _Opener(fake))
+
+
+@pytest.fixture
+def _other_default_gateway(monkeypatch):
+    """The process/default Gateway differs from the one that parked the prompt,
+    and no live stream maps the run (stream torn down / other profile / restart)."""
+    monkeypatch.setattr(gateway_chat, "_gateway_base_url", lambda *a, **k: "http://default-gw:8642")
+    monkeypatch.setattr(gateway_chat, "_gateway_api_key", lambda *a, **k: "default-secret")
+
+
+def test_respond_delivers_only_to_owning_gateway(_other_default_gateway):
+    """Ownership regression: the answer and credential go to the Gateway the
+    prompt was relayed from, never to the process-default Gateway."""
+    events = []
+    gateway_chat._relay_gateway_run_events(
+        _Sse([_request()]), SID, "stream-owner", RUN, "http://owner-gw:9000", "owner-secret",
+        put_gateway_event=lambda ev, data: events.append((ev, data)),
+        cancel_event=threading.Event(),
+    )
+    card = events[-1][1]
+    # Credentials and Gateway URLs stay server-side.
+    assert "owner-secret" not in json.dumps(card) and "owner-gw" not in json.dumps(card)
+    assert "owner-secret" not in json.dumps(clarify.get_pending(SID))
+    calls, ctx = _gateway_post_with_auth({"status": "resolved"})
+    with ctx:
+        out = _respond({"session_id": SID, "clarify_id": card["clarify_id"], "response": "blue"})
+    assert out["status"] == 200
+    assert [(url, auth) for url, auth, _b in calls] == [
+        (f"http://owner-gw:9000/v1/runs/{RUN}/clarify", "Bearer owner-secret"),
+    ]
+
+
+def test_respond_fails_closed_when_owner_unknown(_other_default_gateway):
+    """A Gateway-run mirror whose owning Gateway was never established is never
+    answered through a default/shared Gateway or credential."""
+    data = gateway_chat._gateway_runs_clarify_event(_request(), RUN)
+    assert data is not None
+    clarify.submit_gateway_run_pending(SID, data)
+    calls, ctx = _gateway_post_with_auth({"status": "resolved"})
+    with ctx:
+        out = _respond({"session_id": SID, "clarify_id": data["clarify_id"], "response": "blue"})
+    assert out["status"] == 409
+    assert calls == []
+
+
 def test_sequential_prompts_answer_each_with_own_identity(_endpoint):
     events = []
     _relay([_request("c1", question="Q1"), _request("c2", generation=3, question="Q2")], events)
@@ -472,7 +525,7 @@ def test_restart_restores_parked_clarify_from_run_status(monkeypatch, _endpoint)
 def test_restart_restored_clarify_is_answerable(_endpoint):
     events = []
     gateway_chat._sync_gateway_run_clarify_from_status(
-        SID, RUN, {"status": "running", "pending_controls": [_parked()]},
+        SID, RUN, {"status": "running", "pending_controls": [_parked()]}, "http://gw:8642", "k",
         put_gateway_event=lambda e, d: events.append((e, d)))
     cid = events[-1][1]["clarify_id"]
     calls, ctx = _gateway_post({"run_id": RUN, "status": "resolved", "prompt_id": "clar-a"})
@@ -497,7 +550,7 @@ def test_restart_does_not_resurrect_settled_clarify(monkeypatch):
 def test_status_without_pending_controls_keeps_clarify_queue():
     _relay([_request()], [])
     gateway_chat._sync_gateway_run_clarify_from_status(
-        SID, RUN, {"status": "running"}, put_gateway_event=lambda *a: None)
+        SID, RUN, {"status": "running"}, "http://gw:8642", "k", put_gateway_event=lambda *a: None)
     assert clarify.gateway_run_prompt_ids(SID, RUN) == {"clar-a"}
 
 

@@ -994,20 +994,24 @@ def _gateway_runs_clarify_event(payload: dict, run_id: str) -> dict | None:
     }
 
 
-def _relay_gateway_run_clarify(session_id, run_id, payload, *, put_gateway_event) -> bool:
-    """Surface one Runs API clarify prompt as a WebUI clarify card."""
+def _relay_gateway_run_clarify(session_id, run_id, payload, base_url, api_key, *, put_gateway_event) -> bool:
+    """Surface one Runs API clarify prompt as a WebUI clarify card.
+
+    ``base_url``/``api_key`` identify the Gateway this prompt was read from; the
+    answer is delivered only there (bound server-side, never in the card data).
+    """
     clarify_data = _gateway_runs_clarify_event(payload, run_id)
     if not clarify_data:
         logger.debug("Ignoring malformed gateway clarify payload for run %s", run_id)
         return False
     from api.clarify import submit_gateway_run_pending
 
-    head, total = submit_gateway_run_pending(session_id, clarify_data)
+    head, total = submit_gateway_run_pending(session_id, clarify_data, owner=(base_url, api_key))
     put_gateway_event("clarify", {**(head or clarify_data), "pending_count": total})
     return True
 
 
-def _sync_gateway_run_clarify_from_status(session_id, run_id, status, *, put_gateway_event) -> None:
+def _sync_gateway_run_clarify_from_status(session_id, run_id, status, base_url, api_key, *, put_gateway_event) -> None:
     """Mirror exactly the clarify prompts a durable run status still has parked.
 
     The Gateway's ``pending_controls`` is the only authority for which clarify
@@ -1029,7 +1033,9 @@ def _sync_gateway_run_clarify_from_status(session_id, run_id, status, *, put_gat
         _settle_gateway_run_clarify(session_id, run_id, prompt_id)
     for control in parked:
         if _gateway_prompt_identity(control) not in queued:
-            _relay_gateway_run_clarify(session_id, run_id, control, put_gateway_event=put_gateway_event)
+            _relay_gateway_run_clarify(
+                session_id, run_id, control, base_url, api_key, put_gateway_event=put_gateway_event,
+            )
 
 
 def _settle_gateway_run_clarify(session_id, run_id, prompt_id=None) -> int:
@@ -1272,7 +1278,7 @@ def _relay_gateway_run_events(
             sse_event = "message"
             continue
         if payload_event in _GATEWAY_CLARIFY_REQUEST_EVENTS:
-            _relay_gateway_run_clarify(session_id, run_id, payload, put_gateway_event=emit)
+            _relay_gateway_run_clarify(session_id, run_id, payload, base_url, api_key, put_gateway_event=emit)
             commit()
             sse_event = "message"
             continue
@@ -1845,7 +1851,9 @@ def _run_gateway_runs_api_streaming(
         _surface_status_approval(status)
         # Same clarify reconciliation as cold reattach: the status's pending_controls
         # is the live authority when /events cannot deliver the clarify.request.
-        _sync_gateway_run_clarify_from_status(session_id, run_id, status, put_gateway_event=put_gateway_event)
+        _sync_gateway_run_clarify_from_status(
+            session_id, run_id, status, base_url, api_key, put_gateway_event=put_gateway_event,
+        )
         action, value = _settle_by_status(status)
         if action == "continue":
             # Still running: reconnect and resume from the last seen event id,
@@ -2208,7 +2216,9 @@ def _await_gateway_run_result(
         surface_parked_approval(status)
         # Clarify prompts relayed before the restart sit behind the replay cursor and the
         # new process's queue is empty; the status projection is their only live record.
-        _sync_gateway_run_clarify_from_status(session_id, run_id, status, put_gateway_event=put_gateway_event)
+        _sync_gateway_run_clarify_from_status(
+            session_id, run_id, status, base_url, api_key, put_gateway_event=put_gateway_event,
+        )
         if state in _GATEWAY_RUN_TERMINAL_STATUSES:
             _relay_gateway_pending_steer(session_id, status, put_gateway_event)
             settle_gateway_pending_run(session_id, run_id, reason=f"Gateway run {state} before approval resolution")
