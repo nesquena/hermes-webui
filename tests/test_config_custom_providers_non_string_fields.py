@@ -8,9 +8,12 @@ inline ``(... or '').strip()`` reads raised
 whole resolution, including the ``@<provider>:`` and default-model save paths
 that only touch those rows in passing.
 
-The resolver must treat a non-string field as ABSENT (the Agent's own
-legacy-row reader skips such rows) instead of coercing it with ``str()`` —
-coercion would mint a provider literally named "5", a row the user never wrote.
+The resolver must treat a non-string field as ABSENT instead of coercing it
+with ``str()`` — coercion would mint a provider literally named "5", a row the
+user never wrote. Endpoint reads follow the installed Agent's legacy-row URL
+reader (``hermes_cli.config_providers._pick_provider_base_url``), which accepts
+only ``str``; identity reads are deliberately stricter here than that reader's
+``coerce_provider_id``, which does coerce a name.
 """
 
 from __future__ import annotations
@@ -158,6 +161,170 @@ def test_slash_form_prefix_scan_with_non_string_fields(slash_legacy_store):
         "custom:eu",
         None,
     )
+
+
+# ── Typed absence must survive the ENDPOINT and IDENTITY consumers too ───────
+#
+# The resolver-only guard above cleared the crash, but a non-string field still
+# reached three consumers that coerced it into valid-looking text:
+#
+#   * the named ``@custom:<slug>:`` explicit-hint endpoint read;
+#   * the connection view / save paths (default model and auxiliary slot), which
+#     persisted the coerced endpoint into the store;
+#   * the legacy identity producers, where ``name: 5`` minted the provider
+#     ``custom:5`` — a row the user never wrote.
+#
+# A non-string endpoint is ABSENT (the Agent's own legacy-row URL reader,
+# ``hermes_cli.config_providers._pick_provider_base_url``, only accepts
+# ``str``), and a non-string ``name`` names no identity at all. Genuinely quoted
+# string names — including ones that need stripping — keep working unchanged.
+
+# One well-formed row and one whose endpoint is an ``int``. The valid row is
+# padded to prove the string path still strips instead of being skipped.
+NAMED_ENDPOINT_YAML = """
+model:
+  provider: openrouter
+  default: gpt-x
+custom_providers:
+  - name: eu
+    base_url: 9
+    models:
+      gpt-x: {}
+  - name: eu-ok
+    base_url: " https://eu-ok.example/v1 "
+    models:
+      gpt-x: {}
+"""
+
+# A row whose ``name`` is an ``int`` next to an ordinary valid row.
+MANUFACTURED_NAME_YAML = """
+model:
+  provider: openrouter
+  default: gpt-x
+custom_providers:
+  - name: 5
+    base_url: "https://five.example/v1"
+    models:
+      gpt-x: {}
+  - name: eu-ok
+    base_url: "https://eu-ok.example/v1"
+    models:
+      gpt-x: {}
+"""
+
+# The non-string ``name`` must not collide with a genuinely quoted ``"5"`` row:
+# collision detection runs on real identities only, so the quoted row wins
+# instead of the pair raising ``AmbiguousCustomProviderError``.
+QUOTED_FIVE_YAML = """
+model:
+  provider: openrouter
+  default: gpt-x
+custom_providers:
+  - name: 5
+    base_url: 9
+  - name: "5"
+    base_url: "https://five-quoted.example/v1"
+"""
+
+
+@pytest.fixture()
+def named_endpoint_store(tmp_path, monkeypatch):
+    yield from _install_config(tmp_path, monkeypatch, NAMED_ENDPOINT_YAML)
+
+
+@pytest.fixture()
+def manufactured_name_store(tmp_path, monkeypatch):
+    yield from _install_config(tmp_path, monkeypatch, MANUFACTURED_NAME_YAML)
+
+
+@pytest.fixture()
+def quoted_five_store(tmp_path, monkeypatch):
+    yield from _install_config(tmp_path, monkeypatch, QUOTED_FIVE_YAML)
+
+
+def _saved_model(path) -> dict:
+    return (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("model") or {}
+
+
+def test_named_hint_endpoint_treats_non_string_base_url_as_absent(named_endpoint_store):
+    """``@custom:<slug>:<model>`` must not hand back ``"9"`` as an endpoint."""
+    assert config.resolve_model_provider("@custom:eu:gpt-x") == ("gpt-x", "custom:eu", None)
+    # Control: an ordinary string endpoint is still stripped and returned.
+    assert config.resolve_model_provider("@custom:eu-ok:gpt-x") == (
+        "gpt-x",
+        "custom:eu-ok",
+        "https://eu-ok.example/v1",
+    )
+
+
+def test_connection_view_treats_non_string_base_url_as_absent(named_endpoint_store):
+    """The connection consumer reads the same typed absence as the resolver."""
+    assert config.resolve_custom_provider_connection("custom:eu") == (None, None)
+    assert config.resolve_custom_provider_connection("custom:eu-ok") == (
+        None,
+        "https://eu-ok.example/v1",
+    )
+
+
+def test_default_model_save_does_not_persist_coerced_endpoint(named_endpoint_store):
+    """Saving a named selection must not write ``base_url: "9"`` (and reloading
+    must not reproduce it)."""
+    result = config.set_hermes_default_model("@custom:eu:gpt-x", provider="custom:eu")
+    assert result["ok"] is True
+    saved = _saved_model(named_endpoint_store)
+    assert "9" != str(saved.get("base_url") or "")
+    assert "base_url" not in saved
+    config.reload_config()
+    assert config.resolve_model_provider("@custom:eu:gpt-x")[2] is None
+    # Control: the valid row's endpoint is still persisted verbatim.
+    result = config.set_hermes_default_model("@custom:eu-ok:gpt-x", provider="custom:eu-ok")
+    assert result["ok"] is True
+    assert _saved_model(named_endpoint_store)["base_url"] == "https://eu-ok.example/v1"
+
+
+def test_auxiliary_save_does_not_persist_coerced_endpoint(named_endpoint_store):
+    """The auxiliary slot reads the selected provider's own entry — typed too."""
+    result = config.set_auxiliary_model("vision", "custom:eu", "gpt-x")
+    assert result["ok"] is True
+    saved = (yaml.safe_load(named_endpoint_store.read_text(encoding="utf-8")) or {})
+    slot = (saved.get("auxiliary") or {}).get("vision") or {}
+    assert "base_url" not in slot
+    # Control: the valid row still persists its endpoint on the slot.
+    result = config.set_auxiliary_model("vision", "custom:eu-ok", "gpt-x")
+    assert result["ok"] is True
+    saved = (yaml.safe_load(named_endpoint_store.read_text(encoding="utf-8")) or {})
+    assert (saved.get("auxiliary") or {})["vision"]["base_url"] == "https://eu-ok.example/v1"
+
+
+def test_non_string_name_row_names_no_identity(manufactured_name_store):
+    """``name: 5`` must not mint the provider ``custom:5``."""
+    assert "custom:5" not in config._named_custom_provider_slugs()
+    assert config.resolve_custom_provider_connection("custom:5") == (None, None)
+    assert config.resolve_model_provider("@custom:5:gpt-x") == ("gpt-x", "custom:5", None)
+    # The save/readback half: nothing of that row reaches the store.
+    result = config.set_hermes_default_model("@custom:5:gpt-x", provider="custom:5")
+    assert result["ok"] is True
+    saved = _saved_model(manufactured_name_store)
+    assert "base_url" not in saved
+    # Control: the ordinary row is still an identity with its own endpoint.
+    assert config.resolve_custom_provider_connection("custom:eu-ok") == (
+        None,
+        "https://eu-ok.example/v1",
+    )
+
+
+def test_non_string_name_does_not_collide_with_quoted_name(quoted_five_store):
+    """Identity validation runs before the collision check.
+
+    With ``name: 5`` (no identity) beside ``name: "5"`` (a real one), the quoted
+    row is the single owner of ``custom:5`` — the pair must not raise
+    ``AmbiguousCustomProviderError``, and its endpoint is the quoted row's.
+    """
+    assert config.resolve_custom_provider_connection("custom:5") == (
+        None,
+        "https://five-quoted.example/v1",
+    )
+
 
 
 def test_yaml_source_is_really_a_legacy_store(legacy_store):

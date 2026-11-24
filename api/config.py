@@ -1936,7 +1936,7 @@ def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
     return {
         slug
         for slug in (
-            _custom_provider_slug_from_name(entry.get("name"))
+            _custom_provider_slug_from_name(_str_field(entry, "name"))
             for entry in _custom_provider_entries(config_obj)
         )
         if slug
@@ -1960,7 +1960,7 @@ def _named_custom_provider_slug_for_provider(
     legacy_only = _is_bare_builtin_provider_id(raw)
     legacy_names = _legacy_custom_provider_names(config_obj) if legacy_only else set()
     for entry in _custom_provider_entries(config_obj):
-        entry_name = str(entry.get("name") or "").strip().lower()
+        entry_name = _str_field(entry, "name").lower()
         slug = _custom_provider_slug_from_name(entry_name)
         if not entry_name or not slug:
             continue
@@ -1978,9 +1978,9 @@ def _legacy_custom_provider_names(config_obj: dict | None = None) -> set[str]:
     if not isinstance(raw_entries, list):
         return set()
     return {
-        str(entry.get("name") or "").strip().lower()
+        _str_field(entry, "name").lower()
         for entry in raw_entries
-        if isinstance(entry, dict) and str(entry.get("name") or "").strip()
+        if isinstance(entry, dict) and _str_field(entry, "name")
     }
 
 
@@ -2290,7 +2290,7 @@ def _custom_provider_entry_owns_model(entry: dict, model_id: str) -> bool:
     model = str(model_id or "").strip()
     if not model or not isinstance(entry, dict):
         return False
-    if str(entry.get("model") or "").strip() == model:
+    if _str_field(entry, "model") == model:
         return True
     if _provider_models_are_discovered_catalog(entry):
         return False
@@ -3184,11 +3184,11 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     if prov.startswith("custom:"):
         raw_suffix = prov.removeprefix("custom:")
         for entry in _custom_provider_entries():
-            slug = _custom_provider_slug_from_name(entry.get("name"))
-            entry_name = str(entry.get("name") or "").strip().lower()
+            entry_name = _str_field(entry, "name").lower()
+            slug = _custom_provider_slug_from_name(entry_name)
             if not (prov in {entry_name, slug} or (slug and raw_suffix == slug.removeprefix("custom:"))):
                 continue
-            if str(entry.get("model") or "").strip() == model:
+            if _str_field(entry, "model") == model:
                 return True
             if model in _configured_model_ids(entry.get("models")):
                 return True
@@ -3504,13 +3504,13 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
     for entry in custom_providers:
         if not isinstance(entry, dict):
             continue
-        name = str(entry.get("name") or "").strip()
+        name = _str_field(entry, "name")
         if not name:
             continue
         if _custom_provider_slug_key(name) == slug_key:
             matches.append(entry)
     if len(matches) >= 2:
-        names = [str(e.get("name") or "").strip() for e in matches]
+        names = [_str_field(e, "name") for e in matches]
         raise AmbiguousCustomProviderError(
             f"Custom providers {names!r} all normalize to the same provider slug "
             f"{slug_key!r}; an endpoint and API key could be resolved from "
@@ -3526,11 +3526,16 @@ def _str_field(entry: dict, key: str) -> str:
     resolver reads as text (``name``, ``model``, ``base_url``) may arrive as a
     non-string scalar — ``name: 5``, ``base_url: 9``. Calling ``.strip()`` on
     such a value raised ``AttributeError`` and took the whole resolution down
-    (#9328). A non-string value is treated as ABSENT, matching the Agent's own
-    legacy-row reader, which skips rows whose ``name``/``base_url`` are not
-    strings. Deliberately NOT ``str(value)``: coercing would mint a provider
-    named "5", a row the user never wrote.
+    (#9328). A non-string value is treated as ABSENT. Endpoint handling
+    matches the installed Agent's legacy-row URL reader
+    (``hermes_cli.config_providers._pick_provider_base_url``, which accepts
+    only ``str``), while the identity rule is deliberately stricter than that
+    module's ``coerce_provider_id``, which does coerce a name. Deliberately
+    NOT ``str(value)``: coercing would mint a provider named "5", a row the
+    user never wrote.
     """
+    if not isinstance(entry, dict):
+        return ""
     value = entry.get(key)
     return value.strip() if isinstance(value, str) else ""
 
@@ -3860,7 +3865,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 _custom_provider_slug_key(provider_hint),
             )
             if entry is not None:
-                base_url = str(entry.get('base_url') or '').strip() or None
+                base_url = _str_field(entry, "base_url") or None
             else:
                 base_url = _get_provider_base_url(provider_hint)
         else:
@@ -4059,7 +4064,7 @@ def _custom_record_base_url(record: object) -> str | None:
     """Return a custom record's OWN endpoint, or None when it declares none."""
     if not isinstance(record, dict):
         return None
-    return str(record.get("base_url") or "").strip() or None
+    return _str_field(record, "base_url") or None
 
 
 def _resolve_custom_record_key(
@@ -7965,7 +7970,7 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                         _custom_provider_slug_key(provider),
                     )
                     if _cp_match is not None:
-                        _url = str(_cp_match.get("base_url") or "").strip()
+                        _url = _str_field(_cp_match, "base_url")
                         if _url:
                             resolved_base_url = _raw_custom_provider_url(
                                 config_data, _exp_cfg, _cp_match, _url,
