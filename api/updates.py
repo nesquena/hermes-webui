@@ -729,18 +729,30 @@ def _run_git(args, cwd, timeout=10):
     except OSError as exc:
         cleanup = _windows_job_cleanup_notes(exc)
         if _is_windows_job_close_unconfirmed(exc):
-            # The command itself finished; only the Windows job teardown is
-            # unconfirmed, so this is a success with a cleanup warning, not a
-            # failed start (#9138). No command output survived the teardown
-            # failure, so the note is all the detail there is.
-            logger.warning(
-                'git finished but the Windows job cleanup was not confirmed: %s',
-                cleanup or 'no cleanup detail',
-            )
-            return (
-                f'{_WINDOWS_JOB_CLEANUP_UNCONFIRMED}\n{cleanup}'
-                if cleanup else _WINDOWS_JOB_CLEANUP_UNCONFIRMED
-            ), True
+            returncode = getattr(exc, 'returncode', None)
+            if returncode == 0:
+                # The command itself finished successfully; only the Windows job
+                # teardown is unconfirmed, so this is a success with a cleanup
+                # warning, not a failed start (#9138).
+                logger.warning(
+                    'git finished but the Windows job cleanup was not confirmed: %s',
+                    cleanup or 'no cleanup detail',
+                )
+                return (
+                    f'{_WINDOWS_JOB_CLEANUP_UNCONFIRMED}\n{cleanup}'
+                    if cleanup else _WINDOWS_JOB_CLEANUP_UNCONFIRMED
+                ), True
+            # Non-zero or missing returncode counts as failure (fail-closed, #9141).
+            raw_stdout = getattr(exc, 'stdout', '') or ''
+            stdout = raw_stdout if '-z' in args else raw_stdout.strip()
+            stderr = (getattr(exc, 'stderr', '') or '').strip()
+            detail = stderr or stdout or f"git exited with status {returncode}"
+            if cleanup:
+                logger.warning(
+                    'git command failed with status %s and unconfirmed Windows job cleanup: %s',
+                    returncode, cleanup,
+                )
+            return f'{detail}\n{cleanup}' if cleanup else detail, False
         if cleanup:
             logger.warning('git failed to start; %s', cleanup)
         message = f'git failed to start: {exc}'

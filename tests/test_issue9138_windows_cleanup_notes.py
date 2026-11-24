@@ -169,6 +169,9 @@ def test_unconfirmed_job_close_is_a_warning_not_a_start_failure(
 ):
     """The command finished; only the teardown is unconfirmed (#9138 item 2)."""
     error = OSError('job close unconfirmed after a successful command')
+    error.returncode = 0
+    error.stdout = ''
+    error.stderr = ''
     error.add_note('windows job cleanup: final CloseHandle confirmed after terminate')
     monkeypatch.setattr(updates, '_run_network_git', _raise(error))
 

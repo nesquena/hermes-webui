@@ -307,6 +307,9 @@ def run_network_command_windows(argv, *, cwd, env, timeout):
         if _windows_close_job(kernel32, job, cleanup):
             cleanup.append("final CloseHandle confirmed after terminate")
         error = OSError("job close unconfirmed after a successful command")
+        error.returncode = process.returncode
+        error.stdout = stdout
+        error.stderr = stderr
         error.add_note("windows job cleanup: " + "; ".join(cleanup))
         raise error
     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
