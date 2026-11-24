@@ -552,6 +552,27 @@ def _get_config_path() -> Path:
         return _DEFAULT_HERMES_HOME / "config.yaml"
 
 
+def _same_config_file(a: Path | None, b: Path | None) -> bool:
+    """Return True if *a* and *b* refer to the same config file.
+
+    Uses ``os.path.samefile`` when both paths exist (handling symlinks,
+    relative paths, ``..``, and redundant separators) and falls back to
+    resolved-path equality when either path does not exist on disk yet.
+    """
+    if a is None or b is None:
+        return False
+    if a == b:
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        pass
+    try:
+        return Path(a).expanduser().resolve(strict=False) == Path(b).expanduser().resolve(strict=False)
+    except OSError:
+        return False
+
+
 _WEBUI_SESSION_SAVE_MODES = {"deferred", "eager"}
 _DEFAULT_WEBUI_SESSION_SAVE_MODE = "deferred"
 _DEFAULT_EXPERIMENTAL_CONFIG = {
@@ -614,7 +635,7 @@ def reload_config_if_stale() -> None:
             current_mtime = config_path.stat().st_mtime
         except OSError:
             current_mtime = 0.0
-        path_changed = _cfg_path != config_path
+        path_changed = not _same_config_file(_cfg_path, config_path)
         mtime_stale = current_mtime != _cfg_mtime
         if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
             _refresh_config_cache(config_path)
@@ -629,7 +650,7 @@ def get_config() -> dict:
         current_mtime = config_path.stat().st_mtime
     except OSError:
         current_mtime = 0.0
-    path_changed = _cfg_path != config_path
+    path_changed = not _same_config_file(_cfg_path, config_path)
     mtime_stale = current_mtime != _cfg_mtime
     if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
         reload_config_if_stale()
@@ -654,7 +675,7 @@ def get_config_snapshot() -> dict:
             current_mtime = config_path.stat().st_mtime
         except OSError:
             current_mtime = 0.0
-        path_changed = _cfg_path != config_path
+        path_changed = not _same_config_file(_cfg_path, config_path)
         mtime_stale = current_mtime != _cfg_mtime
         if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
             _refresh_config_cache(config_path)
@@ -774,7 +795,7 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     # on a path change (per-client profile switch leaves the old profile's
     # mtime) -- preserving the disk cache so the next restart
     # still hits the fast path without a cold run.
-    if _old_cfg_mtime != 0.0 and _old_cfg_path == config_path:
+    if _old_cfg_mtime != 0.0 and _same_config_file(_old_cfg_path, config_path):
         _delete_models_cache_on_disk()
 
 
@@ -10883,7 +10904,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     except OSError:
         _current_path = _get_config_path()
         _current_mtime = 0.0
-    path_changed = _current_path != _cfg_path
+    path_changed = not _same_config_file(_current_path, _cfg_path)
     mtime_stale = _current_mtime != _cfg_mtime
     if path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
         reload_config_if_stale()
