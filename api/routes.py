@@ -1439,13 +1439,19 @@ def _skill_category_from_path(
 
 
 def _active_skill_search_dirs(skills_dir: Path) -> list[Path]:
+    """The request profile's local skills root plus its ``skills.external_dirs``.
+
+    The Agent's ``get_external_skills_dirs()`` reads the process profile's config,
+    so external roots are resolved from the files of the profile that owns
+    *skills_dir* (#7842).
+    """
+    from api.skill_runtime import profile_external_skill_dirs
+
     dirs = [skills_dir]
     try:
-        from agent.skill_utils import get_external_skills_dirs
-
-        dirs.extend(Path(p) for p in get_external_skills_dirs())
+        dirs.extend(profile_external_skill_dirs(Path(skills_dir).parent))
     except Exception:
-        pass
+        logger.debug("External skill-directory lookup failed", exc_info=True)
     return [p for p in dirs if p.exists()]
 
 
