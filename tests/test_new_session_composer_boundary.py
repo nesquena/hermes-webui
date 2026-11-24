@@ -302,6 +302,10 @@ def _run_review_race_harness(schedule: str) -> dict:
           }}else if(schedule==='prompt-then-voice'){{
             insertSavedPromptIntoComposer('saved prompt');
             _composerSetText('source draft voice','voice');
+          }}else if(schedule==='prompt-then-native'){{
+            insertSavedPromptIntoComposer('saved prompt');
+            msg.value='source draft typed';
+            _composerRecordNativeText();
           }}else if(schedule==='voice-prompt-voice'){{
             _composerSetText('source draft interim','interim',null,'voice-producer');
             insertSavedPromptIntoComposer('saved prompt');
@@ -2474,6 +2478,9 @@ def test_abort_shadow_preserves_destination_voice_then_source_clarify_order():
     [
         ("voice-then-prompt", "voice\n\nsaved prompt\n\n"),
         ("prompt-then-voice", "saved prompt\n\nvoice"),
+        # A keystroke after a buffered saved prompt is another producer, not a
+        # replacement of the whole destination buffer: both must survive.
+        ("prompt-then-native", "saved prompt\n\n typed"),
     ],
 )
 def test_saved_prompt_and_voice_producers_compose_in_arrival_order(schedule, expected):
@@ -3082,6 +3089,21 @@ def test_programmatic_send_stops_when_new_session_creation_rejects():
     assert "catch(_){return;}" in boundary, (
         "a failed New Chat must not let Send continue into the restored old session"
     )
+
+
+def test_first_send_keeps_text_typed_after_its_snapshot():
+    send_start = MESSAGES_JS.index("async function send(){")
+    body = MESSAGES_JS[send_start:]
+    # The pre-create snapshot is what separates the submitted message from
+    # input that arrives while /api/session/new is in flight.
+    assert "const _composerTextBeforeCreate=" in body
+    assert "let _composerTypedDuringCreate='';" in body
+    assert "if(_createdSessionForThisSend){" in body
+    # The surviving text goes back into the textarea instead of being cleared.
+    assert "$('msg').value=_composerTypedDuringCreate;" in body
+    # Its draft is the newer text; the submitted draft is not cleared over it.
+    assert "if (_composerTypedDuringCreate && typeof _saveComposerDraftNow === 'function') {" in body
+    assert "} else if (activeSid && typeof _clearComposerDraft === 'function') {" in body
 
 
 def test_failed_new_session_keeps_old_session_composer_visible():

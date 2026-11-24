@@ -2122,6 +2122,12 @@ async function send(){
       }
     }
   }
+  // The composer text (and whether this send must create the chat) at the
+  // moment the create starts. If input arrives while /api/session/new is in
+  // flight, this snapshot separates the submitted message from the newer text
+  // the created conversation must keep.
+  const _createdSessionForThisSend=!S.session;
+  const _composerTextBeforeCreate=_createdSessionForThisSend?String($('msg').value||''):'';
   if(!S.session&&!(await _ensureSessionForComposerAction({pickerClaimEpoch:_sendProjectPickerClaim}))) return;
 
   const activeSid=S.session.session_id;
@@ -2137,6 +2143,22 @@ async function send(){
     ||Number(S.session.visible_message_count)>0);
   const _ownerProfile=S.activeProfile||S.session.profile||'default';
 
+  // A create that this send started seeds the new composer with the submitted
+  // text. Anything typed while /api/session/new was in flight sits beyond that
+  // snapshot and is newer than this message, so it stays in the created chat
+  // instead of being cleared together with the send that preceded it. (Kept
+  // inline: send() is sliced whole by the behaviour harnesses.)
+  let _composerTypedDuringCreate='';
+  if(_createdSessionForThisSend){
+    const _createdComposerText=String($('msg').value||'');
+    if(_createdComposerText&&_createdComposerText!==_composerTextBeforeCreate){
+      const _added=(_composerTextBeforeCreate&&_createdComposerText.startsWith(_composerTextBeforeCreate))
+        ?_createdComposerText.slice(_composerTextBeforeCreate.length)
+        :_createdComposerText;
+      _composerTypedDuringCreate=_added.replace(/^\n+/,'');
+    }
+  }
+
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
   // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()
   // / forced-skill-directive awaits below. send() re-reads the LIVE composer when
@@ -2148,8 +2170,9 @@ async function send(){
   // _submittedDraftTextForClear is the sole authority for the send-time draft
   // signature from here down; no code path below re-reads $('msg').value on the
   // happy path.
-  const _submittedDraftTextForClear=$('msg').value||'';
-  $('msg').value='';autoResize();
+  const _submittedDraftTextForClear=_composerTypedDuringCreate?'':$('msg').value||'';
+  $('msg').value=_composerTypedDuringCreate;
+  autoResize();
 
   // #5912 gate CORE fix: snapshot the pending files that belong to THIS send
   // BEFORE the await, and upload exactly that snapshot. Otherwise a re-entrant /
@@ -2166,8 +2189,18 @@ async function send(){
   // textarea clear, BEFORE any await — so a new draft typed during the upload
   // window is not clobbered by a delayed text:'' post. Keep the promise so the
   // #5472 failed-send restore can chain its re-persist after this clear resolves.
+  // When input arrived during the create, the hand-off already persisted it as
+  // the new chat's draft; clear only what this send submitted.
   let _composerDraftClearPromise=null;
-  if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
+  if (_composerTypedDuringCreate && typeof _saveComposerDraftNow === 'function') {
+    try{
+      Promise.resolve(_saveComposerDraftNow(
+        activeSid,_composerTypedDuringCreate,[],'',{ownerProfile:_ownerProfile}
+      )).catch(()=>{});
+    }catch(_){}
+  } else if (activeSid && typeof _clearComposerDraft === 'function') {
+    _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
+  }
 
   setComposerStatus(_submittedFiles.length?'Uploading…':'');
   let uploaded=[];

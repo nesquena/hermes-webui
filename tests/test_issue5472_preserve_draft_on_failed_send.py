@@ -109,23 +109,27 @@ def test_send_still_clears_composer_on_the_happy_path():
     # returns, bundle-error paths). This assertion must actually guard the main
     # send path's clear.
     main_clear = (
-        "if (activeSid && typeof _clearComposerDraft === 'function') "
         "_composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);"
     )
     assert main_clear in MESSAGES_JS, "main send path must clear the persisted draft at send time"
+    assert (
+        "} else if (activeSid && typeof _clearComposerDraft === 'function') {"
+        in MESSAGES_JS
+    ), "the persisted-draft clear stays on the ordinary (no newer input) branch"
 
     # Salvage of #4750: the composer textarea capture + wipe was moved UP to run
     # immediately after capture (right after `_sendInProgressSid=activeSid;`) and
     # BEFORE `uploadPendingFiles()` / the forced-skill-directive await — so a
     # re-entrant/interrupt-mode send during the async window can't re-read the
     # still-populated DOM and double-submit. Verify that ordering here.
-    capture = "const _submittedDraftTextForClear=$('msg').value||'';"
+    capture = "const _submittedDraftTextForClear="
     assert capture in MESSAGES_JS, "send() must still capture the send-time draft text"
     capture_idx = MESSAGES_JS.index(capture)
-    # The textarea wipe sits immediately after the capture (same 120-char window).
-    window_after_capture = MESSAGES_JS[capture_idx : capture_idx + 120]
-    assert "$('msg').value='';autoResize();" in window_after_capture, (
-        "the composer textarea wipe must sit immediately after the capture"
+    # The textarea is re-assigned immediately after the capture (same window):
+    # cleared for an ordinary send, or set to input that arrived during a create.
+    window_after_capture = MESSAGES_JS[capture_idx : capture_idx + 200]
+    assert "$('msg').value=_composerTypedDuringCreate;" in window_after_capture, (
+        "the composer textarea must be re-assigned immediately after the capture"
     )
     upload_idx = MESSAGES_JS.index("uploaded=await uploadPendingFiles(")
     clear_idx = MESSAGES_JS.index(main_clear)

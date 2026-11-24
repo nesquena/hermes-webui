@@ -315,6 +315,12 @@ A pending state that disables the composer, or a settle that restores the
 destination draft over live input, fails it. Run it locally with
 `python tests/browser_new_chat_composer_retention.py`.
 
+`tests/browser_first_send_composer_retention.py` covers the first Send from an
+empty pane: with the create held after "hello" was submitted, " world" typed
+during the wait must still be in the created conversation's composer, while the
+posted message stays "hello". Run it locally with
+`python tests/browser_first_send_composer_retention.py`.
+
 `tests/browser_new_chat_composer_ownership.py` is the other half: a draft typed
 before clicking New Chat must not leak into the created conversation's composer,
 and must still be the source conversation's stored draft afterwards. Run it

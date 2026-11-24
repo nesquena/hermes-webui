@@ -56,10 +56,13 @@ def test_composer_captured_and_cleared_before_upload_await():
     """The fix: capture + textarea wipe must run before uploadPendingFiles()."""
     body = _function_body(MESSAGES_JS, "send")
 
-    capture_idx = body.index("const _submittedDraftTextForClear=$('msg').value||'';")
-    # The wipe sits immediately after the capture.
-    wipe_rel = body.index("$('msg').value='';autoResize();", capture_idx)
-    assert wipe_rel - capture_idx < 120, "the textarea wipe must sit immediately after the capture"
+    capture_idx = body.index("const _submittedDraftTextForClear=")
+    # The textarea is re-assigned immediately after the capture: cleared for an
+    # ordinary send, and set to the newer text typed while a create was pending.
+    wipe_rel = body.index("$('msg').value=_composerTypedDuringCreate;", capture_idx)
+    assert wipe_rel - capture_idx < 160, (
+        "the composer textarea must be re-assigned immediately after the capture"
+    )
 
     upload_idx = body.index("uploaded=await uploadPendingFiles(")
     directive_await_idx = body.index("const _directivePayload = await _pending.promise;")

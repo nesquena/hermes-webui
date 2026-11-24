@@ -257,11 +257,14 @@ function _composerBlockJoin(current,value){
 }
 function _composerRenderDestinationText(tx){
   let text='';
+  // Every producer token owns one slot and one slot only: a later write
+  // replaces the value at that token's original position. It must never reset
+  // the whole buffer, or a keystroke that arrives after a buffered saved prompt
+  // (or transcript) would erase the earlier producer's text at settle time.
   for(const token of tx.destinationOrder){
     const slot=tx.destinationSlots.get(token);
     if(!slot)continue;
-    if(slot.semantics==='replace-all')text=String(slot.value||'');
-    else text=slot.semantics==='block-append'
+    text=slot.semantics==='block-append'
       ? _composerBlockJoin(text,slot.value)
       : text+String(slot.value||'');
   }

@@ -280,7 +280,9 @@ def _run(*steps):
         .replace("__RECOVER_AND_RESTORE__", RECOVER_AND_RESTORE_SRC)
         .replace("__SEND__", SEND_SRC)
     )
-    proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
+    # Feed the harness on stdin: the extracted send() plus its helpers no longer
+    # fit in one Windows argv entry (WinError 206) or Linux MAX_ARG_STRLEN.
+    proc = subprocess.run([NODE, "-"], input=script, capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
