@@ -102,9 +102,11 @@ def _fresh_caches():
 
     config._CREDENTIAL_POOL_CACHE.clear()
     providers._POOL_USAGE_CACHE.clear()
+    getattr(providers, "_POOL_USAGE_CACHE_CLAIMS", {}).clear()
     yield
     config._CREDENTIAL_POOL_CACHE.clear()
     providers._POOL_USAGE_CACHE.clear()
+    getattr(providers, "_POOL_USAGE_CACHE_CLAIMS", {}).clear()
 
 
 def _idless_entry(label, token, *, status="ok"):
@@ -472,3 +474,181 @@ def test_non_opencode_go_multi_credential_pool_keeps_its_payload_shape(monkeypat
     assert "credentials" not in result
     assert len(result["account_limits"]["pool"]["credentials"]) == 2
     assert calls == []
+
+
+# --- Refresh versus a superseded probe ---------------------------------------
+#
+# A probe whose request already timed out keeps running. If Refresh completes before
+# it, the older probe must not publish: it would replace the refreshed windows (or the
+# refreshed rows, on a late failure) for another full cache lifetime. Ownership is a
+# generation claimed before the network work starts; a completion timestamp cannot do
+# this job because the superseded worker finishes last and would look newest.
+
+
+def _superseded_probe_scenario(monkeypatch, tmp_path, *, late_returns_payload):
+    """Ordinary request times out while A's probe is in flight, then Refresh runs.
+
+    ``late_returns_payload`` is what the superseded probe finally answers, or an
+    exception instance for the stale-failure schedule. Returns the result the next
+    ordinary poll reads after the superseded probe has finished.
+    """
+    import threading
+
+    import api.providers as providers
+
+    monkeypatch.setattr(providers, "_PROVIDER_QUOTA_TIMEOUT_SECONDS", 0.4)
+    a_started = threading.Event()
+    release = threading.Event()
+    late_returns = threading.Event()
+    state = {"a_calls": 0}
+    fresh = {"usage": {"rolling": {"percent": 10, "status": "ok"}}}   # 90 left
+
+    def opener(req, timeout=None):
+        auth = req.headers.get("Authorization")
+        if auth == "Bearer " + _AGGREGATE_KEY:
+            return _FakeResponse(json.dumps(_AGGREGATE_RESPONSE).encode("utf-8"))
+        if auth == "Bearer " + _CRED_B:
+            return _FakeResponse(json.dumps(_CRED_B_RESPONSE).encode("utf-8"))
+        state["a_calls"] += 1
+        if state["a_calls"] == 1:
+            a_started.set()
+            try:
+                release.wait(5.0)
+                if isinstance(late_returns_payload, Exception):
+                    raise late_returns_payload
+                return _FakeResponse(json.dumps(late_returns_payload).encode("utf-8"))
+            finally:
+                late_returns.set()
+        return _FakeResponse(json.dumps(fresh).encode("utf-8"))
+
+    payloads = [_entry("primary", _CRED_A), _entry("backup", _CRED_B)]
+    first = {}
+
+    def ordinary_request():
+        first["result"], _calls = _quota(
+            monkeypatch, tmp_path, pool_payloads=payloads,
+            responses={"Bearer " + _AGGREGATE_KEY: _AGGREGATE_RESPONSE}, opener=opener,
+        )
+
+    worker = threading.Thread(target=ordinary_request, name="ordinary-quota-request")
+    worker.start()
+    assert a_started.wait(5.0), "the credential probe never started"
+    worker.join(10.0)
+    assert not worker.is_alive()
+    assert first["result"]["credentials"][0]["windows"] == [], "the request returned at its deadline"
+
+    refreshed, _refresh_calls = _quota(
+        monkeypatch, tmp_path, refresh=True, pool_payloads=payloads,
+        responses={"Bearer " + _AGGREGATE_KEY: _AGGREGATE_RESPONSE}, opener=opener,
+    )
+    assert [w["remaining_percent"] for w in refreshed["credentials"][0]["windows"]] == [90.0]
+
+    # Let the superseded probe finish now, strictly after Refresh has answered.
+    release.set()
+    assert late_returns.wait(5.0), "the superseded probe never returned"
+    time.sleep(1.0)  # its publication is the next statement after the response is read
+
+    calls = []
+    third, _third_calls = _quota(
+        monkeypatch, tmp_path, pool_payloads=payloads,
+        responses={"Bearer " + _AGGREGATE_KEY: _AGGREGATE_RESPONSE},
+        opener=_opener({"Bearer " + _AGGREGATE_KEY: _AGGREGATE_RESPONSE}, calls),
+    )
+    return third, calls
+
+
+def test_a_superseded_probe_cannot_undo_refreshed_windows(monkeypatch, tmp_path):
+    """A stale success finishing after Refresh must not replace the refreshed windows."""
+    third, calls = _superseded_probe_scenario(
+        monkeypatch, tmp_path,
+        late_returns_payload={"usage": {"rolling": {"percent": 60, "status": "ok"}}},
+    )
+
+    assert [w["remaining_percent"] for w in third["credentials"][0]["windows"]] == [90.0], \
+        "an ordinary poll read the superseded probe instead of the refreshed windows"
+    assert [c for c in calls if c["authorization"] != "Bearer " + _AGGREGATE_KEY] == [], \
+        "the cache answered: the stale result was not stored and no re-probe was needed"
+
+
+def test_a_superseded_failure_cannot_blank_refreshed_windows(monkeypatch, tmp_path):
+    """A stale failure finishing after Refresh must not cache a failure over the value."""
+    third, _calls = _superseded_probe_scenario(
+        monkeypatch, tmp_path, late_returns_payload=OSError("probe unavailable"),
+    )
+
+    assert [w["remaining_percent"] for w in third["credentials"][0]["windows"]] == [90.0], \
+        "a late failure blanked the refreshed credential row"
+
+
+def test_a_probe_that_finishes_before_refresh_is_superseded_too(monkeypatch, tmp_path):
+    """Reverse completion order: the earlier probe stores, Refresh still wins."""
+    payloads = [_entry("primary", _CRED_A), _entry("backup", _CRED_B)]
+    responses = {
+        "Bearer " + _AGGREGATE_KEY: _AGGREGATE_RESPONSE,
+        "Bearer " + _CRED_A: {"usage": {"rolling": {"percent": 60, "status": "ok"}}},
+        "Bearer " + _CRED_B: _CRED_B_RESPONSE,
+    }
+    first, _first_calls = _quota(
+        monkeypatch, tmp_path, pool_payloads=payloads, responses=responses,
+    )
+    assert [w["remaining_percent"] for w in first["credentials"][0]["windows"]] == [40.0]
+
+    second, _second_calls = _quota(
+        monkeypatch, tmp_path, refresh=True, pool_payloads=payloads,
+        responses={
+            "Bearer " + _AGGREGATE_KEY: _AGGREGATE_RESPONSE,
+            "Bearer " + _CRED_A: {"usage": {"rolling": {"percent": 10, "status": "ok"}}},
+            "Bearer " + _CRED_B: _CRED_B_RESPONSE,
+        },
+    )
+    assert [w["remaining_percent"] for w in second["credentials"][0]["windows"]] == [90.0]
+
+    calls = []
+    third, _third_calls = _quota(
+        monkeypatch, tmp_path, pool_payloads=payloads,
+        responses={"Bearer " + _AGGREGATE_KEY: _AGGREGATE_RESPONSE},
+        opener=_opener({"Bearer " + _AGGREGATE_KEY: _AGGREGATE_RESPONSE}, calls),
+    )
+    assert [w["remaining_percent"] for w in third["credentials"][0]["windows"]] == [90.0]
+    assert [c for c in calls if c["authorization"] != "Bearer " + _AGGREGATE_KEY] == []
+
+
+# --- Pool summary derives from its own rows ----------------------------------
+
+
+def test_pool_summary_describes_the_rows_it_ships(monkeypatch, tmp_path):
+    """queried/plans/best-remaining must not read zero/empty beside populated rows."""
+    result, _calls = _quota(
+        monkeypatch, tmp_path,
+        pool_payloads=[_entry("primary", _CRED_A), _entry("backup", _CRED_B)],
+        responses={
+            "Bearer " + _AGGREGATE_KEY: _AGGREGATE_RESPONSE,
+            "Bearer " + _CRED_A: _CRED_A_RESPONSE,
+            "Bearer " + _CRED_B: _CRED_B_RESPONSE,
+        },
+    )
+    pool = result["account_limits"]["pool"]
+
+    assert pool["queried_credentials"] == 2
+    assert pool["plans"] == ["primary", "Team"], "plans come from the row results, in row order"
+    best = pool["best_remaining_by_window"]
+    assert len(best) == 2
+    assert sorted(row["remaining_percent"] for row in best) == [60.0, 90.0]
+    assert {row["credential_label"] for row in best} == {"primary", "backup"}
+    assert pool["next_reset_at"] is not None
+
+
+def test_pool_summary_stays_historical_without_probes(monkeypatch, tmp_path):
+    """A pool whose rows carry no windows keeps the pre-PR summary payload."""
+    result, _calls = _quota(
+        monkeypatch, tmp_path, provider="zai", key=None,
+        pool_payloads=[_entry("primary", _CRED_A), _entry("backup", _CRED_B)],
+        responses={},
+    )
+    pool = result["account_limits"]["pool"]
+
+    assert pool["queried_credentials"] == 0
+    assert pool["plans"] == []
+    assert pool["best_remaining_by_window"] == []
+    assert pool["next_reset_at"] is None
+    assert pool["failed_credentials"] == 0

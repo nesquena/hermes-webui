@@ -1023,6 +1023,46 @@ _POOL_USAGE_CACHE_MAX_ENTRIES = 128
 # too: a dead endpoint must not be re-probed once per request per credential.
 _POOL_USAGE_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, Any] | None]] = {}
 _POOL_USAGE_CACHE_LOCK = threading.Lock()
+# Publication ownership, one generation per probe, claimed *before* the network work
+# starts. A probe may only write its result while it still owns its key; a newer
+# request (Refresh) claims a new generation, so a probe that finishes later — success
+# or failure — cannot overwrite the fresher value. A completion timestamp is not
+# request authority: the superseded worker finishes *after* the fresh one, so it would
+# look newer and win.
+_POOL_USAGE_CACHE_CLAIMS: dict[tuple[str, str, str], int] = {}
+_POOL_USAGE_CACHE_GENERATION = 0
+
+
+def _claim_pool_usage_probe(key) -> int:
+    """Take ownership of ``key`` for one probe and return its generation."""
+    global _POOL_USAGE_CACHE_GENERATION
+    with _POOL_USAGE_CACHE_LOCK:
+        _POOL_USAGE_CACHE_GENERATION += 1
+        _POOL_USAGE_CACHE_CLAIMS[key] = _POOL_USAGE_CACHE_GENERATION
+        return _POOL_USAGE_CACHE_GENERATION
+
+
+def _publish_pool_usage_probe(key, generation: int, result) -> bool:
+    """Store a probe result only while this probe still owns ``key``.
+
+    Returns False when a newer probe replaced this one while it was in flight: the
+    result still goes to its own caller, it just must not enter the cache.
+    """
+    with _POOL_USAGE_CACHE_LOCK:
+        if _POOL_USAGE_CACHE_CLAIMS.get(key) != generation:
+            return False
+        _POOL_USAGE_CACHE_CLAIMS.pop(key, None)
+        stamp = time.monotonic()
+        if len(_POOL_USAGE_CACHE) >= _POOL_USAGE_CACHE_MAX_ENTRIES:
+            stale = [
+                cached_key
+                for cached_key, (cached_at, _value) in _POOL_USAGE_CACHE.items()
+                if (stamp - cached_at) >= _POOL_USAGE_CACHE_TTL_SECONDS
+            ]
+            for cached_key in stale or list(_POOL_USAGE_CACHE):
+                _POOL_USAGE_CACHE.pop(cached_key, None)
+        _POOL_USAGE_CACHE[key] = (stamp, result)
+        return True
 
 
 def _pool_usage_cache_scope() -> str:
@@ -1162,8 +1202,10 @@ def _cached_pool_credential_usage(provider, entry, index: int, *, refresh: bool 
 
     ``refresh`` skips the cache read — cached *failures* included, so a credential
     fixed a second ago is re-probed instead of being reported empty for the rest of
-    the TTL. The fresh answer is stored with its own timestamp, so the next
-    non-refresh read sees it rather than the superseded value.
+    the TTL. A probe's result enters the cache only while that probe still owns the
+    key (see ``_claim_pool_usage_probe``): skipping the read is not enough on its own,
+    because a probe whose request already timed out keeps running and would otherwise
+    publish its superseded answer *after* a Refresh, for another full TTL.
     """
     key = _pool_usage_cache_key(str(provider or "").strip().lower(), entry, index, cache_scope)
     remaining = _pool_deadline_remaining(deadline)
@@ -1175,18 +1217,9 @@ def _cached_pool_credential_usage(provider, entry, index: int, *, refresh: bool 
             cached = _POOL_USAGE_CACHE.get(key)
             if cached is not None and (now - cached[0]) < _POOL_USAGE_CACHE_TTL_SECONDS:
                 return cached[1]
+    generation = _claim_pool_usage_probe(key)
     result = _probe_pool_credential_usage(provider, entry, timeout=remaining)
-    with _POOL_USAGE_CACHE_LOCK:
-        stamp = time.monotonic()
-        if len(_POOL_USAGE_CACHE) >= _POOL_USAGE_CACHE_MAX_ENTRIES:
-            stale = [
-                cached_key
-                for cached_key, (cached_at, _value) in _POOL_USAGE_CACHE.items()
-                if (stamp - cached_at) >= _POOL_USAGE_CACHE_TTL_SECONDS
-            ]
-            for cached_key in stale or list(_POOL_USAGE_CACHE):
-                _POOL_USAGE_CACHE.pop(cached_key, None)
-        _POOL_USAGE_CACHE[key] = (stamp, result)
+    _publish_pool_usage_probe(key, generation, result)
     return result
 
 
@@ -1256,6 +1289,79 @@ def _probe_pool_usage_rows(provider, probe_items, *, refresh: bool, deadline: fl
     finally:
         executor.shutdown(wait=False)
     return results
+
+
+def _pool_window_number(value):
+    """Number from a window field, else None (the child worker's ``_number`` shape)."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    try:
+        text = str(value).strip()
+        if not text:
+            return None
+        number = float(text)
+        return int(number) if number.is_integer() else number
+    except Exception:  # noqa: BLE001 - an unparsable field is simply absent
+        return None
+
+
+def _pool_rows_best_remaining(rows):
+    """Best remaining percent per window across the pool's own rows.
+
+    Mirrors the child worker's helper of the same shape (``_best_remaining_by_window``
+    inside ``_ACCOUNT_USAGE_SUBPROCESS_CODE``, which is a script string, not a module
+    function) so the pool summary and the Codex pool describe windows identically.
+    """
+    best = {}
+    for row in rows:
+        if row.get("status") != "available":
+            continue
+        label = row.get("label") or "Credential"
+        for window in row.get("windows") or []:
+            if not isinstance(window, dict):
+                continue
+            window_label = str(window.get("label") or "").strip()
+            remaining = _pool_window_number(window.get("remaining_percent"))
+            if not window_label or remaining is None:
+                continue
+            limit_window_seconds = _pool_window_number(window.get("limit_window_seconds"))
+            window_key = (
+                ("duration", limit_window_seconds)
+                if limit_window_seconds is not None
+                else ("label", window_label.lower())
+            )
+            candidate = {
+                "label": window_label,
+                "remaining_percent": remaining,
+                "used_percent": window.get("used_percent"),
+                "reset_at": window.get("reset_at"),
+                "detail": window.get("detail"),
+                "limit_window_seconds": limit_window_seconds,
+                "credential_label": label,
+            }
+            current = best.get(window_key)
+            if current is None or float(remaining) > float(current.get("remaining_percent") or -1):
+                best[window_key] = candidate
+    return list(best.values())
+
+
+def _pool_rows_next_reset_at(rows):
+    """Earliest reset instant across the pool's own rows, or None."""
+    best_dt = None
+    best_text = None
+    for row in rows:
+        for window in row.get("windows") or []:
+            if not isinstance(window, dict):
+                continue
+            dt = _parse_dt(window.get("reset_at"))
+            if dt is None:
+                continue
+            if best_dt is None or dt < best_dt:
+                best_dt = dt
+                best_text = _iso(dt)
+    return best_text
 
 
 def _local_pool_snapshot(provider, *, refresh: bool = False, deadline: float | None = None):
@@ -1346,16 +1452,28 @@ def _local_pool_snapshot(provider, *, refresh: bool = False, deadline: float | N
         return None
 
     total = available_count + exhausted_count + dead_count
+    # Derived from the rows, not pinned: the panel shows per-credential plan and
+    # windows, so the summary beside them must describe those same rows instead of
+    # reading zero/empty while they are populated. A pool whose rows carry no windows
+    # (every provider that is not probed) keeps the historical payload exactly:
+    # 0, [], [], None. ``failed_credentials`` stays 0 for the same reason — deriving
+    # it would reclassify every other provider's rows.
+    queried_count = sum(1 for row in rows if row.get("windows"))
+    plans = []
+    for row in rows:
+        row_plan = row.get("plan")
+        if isinstance(row_plan, str) and row_plan and row_plan not in plans:
+            plans.append(row_plan)
     pool_dict = {
         "total_credentials": total,
-        "queried_credentials": 0,
+        "queried_credentials": queried_count,
         "available_credentials": available_count,
         "exhausted_credentials": exhausted_count,
         "dead_credentials": dead_count,
         "failed_credentials": 0,
-        "plans": [],
-        "next_reset_at": None,
-        "best_remaining_by_window": [],
+        "plans": plans,
+        "next_reset_at": _pool_rows_next_reset_at(rows),
+        "best_remaining_by_window": _pool_rows_best_remaining(rows),
         "credentials": rows,
     }
 

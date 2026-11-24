@@ -36,9 +36,14 @@ is in the key because a cloned profile copies `auth.json` and therefore repeats
 credential ids.
 
 `?refresh=1` (the Refresh button) bypasses that cache read, cached failures included,
-so a credential fixed a moment ago is re-probed immediately. The refreshed values
-replace the cached ones, so the next ordinary poll reads the new numbers rather than
-the superseded ones.
+so a credential fixed a moment ago is re-probed immediately. A result is written to the
+cache only while its own probe still owns the key: every probe takes a generation
+before its request starts, and a newer request replaces it. A probe that finishes
+later — a success or a failure — is therefore refused the cache instead of overwriting
+the refreshed value, so the next ordinary poll reads the new numbers whichever probe
+finishes last. Skipping the cache read is not enough on its own: a probe whose request
+already timed out keeps running, and a completion timestamp would only make it look
+newest.
 
 ## Deadlines
 
@@ -65,6 +70,11 @@ credential, but they serve different readers:
 | `account_limits.pool` | pool bookkeeping (`total/available/exhausted/dead`, `queried_credentials`, best-remaining summary) | pool stats **plus** `credentials` rows |
 | `credentials` (top level) | Settings › Providers card | flat array of `{label, status, plan, windows, details, unavailable_reason, retry_after}` |
 
+`account_limits.pool`'s `queried_credentials`, `plans`, `best_remaining_by_window` and
+`next_reset_at` are derived from its own rows, so they never read zero or empty beside
+populated per-credential windows. A pool whose rows carry no windows — every provider
+that is not probed — keeps the previous payload exactly (`0`, `[]`, `[]`, `null`).
+
 `credentials` is derived from `account_limits.pool.credentials` — same non-secret
 fields — and only exists for opencode-go with more than one credential. A client that
 does not know the field keeps rendering the pool block; the panel prefers
@@ -76,6 +86,8 @@ ever carries key material: labels come from the configured label (or
 
 `tests/test_provider_quota_per_credential_windows.py` runs the real
 `get_provider_quota()` path with the upstream call and the credential pool stubbed: it
-pins the profile-scoped cache key, the id-less identities, `refresh`, the concurrent
-deadline (measured wall time), a timed-out probe's failure row, and the restricted
-`credentials` field.
+pins the profile-scoped cache key, the id-less identities, `refresh`, a superseded probe
+that finishes after Refresh in either completion order (stale success and stale failure,
+plus the reverse-order control), the concurrent deadline (measured wall time), a
+timed-out probe's failure row, the pool summary derived from its rows, and the
+restricted `credentials` field.
