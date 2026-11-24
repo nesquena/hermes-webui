@@ -17,11 +17,15 @@ save) with no wall-clock delay.
 from __future__ import annotations
 
 import json
+import re
 import threading
+from io import BytesIO
+from types import SimpleNamespace
 
 import pytest
 
 import api.models as models
+from api import session_recovery
 from api.models import SESSIONS, Session
 from api.session_ops import (
     _stamp_intentional_shrink_generation,
@@ -619,4 +623,215 @@ def test_generation_read_with_the_rows_it_describes(tmp_path, monkeypatch):
     # And the marker the late shrink stamped is still the pending authority.
     assert cached.intentional_shrink_generation == "generation-mid-capture"
     assert getattr(cached, "_intentional_shrink_pending_count", None) == 5
+
+
+# ── gate round on PR #9273: a failed save may not publish a shrink ──────────
+#
+# ``retry_last`` / ``undo_last`` / the truncate routes shrink the cached object,
+# then save. A save that raises left the pending-shrink marker behind, and while
+# that marker lived a GET preferred the shorter cache over the intact sidecar --
+# so the server kept serving a shrink that had never reached disk, and the next
+# ordinary save persisted it (permanent loss, with a generation that told
+# startup recovery the loss was intentional).
+
+FULL = [Q1, A1, PARTIAL, Q2, OLD_A2]
+_GENERATION_RE = re.compile(r"^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$")
+
+
+def _fail_next_sidecar_write(monkeypatch, sid: str) -> dict:
+    """Make the next real sidecar replacement for ``sid`` fail like a full disk.
+
+    The failure lands after the in-memory shrink and inside the real ``save()``
+    (the ``.bak`` copy is already written), which is exactly the state that used
+    to leave the pending marker behind.
+    """
+    real_replace = models._replace_session_sidecar
+    state = {"armed": True, "attempts": 0}
+
+    def replace(tmp, path, session_id):
+        if state["armed"] and session_id == sid:
+            state["armed"] = False
+            state["attempts"] += 1
+            raise OSError(28, "No space left on device")
+        return real_replace(tmp, path, session_id)
+
+    monkeypatch.setattr(models, "_replace_session_sidecar", replace)
+    return state
+
+
+def _assert_sidecar_has_no_shrink_provenance(session_dir, sid: str) -> None:
+    """Disk must not claim a shrink it never received (startup recovery trust)."""
+    sidecar = _raw_disk(session_dir, sid)
+    assert sidecar.get("intentional_shrink_generation") is None
+    status = session_recovery.inspect_session_recovery_status(
+        session_dir / f"{sid}.json"
+    )
+    assert status["live_messages"] == len(FULL)
+    assert status["recommend"] != "restore"
+
+
+@pytest.mark.parametrize("operation", [retry_last, undo_last], ids=["retry", "undo"])
+def test_failed_save_does_not_serve_or_persist_the_unsaved_shrink(
+    tmp_path, monkeypatch, operation
+):
+    session_dir = tmp_path / "sessions"
+    sid = f"issue9029-failed-save-{operation.__name__}"
+    cached = _seed_and_cache(session_dir, sid)
+    failure = _fail_next_sidecar_write(monkeypatch, sid)
+
+    with pytest.raises(OSError):
+        operation(sid)
+
+    assert failure["attempts"] == 1
+    # Nothing reached the sidecar...
+    assert [row["content"] for row in _load_disk(session_dir, sid)] == FULL
+    # ...and the in-memory shrink was handed back, so the reader that lands
+    # after the failure is served the pre-shrink transcript, not the shorter
+    # copy the failed request left behind (the gate's 4-on-disk / 2-served
+    # state). Same object: the rollback, not a reload, is what makes this true,
+    # which also keeps the pending marker from being able to pin anything.
+    served = models.get_session(sid)
+    assert served is cached
+    assert [row["content"] for row in served.messages] == FULL
+    assert getattr(served, "_intentional_shrink_pending_count", None) is None
+    assert models._cached_session_lags_disk(served) is False
+    _assert_sidecar_has_no_shrink_provenance(session_dir, sid)
+
+    # The next ordinary save (chat/start, a checkpoint) must not persist the
+    # shrink that never landed.
+    served.save()
+    assert [row["content"] for row in _load_disk(session_dir, sid)] == FULL
+    assert _raw_disk(session_dir, sid)["message_count"] == len(FULL)
+
+
+def _post_route(monkeypatch, path: str, payload: dict) -> dict:
+    """Drive the real POST handler for ``path`` and capture its response."""
+    import api.routes as routes
+
+    body_bytes = json.dumps(payload).encode()
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr("api.config._evict_session_agent", lambda _sid: None)
+    captured: dict = {}
+
+    def fake_j(handler, response_payload, status=200, extra_headers=None):
+        captured["payload"] = response_payload
+        captured["status"] = status
+
+    monkeypatch.setattr(routes, "j", fake_j)
+    handler = SimpleNamespace(
+        headers={"Content-Length": str(len(body_bytes))}, rfile=BytesIO(body_bytes)
+    )
+    try:
+        routes.handle_post(handler, SimpleNamespace(path=path))
+    except BaseException as exc:  # surfaced to the assertions below
+        captured["error"] = exc
+    return captured
+
+
+def test_truncate_route_publishes_the_shrink_and_closes_the_window(
+    tmp_path, monkeypatch
+):
+    """The route must use the same publication contract as retry/undo.
+
+    Truncating used to save without closing the pending-shrink window, so the
+    marker outlived its own save and every sidecar up to the pre-shrink snapshot
+    looked older than the cache.
+    """
+    session_dir = tmp_path / "sessions"
+    sid = "issue9029-truncate-route"
+    _seed_and_cache(session_dir, sid)
+
+    captured = _post_route(
+        monkeypatch, "/api/session/truncate", {"session_id": sid, "keep_count": 3}
+    )
+    assert "error" not in captured, captured.get("error")
+    assert captured["payload"].get("ok") is True
+    assert captured["payload"]["session"]["message_count"] == 3
+
+    sidecar = _raw_disk(session_dir, sid)
+    assert [row["content"] for row in sidecar["messages"]] == SHRUNK
+    assert _GENERATION_RE.fullmatch(sidecar["intentional_shrink_generation"] or ""), (
+        "the successful save did not publish a real shrink generation"
+    )
+    served = models.get_session(sid)
+    assert [row["content"] for row in served.messages] == SHRUNK
+    assert getattr(served, "_intentional_shrink_pending_count", None) is None
+
+    # A genuinely newer sidecar still wins: the window is closed, not pinned.
+    writer = Session.load(sid)
+    writer.messages = list(writer.messages) + [_msg("assistant", "newer", 9.0, "n1")]
+    writer.save()
+    fresh = models.get_session(sid)
+    assert [row["content"] for row in fresh.messages] == SHRUNK + ["newer"]
+
+
+def test_truncate_route_failed_save_rolls_the_truncation_back(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    sid = "issue9029-truncate-route-failed-save"
+    cached = _seed_and_cache(session_dir, sid)
+    failure = _fail_next_sidecar_write(monkeypatch, sid)
+
+    captured = _post_route(
+        monkeypatch, "/api/session/truncate", {"session_id": sid, "keep_count": 2}
+    )
+    assert isinstance(captured.get("error"), OSError), captured
+    assert failure["attempts"] == 1
+
+    # Lines on disk vs lines served: both keep the pre-truncation transcript.
+    assert len(_load_disk(session_dir, sid)) == len(FULL)
+    served = models.get_session(sid)
+    assert served is cached
+    assert [row["content"] for row in served.messages] == FULL
+    assert getattr(served, "_intentional_shrink_pending_count", None) is None
+    _assert_sidecar_has_no_shrink_provenance(session_dir, sid)
+
+    served.save()
+    assert [row["content"] for row in _load_disk(session_dir, sid)] == FULL
+
+
+def test_consecutive_unsaved_shrinks_keep_the_first_baseline(tmp_path, monkeypatch):
+    """A second shrink before the save may not narrow the pending baseline.
+
+    The marker records the pre-shrink snapshot the cache branched from, and it
+    is what excuses the shorter cache over the longer sidecar. Overwriting it
+    with the second shrink's ``old_message_count`` (4 instead of 5) left the
+    sidecar outside the excused range, so a GET reloaded the pre-shrink file and
+    resurrected the turns the first shrink had already removed.
+    """
+    session_dir = tmp_path / "sessions"
+    sid = "issue9029-consecutive-shrinks"
+    cached = _seed_and_cache(session_dir, sid)
+
+    truncate_session_at_keep(cached, 4)
+    first_generation = cached.intentional_shrink_generation
+    assert _GENERATION_RE.fullmatch(first_generation)
+    assert getattr(cached, "_intentional_shrink_pending_count", None) == 5
+    assert [row["content"] for row in models.get_session(sid).messages] == FULL[:4]
+
+    truncate_session_at_keep(cached, 2)
+    assert cached.intentional_shrink_generation != first_generation
+    assert getattr(cached, "_intentional_shrink_pending_count", None) == 5, (
+        "the second unsaved shrink narrowed the pending baseline"
+    )
+    served = models.get_session(sid)
+    assert served is cached
+    assert [row["content"] for row in served.messages] == [Q1, A1]
+    assert [row["content"] for row in _load_disk(session_dir, sid)] == FULL
+
+    # One save publishes the latest shrink, records its own token and closes
+    # the window: both shrinks' removals are now durable.
+    from api.session_ops import save_intentional_shrink, snapshot_intentional_shrink_state
+
+    save_intentional_shrink(cached, snapshot_intentional_shrink_state(cached))
+    sidecar = _raw_disk(session_dir, sid)
+    assert [row["content"] for row in sidecar["messages"]] == [Q1, A1]
+    assert sidecar["intentional_shrink_generation"] == cached.intentional_shrink_generation
+    assert getattr(cached, "_intentional_shrink_pending_count", None) is None
+    served.save()
+    assert [row["content"] for row in _load_disk(session_dir, sid)] == [Q1, A1]
+    status = session_recovery.inspect_session_recovery_status(
+        session_dir / f"{sid}.json"
+    )
+    assert status["recommend"] != "restore"
+    assert status.get("intentional_message_shrink") is True
 

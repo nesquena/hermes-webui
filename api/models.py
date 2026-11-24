@@ -2264,13 +2264,19 @@ class Session:
             'skill_provenance',
             'skill_provenance_generation',
         ]
-        # #9029: intentional_shrink_generation describes the transcript rows
-        # this save captures. Read the generation token once, before row
-        # capture, so a concurrent shrink landing during or after capture
-        # neither leaks a newer generation onto an older transcript nor
-        # gets its pending-shrink marker cleared prematurely.
-        written_shrink_generation = getattr(self, 'intentional_shrink_generation', None)
-        guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
+        # #9029: capture the generation token and the transcript rows it
+        # describes as ONE snapshot, under the fence shrink producers mutate
+        # both in (see _INTENTIONAL_SHRINK_LOCK). Reading the token here and the
+        # rows through a later getattr() let a shrink land between the two: the
+        # save then persisted the OLD rows with the NEW token, and the startup
+        # recovery path (api/session_recovery.py) read that as an intentional
+        # shrink and refused to restore the longer backup. The rows reference is
+        # captured, not copied; the dedup below reads only this snapshot, so a
+        # rebind after the snapshot cannot change what this save writes.
+        with _INTENTIONAL_SHRINK_LOCK:
+            written_shrink_generation = getattr(self, 'intentional_shrink_generation', None)
+            captured_messages = self.messages
+        guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(captured_messages)
         if exact_replay_rows_removed:
             logger.warning(
                 "Removed %d exact stable replay messages from persisted snapshot for session %s",
@@ -2581,19 +2587,24 @@ class Session:
         self._reasoning_effort_saved = written_reasoning_effort
         self._share_token_saved = self.share_token
         self._share_created_at_saved = self.share_created_at
-        # #9029: close the pending-shrink window once the truncated transcript
-        # has been persisted to disk. Callers that skip the sidebar index
-        # (e.g. the first-draft owner record in api/routes.py) already hold
-        # LOCK, which is non-reentrant; following the skip_index convention,
-        # skip_index=True saves never acquire LOCK, while shrink operations'
-        # own saves (skip_index default False) still close the pending-shrink
-        # window. The clear is generation-guarded under LOCK so a marker stamped
-        # after this save captured its snapshot (or on another Session object
-        # for the same id) is untouched.
-        if not skip_index and isinstance(written_shrink_generation, str) and written_shrink_generation.strip():
-            with LOCK:
-                if getattr(self, 'intentional_shrink_generation', None) == written_shrink_generation:
-                    self._intentional_shrink_pending_count = None
+        # #9029: close the pending-shrink window only AFTER the truncated
+        # transcript is on disk, and only for the shrink this save captured.
+        # The same fence that produced the snapshot guards the clear: a newer
+        # shrink replaces the token AND the rows together, so matching both
+        # proves this save persisted exactly the state it observed and that the
+        # marker waiting to be closed is that state's. A failed save never
+        # reaches this point, and the producer rolls its in-memory shrink back
+        # (api/session_ops.save_intentional_shrink), so a marker can never
+        # outlive a shrink that did not land -- while it lived,
+        # _cached_session_lags_disk() would refuse to reload the longer sidecar.
+        with _INTENTIONAL_SHRINK_LOCK:
+            if (
+                isinstance(written_shrink_generation, str)
+                and written_shrink_generation.strip()
+                and getattr(self, 'intentional_shrink_generation', None) == written_shrink_generation
+                and self.messages is captured_messages
+            ):
+                self._intentional_shrink_pending_count = None
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
@@ -6662,6 +6673,25 @@ def _session_persist_lock(sid):
             lock = threading.RLock()
             _SESSION_PERSIST_LOCKS[key] = lock
         return lock
+
+
+# #9029: the intentional-shrink generation token and the transcript rows it
+# describes are ONE publication. Shrink producers (api/session_ops.py: retry,
+# undo, truncate, regeneration) replace the rows and stamp the token as a single
+# unit under this fence, and Session.save() captures (token, rows) under the
+# same fence, so the generation a sidecar records always describes the rows
+# written with it -- a shrink landing mid-save can neither leak its token onto an
+# older transcript nor keep its pending marker while older rows land without the
+# token.
+#
+# LOCK cannot serve as this fence: save() also runs while its caller already
+# holds LOCK (the first-draft owner record in api/routes.py), and LOCK is a plain
+# threading.Lock. The per-session persist lock cannot either: producers mutate
+# before they save, so they would have to hold it across the whole mutation.
+# Lock order: LOCK -> _INTENTIONAL_SHRINK_LOCK (producers), and save() takes it
+# on its own inside the persist lock. Nothing takes LOCK or the persist lock
+# while holding it.
+_INTENTIONAL_SHRINK_LOCK = threading.Lock()
 
 
 # The source-identity fields CLI materialization stamps on a session, and the
