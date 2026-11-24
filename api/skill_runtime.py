@@ -41,8 +41,10 @@ def profile_external_skill_dirs(profile_home: Path) -> list[Path]:
         config = yaml.safe_load(config_path.read_bytes().decode('utf-8-sig'))
     except FileNotFoundError:
         return []
-    except Exception:
-        logger.debug("Could not read skills config %s", config_path, exc_info=True)
+    except Exception as exc:
+        # #9322: path + error class only. The parser's traceback quotes the bad
+        # line, which may hold a value the operator does not want in a log file.
+        logger.debug("Could not read skills config %s: %s", config_path, type(exc).__name__)
         return []
     skills = config.get('skills') if isinstance(config, dict) else None
     raw = skills.get('external_dirs') if isinstance(skills, dict) else None
