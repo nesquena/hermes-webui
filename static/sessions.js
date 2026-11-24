@@ -2813,6 +2813,10 @@ async function loadSession(sid){
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
   const sameSessionForceReload = forceReload && currentSid===sid;
+  // #9338: captured HERE, before S.session is replaced below, so the deferred
+  // workspace refresh of this load can tell a state refresh of the open session
+  // from a navigation to another one. See _sessionLoadWorkspaceRefreshOpts().
+  const _workspaceRefreshOpts = _sessionLoadWorkspaceRefreshOpts(forceReload, currentSid, sid);
   // Clicking the already-open session in the sidebar is a no-op. Reloading it
   // tears down active pane state and can reset the long-session scroll window
   // to the top even though the user did not navigate anywhere. Explicit
@@ -3458,7 +3462,7 @@ async function loadSession(sid){
       const liveTurn=document.getElementById('liveAssistantTurn');
       if(!liveTurn||!liveTurn.querySelector('.tool-call-group[data-tool-worklog-group="1"]')) ensureLiveWorklogShell();
     }
-    _deferWorkspaceRefreshForSession(sid);
+    _deferWorkspaceRefreshForSession(sid, _workspaceRefreshOpts);
     setBusy(true);setComposerStatus('');
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
@@ -3572,7 +3576,7 @@ async function loadSession(sid){
         if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
         else appendThinking();
       }
-      _deferWorkspaceRefreshForSession(sid);
+      _deferWorkspaceRefreshForSession(sid, _workspaceRefreshOpts);
       updateQueueBadge(sid);
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
@@ -3593,7 +3597,7 @@ async function loadSession(sid){
       // Workspace refresh is guarded by session id inside loadDir(); keep it
       // after the transcript's first paint so chat switching is not competing
       // with file-tree / git badge IO.
-      _deferWorkspaceRefreshForSession(sid);
+      _deferWorkspaceRefreshForSession(sid, _workspaceRefreshOpts);
     }
   }
 
@@ -4236,6 +4240,19 @@ function _deferWorkspaceRefreshForSession(sid, opts={}){
     const load=loadDir('.', opts);
     if(load&&typeof load.catch==='function') load.catch(()=>{});
   },150);
+}
+
+// #9338: options for the deferred workspace refresh a session LOAD triggers.
+// A forced reload of the session that is already on screen (window focus, tab
+// visible, SSE catch-up, idle reconcile) is a state refresh, not a navigation:
+// it must keep the open preview alive by taking loadDir()'s preservePreview
+// branch (which re-reads a mutated file and never overwrites dirty editor text)
+// instead of the navigation branch that closes the preview or pops the
+// "Discard edits?" dialog. A real session switch returns {} so the #8514
+// cross-workspace clearing path stays exactly as it was.
+function _sessionLoadWorkspaceRefreshOpts(forceReload, currentSid, targetSid){
+  const sameSessionReload = !!forceReload && !!currentSid && currentSid === targetSid;
+  return sameSessionReload ? {preservePreview:true} : {};
 }
 
 function _resolveSessionModelForDisplaySoon(sid){
