@@ -7677,8 +7677,8 @@ def _provider_is_config_declared(provider_id: str, config_obj: dict) -> bool:
     the built-in prefix. A switched-off record still declares its name: it is
     kept as written so the Agent refuses it, not rewritten to the public
     built-in (#9323). The file this save loaded counts both raw and
-    ``${VAR}``-expanded (with the live profile env), so a name given as a
-    reference matches once expanded. So does the Agent's managed-scope config
+    ``${VAR}``-expanded (with the process env, and with the active profile's
+    own ``.env``), so a name given as a reference matches once expanded. So does the Agent's managed-scope config
     merged over it (raw and expanded). The runtime config counts too: a source
     can only keep a name, never strip one, so a runtime config older than the
     file fails toward keeping it, and the Agent refuses an id it can't route.
@@ -7700,6 +7700,15 @@ def _provider_is_config_declared(provider_id: str, config_obj: dict) -> bool:
         sources = [config_obj, _expand_env_vars(config_obj), cfg]
         if managed is not config_obj:
             sources += [managed, _expand_env_vars(managed)]
+        try:  # a profile picked per request never loads its own .env into os.environ
+            from api.profiles import expand_profile_config
+
+            home = _get_config_path().parent
+            sources.append(expand_profile_config(home, config_obj))
+            if managed is not config_obj:
+                sources.append(expand_profile_config(home, managed))
+        except Exception:
+            logger.debug("default-model save: profile env expansion unavailable", exc_info=True)
         return any(wanted in _declared_provider_names(source) for source in sources)
     except Exception:
         return True

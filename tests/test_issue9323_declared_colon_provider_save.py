@@ -18,6 +18,7 @@ import api.config as config
 from api.config import set_hermes_default_model
 
 EU = "https://eu-proxy.example/v1"
+_REAL_CONFIG_PATH = config._get_config_path  # before the autouse fixture pins it
 
 
 @pytest.fixture(autouse=True)
@@ -375,3 +376,33 @@ def test_managed_scope_declaration_is_kept_and_resolves_to_its_record(monkeypatc
         assert (runtime.get("base_url"), runtime.get("api_key")) == (EU, RECORD_KEY), runtime
     finally:
         managed_scope.invalidate_managed_cache()
+
+
+@pytest.mark.parametrize("record", [
+    {"providers": {"eu": {"name": "${EU_NAME}", "base_url": EU, "api_key": RECORD_KEY}}},
+    {"custom_providers": [{"name": "${EU_NAME}", "base_url": EU, "api_key": RECORD_KEY}]},
+], ids=["native", "legacy"])
+def test_env_name_from_a_request_profiles_own_env_is_kept(monkeypatch, tmp_path, record):
+    """A profile picked per request (the profile cookie) never loads its ``.env`` into ``os.environ``; a record name
+    given as ``${VAR}`` from that ``.env`` still declares the id."""
+    from api import profiles
+
+    base = tmp_path / ".hermes"
+    profile_home = base / "profiles" / "b"
+    profile_home.mkdir(parents=True)
+    (profile_home / ".env").write_text("EU_NAME=openrouter:eu\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(config, "_get_config_path", _REAL_CONFIG_PATH)
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("EU_NAME", raising=False)
+    profiles.set_request_profile("b")
+    try:
+        path = config._get_config_path()
+        assert path.parent == profile_home, path
+        data = {"model": {"provider": "openrouter:eu", "default": "gpt-x", "base_url": EU}, **record}
+        path.write_text(yaml.safe_dump(data), encoding="utf-8")
+        result = set_hermes_default_model("gpt-x", provider="openrouter:eu")
+        assert result["provider"] == "openrouter:eu", result
+        assert _saved_model(path)["provider"] == "openrouter:eu"
+    finally:
+        profiles.clear_request_profile()
