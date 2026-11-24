@@ -3329,10 +3329,13 @@ $('msg').addEventListener('paste',e=>{
       const blob=i.getAsFile();
       // A clipboard can advertise an image item whose data never materialized
       // (delayed-render screenshot tools, cloud clipboards, some browser
-      // implementations). `new File([null], ...)` would stringify null and
-      // silently upload a 4-byte file containing the literal text "null", so
-      // skip those items rather than fabricate a broken attachment.
-      if(!blob)return null;
+      // implementations). Two shapes occur in practice: `getAsFile()` returns
+      // null, or it returns a zero-length Blob — real browsers do the latter
+      // for a declared image with no payload. `new File([null], ...)` and
+      // `new File([emptyBlob], ...)` both yield a broken attachment whose name
+      // still looks like a screenshot, so skip both rather than fabricate one.
+      // A legitimate image is never zero bytes.
+      if(!blob||blob.size===0)return null;
       const ext=i.type.split('/')[1]||'png';
       const suffix=imageItems.length>1?`-${idx+1}`:'';
       return new File([blob],`screenshot-${pasteTs}${suffix}.${ext}`,{type:i.type});

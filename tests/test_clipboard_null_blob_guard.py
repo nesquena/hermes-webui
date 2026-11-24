@@ -161,9 +161,41 @@ def test_mixed_null_and_real_items_attach_only_the_real_one():
     assert result["lastStatus"] == "Image pasted: screenshot-1700000000000-2.png"
 
 
+def test_empty_blob_item_is_not_fabricated_into_a_file():
+    """A declared image whose payload is zero bytes must be skipped.
+
+    Real browsers do not always return ``null`` for a clipboard image item
+    whose data never materialized — Safari and Chromium can hand back a
+    ``Blob`` whose ``size`` is ``0``. That object is truthy, so a guard that
+    only tests ``!blob`` lets it through and attaches a zero-byte file named
+    like a screenshot, with a success status and no error.
+    """
+    result = _paste_harness(
+        "[{kind:'file', type:'image/png', getAsFile:()=>new Blob([], {type:'image/png'})}]"
+    )
+
+    assert result["pendingCount"] == 0, result
+    assert result["renderCount"] == 0, "addFiles must not be called for an empty blob"
+    assert 0 not in result["pendingSizes"], result["pendingSizes"]
+    assert result["lastStatus"] == "image_paste_failed", result["lastStatus"]
+    assert result["lastStatusType"] == "error", result["lastStatusType"]
+
+
+def test_mixed_empty_and_real_items_attach_only_the_real_one():
+    """An empty blob is dropped individually; a real sibling still attaches."""
+    result = _paste_harness(
+        "[{kind:'file', type:'image/png', getAsFile:()=>new Blob([], {type:'image/png'})},"
+        "{kind:'file', type:'image/jpeg', getAsFile:()=>new Blob(['real'], {type:'image/jpeg'})}]"
+    )
+
+    assert result["pendingCount"] == 1, result
+    assert result["pendingSizes"] == [4], result["pendingSizes"]
+    assert result["lastStatus"].startswith("Image pasted:"), result["lastStatus"]
+
+
 def test_source_guards_the_null_blob_path():
-    """Pin the two structural guards so a refactor cannot silently drop them."""
+    """Pin the structural guards so a refactor cannot silently drop them."""
     boot = _read_js(BOOT_JS_PATH)
 
-    assert "if(!blob)return null;" in boot
+    assert "if(!blob||blob.size===0)return null;" in boot
     assert "}).filter(Boolean);" in boot
