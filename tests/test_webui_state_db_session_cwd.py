@@ -556,15 +556,29 @@ def test_delayed_workspace_sync_skips_a_session_that_no_longer_resolves(monkeypa
     assert routes._current_cwd_sync_target("deleted-sid") is None
 
 
-# ── against the real Agent SessionDB when available ─────────────────────────
+# ── against the real Agent store when available ─────────────────────────────
+# ``state_sync._open_state_db`` is the production opener: the legacy SessionDB on
+# Agents that still carry its write verbs, the storage interface on newer ones.
+
+
+def _real_db(db_path):
+    from tests._agent_state_store import open_agent_store
+
+    return open_agent_store(db_path)
+
+
+def _seed(db, session_id, source="webui", cwd=None):
+    """An Agent-created row (the Agent writes it on the first turn), optionally with a cwd."""
+    db.ensure_session(session_id=session_id, source=source, model="m")
+    if cwd:
+        db.update_session_cwd(session_id, cwd)
 
 
 @pytest.mark.requires_agent_modules
 def test_real_session_db_row_gets_workspace(tmp_path):
-    hermes_state = pytest.importorskip("hermes_state")
-    db = hermes_state.SessionDB(db_path=tmp_path / "state.db")
+    db = _real_db(tmp_path / "state.db")
     try:
-        db.create_session(session_id="real", source="webui", model="m", cwd=None)
+        _seed(db, "real")
         assert state_sync.sync_session_cwd("real", "/home/u/workspace/", db=db) is True
         row = db.get_session("real")
         assert row["cwd"] == "/home/u/workspace"
@@ -572,7 +586,7 @@ def test_real_session_db_row_gets_workspace(tmp_path):
         assert state_sync.sync_session_cwd("missing", "/home/u/workspace", db=db) is False
         assert db.get_session("missing") is None
 
-        db.create_session(session_id="cli-row", source="cli", model="m", cwd="/projects/cli")
+        _seed(db, "cli-row", source="cli")
         db.update_session_cwd("cli-row", "/projects/cli", git_branch="main", git_repo_root="/projects/cli")
         assert state_sync.sync_session_cwd("cli-row", "/projects/webui", db=db) is False
         cli = db.get_session("cli-row")
@@ -585,7 +599,6 @@ def test_real_session_db_row_gets_workspace(tmp_path):
 def real_homes(tmp_path, monkeypatch):
     """Root and named-profile homes with real ``state.db`` files, the named one
     active process-wide (the setup the profile=None review finding used)."""
-    hermes_state = pytest.importorskip("hermes_state")
     import api.profiles as profiles
 
     root, named = tmp_path / "root", tmp_path / "profiles" / "work"
@@ -597,7 +610,7 @@ def real_homes(tmp_path, monkeypatch):
         lambda name: root if name == "default" else named,
     )
     monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
-    dbs = {k: hermes_state.SessionDB(db_path=h / "state.db") for k, h in (("root", root), ("work", named))}
+    dbs = {k: _real_db(h / "state.db") for k, h in (("root", root), ("work", named))}
     yield dbs
     for db in dbs.values():
         db.close()
@@ -606,8 +619,8 @@ def real_homes(tmp_path, monkeypatch):
 @pytest.mark.requires_agent_modules
 def test_real_db_profile_none_updates_the_root_row_not_the_active_profile(real_homes):
     root_db, work_db = real_homes["root"], real_homes["work"]
-    root_db.create_session(session_id="legacy", source="webui", model="m", cwd=None)
-    work_db.create_session(session_id="legacy", source="webui", model="m", cwd="/home/u/active")
+    _seed(root_db, "legacy")
+    _seed(work_db, "legacy", cwd="/home/u/active")
     state_sync.sync_session_cwd_background(lambda: ("legacy", "/home/u/workspace", None))
     assert state_sync.drain_cwd_syncs()
     assert root_db.get_session("legacy")["cwd"] == "/home/u/workspace"
@@ -616,13 +629,12 @@ def test_real_db_profile_none_updates_the_root_row_not_the_active_profile(real_h
 
 @pytest.mark.requires_agent_modules
 def test_real_db_trailing_space_workspace_is_recorded_verbatim(tmp_path):
-    hermes_state = pytest.importorskip("hermes_state")
     plain, spaced = tmp_path / "acme", tmp_path / "acme "
     plain.mkdir()
     spaced.mkdir()
-    db = hermes_state.SessionDB(db_path=tmp_path / "state.db")
+    db = _real_db(tmp_path / "state.db")
     try:
-        db.create_session(session_id="sp", source="webui", model="m", cwd=str(plain))
+        _seed(db, "sp", cwd=str(plain))
         assert state_sync.sync_session_cwd("sp", str(spaced), db=db) is True
         assert db.get_session("sp")["cwd"] == str(spaced)
         assert state_sync.sync_session_cwd("sp", str(spaced), db=db) is False
@@ -645,7 +657,7 @@ def test_real_db_and_real_session_cache_survive_eviction_between_updates(real_ho
     s.workspace = str(ws[0])
     s.save()
     SESSIONS.pop("evict-sid", None)
-    real_homes["root"].create_session(session_id="evict-sid", source="webui", model="m", cwd=str(ws[0]))
+    _seed(real_homes["root"], "evict-sid", cwd=str(ws[0]))
 
     first = routes.get_session("evict-sid")
     first.workspace = str(ws[1])

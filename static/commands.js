@@ -2584,6 +2584,12 @@ function cmdVoice(){
 async function cmdYolo(){
   const sid=S.session&&S.session.session_id;
   if(!sid){showToast(t('yolo_no_session'));return;}
+  // One /yolo per session at a time: an overlapping call would read the same
+  // pre-toggle state (or the first's half-applied one) and post a duplicate or
+  // reverse. Another session's /yolo is independent and still runs.
+  if(!S._yoloCommandsInFlight)S._yoloCommandsInFlight=new Set();
+  if(S._yoloCommandsInFlight.has(sid))return;
+  S._yoloCommandsInFlight.add(sid);
   const generation=_loadSessionGeneration;
   const viewIsCurrent=()=>!!(
     S.session&&S.session.session_id===sid&&_loadSessionGeneration===generation
@@ -2593,6 +2599,9 @@ async function cmdYolo(){
     // Check current state first to toggle.
     const status=await api('/api/session/yolo?session_id='+encodeURIComponent(sid));
     if(!viewIsCurrent())return;
+    // Same boolean rule as the pill's own read: a malformed answer is never
+    // inverted into a toggle (it would post enabled:true for {} or null).
+    if(!status||typeof status.yolo_enabled!=='boolean')throw new Error('unexpected answer from the server');
     const enable=!status.yolo_enabled;
     // A visible approval must belong to this exact session load before any
     // command handler may POST through it. Otherwise fail closed.
@@ -2625,6 +2634,8 @@ async function cmdYolo(){
       _applyYoloState(sid,errorPayload.yolo_enabled,{gen:generation});
     }
     showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||e.message));
+  }finally{
+    S._yoloCommandsInFlight.delete(sid);
   }
 }
 

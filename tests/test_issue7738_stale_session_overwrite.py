@@ -210,7 +210,7 @@ def _stub_post_lock_side_effects(monkeypatch):
     """Stub the rename's post-lock side effects so the test stays focused
     on the stale-overwrite race itself.
     """
-    monkeypatch.setattr(routes, "_sync_session_title_to_insights", lambda s: None)
+    monkeypatch.setattr(routes, "_sync_session_title_to_insights", lambda s, **_kw: None)
     monkeypatch.setattr(
         routes, "publish_session_list_changed", lambda *a, **kw: None,
     )
