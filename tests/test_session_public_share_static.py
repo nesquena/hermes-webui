@@ -20,12 +20,23 @@ def test_conversation_panel_has_share_actions():
 
 def test_boot_js_wires_share_create_and_revoke():
     assert "$('btnShareSession').onclick=async()=>{" in BOOT_JS
-    assert "new URL(`/share/${encodeURIComponent(S.session.share_token)}`,location.origin).href" in BOOT_JS
-    assert "api('/api/share/create'" in BOOT_JS
+    # The panel's Share goes through the same helper as the sidebar menu, bound to
+    # the conversation captured at click time; it never posts S.session itself.
+    start = BOOT_JS.index("$('btnShareSession').onclick=async()=>{")
+    share_body = BOOT_JS[start:BOOT_JS.index("$('btnStopSharingSession').onclick", start)]
+    assert "const session=S.session;" in share_body
+    assert "_createOrRefreshSessionShare(session,{requireActive:true})" in share_body
+    assert "api('/api/share/create'" not in share_body
+    assert "S.session=res.session" not in share_body
     assert "$('btnStopSharingSession').onclick=async()=>{" in BOOT_JS
-    assert "api('/api/share/revoke'" in BOOT_JS
-    assert "share_session_created" in BOOT_JS
-    assert "share_session_revoked" in BOOT_JS
+    # Stop sharing likewise goes through the bound sidebar helper.
+    start = BOOT_JS.index("$('btnStopSharingSession').onclick=async()=>{")
+    stop_body = BOOT_JS[start:BOOT_JS.index("function exportSessionHTML(", start)]
+    assert "const session=S.session;" in stop_body
+    assert "_revokeSessionShare(session,{requireActive:true})" in stop_body
+    assert "api('/api/share/revoke'" not in stop_body
+    assert "S.session=res.session" not in stop_body
+    assert "share_session_revoke_failed" in stop_body
 
 
 def test_panels_sync_exposes_share_status_and_button_states():
@@ -64,7 +75,7 @@ def test_public_share_page_assets_exist():
 
 def test_session_action_menu_exposes_public_share_actions():
     assert "_appendSessionShareActions(menu, session);" in SESSIONS_JS
-    assert "function _createOrRefreshSessionShare(session){" in SESSIONS_JS
+    assert "function _createOrRefreshSessionShare(session, opts){" in SESSIONS_JS
     assert "new URL(`/share/${encodeURIComponent(token)}`,location.origin).href;" in SESSIONS_JS
     assert "api('/api/share/create'" in SESSIONS_JS
     assert "api('/api/share/revoke'" in SESSIONS_JS
