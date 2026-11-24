@@ -376,7 +376,14 @@ def test_reviewer_identified_direct_session_transitions_reach_sync_topbar():
             or "_ensureSessionForComposerAction(" in transition
             or "S.session=r.session" in transition
         ), transition[:200]
+    # Workspace prompts/switches own a whole context transition. The file/folder
+    # entries only serialize the blank-page mint through _ensureBlankPageSession;
+    # their dialog and write stay outside the queue so a programmatic switch never
+    # waits on a create that is still being answered or submitted.
+    for transition in (workspace_prompt, workspace_switch):
         assert "_runContextTransition(" in transition
+    for transition in (new_file, new_folder):
+        assert "_ensureBlankPageSession(" in transition
 
 
 def test_restored_empty_session_keeps_provider_through_boot_demotion():
