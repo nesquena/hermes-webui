@@ -204,6 +204,23 @@ def compaction_handoff_remainder(message):
     return head.strip()
 
 
+def is_standalone_compaction_card(message) -> bool:
+    """Return true for synthetic compaction cards and carriers lacking authentic text.
+
+    Returns False when *message* is not a context compression marker.
+    Returns False when *message* is a folded compaction carrier that retains
+    authentic text (i.e. ``is_folded_compaction_carrier`` is True and
+    ``compaction_handoff_remainder`` returns non-empty text).
+    Returns True for all other markers: standalone summary cards, folded carriers
+    with no authentic text, and task list / session arc summary markers.
+    """
+    if not is_context_compression_marker(message):
+        return False
+    if is_folded_compaction_carrier(message) and bool(compaction_handoff_remainder(message)):
+        return False
+    return True
+
+
 _CARRIER_NOT_A_CARRIER = "not_carrier"
 _CARRIER_PROVEN_SYNTHETIC = "proven_synthetic"
 _CARRIER_AUTHENTIC_REMAINDER = "authentic_remainder"

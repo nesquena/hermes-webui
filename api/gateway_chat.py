@@ -3701,12 +3701,14 @@ def _run_gateway_chat_streaming(
                 logger.debug("Failed to stamp stable ids on gateway turn rows", exc_info=True)
             s.context_messages = previous_context + [user_msg, assistant_msg]
             try:
-                from api.streaming import _is_context_compression_marker
+                from api.streaming import _is_standalone_compaction_card
 
+                # Folded compaction carriers with authentic text must not be dropped
+                # from display_context; only drop standalone cards and textless carriers (#8748).
                 display_context = [
                     msg
                     for msg in previous_context
-                    if not _is_context_compression_marker(msg)
+                    if not _is_standalone_compaction_card(msg)
                 ]
             except Exception:
                 logger.debug("Failed to filter gateway display context markers", exc_info=True)
