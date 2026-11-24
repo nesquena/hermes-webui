@@ -463,6 +463,7 @@ def _run_new_session_harness(
     fail_create: bool,
     late_text: str | None = None,
     late_file: bool = False,
+    late_file_batches: list[list[dict]] | None = None,
     has_session: bool = True,
     fail_save_on_call: int | None = None,
     read_only_source: bool = False,
@@ -562,6 +563,10 @@ def _run_new_session_harness(
             _composerSetText(lateText, destinationText);
           }}
           if({str(late_file).lower()}) addFiles([lateFile]);
+          const lateBatches = {json.dumps(late_file_batches or [])};
+          for(const batch of lateBatches){{
+            addFiles(batch.map(spec => new File([spec.content], spec.name, {{type: 'text/plain', lastModified: spec.mtime}})));
+          }}
           if ({str(fail_create).lower()}) throw new Error('create failed');
           return {{ session: {{
             session_id: 'new-session', profile:'default', workspace: '/workspace', messages: [],
@@ -593,6 +598,12 @@ def _run_new_session_harness(
             value: msg.value,
             activeSid: S.session && S.session.session_id,
             pendingFileNames: S.pendingFiles.map(file => file.name),
+            pendingFileSizes: S.pendingFiles.map(file => file.size),
+            pendingFileOrigNames: S.pendingFiles.map(file => (file && file._origName) || file.name),
+            savedFileNames: saves.map(save => ({{
+              sid: save.sid,
+              files: (save.files || []).map(file => file && file.name),
+            }})),
             lateFileIdentity: S.pendingFiles.includes(lateFile),
             sourceFileIdentity: S.pendingFiles.includes(pendingFile),
             visibleTray,
@@ -1672,6 +1683,120 @@ def test_files_dropped_while_new_session_is_pending_are_replayed_after_settlemen
     assert result["immediate"] == []
     assert result["after"] == ["late.txt"]
     assert result["trayRenders"] == 1
+
+
+def test_files_dropped_in_separate_events_during_new_session_pending_share_the_transition_buffer():
+    """A second drop event must see the batch the first event buffered.
+
+    While the create request is held the tray still shows the departing chat,
+    so addFiles() stages into the ownership-transition buffer. The next event
+    has to dedupe against that buffer and pick collision-free names from the
+    same view; otherwise one file is staged twice and two different files both
+    keep `repeat.txt`.
+    """
+    result = _run_new_session_harness(
+        fail_create=False,
+        late_file_batches=[
+            [{"name": "repeat.txt", "content": "aaa", "mtime": 1}],
+            [{"name": "repeat.txt", "content": "aaa", "mtime": 1}],
+            [{"name": "repeat.txt", "content": "bbbb", "mtime": 2}],
+        ],
+    )
+
+    assert result["activeSid"] == "new-session"
+    assert result["pendingFileNames"] == ["repeat.txt", "repeat-2.txt"]
+    assert result["pendingFileOrigNames"] == ["repeat.txt", "repeat.txt"]
+    assert result["pendingFileSizes"] == [3, 4]
+    destination_saves = [
+        save for save in result["savedFileNames"] if save["sid"] == "new-session"
+    ]
+    assert destination_saves
+    assert destination_saves[-1]["files"] == ["repeat.txt", "repeat-2.txt"]
+
+
+def test_pending_file_validation_uses_one_view_for_ordinary_within_batch_and_transition():
+    """Ordinary, within-batch and transition drops share the same rules.
+
+    The transition case is the regression: two separate drop events during a
+    held New Chat handoff must dedupe and rename against the buffered view
+    while preserving File identity, contents and ordering through the drain.
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+
+    source = _add_files_function()
+    authority = _composer_authority_helpers()
+    script = textwrap.dedent(
+        f"""
+        const assert = require('assert');
+        const S = {{pendingFiles: []}};
+        const MAX_UPLOAD_BYTES = 1024 * 1024;
+        let trayRenders = 0;
+        const elements = {{msg: {{value: ''}}}};
+        const $ = id => elements[id] || null;
+        function renderTray() {{ trayRenders += 1; }}
+        function _showUploadTooLarge() {{ throw new Error('unexpected large file'); }}
+        {authority}
+        {source}
+
+        (async () => {{
+          const make = (content, name, mtime) =>
+            new File([content], name, {{type: 'text/plain', lastModified: mtime}});
+
+          // Ordinary (no handoff): separate-batch duplicate skipped and a
+          // distinct file with a taken name renamed, exactly as before.
+          const ordinaryFirst = make('aaa', 'repeat.txt', 1);
+          addFiles([ordinaryFirst]);
+          addFiles([make('aaa', 'repeat.txt', 1)]);
+          addFiles([make('bbbb', 'repeat.txt', 2)]);
+          const ordinary = {{
+            names: S.pendingFiles.map(file => file.name),
+            identity: S.pendingFiles[0] === ordinaryFirst,
+          }};
+          S.pendingFiles = [];
+
+          // Within one batch: the clone is dropped, the alias is allocated.
+          addFiles([
+            make('aaa', 'repeat.txt', 1),
+            make('aaa', 'repeat.txt', 1),
+            make('bbbb', 'repeat.txt', 2),
+          ]);
+          const withinBatch = S.pendingFiles.map(file => file.name);
+          S.pendingFiles = [];
+
+          // Held New Chat: batches land in the transition buffer. The second
+          // and third events must see the first batch and each other.
+          const token = _beginComposerOwnershipTransition('old-session', 'default');
+          const first = make('aaa', 'repeat.txt', 1);
+          addFiles([first]);
+          addFiles([make('aaa', 'repeat.txt', 1)]);
+          addFiles([make('bbbb', 'repeat.txt', 2)]);
+          const visibleWhilePending = S.pendingFiles.map(file => file.name);
+          _drainComposerOwnershipTransition(token);
+          const drained = S.pendingFiles.map(file => file.name);
+          const contents = [];
+          for (const file of S.pendingFiles) contents.push(await file.text());
+          process.stdout.write(JSON.stringify({{
+            ordinary, withinBatch, visibleWhilePending, drained, contents,
+            identity: S.pendingFiles[0] === first,
+            origNames: S.pendingFiles.map(file => (file && file._origName) || file.name),
+            trayRenders,
+          }}));
+        }})().catch(error => {{ console.error(error); process.exit(1); }});
+        """
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    assert result["ordinary"] == {"names": ["repeat.txt", "repeat-2.txt"], "identity": True}
+    assert result["withinBatch"] == ["repeat.txt", "repeat-2.txt"]
+    assert result["visibleWhilePending"] == []
+    assert result["drained"] == ["repeat.txt", "repeat-2.txt"]
+    assert result["contents"] == ["aaa", "bbbb"]
+    assert result["identity"] is True
+    assert result["origNames"] == ["repeat.txt", "repeat.txt"]
 
 
 def test_hidden_owner_callback_cannot_cancel_visible_owner_pending_draft_save():

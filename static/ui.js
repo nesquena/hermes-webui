@@ -28665,16 +28665,44 @@ function _pendingFileUniqueName(name, alsoTaken){
 }
 // A pending file's identity is its ORIGINAL name (before any collision rename).
 function _pendingFileOrigName(p){return (p&&p._origName)||(p&&p.name);}
+// The files an in-flight composer ownership transition has buffered for the
+// chat it is creating. While a New Chat handoff is pending the tray still
+// belongs to the departing chat, so `S.pendingFiles` cannot see an earlier
+// drop from the same handoff; addFiles() must validate both views.
+function _pendingFilesBufferedByTransition(){
+  if(typeof _composerOwnershipTransition==='undefined'||!_composerOwnershipTransition)return [];
+  const buffered=[];
+  for(const mutation of _composerOwnershipTransition.mutations||[]){
+    if(mutation.ownerRole!=='destination')continue;
+    if(mutation.kind==='files-add'){
+      for(const file of Array.from(mutation.value||[])){
+        if(file&&!buffered.includes(file))buffered.push(file);
+      }
+    }else if(mutation.kind==='files-replace'){
+      buffered.length=0;
+      for(const file of Array.from(mutation.value||[]))if(file)buffered.push(file);
+    }else if(mutation.kind==='file-remove'){
+      const index=buffered.indexOf(mutation.value);
+      if(index>=0)buffered.splice(index,1);
+    }
+  }
+  return buffered;
+}
 function addFiles(files){
   const accepted=[];
+  // The effective pending view for the composer being mutated: the visible
+  // tray plus any batches the active New Chat handoff already buffered. Both
+  // duplicate suppression and collision naming must use this same view.
+  const buffered=_pendingFilesBufferedByTransition();
   for(const f of files){
     if(f&&f.size>MAX_UPLOAD_BYTES){_showUploadTooLarge(f);continue;}
     // True duplicate: same original name, size and mtime as ANY pending file,
     // including one already renamed to a collision-free alias.
     if(S.pendingFiles.some(p=>_pendingFileOrigName(p)===f.name&&p.size===f.size&&p.lastModified===f.lastModified))continue;
+    if(buffered.some(p=>_pendingFileOrigName(p)===f.name&&p.size===f.size&&p.lastModified===f.lastModified))continue;
     if(accepted.some(p=>_pendingFileOrigName(p)===f.name&&p.size===f.size&&p.lastModified===f.lastModified))continue;
-    if(S.pendingFiles.some(p=>p.name===f.name)||accepted.some(p=>p.name===f.name)){
-      const copy=new File([f],_pendingFileUniqueName(f.name,accepted),{type:f.type,lastModified:f.lastModified});
+    if(S.pendingFiles.some(p=>p.name===f.name)||buffered.some(p=>p.name===f.name)||accepted.some(p=>p.name===f.name)){
+      const copy=new File([f],_pendingFileUniqueName(f.name,[...buffered,...accepted]),{type:f.type,lastModified:f.lastModified});
       try{Object.defineProperty(copy,'_origName',{value:f.name});}catch(_){}
       accepted.push(copy);
       continue;
