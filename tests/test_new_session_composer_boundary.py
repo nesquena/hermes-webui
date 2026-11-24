@@ -1300,13 +1300,13 @@ def _run_held_directory_reload_harness(entry: str, response_order: str) -> dict:
         {_load_dir_function()}
         function deferred(){{let resolve;const promise=new Promise(r=>{{resolve=r;}});return {{promise,resolve}};}}
         async function spinUntil(predicate){{for(let i=0;i<200;i++){{if(predicate())return;await Promise.resolve();}}throw new Error('timeout');}}
-        const listA=deferred();const listB=deferred();const listRequests=[];const projections=[];const opens=[];let confirms=0;let _wsTreeGen=0;let _wsNavigationGen=0;
+        const listA1=deferred();const listA2=deferred();const listB=deferred();const listRequests=[];const projections=[];const opens=[];let confirms=0;let _wsTreeGen=0;let _wsNavigationGen=0;let aRequests=0;
         const S={{session:{{session_id:'source-session',profile:'default',workspace:'/workspace-a'}},messages:[],activeProfile:'default',_profileDefaultWorkspace:'/workspace-a',currentDir:'A',entries:[],_dirCache:{{}},_expandedDirs:new Set(),busy:false}};
         function api(path,options){{
           if(path==='/api/file/create'||path==='/api/file/create-dir')return Promise.resolve({{}});
           const requested=new URL(path,'http://localhost').searchParams.get('path');
           listRequests.push(requested);
-          if(requested==='A')return listA.promise;
+          if(requested==='A'){{aRequests+=1;return aRequests===1?listA1.promise:listA2.promise;}}
           if(requested==='B')return listB.promise;
           throw new Error(`unexpected API path: ${{path}}`);
         }}
@@ -1327,7 +1327,20 @@ def _run_held_directory_reload_harness(entry: str, response_order: str) -> dict:
           const action={calls[entry]};
           await spinUntil(()=>listRequests.includes('A'));
           if('{response_order}'==='current'){{
-            listA.resolve({{entries:[{{name:'from-A'}}]}});
+            listA1.resolve({{entries:[{{name:'from-A'}}]}});
+            await action;
+            process.stdout.write(JSON.stringify({{currentDir:S.currentDir,entries:S.entries.map(x=>x.name),projections,opens,confirms}}));
+            return;
+          }}
+          if('{response_order}'==='same-folder-refresh'){{
+            // A user refresh of the SAME folder finishes before the create's
+            // own reload. The newer listing must win the paint, but the create
+            // follow-up still belongs to the current navigation.
+            const refresh=loadDir('A');
+            await spinUntil(()=>aRequests===2);
+            listA2.resolve({{entries:[{{name:'from-newer-A'}}]}});
+            await refresh;
+            listA1.resolve({{entries:[{{name:'from-stale-A'}}]}});
             await action;
             process.stdout.write(JSON.stringify({{currentDir:S.currentDir,entries:S.entries.map(x=>x.name),projections,opens,confirms}}));
             return;
@@ -1335,13 +1348,13 @@ def _run_held_directory_reload_harness(entry: str, response_order: str) -> dict:
           const navigationB=loadDir('B');
           await spinUntil(()=>S.currentDir==='B');
           if('{response_order}'==='A-then-B'){{
-            listA.resolve({{entries:[{{name:'from-A'}}]}});
+            listA1.resolve({{entries:[{{name:'from-A'}}]}});
             await Promise.resolve();await Promise.resolve();
             listB.resolve({{entries:[{{name:'from-B'}}]}});
           }}else{{
             listB.resolve({{entries:[{{name:'from-B'}}]}});
             await navigationB;
-            listA.resolve({{entries:[{{name:'from-A'}}]}});
+            listA1.resolve({{entries:[{{name:'from-A'}}]}});
           }}
           await Promise.all([action,navigationB]);
           process.stdout.write(JSON.stringify({{currentDir:S.currentDir,entries:S.entries.map(x=>x.name),projections,opens,confirms}}));
@@ -1379,6 +1392,29 @@ def test_current_create_reload_commits_and_runs_follow_up(
     assert result["entries"] == ["from-A"]
     assert any("from-A" in projection for projection in result["projections"])
     assert result["opens"] == expected_opens
+    assert result["confirms"] == expected_confirms
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected_opens", "expected_confirms"),
+    [
+        ("promptNewFile", ["created-item"], 0),
+        ("promptNewFolder", [], 1),
+    ],
+)
+def test_create_follow_up_survives_a_newer_refresh_of_the_same_folder(
+    entry, expected_opens, expected_confirms
+):
+    """A user refresh of the same directory may paint before the create's own
+    reload. The newer listing wins the paint, but the create follow-up still
+    belongs to the current navigation and must run."""
+    result = _run_held_directory_reload_harness(entry, "same-folder-refresh")
+    assert result["currentDir"] == "A"
+    assert result["entries"] == ["from-newer-A"]
+    assert not any("from-stale-A" in projection for projection in result["projections"])
+    assert result["opens"] == expected_opens, (
+        "a same-folder refresh must not drop the created file's open"
+    )
     assert result["confirms"] == expected_confirms
 
 

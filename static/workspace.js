@@ -1075,6 +1075,16 @@ async function loadDir(path, opts={}){
     &&navigationGen===_wsNavigationGen
     &&String(S.currentDir||'.')===requestedPath
     &&requestSeq>=(typeof _wsAppliedRequestSeq==='number'?_wsAppliedRequestSeq:0);
+  // A newer listing for the SAME conversation, tree and path may finish first.
+  // It supersedes this reply for painting, but the navigation the caller made
+  // is still the one on screen: a create follow-up (open the new file, offer to
+  // add the folder) must run instead of being dropped as an abandoned
+  // navigation. Only a real navigation (session, tree, directory) returns false.
+  const isSameNavigation=()=>!!S.session
+    &&S.session.session_id===sessionId
+    &&treeGen===_wsTreeGen
+    &&navigationGen===_wsNavigationGen
+    &&String(S.currentDir||'.')===requestedPath;
   // A root refresh renders twice (partial, then complete). This object owns
   // the keyboard position carried between the two; every exit drops it.
   let refill=null;
@@ -1089,7 +1099,10 @@ async function loadDir(path, opts={}){
       _workspaceRouteForPath(requestedPath, 'list') ||
       `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(requestedPath)}`
     );
-    if(!isCurrentNavigation())return false;
+    if(!isCurrentNavigation()){
+      if(isSameNavigation())return true;
+      return false;
+    }
     if(data.workspace_recovered&&data.workspace){
       S.session.workspace=String(data.workspace);
       S._dirCache={};
@@ -1120,7 +1133,10 @@ async function loadDir(path, opts={}){
             .then(dc=>({dirPath,entries:dc.entries||[]}))
             .catch(()=>({dirPath,entries:[]}))
         ));
-        if(!isCurrentNavigation())return false;
+        if(!isCurrentNavigation()){
+          if(isSameNavigation())return true;
+          return false;
+        }
         for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
       }
       if(expanded.size>0)renderFileTree({completesRefill:refill,scope:treeScope});
@@ -1142,7 +1158,10 @@ async function loadDir(path, opts={}){
       }
     }else if(preservePreview){
       await refreshOpenPreviewIfMutated();
-      if(!isCurrentNavigation())return false;
+      if(!isCurrentNavigation()){
+        if(isSameNavigation())return true;
+        return false;
+      }
     }
     // Fetch git info for workspace root (non-blocking)
     if(requestedPath==='.') _refreshGitBadge();
