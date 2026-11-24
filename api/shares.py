@@ -25,7 +25,13 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from api.config import STATE_DIR
-from api.helpers import _json_response_body, _redact_fn_cached, redact_session_data, split_media_token_ref
+from api.helpers import _json_response_body, redact_session_data, split_media_token_ref
+# _redact_fn_cached is the ALWAYS-ON credential redactor (agent redactor with
+# force=True + local fallback regex). Unlike redact_session_data it does NOT
+# consult the user-toggleable api_redact_enabled setting — a public share is a
+# hard safety boundary that must redact credentials even if the operator turned
+# API-response redaction off.
+from api.helpers import _redact_fn_cached as _force_redact_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -63,32 +69,29 @@ def _scrub_registered_values(text):
     return text
 
 
-def _force_redact_credentials(text):
-    """ALWAYS-ON redaction of public-share prose: registered exact values, then patterns.
-
-    ``_redact_fn_cached`` is the agent redactor with force=True + local
-    fallback regex. Unlike redact_session_data it does NOT consult the
-    user-toggleable api_redact_enabled setting — a public share is a hard
-    safety boundary that must redact credentials even if the operator turned
-    API-response redaction off. The exact values go first, outside its memo,
-    as the Agent orders them: a pattern can rewrite part of a registered
-    value, which then no longer matches.
-    """
-    return _redact_fn_cached(_scrub_registered_values(text))
-
-
 def _scrub_message_prose(message):
+    """``message`` with registered exact values masked in its prose.
+
+    A share publishes a message's text parts joined, so they are joined here
+    (into the first text part, other parts kept in place) and scrubbed whole:
+    a value split across parts must be found before any pattern pass masks
+    part of it.
+    """
     content = message.get("content") if isinstance(message, dict) else None
     if isinstance(content, str):
         return {**message, "content": _scrub_registered_values(content)}
-    if isinstance(content, list):
-        return {**message, "content": [
-            {**part, "text": _scrub_registered_values(part["text"])}
-            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
-            else part
-            for part in content
-        ]}
-    return message
+    if not isinstance(content, list):
+        return message
+    is_text = [isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str) for p in content]
+    if not any(is_text):
+        return message
+    joined = _scrub_registered_values("".join(p["text"] for p, t in zip(content, is_text) if t))
+    first = is_text.index(True)
+    return {**message, "content": [
+        {**p, "text": joined} if i == first else p
+        for i, (p, t) in enumerate(zip(content, is_text))
+        if i == first or not t
+    ]}
 
 
 def _with_source_schema(walked, source):
@@ -301,10 +304,12 @@ _SHARE_ALLOWED_MIME_TYPES: frozenset[str] = frozenset({
     "image/gif",
     "image/webp",
 })
-# The image data _embed_share_media writes into a snapshot, for those types.
-# A snapshot build replaces content-supplied data: URIs with a placeholder
-# before the embed (_placeholder_inline_data_uris).
-_EMBEDDED_IMAGE_DATA_RE = re.compile(r"(data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]*)")
+# The image data _embed_share_media writes into a snapshot, matched only inside
+# the exact tag it emits. A snapshot build replaces content-supplied data: URIs
+# with a placeholder before the embed (_placeholder_inline_data_uris).
+_EMBEDDED_IMAGE_DATA_RE = re.compile(
+    r'(?<=<img src=")data:(image/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=]*)(?=" class="msg-media-img" alt=")'
+)
 
 # SVG namespace URI used during sanitisation.
 _SVG_NS = "http://www.w3.org/2000/svg"
@@ -1106,18 +1111,32 @@ def _sanitize_message(
     return sanitized
 
 
+def _is_embedded_image(m: re.Match) -> bool:
+    try:
+        data = base64.b64decode(m.group(2), validate=True)
+    except ValueError:
+        return False
+    return _check_image_magic(data, m.group(1))
+
+
 def _scrub_stored_share_text(text):
-    """A stored snapshot's text with registered exact values masked, embedded image data excepted.
+    """A stored message's text with registered exact values masked, embedded images excepted.
 
     A snapshot is written once, so a value registered after it was published
-    has to be masked when the snapshot is served. The image data the snapshot
-    embedded from a verified local file is left as written: a short registered
-    value can occur in base64 by chance, and replacing it only breaks the image.
+    has to be masked when the snapshot is served. Only the image data of an
+    ``<img>`` tag exactly as _embed_share_media writes it, holding a decodable
+    image of its declared type, is left as written: a short registered value
+    can occur in base64 by chance, and replacing it only breaks the image.
     """
     if not isinstance(text, str) or not text or not _EXACT_VALUE_SCRUBBERS:
         return text
-    pieces = _EMBEDDED_IMAGE_DATA_RE.split(text)  # odd items are embedded image data
-    return "".join(piece if i % 2 else _scrub_registered_values(piece) for i, piece in enumerate(pieces))
+    out, pos = [], 0
+    for m in _EMBEDDED_IMAGE_DATA_RE.finditer(text):
+        if _is_embedded_image(m):
+            out += [_scrub_registered_values(text[pos:m.start()]), m.group(0)]
+            pos = m.end()
+    out.append(_scrub_registered_values(text[pos:]))
+    return "".join(out)
 
 
 def _public_share_payload(payload: dict) -> dict:
@@ -1131,7 +1150,7 @@ def _public_share_payload(payload: dict) -> dict:
         for m in messages
     ]
     public = {
-        "title": _scrub_stored_share_text(str(payload.get("title") or "Untitled")),
+        "title": _scrub_registered_values(str(payload.get("title") or "Untitled")),
         "messages": messages,
         "message_count": int(payload.get("message_count") or len(messages)),
     }

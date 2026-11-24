@@ -14,7 +14,10 @@ stored snapshot was served as written:
   the exact value no longer matched and its remainder was published.
 
 Shares now run the exact values first, on the prose a share publishes (title
-and message text), when a snapshot is built and when a stored one is served.
+and message text, with a message's text parts joined as the share joins them),
+when a snapshot is built and when a stored one is served. On a read only the
+image data inside the exact tag the build's media embed writes, holding a real
+image, is left as written.
 Roles, part types and other schema fields are never scrubbed, so a short
 registered value such as "user" or "text" cannot break a share. In prose such
 a value is masked like any other registered value, as the Agent does. In-app
@@ -22,6 +25,7 @@ API responses are unchanged by this.
 
 All values are synthetic.
 """
+import base64
 import io
 import json
 import sys
@@ -116,6 +120,15 @@ def secret_sources():
     sources.publish_secret_source_values(home, {})
     yield lambda values: sources.publish_secret_source_values(home, values)
     sources.publish_secret_source_values(home, {})
+
+
+@pytest.fixture(params=["vault", "secret-source"])
+def registry(request):
+    """``(register, mask)`` for one of the Agent's two exact-value registries."""
+    if request.param == "vault":
+        return request.getfixturevalue("vault").register_vault_redaction_value, _VAULT_MASK
+    publish = request.getfixturevalue("secret_sources")
+    return (lambda value: publish({"DB_PASSWORD": value})), _SOURCE_MASK
 
 
 @pytest.fixture
@@ -238,10 +251,23 @@ def test_new_share_masks_a_value_split_across_text_parts(vault):
     assert _texts(_snapshot("t", messages))[1] == _VAULT_MASK
 
 
+def test_new_share_masks_a_registered_value_split_across_text_parts(registry, redaction_setting):
+    """The text parts a share joins are scrubbed joined, before any pattern pass masks part of a value."""
+    register, mask = registry
+    outer = "DUMMYprefix ghp_" + "A" * 40 + " DUMMYsuffix"
+    register(outer)
+    split = [{"type": "text", "text": "DUMMYprefix "}, {"type": "text", "text": "ghp_" + "A" * 40 + " DUMMYsuffix"}]
+    mixed = [
+        {"type": "text", "text": "Hello "},
+        {"type": "image_url", "image_url": {"url": "https://example.invalid/x.png"}},
+        {"type": "text", "text": "world"},
+    ]
+    snapshot = _snapshot("t", [{"role": "user", "content": split}, {"role": "user", "content": mixed}])
+    assert snapshot["messages"] == [{"role": "user", "content": mask}, {"role": "user", "content": "Hello world"}]
+
+
 def test_exact_values_run_in_the_agents_order(vault, secret_sources):
     """Vault values first, then secret-source values, as ``redact_sensitive_text`` does."""
-    from api import shares
-
     outer = "DUMMYVAULTouter" + _SOURCE_VALUE + "tail"
     vault.register_vault_redaction_value(outer)
     secret_sources({"DB_PASSWORD": _SOURCE_VALUE})
@@ -249,7 +275,6 @@ def test_exact_values_run_in_the_agents_order(vault, secret_sources):
     expected = vault.redact_sensitive_text(text, force=True)
     assert expected == f"the field now holds {_VAULT_MASK} ok"
     assert _texts(_snapshot("t", [{"role": "user", "content": text}]))[1] == expected
-    assert shares._force_redact_credentials(text) == expected
 
 
 # ── Serving a stored share ──────────────────────────────────────────────────
@@ -280,28 +305,83 @@ def test_stored_share_read_masks_values_registered_after_publishing(state, vault
     assert (shares.SHARES_DIR / f"{token}.json").read_bytes() == stored
 
 
-def test_stored_share_read_keeps_embedded_image_data(state, vault):
-    """Image bytes a snapshot embedded are served as written; the text around them is scrubbed."""
+def _png_bytes():
+    return b"\x89PNG\r\n\x1a\n" + bytes(range(256))
+
+
+def _embed_tag(payload, alt="pic.png"):
+    """The tag _embed_share_media writes for a PNG."""
+    return f'<img src="data:image/png;base64,{payload}" class="msg-media-img" alt="{alt}" loading="lazy">'
+
+
+def test_stored_share_read_keeps_a_genuine_embedded_image(state, vault, tmp_path):
+    """An image the build embedded from the workspace is served as written; the prose is scrubbed."""
     from api import shares
 
-    b64 = "iVBORw0KGgo" + "user" + "AAAANSUhEUgAAAAEAAAAB" + _VAULT_VALUE + "CAYAAAAfFcSJ"
-    image = f'<img src="data:image/png;base64,{b64}" class="msg-media-img" alt="user.png" loading="lazy">'
-    content = f"the user saw {_VAULT_VALUE}\n\n{image}\n\nlater user text"
-    _save_session("Images", [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}])
-    meta = shares.write_share_snapshot(
-        {"title": "Images", "messages": [{"role": "assistant", "content": content}], "message_count": 1},
-        source_session_id=SID,
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "pic.png").write_bytes(_png_bytes())
+    b64 = base64.b64encode(_png_bytes()).decode()
+    messages = [{"role": "assistant", "content": f"look MEDIA:pic.png and {_VAULT_VALUE}"}]
+    snapshot = shares.build_share_snapshot(
+        types.SimpleNamespace(session_id=SID, title="Pic", messages=messages, workspace=str(workspace))
     )
+    content = snapshot["messages"][0]["content"]
+    assert _embed_tag(b64) in content, "precondition: the build embedded the file"
+    _save_session("Pic", [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}])
+    token = shares.write_share_snapshot(snapshot, source_session_id=SID)["share_token"]
 
-    vault.register_vault_redaction_value("user")
+    vault.register_vault_redaction_value(b64[24:36])  # occurs in the image data only
     vault.register_vault_redaction_value(_VAULT_VALUE)
 
-    served = _public_read(meta["share_token"])["messages"][0]["content"]
-    assert f"data:image/png;base64,{b64}\"" in served
-    assert served == (
-        f"the {_VAULT_MASK} saw {_VAULT_MASK}\n\n"
-        f'<img src="data:image/png;base64,{b64}" class="msg-media-img" alt="{_VAULT_MASK}.png" loading="lazy">'
-        f"\n\nlater {_VAULT_MASK} text"
+    served = _public_read(token)["messages"][0]["content"]
+    assert served == content.replace(_VAULT_VALUE, _VAULT_MASK)
+    assert _embed_tag(b64) in served
+
+
+@pytest.mark.parametrize("prefix", ["X", "_", "meta"])
+def test_stored_share_read_masks_data_uri_lookalikes(state, registry, prefix):
+    """Prose that looks like image data is scrubbed on read, in the title and in messages."""
+    register, mask = registry
+    text = f"{prefix}data:image/png;base64,{_VAULT_VALUE}"
+    _save_session(text, [
+        {"role": "user", "content": text, "timestamp": 100},
+        {"role": "assistant", "content": "ok", "timestamp": 101},
+    ])
+    token = _publish()
+    assert _texts(_public_read(token)) == [text, text, "ok"], "precondition: the build keeps the text"
+
+    register(_VAULT_VALUE)
+
+    masked = f"{prefix}data:image/png;base64,{mask}"
+    assert _texts(_public_read(token)) == [masked, masked, "ok"]
+
+
+def test_stored_share_read_exempts_only_the_embed_tag_with_an_image(state, vault):
+    """A stored snapshot (as an older build may have written it): only a real embed tag keeps its data.
+
+    The exact tag holding no image, a real image outside the tag, and the tag
+    in a title are all scrubbed.
+    """
+    from api import shares
+
+    b64 = base64.b64encode(_png_bytes()).decode()
+    chunk = b64[24:36]
+    content = f"{_embed_tag(b64)}\n{_embed_tag(_VAULT_VALUE)}\nsee data:image/png;base64,{b64} here"
+    _save_session("Images", [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}])
+    token = shares.write_share_snapshot(
+        {"title": _embed_tag(b64), "messages": [{"role": "assistant", "content": content}], "message_count": 1},
+        source_session_id=SID,
+    )["share_token"]
+
+    vault.register_vault_redaction_value(chunk)
+    vault.register_vault_redaction_value(_VAULT_VALUE)
+
+    share = _public_read(token)
+    masked_b64 = b64.replace(chunk, _VAULT_MASK)
+    assert share["title"] == _embed_tag(masked_b64)
+    assert share["messages"][0]["content"] == (
+        f"{_embed_tag(b64)}\n{_embed_tag(_VAULT_MASK)}\nsee data:image/png;base64,{masked_b64} here"
     )
 
 
