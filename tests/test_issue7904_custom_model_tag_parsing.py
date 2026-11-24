@@ -1,0 +1,417 @@
+"""#7904 — colon-tagged models on the generic ``custom`` lane.
+
+``@custom:<segment>:<tag>`` is genuinely ambiguous as a bare string: it is
+either generic ``custom`` + model ``<segment>:<tag>`` (the #7904 report) or a
+named ``custom:<segment>`` provider + model ``<tag>`` (#6722/#7182 grammar).
+So the tag is peeled ONLY on POSITIVE evidence that the selection belongs to
+the generic lane:
+
+  * the session's stored ``model_provider == "custom"`` (passed as
+    ``session_provider=`` on ``resolve_model_provider`` / ``generic_custom=``
+    on the parser), or
+  * the picker writing the generic route.
+
+Everything else keeps master's parse — including the three CORE cases from the
+2026-10-01 review:
+
+1. ``providers: {custom:<name>: …}`` counts as a configured identity, not just
+   the ``custom_providers:`` list, so a named provider keeps its own base_url;
+2. a removed provider is NOT silently rerouted to the generic endpoint — it
+   keeps ``custom:<name>`` and fails visibly, exactly like master;
+3. ``_gateway_model_field()`` resolves configured identities through the
+   SESSION's profile config instead of the ambient one.
+"""
+
+from unittest.mock import patch
+
+import api.config as config
+from api.config import (
+    _configured_custom_provider_identity,
+    _parse_provider_qualified_model_id,
+    canonical_model_provider_lane,
+    model_with_provider_context,
+    resolve_model_provider,
+)
+from api.routes import _clean_session_model_provider, _split_provider_qualified_model
+
+GENERIC_CFG = {
+    "model": {"provider": "deepseek", "base_url": "https://api.deepseek.com/v1"},
+    "providers": {"custom": {"base_url": "https://generic.example/v1"}},
+}
+
+
+# ── #7904 preserved: generic session + colon tag -> generic endpoint ────────
+def test_issue7904_generic_session_peels_tag_to_generic_endpoint():
+    """A ``custom`` session's ``@custom:<model>:<tag>`` routes to generic custom."""
+    with patch.dict(config.cfg, GENERIC_CFG, clear=True):
+        routed = model_with_provider_context("qwen3-30b-a3b:latest", "custom")
+        assert routed == "@custom:qwen3-30b-a3b:latest"
+        assert resolve_model_provider(routed, session_provider="custom") == (
+            "qwen3-30b-a3b:latest",
+            "custom",
+            "https://generic.example/v1",
+        )
+        assert resolve_model_provider(
+            "@custom:qwen3-30b-a3b:latest", session_provider="custom"
+        ) == (
+            "qwen3-30b-a3b:latest",
+            "custom",
+            "https://generic.example/v1",
+        )
+        assert _parse_provider_qualified_model_id(
+            "@custom:qwen3-30b-a3b:latest", generic_custom=True
+        ) == ("qwen3-30b-a3b:latest", "custom")
+
+
+def test_without_positive_evidence_master_parse_is_preserved():
+    """Rule: no evidence of the generic lane -> master's parse, no peel."""
+    assert _parse_provider_qualified_model_id("@custom:qwen3-30b-a3b:latest") == (
+        "latest",
+        "custom:qwen3-30b-a3b",
+    )
+    with patch.dict(config.cfg, GENERIC_CFG, clear=True):
+        assert resolve_model_provider("@custom:qwen3-30b-a3b:latest") == (
+            "latest",
+            "custom:qwen3-30b-a3b",
+            None,
+        )
+    # routes' helpers share the same grammar and stay master-compatible.
+    assert _split_provider_qualified_model("@custom:qwen3-30b-a3b:latest") == (
+        "latest",
+        "custom:qwen3-30b-a3b",
+    )
+    assert _clean_session_model_provider("@custom:qwen3-30b-a3b:latest") == (
+        "custom:qwen3-30b-a3b"
+    )
+
+
+# ── CORE 1: the `providers:` dict form is a configured identity ─────────────
+def test_providers_dict_identity_wins_over_generic_evidence():
+    """``providers: {custom:omni: …}`` keeps its own base_url, never generic."""
+    cfg = {
+        "model": {"provider": "deepseek"},
+        "providers": {
+            "custom:omni": {
+                "base_url": "https://omni.example/v1",
+                "models": ["latest"],
+            },
+            "custom": {"base_url": "https://generic.example/v1"},
+        },
+    }
+    expected = ("latest", "custom:omni", "https://omni.example/v1")
+    with patch.dict(config.cfg, cfg, clear=True):
+        # Plain string, no session evidence (the reviewer's own probe).
+        assert resolve_model_provider("@custom:omni:latest") == expected
+        # Even with positive generic evidence a CONFIGURED identity must win:
+        # absence of a list entry is not evidence that the string meant generic.
+        assert resolve_model_provider(
+            "@custom:omni:latest", session_provider="custom"
+        ) == expected
+        # The named session route round-trips to its own endpoint.
+        routed = model_with_provider_context("latest", "custom:omni")
+        assert routed == "@custom:omni:latest"
+        assert resolve_model_provider(
+            routed, session_provider="custom:omni"
+        ) == expected
+        assert _parse_provider_qualified_model_id("@custom:omni:latest") == (
+            "latest",
+            "custom:omni",
+        )
+
+    # Scenario 2: providers: {proxy: {name: omni, ...}} alias identity
+    alias_cfg = {
+        "model": {"provider": "deepseek"},
+        "providers": {
+            "proxy": {
+                "name": "omni",
+                "base_url": "https://omni.example/v1",
+                "models": ["latest"],
+            },
+            "custom": {"base_url": "https://generic.example/v1"},
+        },
+    }
+    with patch.dict(config.cfg, alias_cfg, clear=True):
+        # All three surfaces for name: alias identity
+        assert config._configured_custom_provider_identity("omni") is True
+        assert _parse_provider_qualified_model_id(
+            "@custom:omni:latest", generic_custom=True
+        ) == ("latest", "custom:omni")
+        assert resolve_model_provider(
+            "@custom:omni:latest", session_provider="custom"
+        ) == expected
+        # Plain string, round-trip, and parser parity
+        assert resolve_model_provider("@custom:omni:latest") == expected
+        routed = model_with_provider_context("latest", "custom:omni")
+        assert routed == "@custom:omni:latest"
+        assert resolve_model_provider(
+            routed, session_provider="custom:omni"
+        ) == expected
+        assert _parse_provider_qualified_model_id("@custom:omni:latest") == (
+            "latest",
+            "custom:omni",
+        )
+
+
+def test_custom_providers_list_identity_still_wins():
+    """The ``custom_providers:`` list form keeps working (both config shapes)."""
+    cfg = {
+        "custom_providers": [
+            {"name": "mybox", "base_url": "http://127.0.0.1:8000/v1"},
+        ],
+        "model": {"provider": "deepseek"},
+        "providers": {"custom": {"base_url": "https://generic.example/v1"}},
+    }
+    with patch.dict(config.cfg, cfg, clear=True):
+        assert resolve_model_provider(
+            "@custom:mybox:my-model:latest", session_provider="custom"
+        ) == ("my-model:latest", "custom:mybox", "http://127.0.0.1:8000/v1")
+        assert _parse_provider_qualified_model_id("@custom:mybox:my-model") == (
+            "my-model",
+            "custom:mybox",
+        )
+        assert _parse_provider_qualified_model_id("@custom:mybox:my-model:latest") == (
+            "my-model:latest",
+            "custom:mybox",
+        )
+
+
+def test_generic_custom_record_naming_the_slug_keeps_named_lane():
+    """Generic ``providers['custom']`` naming the slug outranks generic lane."""
+    cfg = {
+        "model": {"provider": "deepseek"},
+        "providers": {
+            "custom": {
+                "name": "omni",
+                "base_url": "https://omni.example/v1",
+                "models": ["latest"],
+            }
+        },
+    }
+    with patch.dict(config.cfg, cfg, clear=True):
+        assert _configured_custom_provider_identity("omni") is True
+        assert _parse_provider_qualified_model_id(
+            "@custom:omni:latest", generic_custom=True, config_obj=cfg
+        ) == ("latest", "custom:omni")
+        # Master parity: the named lane is what must be preserved; the endpoint
+        # stays None here exactly as on base (the connection bundle resolves it
+        # from the same selector authority downstream).
+        assert resolve_model_provider(
+            "@custom:omni:latest", session_provider="custom"
+        ) == ("latest", "custom:omni", None)
+        assert canonical_model_provider_lane(
+            "@custom:omni:latest", "custom"
+        ) == ("latest", "custom:omni")
+        # Negative control, same config: slug ghost
+        assert _configured_custom_provider_identity("ghost") is False
+        assert _parse_provider_qualified_model_id(
+            "@custom:ghost:latest", generic_custom=True, config_obj=cfg
+        ) == ("ghost:latest", "custom")
+
+
+def test_model_block_ownership_keeps_named_lane():
+    """``model:`` block naming the identity outranks generic lane."""
+    cfg = {
+        "model": {"provider": "custom:omni", "base_url": "https://omni.example/v1"},
+        "providers": {},
+    }
+    with patch.dict(config.cfg, cfg, clear=True):
+        assert _configured_custom_provider_identity("omni") is True
+        assert canonical_model_provider_lane(
+            "@custom:omni:latest", "custom"
+        ) == ("latest", "custom:omni")
+        assert resolve_model_provider(
+            "@custom:omni:latest", session_provider="custom"
+        ) == ("latest", "custom:omni", "https://omni.example/v1")
+        assert _parse_provider_qualified_model_id(
+            "@custom:omni:latest", generic_custom=True, config_obj=cfg
+        ) == ("latest", "custom:omni")
+        # Negative control: unconfigured slug ghost
+        assert _configured_custom_provider_identity("ghost") is False
+        assert _parse_provider_qualified_model_id(
+            "@custom:ghost:latest", generic_custom=True, config_obj=cfg
+        ) == ("ghost:latest", "custom")
+        assert canonical_model_provider_lane(
+            "@custom:ghost:latest", "custom"
+        ) == ("ghost:latest", "custom")
+
+    # Negative control: model.provider == "custom:ghost" with its own base_url
+    cfg_ghost = {
+        "model": {"provider": "custom:ghost", "base_url": "https://ghost.example/v1"},
+        "providers": {},
+    }
+    with patch.dict(config.cfg, cfg_ghost, clear=True):
+        assert _configured_custom_provider_identity("omni") is False
+        assert _parse_provider_qualified_model_id(
+            "@custom:omni:latest", generic_custom=True, config_obj=cfg_ghost
+        ) == ("omni:latest", "custom")
+        assert canonical_model_provider_lane(
+            "@custom:omni:latest", "custom"
+        ) == ("omni:latest", "custom")
+
+
+# ── CORE 2: a removed provider must fail visibly, never reroute silently ────
+def test_removed_named_provider_is_not_silently_rerouted():
+    """``custom:retired`` is gone from config -> keep ``custom:retired``, no peel."""
+    with patch.dict(config.cfg, GENERIC_CFG, clear=True):
+        assert "custom:retired" not in (config.cfg.get("providers") or {})
+        assert not config.cfg.get("custom_providers")
+        expected = ("latest", "custom:retired", None)
+        # Session that still names the removed provider.
+        assert resolve_model_provider(
+            "@custom:retired:latest", session_provider="custom:retired"
+        ) == expected
+        # Plain-string probe: same as master — base_url stays None so the
+        # downstream lookup raises "not configured" instead of rerouting.
+        assert resolve_model_provider("@custom:retired:latest") == expected
+        assert _parse_provider_qualified_model_id("@custom:retired:latest") == (
+            "latest",
+            "custom:retired",
+        )
+
+
+# ── CORE 3: the gateway parses with the SESSION's profile config ────────────
+def test_gateway_model_field_reads_session_profile_config(tmp_path, monkeypatch):
+    """``_gateway_model_field`` resolves identities from the session profile.
+
+    The homes are real and distinct: a mocked resolver that returned the same
+    directory for ``default`` and for a named profile would make the named home
+    the root home, and root legitimately owns an external ``HERMES_CONFIG_PATH``
+    there (#7905 review 2026-11-16T01:03:48Z). No override is set, so every
+    profile reads its own file.
+    """
+    from api.gateway_chat import _gateway_model_field
+
+    root_home = tmp_path / "root"
+    profile_home = root_home / "profiles" / "omni"
+    profile_home.mkdir(parents=True)
+    identity = (
+        "providers:\n"
+        "  custom:omni:\n"
+        "    base_url: https://omni.example/v1\n"
+        "    models: [latest]\n"
+    )
+    (root_home / "config.yaml").write_text(identity, encoding="utf-8")
+    (profile_home / "config.yaml").write_text(identity, encoding="utf-8")
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+
+    def _home_for(name):
+        return profile_home if str(name or "").strip() == "omni" else root_home
+
+    with patch.dict(config.cfg, GENERIC_CFG, clear=True):
+        # No evidence at all -> master's parse (model stays `latest`).
+        assert _gateway_model_field("@custom:omni:latest") == "latest"
+        # Generic session evidence, but the AMBIENT config has no `custom:omni`
+        # identity: this is the misparse the review flagged — hence the profile.
+        assert _gateway_model_field(
+            "@custom:omni:latest", session_provider="custom"
+        ) == "omni:latest"
+        # The SESSION's profile does define `custom:omni` -> identity wins.
+        with patch(
+            "api.profiles.get_hermes_home_for_profile",
+            side_effect=_home_for,
+        ):
+            assert _gateway_model_field(
+                "@custom:omni:latest",
+                session_provider="custom",
+                profile="omni",
+            ) == "latest"
+            # Root profile declares custom:omni (via profile=None and profile=""):
+            assert _gateway_model_field(
+                "@custom:omni:latest",
+                session_provider="custom",
+                profile=None,
+            ) == "latest"
+            assert _gateway_model_field(
+                "@custom:omni:latest",
+                session_provider="custom",
+                profile="",
+            ) == "latest"
+            # ...and an unconfigured slug under the same profile still peels.
+            assert _gateway_model_field(
+                "@custom:qwen3-30b-a3b:latest",
+                session_provider="custom",
+                profile="omni",
+            ) == "qwen3-30b-a3b:latest"
+
+
+# ── Generic-lane grammar: every tag shape peels with positive evidence ──────
+def test_generic_custom_various_model_tag_shapes_with_evidence():
+    cases = [
+        ("@custom:qwen3-30b-a3b:latest", ("qwen3-30b-a3b:latest", "custom")),
+        ("@custom:deepseek-r1:1.5b", ("deepseek-r1:1.5b", "custom")),
+        ("@custom:deepseek-r1:70b", ("deepseek-r1:70b", "custom")),
+        ("@custom:llama3.2:1b", ("llama3.2:1b", "custom")),
+        ("@custom:mistral-0.3:7b-instruct", ("mistral-0.3:7b-instruct", "custom")),
+        ("@custom:phi-4:mini", ("phi-4:mini", "custom")),
+        ("@custom:qwen2.5-coder:32b-instruct", ("qwen2.5-coder:32b-instruct", "custom")),
+        ("@custom:my-model:q4_k_m", ("my-model:q4_k_m", "custom")),
+        ("@custom:local-model:free", ("local-model:free", "custom")),
+    ]
+    for raw, (expected_model, expected_provider) in cases:
+        assert _parse_provider_qualified_model_id(raw, generic_custom=True) == (
+            expected_model,
+            expected_provider,
+        ), f"generic lane must keep the full model id for {raw!r}"
+
+
+def test_configured_named_custom_provider_retains_slug():
+    """When a custom provider is configured in custom_providers, its slug is retained."""
+    cfg_mock = {
+        "custom_providers": [
+            {"name": "mybox", "base_url": "http://127.0.0.1:8000/v1"},
+        ]
+    }
+    with patch.dict(config.cfg, cfg_mock, clear=True):
+        # Untagged model on configured custom provider
+        assert _parse_provider_qualified_model_id("@custom:mybox:my-model") == (
+            "my-model",
+            "custom:mybox",
+        )
+        # Tagged model on configured custom provider
+        assert _parse_provider_qualified_model_id("@custom:mybox:my-model:latest") == (
+            "my-model:latest",
+            "custom:mybox",
+        )
+
+
+def test_endpoint_like_slugs_retained():
+    """Host:port and IP custom slugs are retained as providers."""
+    assert _parse_provider_qualified_model_id("@custom:10.8.71.41:8080:Qwen3") == (
+        "Qwen3",
+        "custom:10.8.71.41:8080",
+    )
+    assert _parse_provider_qualified_model_id("@custom:localhost:11434:Qwen3") == (
+        "Qwen3",
+        "custom:localhost:11434",
+    )
+    # Also retained with positive generic evidence (and colon-tagged model)
+    assert _parse_provider_qualified_model_id(
+        "@custom:10.8.71.41:8080:Qwen3", generic_custom=True
+    ) == (
+        "Qwen3",
+        "custom:10.8.71.41:8080",
+    )
+    assert _parse_provider_qualified_model_id(
+        "@custom:localhost:11434:Qwen3", generic_custom=True
+    ) == (
+        "Qwen3",
+        "custom:localhost:11434",
+    )
+    assert _parse_provider_qualified_model_id(
+        "@custom:localhost:11434:qwen3:8b", generic_custom=True
+    ) == (
+        "qwen3:8b",
+        "custom:localhost:11434",
+    )
+
+
+def test_generic_custom_producer_parser_roundtrip():
+    """Producer model_with_provider_context and parser roundtrip cleanly."""
+    with patch.dict(config.cfg, {"model": {"provider": "deepseek"}}, clear=True):
+        routed = model_with_provider_context("qwen3-30b-a3b:latest", "custom")
+        assert routed == "@custom:qwen3-30b-a3b:latest"
+        parsed_model, parsed_provider = _parse_provider_qualified_model_id(
+            routed, generic_custom=True
+        )
+        assert parsed_model == "qwen3-30b-a3b:latest"
+        assert parsed_provider == "custom"

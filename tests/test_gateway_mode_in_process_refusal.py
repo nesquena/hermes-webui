@@ -184,7 +184,7 @@ def _stub_model_resolution(monkeypatch):
         api_config, "model_with_provider_context", lambda model, provider: model
     )
     monkeypatch.setattr(
-        api_config, "resolve_model_provider", lambda _model: ("m", "openai", None)
+        api_config, "resolve_model_provider", lambda _model, **_kwargs: ("m", "openai", None)
     )
     monkeypatch.setattr(
         api_oauth,
