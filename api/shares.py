@@ -25,15 +25,108 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from api.config import STATE_DIR
-from api.helpers import _json_response_body, redact_session_data, split_media_token_ref
-# _redact_fn_cached is the ALWAYS-ON credential redactor (agent redactor with
-# force=True + local fallback regex). Unlike redact_session_data it does NOT
-# consult the user-toggleable api_redact_enabled setting — a public share is a
-# hard safety boundary that must redact credentials even if the operator turned
-# API-response redaction off.
-from api.helpers import _redact_fn_cached as _force_redact_credentials
+from api.helpers import _json_response_body, _redact_fn_cached, redact_session_data, split_media_token_ref
 
 logger = logging.getLogger(__name__)
+
+
+def _bind_exact_value_scrubbers() -> tuple:
+    """The Agent's exact-value scrubbers, in the order ``redact_sensitive_text`` runs them.
+
+    They mask exact values the Agent registers at runtime (``browser_vault``
+    fills, values applied from external secret sources). Such a value has no
+    fixed shape, and it can be registered after a string was memoized or a
+    snapshot was written. An Agent without one of them skips that step.
+    """
+    scrubbers = []
+    try:
+        from agent.redact import redact_registered_vault_values
+    except ImportError:
+        pass
+    else:
+        scrubbers.append(redact_registered_vault_values)
+    try:
+        from agent.redact_secret_sources import redact_secret_source_values
+    except ImportError:
+        pass
+    else:
+        scrubbers.append(redact_secret_source_values)
+    return tuple(scrubbers)
+
+
+_EXACT_VALUE_SCRUBBERS = _bind_exact_value_scrubbers()
+
+
+def _scrub_registered_values(text):
+    for scrub in _EXACT_VALUE_SCRUBBERS:
+        text = scrub(text)
+    return text
+
+
+def _force_redact_credentials(text):
+    """ALWAYS-ON redaction of public-share prose: registered exact values, then patterns.
+
+    ``_redact_fn_cached`` is the agent redactor with force=True + local
+    fallback regex. Unlike redact_session_data it does NOT consult the
+    user-toggleable api_redact_enabled setting — a public share is a hard
+    safety boundary that must redact credentials even if the operator turned
+    API-response redaction off. The exact values go first, outside its memo,
+    as the Agent orders them: a pattern can rewrite part of a registered
+    value, which then no longer matches.
+    """
+    return _redact_fn_cached(_scrub_registered_values(text))
+
+
+def _scrub_message_prose(message):
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return {**message, "content": _scrub_registered_values(content)}
+    if isinstance(content, list):
+        return {**message, "content": [
+            {**part, "text": _scrub_registered_values(part["text"])}
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+            else part
+            for part in content
+        ]}
+    return message
+
+
+def _with_source_schema(walked, source):
+    """``walked`` with the schema fields a share reads taken back from ``source``.
+
+    redact_session_data walks every message value, and when it sends a role or
+    a part type through the Agent redactor a registered value such as "user"
+    masks it. A share keeps only the walked prose.
+    """
+    if not isinstance(walked, dict) or not isinstance(source, dict):
+        return walked
+    out = {**walked, **{k: source[k] for k in ("role", "timestamp", "_source") if k in source}}
+    parts, source_parts = walked.get("content"), source.get("content")
+    if isinstance(parts, list) and isinstance(source_parts, list) and len(parts) == len(source_parts):
+        out["content"] = [
+            {**p, "type": sp["type"]} if isinstance(p, dict) and isinstance(sp, dict) and "type" in sp else p
+            for p, sp in zip(parts, source_parts)
+        ]
+    return out
+
+
+def _scrub_share_source_prose(raw: dict) -> dict:
+    """``raw`` with registered exact values masked in the prose a share publishes.
+
+    Runs on the original text, before redact_session_data's pattern pass. Only
+    the title, string message content and the text of text parts are touched;
+    roles, part types, ids and timestamps are copied as they are, so a short
+    registered value such as "user" or "text" cannot rewrite the schema.
+    """
+    if not _EXACT_VALUE_SCRUBBERS:
+        return raw
+    out = dict(raw)
+    if isinstance(out.get("title"), str):
+        out["title"] = _scrub_registered_values(out["title"])
+    if isinstance(out.get("messages"), list):
+        out["messages"] = [_scrub_message_prose(m) for m in out["messages"]]
+    return out
+
 
 SHARES_DIR = STATE_DIR / "shares"
 _SHARE_LOCK = threading.Lock()
@@ -208,6 +301,10 @@ _SHARE_ALLOWED_MIME_TYPES: frozenset[str] = frozenset({
     "image/gif",
     "image/webp",
 })
+# The image data _embed_share_media writes into a snapshot, for those types.
+# A snapshot build replaces content-supplied data: URIs with a placeholder
+# before the embed (_placeholder_inline_data_uris).
+_EMBEDDED_IMAGE_DATA_RE = re.compile(r"(data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]*)")
 
 # SVG namespace URI used during sanitisation.
 _SVG_NS = "http://www.w3.org/2000/svg"
@@ -1009,12 +1106,32 @@ def _sanitize_message(
     return sanitized
 
 
+def _scrub_stored_share_text(text):
+    """A stored snapshot's text with registered exact values masked, embedded image data excepted.
+
+    A snapshot is written once, so a value registered after it was published
+    has to be masked when the snapshot is served. The image data the snapshot
+    embedded from a verified local file is left as written: a short registered
+    value can occur in base64 by chance, and replacing it only breaks the image.
+    """
+    if not isinstance(text, str) or not text or not _EXACT_VALUE_SCRUBBERS:
+        return text
+    pieces = _EMBEDDED_IMAGE_DATA_RE.split(text)  # odd items are embedded image data
+    return "".join(piece if i % 2 else _scrub_registered_values(piece) for i, piece in enumerate(pieces))
+
+
 def _public_share_payload(payload: dict) -> dict:
     messages = payload.get("messages")
     if not isinstance(messages, list):
         messages = []
+    messages = [
+        {**m, "content": _scrub_stored_share_text(m["content"])}
+        if isinstance(m, dict) and isinstance(m.get("content"), str)
+        else m
+        for m in messages
+    ]
     public = {
-        "title": str(payload.get("title") or "Untitled"),
+        "title": _scrub_stored_share_text(str(payload.get("title") or "Untitled")),
         "messages": messages,
         "message_count": int(payload.get("message_count") or len(messages)),
     }
@@ -1032,8 +1149,10 @@ def build_share_snapshot(session) -> dict:
     # redact_session_data respects the api_redact_enabled setting; keep it as a
     # first pass, but the per-message sanitizer below applies ALWAYS-ON credential
     # + path redaction that does NOT depend on that setting (the public boundary
-    # must hold even if the operator disabled api_redact_enabled).
-    safe_session = redact_session_data(raw_dict)
+    # must hold even if the operator disabled api_redact_enabled). Registered
+    # exact values are masked in the prose before either pattern pass.
+    source = _scrub_share_source_prose(raw_dict)
+    safe_session = redact_session_data(source)
     # Concrete local paths to scrub from any message prose / title.
     redact_paths = []
     for key in ("workspace", "worktree_path", "worktree_repo_root"):
@@ -1067,8 +1186,11 @@ def build_share_snapshot(session) -> dict:
     except Exception:
         pass
     _allowed_roots_tuple: tuple[Path, ...] = tuple(_allowed_roots)
+    walked = safe_session.get("messages") or []
+    if isinstance(source.get("messages"), list) and len(source["messages"]) == len(walked):
+        walked = [_with_source_schema(w, s) for w, s in zip(walked, source["messages"])]
     safe_messages = []
-    for raw in safe_session.get("messages") or []:
+    for raw in walked:
         sanitized = _sanitize_message(
             raw, redact_paths=redact_paths, allowed_roots=_allowed_roots_tuple,
             trusted_roots=_trusted_roots,
