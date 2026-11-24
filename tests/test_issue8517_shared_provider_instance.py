@@ -21,6 +21,7 @@ the claim is refused, and only then calls ``initialize``. One test drives the RE
 # ruff: noqa: F811  (pytest fixtures imported from the #8517 P0/P1 module)
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import logging
 import sys
@@ -199,7 +200,18 @@ def test_real_memory_manager_refuses_a_shared_instance_for_a_second_profile(hc, 
         def get_tool_schemas(self):
             return []
 
-    require_ai_agent_class()  # every WebUI construction site resolves the Agent class here
+    try:
+        require_ai_agent_class()  # every WebUI construction site resolves the Agent class here
+    except ModuleNotFoundError as exc:
+        # A WebUI-only environment can hold the Agent's source without its own third-party
+        # dependencies. Production treats that as "Agent unavailable" (get_ai_agent_class);
+        # skip only then, so a broken WebUI or Agent module still fails here.
+        missing = (exc.name or "").split(".")[0]
+        if not missing or importlib.util.find_spec(missing) is not None:
+            raise
+        pytest.skip(
+            f"the Agent's dependency {missing!r} is not installed in this environment"
+        )
     singleton = SharedSbx(homes["default"])
     alpha = mm_mod.MemoryManager()
     alpha.add_provider(singleton)
