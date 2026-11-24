@@ -1556,6 +1556,10 @@ _PROVIDER_ALIASES = {
     "moonshot": "kimi-coding",
     "claude": "anthropic",
     "claude-code": "anthropic",
+    "chatgpt": "openai-codex",
+    "chatgpt-codex": "openai-codex",
+    "novita-ai": "novita",
+    "novitaai": "novita",
     "deep-seek": "deepseek",
     "minimax-china": "minimax-cn",
     "minimax_cn": "minimax-cn",
@@ -3743,6 +3747,14 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         _active_slug = _canon_config_provider
         for slug, pdef in providers_cfg.items():
             if not isinstance(pdef, dict):
+                continue
+            # A record the user switched off is invisible to the Agent's
+            # resolver, so it must not own a WebUI route either: skip it here
+            # so the chat routes as if that record didn't list the model
+            # (#8954). Without this the scan first-matches the switched-off
+            # spelling and pairs the ENABLED record's key with the disabled
+            # record's base_url.
+            if not _raw_provider_record_enabled(pdef):
                 continue
             if target not in _configured_model_ids(pdef.get('models')):
                 continue
@@ -7580,6 +7592,25 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         model_cfg["api_key"] = api_key
 
 
+def _provider_is_config_declared(provider_id: str, config_obj: dict) -> bool:
+    """True when *provider_id* names a provider declared in this profile's config.
+
+    A ``providers:`` or ``custom_providers`` entry may be named
+    ``<built-in>:<suffix>`` (e.g. ``openrouter:eu``). The Agent resolves that
+    name as its own endpoint, so a save must persist it verbatim instead of
+    splitting it into the built-in prefix. Both the raw file this save loaded and
+    the runtime config count: a name given as a ``${VAR}`` reference matches only
+    once expanded. A lookup failure keeps it verbatim.
+    """
+    try:
+        return bool(
+            _named_custom_provider_slug_for_provider(provider_id, config_obj)
+            or _named_custom_provider_slug_for_provider(provider_id, cfg)
+        )
+    except Exception:
+        return True
+
+
 def set_hermes_default_model(model_id: str, provider: str | None = None, advanced: dict | None = None) -> dict:
     """Persist the Hermes default model in config.yaml and reload runtime config."""
     selected_model = str(model_id or "").strip()
@@ -7606,8 +7637,22 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
             _expand_env_vars(str(model_cfg.get("provider") or "").strip()) or ""
         ).strip()
         requested_provider = str(provider or "").strip()
+        provider_prefix, separator, model_pin = requested_provider.partition(":")
+        model_to_resolve = selected_model
+        if (
+            separator
+            and model_pin
+            and provider_prefix.lower() != "custom"
+            and not _provider_is_config_declared(requested_provider, config_data)
+            and _is_known_model_provider(_resolve_provider_alias(provider_prefix))
+        ):
+            # The picker may send a built-in provider's pinned catalog group.
+            # Keep the provider selection without persisting its model pin.
+            requested_provider = provider_prefix
+            if not selected_model.startswith("@"):
+                model_to_resolve = f"@{requested_provider}:{selected_model}"
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
-            selected_model
+            model_to_resolve
         )
         # Persist the resolved bare/slash form, NOT the `@provider:` prefix. The
         # prefix is a WebUI-internal routing hint that the hermes-agent CLI does
