@@ -1420,6 +1420,22 @@ async function _recoverCompressedSend(error,sid,draftText,filesSnapshot,clearPro
   }catch(_){ return false; }
 }
 
+// #9237: how an off-screen send notice names the chat that issued it: the
+// title in the locale's quotes, cut at 40 characters, or a generic phrase for
+// a chat that has no title of its own yet.
+function _sendOwnerLabel(title){
+  if(_sessionTitleLooksDefaultOrProvisional(title)) return t('send_offscreen_chat_fallback');
+  const chars=Array.from(String(title).replace(/\s+/g,' ').trim());
+  return t('send_offscreen_chat_title',chars.length>40?chars.slice(0,40).join('').trimEnd()+'\u2026':chars.join(''));
+}
+
+// #9237: a chat with a default title and no messages before this send is not
+// in the chat list (server and sidebar both hide it), so a notice must not
+// point the user to a draft saved there.
+function _sendOwnerIsNewChat(title, hadMessages){
+  return !hadMessages&&_sessionTitleLooksDefaultOrProvisional(title);
+}
+
 function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, goalContinuationId){
   const restore=String(draftText||'');
   const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
@@ -2014,6 +2030,16 @@ async function send(){
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
+  // #9237: the uploads and forced-skill directive below can await while the
+  // user switches chats. Keep the issuing chat's transcript and payload
+  // context so its turn neither lands in nor borrows from the chat on screen.
+  const _ownerMessages=Array.isArray(S.messages)?S.messages:[];
+  const _ownerModelState=_chatPayloadModelState();
+  const _ownerWorkspace=S.session.workspace;
+  const _ownerTitle=S.session.title;
+  const _ownerHadMessages=!!(_ownerMessages.length||Number(S.session.message_count)>0
+    ||Number(S.session.visible_message_count)>0);
+  const _ownerProfile=S.activeProfile||S.session.profile||'default';
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
   // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()
@@ -2097,10 +2123,16 @@ async function send(){
   // bump is exactly the rows this send added (idempotent across the updater's
   // multiple passes, and correct when only a paginated tail is loaded). Same
   // hidden-row rule as the updater in sessions.js.
-  const _localVisibleBeforePush=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
+  let _localVisibleBeforePush=null;
+  let optimisticMessages;
+  // #9237: only the issuing chat may show its optimistic turn. If the user
+  // switched chats during the awaits above, the else branch below keeps the
+  // turn in that chat's INFLIGHT state and leaves the pane alone.
+  const _ownerOnScreenBeforeStart=_isSessionCurrentPane(activeSid);
+  if(_ownerOnScreenBeforeStart){
+  _localVisibleBeforePush=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
-  let optimisticMessages;
   try{
     S.messages.push(userMsg);renderMessages();setBusy(true);
     if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
@@ -2168,6 +2200,14 @@ async function send(){
     S.activeStreamId=null;
     if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
   }
+  }else{
+    // Off screen: loadSession() shows this turn from INFLIGHT on return.
+    optimisticMessages=[..._ownerMessages,userMsg];
+    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+    _runOptionalPreStartUiStep('saveInflightState.offscreen', ()=>{
+      if(typeof saveInflightState==='function') saveInflightState(activeSid,{streamId:null,messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]});
+    });
+  }
 
   // Start the agent via POST, get a stream_id back
   let streamId;
@@ -2175,7 +2215,7 @@ async function send(){
   let modelStateForPostStart;
   let explicitPickForPostStart;
   try{
-    const _modelState=_chatPayloadModelState();
+    const _modelState=_ownerOnScreenBeforeStart?_chatPayloadModelState():_ownerModelState;
     modelStateForPostStart=_modelState;
     const _pendingPick=(typeof _readPendingSessionModel==='function')
       ? _readPendingSessionModel(activeSid)
@@ -2209,9 +2249,9 @@ async function send(){
       session_id:activeSid,message:msgText,
       // S.session.model remains authoritative; the helper only resolves a
       // matching provider fallback for the same outgoing model.
-      model:_modelState.model,workspace:S.session.workspace,
+      model:_modelState.model,workspace:_ownerOnScreenBeforeStart?S.session.workspace:_ownerWorkspace,
       model_provider:_modelState.model_provider,
-      profile:S.activeProfile||S.session.profile||'default',
+      profile:_ownerOnScreenBeforeStart?(S.activeProfile||S.session.profile||'default'):_ownerProfile,
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
       moa_config:_pendingMoaConfig?true:undefined,
@@ -2232,6 +2272,36 @@ async function send(){
     postStartData = startData;
   }catch(e){
     const errMsg=String((e&&e.message)||'');
+    // #9237: the user switched chats while /api/chat/start was in flight. The
+    // failure belongs to activeSid: settle its optimistic state by id and keep
+    // the text as its draft, as master does (none for a deleted chat). Never clear, navigate or annotate the chat now
+    // on screen. A chat that is still running takes master's queue-and-reload
+    // branch below instead, on screen or not.
+    if(!_isSessionCurrentPane(activeSid)&&!/session already has an active stream/i.test(errMsg)){
+      delete INFLIGHT[activeSid];
+      if(typeof clearInflightState==='function') clearInflightState(activeSid);
+      if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
+      const deleted=!!(e&&e.status===404);
+      // A compression rotation is no exception: the text is restored for
+      // activeSid exactly as on master (the server keeps a compressed chat's
+      // draft with its continuation). Its notice does not claim where the text
+      // was saved, because that continuation may already hold a draft.
+      let rotated=false;
+      try{
+        const body=e&&e.status===409?JSON.parse(e.body||'{}'):null;
+        rotated=!!(body&&body.code==='session_rotated');
+      }catch(_){ }
+      if(!deleted) _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId);
+      const owner=_sendOwnerLabel(_ownerTitle);
+      if(_sendOwnerIsNewChat(_ownerTitle,_ownerHadMessages)) showToast(t('send_offscreen_new_chat'),null,'error');
+      else{
+        const reason=(errMsg||'request failed').replace(/[\s.]+$/,'');
+        showToast(deleted?t('send_offscreen_deleted',owner)
+          :t(rotated?'send_offscreen_failed_rotated':'send_offscreen_failed',owner,reason),null,'error');
+      }
+      if(typeof renderSessionList==='function') void renderSessionList();
+      return;
+    }
     // If /api/chat/start returns 404, the session was deleted server-side
     // (its sidecar is gone) while GET kept returning a CLI stub (#2782). Strip
     // the stale /session/<id> URL and clear localStorage so a reload does not
@@ -2320,7 +2390,10 @@ async function send(){
 
   const startData = postStartData || {};
   streamId = postStartData ? postStartData.stream_id : null;
-  S.activeStreamId = streamId;
+  // #9237: pane writes only while the issuing chat is still on screen. The
+  // title, INFLIGHT and session-list bookkeeping below stay keyed by activeSid.
+  const _ownerOnScreenAfterStart=_isSessionCurrentPane(activeSid);
+  if(_ownerOnScreenAfterStart) S.activeStreamId = streamId;
   // setBusy(true) already ran with activeStreamId=null; refresh now that we
   // have a stream id so the primary button can switch to Stop (see
   // getComposerPrimaryAction).
@@ -2330,6 +2403,7 @@ async function send(){
     const _explicitPick=explicitPickForPostStart;
     if(startData&&startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
 
+    if(_ownerOnScreenAfterStart){
     if(startData&&startData.effective_model && S.session){
       const _sentModel=_modelState&&_modelState.model;
       if(_explicitPick && _sentModel && startData.effective_model!==_sentModel && typeof showToast==='function'){
@@ -2372,6 +2446,7 @@ async function send(){
       // against real active-stream metadata before the background refresh lands.
       upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now(),localVisibleBeforePush:_localVisibleBeforePush});
     }
+    }
     if(!INFLIGHT[activeSid]){
       INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
     }
@@ -2387,8 +2462,12 @@ async function send(){
     }
   });
 
-  // Open SSE stream and render tokens live
-  attachLiveStream(activeSid, streamId, uploadedNames);
+  // Open SSE stream and render tokens live. #9237: only for the chat on
+  // screen; attachLiveStream() closes every other live stream (#2313), so an
+  // off-screen sender would cut the viewed chat's SSE. Mark it instead so
+  // loadSession() reattaches when the user returns.
+  if(_ownerOnScreenAfterStart) attachLiveStream(activeSid, streamId, uploadedNames);
+  else if(INFLIGHT[activeSid]){ INFLIGHT[activeSid].streamId=streamId; INFLIGHT[activeSid].reattach=true; }
 
   }finally{ _sendInProgress=false; _sendInProgressSid=null; }
 }
@@ -8863,11 +8942,24 @@ function _updateYoloPill() {
   const openSid = (S.session && S.session.session_id) || null;
   const on = !!(openSid && _yoloView.sid === openSid && _yoloView.enabled);
   pill.style.display = on ? '' : 'none';
+  // #9101: the "hide YOLO" composer setting hides the pill only while YOLO is
+  // off; while it is on, this pill is the only sign that approvals are
+  // skipped, so the setting shrinks it to its ⚡ icon instead.
+  const vis = typeof window !== 'undefined' ? window._composerControlVisibility : null;
+  const hidePref = !!(vis && vis.hide_composer_yolo);
+  const hideByPref = hidePref && !on;
+  pill.classList.toggle('composer-control-hidden', hideByPref);
+  pill.classList.toggle('yolo-pill-compact', hidePref && on);
+  if (hideByPref) pill.setAttribute('aria-hidden', 'true');
+  else pill.removeAttribute('aria-hidden');
   if (on) {
     // The pill's click disables exactly the session it was painted for.
     pill.setAttribute('data-yolo-session', openSid);
     pill.title = t('yolo_pill_title_active');
     pill.setAttribute('data-i18n-title', 'yolo_pill_title_active');
+    // Its own name: the ⚡-only pill has no visible label text.
+    pill.setAttribute('aria-label', t('yolo_pill_title_active'));
+    pill.setAttribute('data-i18n-aria-label', 'yolo_pill_title_active');
   } else {
     pill.removeAttribute('data-yolo-session');
   }
