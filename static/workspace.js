@@ -627,6 +627,39 @@ function _textWriteOpTargets(text){
     const s=String(t).trim().replace(/^['"`]+|['"`;,]+$/g,'');
     if(s) out.push(s);
   };
+  const tokenize=(seg)=>{
+    const toks=[];
+    let cur='';
+    let inTok=false;
+    let quote=null;
+    for(let i=0;i<seg.length;i++){
+      const ch=seg[i];
+      if(quote==="'"){
+        if(ch==="'") quote=null;
+        else cur+=ch;
+      }else if(quote==='"'){
+        if(ch==='"') quote=null;
+        else if(ch==='\\'&&i+1<seg.length){ i++; cur+=seg[i]; }
+        else cur+=ch;
+      }else{
+        if(ch==="'"||ch==='"'){
+          inTok=true;
+          quote=ch;
+        }else if(ch==='\\'&&i+1<seg.length){
+          inTok=true;
+          i++;
+          cur+=seg[i];
+        }else if(/\s/.test(ch)){
+          if(inTok){ toks.push(cur); cur=''; inTok=false; }
+        }else{
+          inTok=true;
+          cur+=ch;
+        }
+      }
+    }
+    if(inTok) toks.push(cur);
+    return toks;
+  };
   let m;
   // 1. shell redirects: `> file` / `>> file` (excludes numeric-fd / stderr dup
   //    forms like `2> err.log` and `2>&1` — those don't mutate the target).
@@ -635,7 +668,7 @@ function _textWriteOpTargets(text){
     const t=m[2]||m[3]||m[4];
     if(t && !/^&?\d+$/.test(t)) push(t);
   }
-  // 2. `sed -i ... <file>` — the last bare token of the sed invocation.
+  // 2. `sed -i ... <file>` — file operands of the sed invocation.
   const sedRe=/(?:^|[\s;|&])sed\s+-i\b/g;
   while((m=sedRe.exec(text))){
     let quote=null;
@@ -656,8 +689,35 @@ function _textWriteOpTargets(text){
     }
     const seg=text.slice(sedRe.lastIndex,end);
     sedRe.lastIndex=end;
-    const toks=(seg||'').split(/\s+/).filter(Boolean);
-    if(toks.length) push(toks[toks.length-1]);
+    const toks=tokenize(seg||'');
+    let hasScript=false;
+    let endOfOptions=false;
+    for(let i=0;i<toks.length;i++){
+      const tok=toks[i];
+      if(!endOfOptions && tok==='--'){
+        endOfOptions=true;
+        continue;
+      }
+      if(!endOfOptions && tok.startsWith('-') && tok!=='-'){
+        if(tok==='-e'||tok==='--expression'){
+          hasScript=true;
+          if(i+1<toks.length) i++;
+        }else if((tok.startsWith('-e')&&!tok.startsWith('--'))||tok.startsWith('--expression=')){
+          hasScript=true;
+        }else if(tok==='-f'||tok==='--file'){
+          hasScript=true;
+          if(i+1<toks.length) i++;
+        }else if((tok.startsWith('-f')&&!tok.startsWith('--'))||tok.startsWith('--file=')){
+          hasScript=true;
+        }
+        continue;
+      }
+      if(!hasScript){
+        hasScript=true;
+      }else{
+        push(tok);
+      }
+    }
   }
   // 3. `patch ... -o <file>`.
   const patchRe=/\bpatch\b([^;|&\n]*?)\s+-o\s+(?:"([^"]+)"|'([^']+)'|([^\s;|&<>"'`]+))/g;
