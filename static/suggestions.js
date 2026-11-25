@@ -90,20 +90,23 @@
       if(typeof fn==='function') await fn();
     }finally{
       if(draft){
-        // send() hat den Server-Draft dieses Chats geleert. Damit ein Reload den
-        // wiederhergestellten Text nicht verliert, ihn für den Besitzer-Chat neu
-        // hinterlegen - aber nur, wenn er dort noch hingehört.
-        if(ownerSid&&typeof _saveComposerDraft==='function'){
-          try{ _saveComposerDraft(ownerSid,draft,draftFiles); }catch(_){}
-        }
-        // In das Eingabefeld zurück nur, wenn derselbe Chat noch offen ist und
-        // niemand inzwischen getippt hat (send() leert es teils erst später).
+        const _sameChat=_currentSid()===ownerSid;
         const _untouched=!msg.value.trim()||msg.value===label;
-        if(_currentSid()===ownerSid&&_untouched){
+        // send() hat den Server-Draft dieses Chats geleert (text:"") - der Text
+        // muss also neu hinterlegt werden, aber nie über einen neueren Entwurf:
+        // nur wenn wir ihn auch wieder ins Feld legen (niemand hat getippt).
+        if(_sameChat&&_untouched){
           msg.value=draft;
           if(typeof window.autoResize==='function'){
             try{ window.autoResize(); }catch(_){}
           }
+          if(ownerSid&&typeof _saveComposerDraft==='function'){
+            try{ _saveComposerDraft(ownerSid,draft,draftFiles); }catch(_){}
+          }
+        }else if(!_sameChat&&ownerSid&&typeof _saveComposerDraft==='function'){
+          // Chat gewechselt: Entwurf gehört weiter zu seinem Chat, ohne das
+          // Eingabefeld der jetzt offenen Ansicht anzufassen.
+          try{ _saveComposerDraft(ownerSid,draft,draftFiles); }catch(_){}
         }
       }
     }

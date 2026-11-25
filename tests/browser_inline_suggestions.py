@@ -441,6 +441,31 @@ def _review_checks(page, check):
     check(saves_switch == [["sid-A", "Draft für A"]],
           f"check11: the draft is parked on its own chat (got {saves_switch!r})")
 
+    # ── Check 12: a draft typed while the send is in flight is never overwritten ──
+    page.evaluate(INJECT_ROW_JS, ["row12", _json(["Senden"]), True])
+    _wait(page, "(rowId) => { const r = document.querySelector('[data-test-row=\"' + rowId + '\"]'); "
+                "return r && r.querySelectorAll('.inline-suggestion-btn').length === 1; }", arg="row12")
+    page.evaluate("""() => {
+      window.__draftSaves = [];
+      S.session = { session_id: 'sid-C' };
+      window._saveComposerDraft = function(sid, text, files){
+        window.__draftSaves.push([sid, text]);
+      };
+      document.getElementById('msg').value = 'alter Entwurf';
+      window.send = function(){
+        // The user keeps typing while /api/chat/start is still pending.
+        document.getElementById('msg').value = 'neuer Entwurf';
+        return Promise.resolve();
+      };
+    }""")
+    page.evaluate(CLICK_BUTTON_JS, ["row12", 0])
+    page.wait_for_timeout(300)
+    typed = page.evaluate(COMPOSER_VALUE_JS)
+    saves_typed = page.evaluate("() => window.__draftSaves.slice()")
+    check(typed == "neuer Entwurf", f"check12: the newer draft stays in the composer (got {typed!r})")
+    check(saves_typed == [],
+          f"check12: the stale captured draft is not saved over the newer one (got {saves_typed!r})")
+
 
 def _json(value):
     import json
