@@ -15,11 +15,31 @@ def _function_body(source: str, name: str) -> str:
     assert start != -1, f"{name}() not found"
     depth = 0
     in_str = None
+    in_regex = False
+    in_regex_char_class = False
+    in_line_comment = False
+    in_block_comment = False
     escaped = False
+    prev_non_space = "{"
     i = source.find("{", start)
     assert i != -1
-    for idx in range(i, len(source)):
+    idx = i
+    n = len(source)
+    while idx < n:
         ch = source[idx]
+        nxt = source[idx + 1] if idx + 1 < n else ""
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+            idx += 1
+            continue
+        if in_block_comment:
+            if ch == "*" and nxt == "/":
+                in_block_comment = False
+                idx += 2
+            else:
+                idx += 1
+            continue
         if in_str:
             if escaped:
                 escaped = False
@@ -27,15 +47,49 @@ def _function_body(source: str, name: str) -> str:
                 escaped = True
             elif ch == in_str:
                 in_str = None
+                prev_non_space = ch
+            idx += 1
+            continue
+        if in_regex:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == "[":
+                in_regex_char_class = True
+            elif ch == "]" and in_regex_char_class:
+                in_regex_char_class = False
+            elif ch == "/" and not in_regex_char_class:
+                in_regex = False
+                prev_non_space = ch
+            idx += 1
+            continue
+        if ch == "/" and nxt == "/":
+            in_line_comment = True
+            idx += 2
+            continue
+        if ch == "/" and nxt == "*":
+            in_block_comment = True
+            idx += 2
+            continue
+        if ch == "/" and prev_non_space in ("(", ",", "=", ":", "[", "!", "&", "|", "?", "{", "}", ";"):
+            in_regex = True
+            in_regex_char_class = False
+            idx += 1
             continue
         if ch in ("'", '"', "`"):
             in_str = ch
         elif ch == "{":
             depth += 1
+            prev_non_space = ch
         elif ch == "}":
             depth -= 1
+            prev_non_space = ch
             if depth == 0:
                 return source[start : idx + 1]
+        elif not ch.isspace():
+            prev_non_space = ch
+        idx += 1
     raise AssertionError(f"Unclosed function {name}")
 
 
@@ -90,6 +144,7 @@ def test_tts_playback_keeps_aria_pressed_synchronized():
         for name in (
             "_stripForTTS",
             "_splitForTTS",
+            "_abortPendingTtsRequests",
             "_beginTtsPlayback",
             "_ownsTtsPlayback",
             "_stopActivePlaybackAudio",
@@ -105,6 +160,7 @@ def test_tts_playback_keeps_aria_pressed_synchronized():
     let _ttsChunkIndex = 0;
     let _ttsActiveBtn = null;
     let _ttsGeneration = 0;
+    let _ttsPendingAborts = null;
     let _playingEdgeAudio = null;
     const localStorage = {{ getItem() {{ return 'browser'; }} }};
     const window = {{
@@ -1727,6 +1783,236 @@ def test_polite_copy_does_not_invalidate_assertive_error_before_frame_or_before_
             "assertive": "",
         },
     ]
+
+
+def test_new_turn_in_same_session_fences_pending_assertive_error_with_old_transport_present_and_removed():
+    a11y_js = (ROOT / "static" / "a11y.js").read_text(encoding="utf-8")
+    stream_js = _messages_stream_slice()
+    script = f"""
+    const elements = {{
+      a11yAnnouncer: {{ textContent: '', setAttribute() {{}} }},
+      a11yAlertAnnouncer: {{ textContent: '', setAttribute() {{}} }},
+      messages: {{
+        attrs: {{}},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        getAttribute(k) {{ return this.attrs[k]; }},
+      }},
+      liveAssistantTurn: {{
+        attrs: {{}},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        querySelector() {{ return null; }},
+      }},
+    }};
+    globalThis.window = globalThis;
+    globalThis.location = {{ href: 'http://localhost:8789/' }};
+    globalThis.document = {{
+      baseURI: 'http://localhost:8789/',
+      hidden: false,
+      activeElement: null,
+      body: {{}},
+      getElementById(id) {{ return elements[id] || null; }},
+      addEventListener() {{}},
+    }};
+    globalThis.$ = (id) => elements[id] || null;
+    globalThis.S = {{
+      session: {{ session_id: 'sid-same', pending_started_at: 1 }},
+      messages: [{{ role: 'user', content: 'Prompt' }}],
+      activeStreamId: 'stream-old-1',
+      toolCalls: [],
+      busy: true,
+    }};
+    globalThis.INFLIGHT = {{}};
+    globalThis._desktopBackgroundedForNotifications = false;
+    globalThis.assistantDisplayName = () => 'Hermes';
+    globalThis.t = (k) => ({{
+      thinking: 'Thinking',
+      a11y_response_error: 'Response interrupted by an error',
+    }})[k] || k;
+
+    let rAFCallbacks = [];
+    globalThis.requestAnimationFrame = (fn) => {{ rAFCallbacks.push(fn); return rAFCallbacks.length; }};
+    globalThis.cancelAnimationFrame = (id) => {{ if (id > 0 && id <= rAFCallbacks.length) rAFCallbacks[id - 1] = null; }};
+    function flushRaf() {{
+      const pending = rAFCallbacks;
+      rAFCallbacks = [];
+      for (const fn of pending) {{ if (fn) fn(); }}
+    }}
+
+    globalThis.setTimeout = () => 1;
+    globalThis.clearTimeout = () => {{}};
+
+    for (const noopName of [
+      '_resumeSessionStreamAfterLiveChat',
+      '_suspendSessionStreamForLiveChat',
+      'resetTurnWorkspaceMutations',
+      '_resetStreamScrollFollow',
+      'ensureLiveWorklogShell',
+      'showLiveRunStatus',
+      '_clearLiveRunStatusTimer',
+      'hideLiveRunStatus',
+      'snapshotLiveTurnHtmlForSession',
+      'saveInflightState',
+      'clearInflightState',
+      'clearInflight',
+      'setComposerStatus',
+      'setStatus',
+      'renderSessionList',
+      'renderMessages',
+      'syncTopbar',
+      'loadDir',
+      'playNotificationSound',
+      'sendBrowserNotification',
+      '_markSessionViewed',
+      'finalizeThinkingCard',
+      'clearLiveToolCards',
+      'removeThinking',
+      '_clearApprovalPendingForSession',
+      '_clearClarifyPendingForSession',
+      'stopApprovalPolling',
+      'hideApprovalCard',
+      'stopClarifyPolling',
+      'hideClarifyCard',
+    ]) {{
+      globalThis[noopName] = () => {{}};
+    }}
+    globalThis.setBusy = (val) => {{
+      S.busy = Boolean(val);
+      if (!val && typeof a11ySetStreamBusy === 'function') a11ySetStreamBusy(false);
+    }};
+    globalThis._shouldUseLiveProseFade = () => false;
+    globalThis._shouldFollowMessagesOnDomReplace = () => false;
+    globalThis._isMessagePaneNearBottom = () => false;
+    globalThis._isDocumentVisibleAndFocused = () => true;
+    globalThis._deferStreamErrorIfOffline = () => false;
+    globalThis._deferStreamErrorIfPageHidden = () => false;
+    globalThis._approvalSessionId = null;
+    globalThis._clarifySessionId = null;
+    globalThis._pendingTitleUpdates = new Map();
+    globalThis._pendingTitleExpectedCurrent = new Map();
+    globalThis._queueDrainSid = null;
+    globalThis.localStorage = {{ setItem() {{}} }};
+    globalThis.api = async () => ({{}});
+
+    class MockEventSource {{
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSED = 2;
+      static instances = [];
+      constructor(url) {{
+        this.url = String(url);
+        this.readyState = MockEventSource.OPEN;
+        this.listeners = new Map();
+        MockEventSource.instances.push(this);
+      }}
+      addEventListener(name, fn) {{
+        const list = this.listeners.get(name) || [];
+        list.push(fn);
+        this.listeners.set(name, list);
+      }}
+      async emit(name, payload = {{}}) {{
+        const ev = {{ type: name, data: JSON.stringify(payload), lastEventId: '' }};
+        for (const fn of this.listeners.get(name) || []) {{
+          await fn(ev);
+        }}
+      }}
+      close() {{ this.readyState = MockEventSource.CLOSED; }}
+    }}
+    globalThis.EventSource = MockEventSource;
+
+    {a11y_js}
+    {stream_js}
+
+    (async () => {{
+      const log = [];
+
+      // Case 1: Old transport STILL PRESENT in LIVE_STREAMS['sid-same'] when new turn starts
+      attachLiveStream('sid-same', 'stream-old-1', []);
+      await Promise.resolve();
+      flushRaf();
+      const srcOld1 = MockEventSource.instances.at(-1);
+      elements.a11yAnnouncer.textContent = '';
+      elements.a11yAlertAnnouncer.textContent = '';
+
+      // apperror closes srcOld1 directly but leaves LIVE_STREAMS['sid-same'] present,
+      // and schedules an assertive error RAF for stream-old-1
+      await srcOld1.emit('apperror', {{
+        type: 'rate_limit',
+        status: 'rate_limit',
+        message: 'Old turn error with transport present',
+        session_id: 'sid-same',
+      }});
+      const oldTransportPresentBeforeNewAttach = Boolean(LIVE_STREAMS['sid-same']);
+
+      // Before the assertive error RAF fires, a new turn starts in the SAME session
+      S.activeStreamId = 'stream-new-1';
+      S.busy = true;
+      attachLiveStream('sid-same', 'stream-new-1', []);
+      await Promise.resolve();
+      flushRaf();
+      log.push({{
+        case: 'old_transport_present',
+        oldTransportPresentBeforeNewAttach,
+        busy: elements.messages.attrs['aria-busy'],
+        polite: elements.a11yAnnouncer.textContent.trim(),
+        assertive: elements.a11yAlertAnnouncer.textContent,
+      }});
+
+      // Case 2: Old transport ALREADY REMOVED from LIVE_STREAMS['sid-same'] when new turn starts
+      S.activeStreamId = 'stream-old-2';
+      S.busy = true;
+      attachLiveStream('sid-same', 'stream-old-2', []);
+      await Promise.resolve();
+      flushRaf();
+      const srcOld2 = MockEventSource.instances.at(-1);
+      elements.a11yAnnouncer.textContent = '';
+      elements.a11yAlertAnnouncer.textContent = '';
+
+      await srcOld2.emit('apperror', {{
+        type: 'rate_limit',
+        status: 'rate_limit',
+        message: 'Old turn error with transport already removed',
+        session_id: 'sid-same',
+      }});
+      // Trailing stream_end arrives before the RAF frame, calling _closeSource(srcOld2)
+      // which deletes LIVE_STREAMS['sid-same'] with reconnecting=true
+      await srcOld2.emit('stream_end', {{ session_id: 'sid-same' }});
+      const oldTransportPresentAfterStreamEnd = Boolean(LIVE_STREAMS['sid-same']);
+
+      // Before the assertive error RAF fires, a new turn starts in the SAME session
+      S.activeStreamId = 'stream-new-2';
+      S.busy = true;
+      attachLiveStream('sid-same', 'stream-new-2', []);
+      await Promise.resolve();
+      flushRaf();
+      log.push({{
+        case: 'old_transport_already_removed',
+        oldTransportPresentAfterStreamEnd,
+        busy: elements.messages.attrs['aria-busy'],
+        polite: elements.a11yAnnouncer.textContent.trim(),
+        assertive: elements.a11yAlertAnnouncer.textContent,
+      }});
+
+      console.log(JSON.stringify(log));
+    }})();
+    """
+    out = _run_node(script)
+    assert out == [
+        {
+            "case": "old_transport_present",
+            "oldTransportPresentBeforeNewAttach": True,
+            "busy": "true",
+            "polite": "Hermes: Thinking…",
+            "assertive": "",
+        },
+        {
+            "case": "old_transport_already_removed",
+            "oldTransportPresentAfterStreamEnd": False,
+            "busy": "true",
+            "polite": "Hermes: Thinking…",
+            "assertive": "",
+        },
+    ]
+
 
 
 

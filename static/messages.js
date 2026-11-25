@@ -2590,7 +2590,7 @@ function closeLiveStream(sessionId, streamId, source, reconnecting=false){
   try{if(live.source&&live.source.readyState!==2)live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
   if(!reconnecting && typeof a11yResetStreamState==='function'){
-    a11yResetStreamState(sessionId,{streamId:retiringStreamId});
+    a11yResetStreamState(sessionId,{streamId:retiringStreamId,retiringTurn:true});
   }
   _resumeSessionStreamAfterLiveChat(sessionId);
   // closeLiveStream() is called during session-switch teardown for any session

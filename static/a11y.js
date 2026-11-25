@@ -163,6 +163,10 @@ function announceA11yPolite(message, durationMs = 2500, opts = {}) {
   const applyText = () => {
     _a11yPendingPoliteRaf = null;
     if (generation !== _a11yPoliteGeneration) return;
+    if (streamId && _a11yActiveStreamId && _a11yActiveStreamId !== streamId) {
+      _a11yPoliteMeta = null;
+      return;
+    }
     if ((ownerSid || completedSid) && !_a11yIsActiveSession(ownerSid, completedSid)) {
       _a11yPoliteMeta = null;
       return;
@@ -206,6 +210,10 @@ function announceA11yAssertive(message, durationMs = 4000, opts = {}) {
   const applyText = () => {
     _a11yPendingAssertiveRaf = null;
     if (generation !== _a11yAssertiveGeneration) return;
+    if (streamId && _a11yActiveStreamId && _a11yActiveStreamId !== streamId) {
+      _a11yAssertiveMeta = null;
+      return;
+    }
     if ((ownerSid || completedSid) && !_a11yIsActiveSession(ownerSid, completedSid)) {
       _a11yAssertiveMeta = null;
       return;
@@ -317,6 +325,20 @@ function a11yOnStreamStart(sessionId, opts = {}) {
   const isSameStream = streamId
     ? (_a11yActiveStreamSid === sessionId && _a11yActiveStreamId === streamId && _a11yActiveStreamAnnouncedStart)
     : (_a11yActiveStreamSid === sessionId && _a11yActiveStreamAnnouncedStart);
+  if (!isSameStream) {
+    if (
+      _a11yAssertiveMeta &&
+      (!reconnecting || (streamId && _a11yAssertiveMeta.streamId && _a11yAssertiveMeta.streamId !== streamId))
+    ) {
+      _a11yCancelAssertiveChannel();
+    }
+    if (
+      _a11yPoliteMeta &&
+      (!reconnecting || (streamId && _a11yPoliteMeta.streamId && _a11yPoliteMeta.streamId !== streamId))
+    ) {
+      _a11yCancelPoliteChannel();
+    }
+  }
   _a11yActiveStreamSid = sessionId || null;
   _a11yActiveStreamId = streamId;
   a11ySetStreamBusy(true, sessionId);
