@@ -2025,7 +2025,7 @@ def _custom_provider_identity_owners(
             # fields left that alias free, so a same-slug fallback entry minted the
             # identity and the alias-owned route switched endpoints and failed
             # ``auth_mismatch`` where master completed (#8164 r39 MUST-FIX).
-            if str(record_key or "").strip().lower() != "custom" and isinstance(record, dict):
+            if isinstance(record, dict):
                 for alias in _custom_provider_alias_set(record.get("name") or record_key, record_key):
                     if not alias.startswith("custom:"):
                         continue
@@ -9231,8 +9231,8 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                     _cp_match = _unique_custom_provider_entry(
                         _custom_provider_entries(_exp_cfg),
                         _custom_provider_slug_key(provider),
-                        config_data.get("providers"),
-                        config_data.get("model"),
+                        _exp_cfg.get("providers"),
+                        _exp_cfg.get("model"),
                     )
                     if _cp_match is not None:
                         _url = str(_cp_match.get("base_url") or "").strip()

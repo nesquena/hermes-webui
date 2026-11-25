@@ -505,3 +505,52 @@ def test_an_entry_that_owns_the_identity_keeps_the_pool_probe(monkeypatch):
     _bind(monkeypatch, data)
     assert config._custom_provider_identity_disabled(PID, data) is False
 
+import yaml
+
+
+def test_options_save_keeps_expanded_native_owner(monkeypatch, tmp_path):
+    path = tmp_path / "config.yaml"
+    monkeypatch.setattr(config, "_get_config_path", lambda: path)
+    monkeypatch.setenv("DUMMY_LABEL", "custom:晨光")
+    monkeypatch.setattr(config._thread_ctx, "env", {}, raising=False)
+    monkeypatch.setattr(config._thread_ctx, "block_process_env_fallback", False, raising=False)
+    data = {
+        "model": {"provider": "openai", "default": "gpt-4o"},
+        "providers": {
+            "anchor": {
+                "name": "${DUMMY_LABEL}",
+                "base_url": "https://native.invalid/v1",
+                "api_key": "DUMMY_NATIVE",
+                "model": "vision-model",
+            },
+        },
+        "custom_providers": [
+            {"name": "晨光", "base_url": "https://legacy.invalid/v1", "api_key": "DUMMY_LEGACY", "model": "other-model"},
+        ],
+        "auxiliary": {
+            "vision": {"provider": "custom:晨光", "model": "vision-model", "base_url": "https://native.invalid/v1"},
+        },
+    }
+    path.write_text(yaml.safe_dump(data, allow_unicode=True))
+    config.reload_config()
+    assert config.resolve_custom_provider_connection("custom:晨光") == ("DUMMY_NATIVE", "https://native.invalid/v1")
+    config.set_auxiliary_model("vision", "custom:晨光", "vision-model", advanced={"timeout": 60})
+    saved = yaml.safe_load(path.read_text())
+    assert saved["auxiliary"]["vision"]["base_url"] == "https://native.invalid/v1"
+    assert saved["providers"]["anchor"]["name"] == "${DUMMY_LABEL}"
+
+
+def test_generic_agent_alias_keeps_new_fallback_from_minting_its_id(monkeypatch):
+    entry = {"name": "晨光", "base_url": "https://entry.invalid/v1", "api_key": "DUMMY_ENTRY", "model": "chat-a"}
+    data = {
+        "model": {"provider": "custom", "default": "old-model", "base_url": "https://generic.invalid/v1", "api_key": "DUMMY_GENERIC"},
+        "providers": {
+            "custom": {"name": "晨光", "base_url": "https://generic.invalid/v1", "api_key": "DUMMY_GENERIC"},
+        },
+        "custom_providers": [entry],
+    }
+    # The installed Agent's native lookup accepts custom:晨光 for providers.custom.
+    # A new legacy identity must not select a different record for that same id.
+    assert (
+        config._custom_provider_entry_identity(entry, data["custom_providers"], data["providers"], data["model"]) == ""
+    )
