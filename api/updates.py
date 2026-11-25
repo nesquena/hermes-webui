@@ -1741,6 +1741,12 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
     channel, and the AGENT repo (which is a separate project that legitimately
     tracks master past its tags) — keeps the historical branch fallthrough
     unchanged. This mirrors ``_check_repo_release``.
+
+    A DIVERGED stable checkout (HEAD neither contains the latest tag nor can
+    fast-forward to it) is NOT one of those "already on the stable line"
+    states: it is the opposite, so it must not report "no update" either.
+    Applying ``latest_tag`` would fail fast-forward, so the apply side takes
+    the same branch comparison the check side reports. See #8556.
     """
     channel = _normalize_channel(channel)
     suppress_stable_fallthrough = (channel == 'stable' and target == 'webui')
@@ -1762,7 +1768,6 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
         if (
             (behind == 0 and _head_is_past_latest_tag(path, current_tag, channel, stable_filter=stable_filter))
             or (behind > 0 and _head_contains_ref(path, latest_tag))
-            or (behind > 0 and not _can_fast_forward_to(path, latest_tag))
         ):
             # WebUI stable: "HEAD past/contains the latest stable tag" means
             # up-to-date on the promoted subset — NOT a signal to advance to
@@ -1770,6 +1775,14 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
             if suppress_stable_fallthrough:
                 return None
             # Experimental / agent: preserve the historical branch fallthrough.
+            pass
+        elif behind > 0 and not _can_fast_forward_to(path, latest_tag):
+            # Diverged local branch: HEAD is OFF the stable line — it neither
+            # contains the latest tag nor can fast-forward to it. That is the
+            # opposite of the two up-to-date conditions above, so the stable
+            # suppression must not claim "no update" here either, and applying
+            # the tag would fail fast-forward. Take the same branch comparison
+            # as the check side (#8556).
             pass
         else:
             return latest_tag
@@ -1904,9 +1917,16 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # Patch releases can land on a side branch while day-to-day installs track
     # main past an older tag. A positive tag-name gap then advertises an update
     # that `git pull --ff-only <latest-tag>` cannot reach.
+    #
+    # Unlike conditions 1-2 ("HEAD is on/past/contains the stable line", where
+    # "up to date" is truthful), this condition means HEAD is OFF that line: it
+    # neither contains the latest tag nor can fast-forward to it. Suppressing
+    # the fallthrough here would report "Up to date" and hide every missing
+    # commit, on a checkout that cannot apply the advertised tag anyway — the
+    # exact opposite of an up-to-date state. Fall through to the branch
+    # comparison for the stable channel too; the apply side mirrors this
+    # (#8556).
     if behind > 0 and not _can_fast_forward_to(path, latest_tag):
-        if suppress_stable_fallthrough:
-            return _channel_up_to_date_info(path, name, channel, current_tag, latest_tag)
         return None
 
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
