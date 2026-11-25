@@ -179,8 +179,23 @@ def test_boot_settings_applies_default_without_deleting_browser_model_state():
 
 
 def test_boot_model_dropdown_explicitly_requests_profile_default_precedence():
-    assert "const _hydrateModelDropdown=({redirectIfUnauth=null}={})=>populateModelDropdown({" in BOOT_JS
-    assert "preferProfileDefaultOnFreshBoot:true" in BOOT_JS
+    # #7399: the fresh-boot preference is an opt-in argument of the shared
+    # hydration. Only the boot starter may ask for it -- an ordinary picker
+    # reopen has to preserve the selection the user already has instead of
+    # re-applying the profile/server default over it.
+    assert (
+        "const _hydrateModelDropdown=({redirectIfUnauth=null, preferProfileDefaultOnFreshBoot=false}={})=>{"
+        in BOOT_JS
+    )
+    assert "preferProfileDefaultOnFreshBoot?{preferProfileDefaultOnFreshBoot:true}:{}" in BOOT_JS
+    boot_starter = _boot_model_dropdown_snippet()
+    assert "preferProfileDefaultOnFreshBoot:true" in boot_starter
+    assert "redirectIfUnauth:_redirectBootModelDropdownIfUnauth" in boot_starter
+    open_starter = _open_model_dropdown_snippet()
+    assert "_hydrateModelDropdown()" in open_starter
+    assert "preferProfileDefaultOnFreshBoot" not in open_starter, (
+        "the picker-open starter must not inherit the fresh-boot preference"
+    )
     # #2726 invariant: boot path must keep profile/server default ahead of stale
     # browser-persisted state when a default exists. Post-#2716 cherry-pick onto
     # post-stage-batch11 master uses `stateToApply` pattern rather than the
@@ -319,6 +334,19 @@ def _boot_default_apply_snippet() -> str:
     marker = "// Fresh page boot must prefer the profile/server default"
     start = BOOT_JS.index(marker)
     return BOOT_JS[start - 120 : start + 700]
+
+
+def _boot_model_dropdown_snippet() -> str:
+    marker = "const _startBootModelDropdown=()=>{"
+    start = BOOT_JS.index(marker)
+    return BOOT_JS[start : start + 600]
+
+
+def _open_model_dropdown_snippet() -> str:
+    marker = "const _startModelDropdown=()=>{"
+    start = BOOT_JS.index(marker)
+    end = BOOT_JS.index("const _startBootModelDropdown", start)
+    return BOOT_JS[start:end]
 
 
 def _reconcile_selection_snippet() -> str:

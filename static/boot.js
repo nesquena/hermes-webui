@@ -4459,11 +4459,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     }
     return true;
   };
-  const _hydrateModelDropdown=({redirectIfUnauth=null}={})=>{
+  const _hydrateModelDropdown=({redirectIfUnauth=null, preferProfileDefaultOnFreshBoot=false}={})=>{
     const hydrateProfile=(typeof S!=='undefined'&&S.activeProfile)?S.activeProfile:null;
     let promise;
     promise = populateModelDropdown({
-      preferProfileDefaultOnFreshBoot:true,
+      ...(preferProfileDefaultOnFreshBoot?{preferProfileDefaultOnFreshBoot:true}:{}),
       ...(redirectIfUnauth?{redirectIfUnauth}:{}),
     }).then(()=>{
       if(hydrateProfile!==null&&typeof S!=='undefined'&&S.activeProfile&&S.activeProfile!==hydrateProfile) return;
@@ -4554,7 +4554,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     const ready=window._modelDropdownReady;
     if(ready&&typeof ready.then==='function'&&_modelCatalogHydrationProfile===_catalogHydrationProfile()) return ready;
     return _trackModelCatalogHydration(
-      _hydrateModelDropdown({redirectIfUnauth:_redirectBootModelDropdownIfUnauth})
+      _hydrateModelDropdown({
+        preferProfileDefaultOnFreshBoot:true,
+        redirectIfUnauth:_redirectBootModelDropdownIfUnauth,
+      })
     );
   };
   window._modelDropdownReady=null;

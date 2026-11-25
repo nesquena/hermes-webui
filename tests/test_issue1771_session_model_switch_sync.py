@@ -47,7 +47,7 @@ const calls = {syncModelChip: 0, renderModelDropdown: 0, positionModelDropdown: 
 const _dynamicModelLabels = {};
 let modelSelect;
 let dropdownOpen = false;
-const dropdown = {classList: {contains: (name) => name === 'open' && dropdownOpen}};
+const dropdown = {classList: {contains: (name) => name === 'open' && dropdownOpen}, querySelector: () => null};
 
 function makeOptGroup(provider, label) {
   return {
@@ -158,7 +158,7 @@ for (const name of [
   'assistantDisplayName',
   '_topbarLoadedMessageCount', '_topbarMessageMetaText',
   '_getOptionProviderId', '_providerFromModelValue', '_modelStateForSelect',
-  '_findModelInDropdown', '_refreshOpenModelDropdown', '_applyModelToDropdown',
+  '_findModelInDropdown', '_renderOpenDropdownPreservingInput', '_refreshOpenModelDropdown', '_applyModelToDropdown',
   '_modelPickerOptionIdentity', '_addLiveModelsToSelect',
   '_modelStateFromAppliedDropdown', '_persistSessionModelCorrection',
   '_applySessionModelFallback', 'syncTopbar'

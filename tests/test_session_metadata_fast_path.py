@@ -72,7 +72,7 @@ def test_boot_does_not_block_session_restore_on_model_catalog():
 
     assert "if(s.default_model){" in src
     assert "window._defaultModel=s.default_model;" in src
-    assert "const _hydrateModelDropdown=({redirectIfUnauth=null}={})" in src
+    assert "const _hydrateModelDropdown=({redirectIfUnauth=null, preferProfileDefaultOnFreshBoot=false}={})" in src
     assert "preferProfileDefaultOnFreshBoot:true" in src
     assert "window._modelDropdownReady=null;" in src
     assert "window._startBootModelDropdown=_startBootModelDropdown;" in src
@@ -110,7 +110,7 @@ def test_failed_boot_model_catalog_prime_is_retryable():
     src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
     # #2726 parameterized the call: populateModelDropdown({preferProfileDefaultOnFreshBoot:true})
     # Match either signature shape — empty args (legacy) OR opts arg (post-#2726).
-    needle = "const _hydrateModelDropdown=({redirectIfUnauth=null}={})=>{"
+    needle = "const _hydrateModelDropdown=({redirectIfUnauth=null, preferProfileDefaultOnFreshBoot=false}={})=>{"
     start = src.index(needle)
     end = src.index("const _startBootModelDropdown=()=>", start)
     block = src[start:end]
