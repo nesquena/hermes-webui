@@ -27,6 +27,10 @@
 
 ### Security
 
+- **A profile `config.yaml` that can't be parsed no longer leaves part of its content in the DEBUG log (#9322, #9327, @webtecnica).** The DEBUG line for an unparsable profile config, and the one in the external skill-root resolver, attached the parser's traceback, and for some malformed files that quoted the bad line. They now record only the config path and the error type. The level stays DEBUG, and the fallback is unchanged: an empty profile config and no external skill roots.
+
+- **Saving the default model keeps a provider you declared with a colon name, so chats stay on it (#9323, #9324).** Since exp-v0.52.742, saving the default model could rewrite such a provider to the public built-in of the same prefix (`openrouter:eu` became `openrouter`). This happened when the provider was declared by `name:` or under an alias spelling, or was switched off. Chats then went to the public built-in instead of your configured endpoint, and a provider you had switched off was replaced by one that wasn't. The save now keeps any id that routes to a configured record, switched-off records included, using the Agent's own alias rule. Undeclared picker groups are still saved as their built-in, as in #9304.
+
 - **A named profile's Skills panel no longer shows another profile's external skill folders (#7842, @Notaloop763).** The skills list, skill view, linked files and the on/off toggle used to take the external skill folders (`skills.external_dirs`) from the profile the server started with, whichever profile made the request. So a named profile could list, open and toggle skills that were configured only for another profile. Each request now reads those folders from its own profile's `config.yaml`, with variables resolved for that profile. A missing or broken profile config lists no external folders and never hides the profile's own skills.
 
 - **Closing the "already shared" dialog no longer refreshes the public share (#9260, @JayPokale, fixes #9259).** When a chat already had a public link, dismissing the dialog with ×, Escape or a click outside it counted as "Refresh snapshot", so backing out republished every message added since the last share. Now only the "Refresh snapshot" button refreshes the snapshot; dismissing the dialog does nothing.
@@ -44,6 +48,8 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **Tool cards saved with a turn now keep each result with its own call (#6061, @webtecnica).** When a turn's transcript had no tool-call declarations and the live progress list was missing some ids, the saved tool summaries were paired with results by position, so on reopen one tool's output could appear under another tool's command, or in the wrong order. Results are now matched by tool-call id first, and the rest are paired in order, so each card keeps its own command, arguments and output, in result order. Related: #4666 (memory tool calls missing from the stream), which this does not resolve.
 
 - **Switching chats while a message is still being sent no longer hands that message to the chat you switched to (#9284, refs #9237).** The turn now stays with the chat that sent it, with that chat's model, workspace and profile, and the chat you moved to is left as it was. If the send then fails to start after you have moved away, its text is saved in its own chat as a draft and a short notice names that chat. When the chat was compressed into a continuation meanwhile, the text is restored exactly as before and the notice names the chat without saying where the text went. A chat that is still busy queues the message and takes you back to it, as before, and sending while you stay on the chat is unchanged.
 
@@ -317,6 +323,10 @@
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Internal
+
+- **The shared-memory-provider test skips cleanly when the Agent's own dependencies aren't installed (test-only, #9340).** `test_real_memory_manager_refuses_a_shared_instance_for_a_second_profile` imports the real Agent class. In a WebUI-only venv that has the Agent's source but not its third-party packages (`psutil`), it errored instead of skipping. It now skips only for those known Agent-only packages when they are truly absent. Any other missing module, including the Agent's own `run_agent` and WebUI imports, still fails.
+
+- **The slow-endpoint model-catalog test no longer fails on a busy machine (test-only, #9331).** `test_real_slow_healthy_endpoint_is_listed_and_cached` timed a real 2.5 s endpoint against the rebuild window, so on a loaded runner the rest of the rebuild could use up the slack and fail it. The test keeps the real HTTP server but runs the window on a virtual clock that moves only by the endpoint's latency, and it fails if any timed wait expires, so a shortened wait or slice is still caught.
 
 - **The context-length contract tests check behaviour again (#9254, closes #8900).** Thanks @chhxbchhxb. An earlier byte-for-byte revert of two test files also dropped later behavioural cases, which had degraded to source-string checks. They are back: the per-profile config re-read on every lookup, and safe handling of a null, empty or malformed `providers:` section.
 
