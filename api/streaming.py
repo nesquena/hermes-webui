@@ -743,16 +743,47 @@ def _wrap_streaming_cronjob_tool_entries() -> bool:
     return installed
 
 
-def _supports_kwarg(func, kwarg_name: str) -> bool:
-    """Return True if callable `func` accepts `kwarg_name` (explicitly or via **kwargs)."""
+def _local_accepts_keyword_argument(callable_obj, name: str) -> bool:
+    """Copy of the Agent's ``accepts_keyword_argument`` for Agents without it."""
     try:
-        sig = inspect.signature(func)
-        for param in sig.parameters.values():
-            if param.kind == param.VAR_KEYWORD or param.name == kwarg_name:
-                return True
+        parameters = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
         return False
-    except Exception:
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
         return True
+    parameter = parameters.get(name)
+    return parameter is not None and parameter.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
+
+
+_accepts_keyword_argument = None  # resolved on first use: Agent helper, else the local copy
+
+
+def _supports_kwarg(func, kwarg_name: str) -> bool:
+    """Return True if callable `func` accepts `kwarg_name` as a keyword argument.
+
+    Same answer as the Agent's ``agent.context_compressor_summary.
+    accepts_keyword_argument`` (used when importable): a positional-or-keyword
+    or keyword-only parameter of that name, or ``**kwargs``. A positional-only
+    parameter of that name does not count, and a callable whose signature
+    cannot be inspected is not offered the optional keyword.
+    """
+    global _accepts_keyword_argument
+    helper = _accepts_keyword_argument
+    if helper is None:
+        try:
+            from agent.context_compressor_summary import accepts_keyword_argument as helper
+        except Exception:
+            helper = None
+        if not inspect.isfunction(helper):  # absent, or a test stub module
+            helper = _local_accepts_keyword_argument
+        _accepts_keyword_argument = helper
+    try:
+        return bool(helper(func, kwarg_name))
+    except Exception:
+        return False
 
 
 
@@ -7558,9 +7589,16 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 'expectedCurrent': current,
             })
             # Sync the generated title to state.db so `hermes sessions list` shows it.
+            # A local fallback is synced as 'derived' so the Agent's own model
+            # title can still replace it (Refs #9157).
             try:
                 from api.state_sync import sync_session_title
-                sync_session_title(session_id, effective_title, profile=getattr(s, 'profile', None) or 'default')
+                sync_session_title(
+                    session_id,
+                    effective_title,
+                    profile=getattr(s, 'profile', None) or 'default',
+                    source='derived' if source == 'fallback' else 'llm',
+                )
             except Exception:
                 logger.debug("Failed to sync title to state.db after generation for %s", session_id)
         else:
@@ -10702,6 +10740,47 @@ def _looks_like_current_user_turn_scan(messages, msg_text):
     return last_strong_match
 
 
+# #9233: on an expired provider prompt cache the Agent's proactive tool-result
+# prune (``agent/turn_proactive_prune.py``, ``prune_tool_results_only``) shortens
+# old tool results to a summary naming the archived original. It never adds,
+# drops or reorders rows and raises no compression signal. Local mirror of the
+# Agent's ``tools.tool_result_storage._ARCHIVE_POINTER_RE``.
+_AGENT_PRUNE_ARCHIVE_POINTER_RE = re.compile(r" \u2014 full result: \S*cache/pruned/[A-Za-z0-9_.-]+")
+
+
+def _agent_pruned_tool_row_equal(actual, expected):
+    """True iff returned ``actual`` is the Agent's prune stub of projected tool row ``expected``.
+
+    Every model-facing field except ``content`` (and ``api_content``) is identical,
+    both bodies are plain strings, and the returned body is shorter and carries the
+    archive pointer while the projected one does not. Anything else is a divergence.
+    """
+    if not isinstance(actual, dict) or not isinstance(expected, dict):
+        return False
+    if actual.get('role') != 'tool' or not actual.get('tool_call_id'):
+        return False
+    fields = (set(_EXACT_PREFIX_MODEL_FIELDS) | {'api_content'}) - {'content'}
+    if any(actual.get(field) != expected.get(field) for field in fields):
+        return False
+    body, projected_body = actual.get('content'), expected.get('content')
+    if not isinstance(body, str) or not isinstance(projected_body, str):
+        return False
+    if len(body) >= len(projected_body) or _AGENT_PRUNE_ARCHIVE_POINTER_RE.search(projected_body):
+        return False
+    return _AGENT_PRUNE_ARCHIVE_POINTER_RE.search(body) is not None
+
+
+def _restore_agent_pruned_tool_rows(result_messages, projection):
+    """Copy of ``result_messages`` with each Agent prune stub inside the projected
+    prefix put back to WebUI's own projected row, so the strict proof still checks
+    every other row exactly and the stub is never adopted (#9233)."""
+    restored = list(result_messages or [])
+    for idx, expected in enumerate(list(projection or [])[:len(restored)]):
+        if _agent_pruned_tool_row_equal(restored[idx], expected):
+            restored[idx] = expected
+    return restored
+
+
 def _proven_current_turn_suffix(projected_history, result_messages):
     """Return the proven current-turn suffix of ``result_messages``, else None.
 
@@ -10752,7 +10831,7 @@ def _proven_current_turn_suffix(projected_history, result_messages):
         # Not supplied: no proof available.
         return None
     projection = list(projected_history)
-    result_messages = list(result_messages or [])
+    result_messages = _restore_agent_pruned_tool_rows(result_messages, projection)
     if not projection:
         # Explicitly empty: the Agent was sent no history. The full returned
         # list (if any) is the current-turn suffix. An empty result is also
@@ -11560,7 +11639,7 @@ def _proven_tail_merge_exchange(
     verified tail-merge and the settle must fail closed.
     """
     projection = list(projected_history or [])
-    result = list(result_messages or [])
+    result = _restore_agent_pruned_tool_rows(result_messages, projection[:-1])
     if len(projection) < 1 or len(result) < len(projection):
         return None
     # All projected rows before the tail must match exactly — this is what makes
@@ -12816,7 +12895,6 @@ def _nearest_assistant_msg_idx(messages, msg_idx: int) -> int:
 
 def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
     """Build persisted tool-call summaries from final messages plus live progress fallback."""
-    tool_calls = []
     pending_names = {}
     pending_args = {}
     pending_asst_idx = {}
@@ -12853,36 +12931,76 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
         elif role == 'tool':
             tid = m.get('tool_call_id') or m.get('tool_use_id', '')
             raw = m.get('content', '')
-            seq = {'msg_idx': msg_idx, 'raw': raw, 'resolved': False}
+            seq = {'msg_idx': msg_idx, 'raw': raw, 'tid': tid, 'resolved': False, 'summary': None}
             if tid:
                 name = pending_names.get(tid, '')
                 if name and name != 'tool':
-                    tool_calls.append({
+                    seq['summary'] = {
                         'name': name,
                         'snippet': _tool_result_snippet(raw),
                         'tid': tid,
                         'assistant_msg_idx': pending_asst_idx.get(tid, -1),
                         'args': _truncate_tool_args(pending_args.get(tid, {})),
-                    })
+                    }
                     seq['resolved'] = True
             tool_msg_sequence.append(seq)
 
     live = [tc for tc in (live_tool_calls or []) if isinstance(tc, dict) and tc.get('name') and tc.get('name') != 'clarify']
     if live:
+        # A live entry the transcript already resolved by id belongs to that row
+        # and must not be handed to a different one. When the ledger carries no
+        # id for that position (legacy agents), claim the row's own slot so the
+        # positional pairing below keeps master's alignment.
+        claimed = set()
         for seq_idx, seq in enumerate(tool_msg_sequence):
-            if seq.get('resolved'):
+            if not seq.get('resolved'):
                 continue
-            if seq_idx >= len(live):
-                break
-            live_tc = live[seq_idx]
-            tool_calls.append({
-                'name': live_tc.get('name', 'tool'),
-                'snippet': _tool_result_snippet(seq.get('raw', '')),
-                'tid': live_tc.get('tid', '') or '',
-                'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
-                'args': _truncate_tool_args(live_tc.get('args', {}), limit=4),
-            })
+            tid = seq.get('tid')
+            matched = False
+            if tid:
+                for l_idx, ltc in enumerate(live):
+                    if l_idx not in claimed and ltc.get('tid') == tid:
+                        claimed.add(l_idx)
+                        matched = True
+                        break
+            if not matched and seq_idx < len(live) and seq_idx not in claimed and not live[seq_idx].get('tid'):
+                claimed.add(seq_idx)
 
+        unresolved = [seq for seq in tool_msg_sequence if not seq.get('resolved')]
+
+        def _append_live_summary(seq, ltc, tid):
+            seq['summary'] = {
+                'name': ltc.get('name', 'tool'),
+                'snippet': _tool_result_snippet(seq.get('raw', '')),
+                'tid': tid,
+                'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
+                'args': _truncate_tool_args(ltc.get('args', {}), limit=4),
+            }
+
+        remaining = [(l_idx, ltc) for l_idx, ltc in enumerate(live) if l_idx not in claimed]
+
+        # 1. A row whose id the ledger knows takes its own entry, wherever it sits.
+        still_unresolved = []
+        for seq in unresolved:
+            tid = seq.get('tid')
+            match = None
+            if tid:
+                for pos, (_l_idx, ltc) in enumerate(remaining):
+                    if ltc.get('tid') == tid:
+                        match = pos
+                        break
+            if match is None:
+                still_unresolved.append(seq)
+                continue
+            _l_idx, ltc = remaining.pop(match)
+            _append_live_summary(seq, ltc, tid)
+
+        # 2. Every remaining row pairs with the remaining entries in order, so an
+        #    id the ledger cannot name still keeps its result row.
+        for seq, (_l_idx, ltc) in zip(still_unresolved, remaining, strict=False):
+            _append_live_summary(seq, ltc, seq.get('tid') or ltc.get('tid') or '')
+
+    tool_calls = [seq['summary'] for seq in tool_msg_sequence if seq.get('summary') is not None]
     return tool_calls
 
 
@@ -13578,17 +13696,35 @@ def _last_resort_sync_from_core(session, stream_id, agent_lock):
         )
 
 
-def _session_db_is_open(session_db) -> bool:
-    """True when *session_db* still has a live sqlite connection.
+_NO_RELEASE_FIELD = object()
 
-    SessionDB.close() sets ``_conn = None``. Subagents capture the parent's
-    SessionDB object by reference at spawn time (delegate_tool), so closing
-    that object mid-parent-turn makes every subsequent child
-    ``append_message`` fail with
-    ``'NoneType' object has no attribute 'execute'``.
+
+def _session_db_is_open(session_db) -> bool:
+    """Recognize the lifecycle of legacy SessionDB and newer Agent handles.
+
+    The newer SessionDB shim has no ``_conn``: it owns a Persistence handle
+    in ``_store`` until close. Persistence itself retains its release callback
+    until close. Neither exposes a public is-open flag; inspect only these
+    lifecycle fields, without probing ``ready`` or opening a lazy backend.
+    Misclassifying a live handle closes storage still borrowed by the Agent,
+    its compressor and background consumers (#9149, #6143).
     """
     if session_db is None:
         return False
+    if isinstance(getattr(session_db, "_closed", None), bool):
+        store = getattr(session_db, "_store", None)
+        if session_db._closed or store is None:
+            return False
+        # A shim whose own Persistence handle was released (``_release``
+        # cleared) fails every call: treat it as closed. A store without that
+        # field keeps the answer above.
+        try:
+            release = getattr(store, "_release", _NO_RELEASE_FIELD)
+        except Exception:
+            return True
+        return release is _NO_RELEASE_FIELD or callable(release)
+    if hasattr(session_db, "_release"):
+        return callable(session_db._release)
     return getattr(session_db, "_conn", None) is not None
 
 
@@ -13624,6 +13760,10 @@ def _adopt_session_db_for_cached_agent(agent, new_session_db):
                 "Failed to close unused session_db handle in adopt helper",
                 exc_info=True,
             )
+        if getattr(agent, _BIND_FAILED_ATTR, False) is True:
+            # The last rebind failed while this handle stayed open: retry it,
+            # or the context engine stays on the replaced, closed handle.
+            _rebind_context_engine_session(agent, existing)
         return existing
     if existing is not None:
         try:
@@ -13634,7 +13774,95 @@ def _adopt_session_db_for_cached_agent(agent, new_session_db):
                 exc_info=True,
             )
     agent._session_db = new_session_db
+    if hasattr(agent, "persistence"):
+        # New Agent versions borrow the shim's underlying interface at init;
+        # replacing only _session_db leaves turn admission on the closed one.
+        agent.persistence = (
+            new_session_db if hasattr(new_session_db, "_release")
+            else getattr(new_session_db, "_store", None)
+        )
+    # The Agent handles above already point at the live adopted handle.
+    _rebind_context_engine_session(agent, new_session_db)
     return new_session_db
+
+
+def _reuse_cached_agent_session_db(agent, session_db, agent_kwargs):
+    """Cached-agent reuse step of the stream: adopt this turn's SessionDB.
+
+    Returns the handle the agent keeps (see
+    ``_adopt_session_db_for_cached_agent``) and points the retained
+    constructor kwargs at it, so the credential self-heal never rebuilds from
+    the unused handle the adoption helper just closed.
+    """
+    session_db = _adopt_session_db_for_cached_agent(agent, session_db)
+    agent._session_db = session_db
+    if 'session_db' in agent_kwargs:
+        agent_kwargs['session_db'] = session_db
+    return session_db
+
+
+# Set on a cached agent whose context-engine rebind failed, so a later turn
+# that keeps the (still open) adopted handle retries the hook (#9150).
+_BIND_FAILED_ATTR = "_webui_context_engine_bind_failed"
+_BIND_WARNED_ATTR = "_webui_context_engine_bind_warned"
+
+
+def _set_agent_flag(agent, name, value):
+    try:
+        setattr(agent, name, value)
+    except Exception:
+        pass  # best-effort bookkeeping; never fail the turn over it
+
+
+def _call_bind_session_state(bind, session_db, session_id, bind_kwargs):
+    """Call the hook the way the Agent's reset path and master do: the first
+    two arguments positional.
+
+    There is deliberately no retry in another calling convention. A TypeError
+    can come from inside a hook after it changed state, and nothing outside the
+    call can tell that apart from a refused call for every kind of callable
+    (decorated, partial, native), so a retry could run the hook twice. A hook
+    that refuses the positional call fails like any other hook: logged, and
+    retried on the next cached turn.
+    """
+    bind(session_db, session_id, **bind_kwargs)
+
+
+def _rebind_context_engine_session(agent, session_db):
+    """Best-effort ``bind_session_state`` of a cached agent's context engine.
+
+    ``persistence`` is forwarded only to hooks that accept it. A failure
+    (``Exception`` only) is logged and the turn continues; it is remembered
+    on the agent so the next cached turn retries even when it keeps the open
+    handle, and the first failure per agent is logged once at WARNING.
+    """
+    compressor = getattr(agent, "context_compressor", None)
+    bind = getattr(compressor, "bind_session_state", None)
+    if callable(bind):
+        try:
+            bind_kwargs = {}
+            if _supports_kwarg(bind, "persistence"):
+                bind_kwargs["persistence"] = getattr(agent, "persistence", None)
+            _call_bind_session_state(
+                bind, session_db, getattr(agent, "session_id", ""), bind_kwargs
+            )
+        except Exception as exc:
+            if getattr(agent, _BIND_WARNED_ATTR, False) is not True:
+                _set_agent_flag(agent, _BIND_WARNED_ATTR, True)
+                logger.warning(
+                    "context engine bind_session_state during cached adoption "
+                    "failed (%s); retrying on the next cached turn",
+                    type(exc).__name__,
+                )
+            logger.debug(
+                "context engine bind_session_state during cached adoption failed",
+                exc_info=True,
+            )
+            _set_agent_flag(agent, _BIND_FAILED_ATTR, True)
+            return False
+    if getattr(agent, _BIND_FAILED_ATTR, False) is True:
+        _set_agent_flag(agent, _BIND_FAILED_ATTR, False)
+    return True
 
 
 def _build_session_db_for_stream(state_db_path):
@@ -15727,11 +15955,11 @@ def _run_agent_streaming(
 
                 # Modern Hermes Agent builds can call both tool_progress_callback
                 # and the structured tool_start/tool_complete callbacks for the
-                # same tool. Prefer the structured path when it is supported so
-                # the browser receives one tid-tagged tool card per real call.
+                # same tool. When structured callbacks are wired, suppress the
+                # legacy progress path so the structured path is the single owner
+                # of tool events (#4666).
                 if event_type in (None, 'tool.started') and 'tool_start_callback' in _agent_params:
                     return
-
                 if event_type in (None, 'tool.started'):
                     _live_tool_calls.append({
                         'name': name,
@@ -15779,7 +16007,6 @@ def _run_agent_streaming(
 
                 if event_type == 'tool.completed' and 'tool_complete_callback' in _agent_params:
                     return
-
                 if event_type == 'tool.completed':
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):
@@ -16456,11 +16683,11 @@ def _run_agent_streaming(
                         # When the existing handle is already closed/missing,
                         # adopt the fresh per-request SessionDB (and close the
                         # dead one) so we still avoid the EMFILE FD-leak from
-                        # PR #1421.
-                        _session_db = _adopt_session_db_for_cached_agent(
-                            agent, _session_db
+                        # PR #1421. The retained constructor kwargs follow
+                        # the adopted handle (credential self-heal).
+                        _session_db = _reuse_cached_agent_session_db(
+                            agent, _session_db, _agent_kwargs
                         )
-                        agent._session_db = _session_db
                     if hasattr(agent, '_api_call_count'):
                         agent._api_call_count = 0
                     # Reset interrupt state from a prior cancel so the reused
