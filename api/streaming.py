@@ -13477,7 +13477,16 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
             # attributable to the occurrences settled here.
             stale_prior_tids.add(_ptid)
             continue
-        prior_by_occurrence.setdefault((_po, _ptid), []).append(_ptc)
+        # #7653 re-gate round 17 (11-23 review, item 3): keep the OCCURRENCE
+        # in the key as well. One owning assistant row can emit the same id
+        # twice, and an (owner, tid) key handed the SAME prior rows to both
+        # occurrences — a saved [success, failure] pair merged into
+        # [failure, failure]. A legacy prior row without an ordinal keys on
+        # None and is only used by an unambiguous tid below.
+        _pocc = _ptc.get('occurrence')
+        if isinstance(_pocc, bool) or not isinstance(_pocc, int):
+            _pocc = None
+        prior_by_occurrence.setdefault((_po, _ptid, _pocc), []).append(_ptc)
 
     for msg_idx, m in enumerate(messages or []):
         if not isinstance(m, dict):
@@ -13683,7 +13692,25 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
                             # line up.
                             _prior_rows = None
                         else:
-                            _prior_rows = prior_by_occurrence.get((_owner_idx, tid))
+                            _prior_rows = prior_by_occurrence.get(
+                                (_owner_idx, tid, _occurrence)
+                            )
+                            if _prior_rows is None:
+                                # A legacy prior summary carries no ordinal and
+                                # names no occurrence. It may still be borrowed
+                                # when this OWNER emitted the tid at most once
+                                # in this history — then no ambiguity exists.
+                                # Two occurrences under one owner must never
+                                # share it (round 17).
+                                _owner_emissions_of_tid = sum(
+                                    1
+                                    for _p in (_result_occurrences.get(tid) or [])
+                                    if _p[0] == _owner_idx
+                                )
+                                if _owner_emissions_of_tid <= 1:
+                                    _prior_rows = prior_by_occurrence.get(
+                                        (_owner_idx, tid, None)
+                                    )
                         if _prior_rows is None and tid not in stale_prior_tids:
                             # Round 6 fallback: a prior row that names no
                             # owner index cannot be scoped to an

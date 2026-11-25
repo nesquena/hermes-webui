@@ -349,3 +349,60 @@ process.stdout.write(JSON.stringify(tools.map(r => ({
     tools = _run_settle(script)
     assert len(tools) == 1, f"expected one tool card, got {tools}"
     assert tools[0]["occ"] == 0, f"the projected occurrence row must survive: {tools}"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_settle_matches_explicit_occurrences_before_ordered_fallback():
+    """The 11-23 repro: recovery keeps ONLY the later call, settlement rebuilds both.
+
+    Projected rows hold a single row, ``tool:call_0#1`` (recovery retained just
+    the later call). The settled transcript then rebuilds ``tool:call_0@1#0``
+    and ``tool:call_0@3#1``. Under the old first-unused rule occurrence 0
+    consumed that projected row and was dropped, and occurrence 1 was appended
+    beside its own copy — the earlier card disappeared and the later call
+    rendered twice. Explicit occurrences must match before any ordered fallback.
+    """
+    script = _SETTLE_BOOT + """
+const messages = [
+  {role:'user', content:'go', id:'user-1'},
+  {role:'assistant', content:'first', id:'asst-1'},
+  {role:'assistant', content:'second', id:'asst-3'},
+  {role:'assistant', content:'Final answer', id:'asst-final'},
+];
+function _anchorSceneRowsByMessageIndex(){
+  return new Map([
+    [1, [{role:'tool', kind:'tool_completed', source_event_type:'tool_complete', status:'completed',
+          tool_call_id:'call_0', row_id:'settled:1', group:{assistant_msg_idx:1, occurrence:0},
+          tool:{id:'call_0', name:'terminal', args:{command:'echo FIRST'}, snippet:'FIRST', done:true, is_error:false},
+          payload:{assistant_msg_idx:1, tid:'call_0', occurrence:0, snippet:'FIRST'}}]],
+    [3, [{role:'tool', kind:'tool_completed', source_event_type:'tool_complete', status:'error',
+          tool_call_id:'call_0', row_id:'settled:3', group:{assistant_msg_idx:3, occurrence:1},
+          tool:{id:'call_0', name:'terminal', args:{command:'exit 3'}, snippet:'3', done:true, is_error:true},
+          payload:{assistant_msg_idx:3, tid:'call_0', occurrence:1, snippet:'3'}}]],
+  ]);
+}
+const projectedScene = {
+  mode:'compact_worklog', final_answer:'Final answer',
+  identity:{source_message_refs:['asst-final']}, lifecycle:{},
+  activity_rows:[
+    {role:'tool', kind:'tool_completed', source_event_type:'tool_complete', status:'error',
+     tool_call_id:'call_0', row_id:'live:1', local_id:'live-tool:1',
+     payload:{tid:'call_0', occurrence:1, snippet:'3', is_error:true}},
+  ]
+};
+const scene = _completeSettledAnchorSceneForTurn(messages, 3, projectedScene);
+const tools = (scene && scene.activity_rows || []).filter(r => r.role === 'tool');
+process.stdout.write(JSON.stringify(tools.map(r => ({
+  row_id: r.row_id,
+  key: _anchorSceneExistingRowKey(r),
+  occ: (r.payload && r.payload.occurrence!==undefined) ? r.payload.occurrence : (r.tool && r.tool.occurrence!==undefined ? r.tool.occurrence : null),
+  owner: (r.group && r.group.assistant_msg_idx!==undefined) ? r.group.assistant_msg_idx : null,
+  err: !!((r.tool && r.tool.is_error) || (r.payload && r.payload.is_error) || r.status === 'error'),
+}))));
+"""
+    tools = _run_settle(script)
+    assert len(tools) == 2, f"both occurrences must survive, got {tools}"
+    byOcc = {t["occ"]: t for t in tools if t["occ"] is not None}
+    assert set(byOcc) == {0, 1}, f"each occurrence must survive exactly once: {tools}"
+    assert byOcc[0]["err"] is False, f"occurrence 0 (echo FIRST) must stay successful: {tools}"
+    assert byOcc[1]["err"] is True, f"occurrence 1 (exit 3) must stay failed: {tools}"

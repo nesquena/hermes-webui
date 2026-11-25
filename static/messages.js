@@ -4018,8 +4018,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         :null;
       const _rowIdx=(_rowAIdx!=null&&_rowAIdx!==''&&Number.isFinite(Number(_rowAIdx)))?Number(_rowAIdx):null;
       if(_rowIdx!=null){
-        _persistedIsError=(_persistedEntry.assistant_msg_idx!=null&&Number(_persistedEntry.assistant_msg_idx)===_rowIdx)||
-          (!!_persistedEntry.occurrences&&_persistedEntry.occurrences[_rowIdx]===true);
+        // #7653 re-gate round 17 (11-23 review, item 3): the verdict map
+        // retains the occurrence too. A row that names its occurrence accepts
+        // only the verdict recorded for THAT occurrence — two calls of one id
+        // inside one assistant row must not share a verdict, or a saved
+        // [success, failure] pair reports as [failure, failure]. When the
+        // entry carries scopes and the row cannot name an occurrence, the
+        // attribution is unprovable, so no verdict is applied (fail closed).
+        const _rowOccRaw=(row&&row.occurrence!=null&&row.occurrence!=='')?row.occurrence
+          :(row&&row.group&&row.group.occurrence!=null&&row.group.occurrence!=='')?row.group.occurrence
+          :(row&&row.payload&&row.payload.occurrence!=null&&row.payload.occurrence!=='')?row.payload.occurrence
+          :null;
+        const _rowOcc=(_rowOccRaw!=null&&_rowOccRaw!==''&&Number.isFinite(Number(_rowOccRaw)))?Number(_rowOccRaw):null;
+        if(_persistedEntry.scopes&&typeof _persistedEntry.scopes==='object'){
+          _persistedIsError=_rowOcc!=null&&_persistedEntry.scopes[String(_rowIdx)+'#'+String(_rowOcc)]===true;
+        }else{
+          _persistedIsError=(_persistedEntry.assistant_msg_idx!=null&&Number(_persistedEntry.assistant_msg_idx)===_rowIdx)||
+            (!!_persistedEntry.occurrences&&_persistedEntry.occurrences[_rowIdx]===true);
+        }
       }
     }
     const _liveIsError=_matchedById&&Boolean(live&&live.is_error===true);
@@ -4495,23 +4511,39 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const h=r.indexOf('#');
         const t=a>0?r.slice(0,a):(h>0?r.slice(0,h):r);
         if(t!==tid) continue;
-        if(a>0) ownerRows.push({index:i,owner:(h>a?r.slice(a+1,h):r.slice(a+1))});
+        if(a>0) ownerRows.push({index:i,owner:(h>a?r.slice(a+1,h):r.slice(a+1)),occ:h>a?r.slice(h+1):null});
         else occRows.push({index:i,occ:h>0?r.slice(h+1):null});
       }
       if(incomingOwner!=null){
+        // #7653 re-gate round 17 (11-23 review, item 3): match an EXPLICIT
+        // occurrence before falling back to the ordered pairing. The old
+        // first-unused rule let occurrence 0 consume the only projected row
+        // (one that named occurrence 1), so the earlier card was dropped and
+        // the later call rendered twice. A row that names a DIFFERENT
+        // occurrence is never merged.
+        if(incomingOcc!=null){
+          const exact=occRows.find(c=>c.occ===incomingOcc);
+          if(exact) return exact.index;
+          const bare=occRows.find(c=>c.occ==null);
+          if(bare) return bare.index;
+          return -1;
+        }
         if(!occRows.length) return -1;
-        // Next-unused pairing: owners and occurrences both arrive in
-        // per-tid order, so the k-th owner row pairs with the k-th
-        // occurrence row (round-11 trailing alignment semantics). Two
-        // DIFFERENT occurrences never pair — each consumes its own rank.
-        // A bare ownerless row (legacy, no ordinal) is the single-spelling
-        // case: at most one can exist per tid (two bare rows collapse via
-        // the exact-key path above), so it pairs only with the first owner.
+        // Next-unused pairing: owners and occurrences both arrive in per-tid
+        // order, so the k-th owner row pairs with the k-th occurrence row
+        // (round-11 trailing alignment semantics). An ordinal-less incoming
+        // row cannot tell occurrences apart, so rank order is all it has.
         return occRows[0].index;
       }
       if(incomingOcc!=null){
         if(!ownerRows.length) return -1;
-        return ownerRows[0].index;
+        const exact=ownerRows.find(c=>c.occ===incomingOcc);
+        if(exact) return exact.index;
+        // Owner rows without an ordinal are the single-spelling case; a row
+        // that names a different occurrence must not pair.
+        const candidates=ownerRows.filter(c=>c.occ==null);
+        if(!candidates.length) return -1;
+        return candidates[0].index;
       }
       return -1;
     };

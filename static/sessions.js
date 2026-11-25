@@ -4429,6 +4429,14 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls, sessionId, 
           if(Number.isFinite(_n)) _shiftedOwners.push(_n+_ownerOffset);
         }
       }
+      const _shiftedScopes=[];
+      if(_prevEntry.scopes&&typeof _prevEntry.scopes==='object'){
+        for(const _k of Object.keys(_prevEntry.scopes)){
+          const _parts=String(_k).split('#');
+          const _n=Number(_parts[0]);
+          if(Number.isFinite(_n)) _shiftedScopes.push(String(_n+_ownerOffset)+'#'+String(_parts[1]));
+        }
+      }
       if(!_shiftedOwners.length) continue;
       const _existing=_persistedIsErrorByTid[_tid];
       if(!_existing||typeof _existing!=='object'){
@@ -4441,6 +4449,11 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls, sessionId, 
         if(!_existing.occurrences) _existing.occurrences={};
         for(const _o of _shiftedOwners) _existing.occurrences[_o]=true;
         _existing.is_error=true;
+      }
+      if(_shiftedScopes.length){
+        const _scoped=_persistedIsErrorByTid[_tid];
+        if(!_scoped.scopes) _scoped.scopes={};
+        for(const _s of _shiftedScopes) _scoped.scopes[_s]=true;
       }
     }
   }
@@ -4491,12 +4504,23 @@ function _buildSettledToolIsErrorMap(sessionToolCalls){
     const owner=(raw!=null&&raw!==''&&Number.isFinite(Number(raw)))?Number(raw):null;
     if(owner==null) continue; // unprovable owner: no verdict (fail closed)
     const existing=map[tid];
+    // #7653 re-gate round 17 (11-23 review, item 3): retain the OCCURRENCE
+    // as well as the owner. One assistant row can emit the same id twice, so
+    // an owner-only entry made a saved [success, failure] pair report as
+    // [failure, failure]: both rows resolved their owner to the one failing
+    // entry. The scope key is "<owner>#<occurrence>"; a row that names an
+    // occurrence only accepts a verdict recorded for that same occurrence.
+    const rawOcc=tc.occurrence;
+    const occ=(rawOcc!=null&&rawOcc!==''&&Number.isFinite(Number(rawOcc)))?Number(rawOcc):null;
+    const scope=occ!=null?(String(owner)+'#'+String(occ)):null;
     if(!existing||typeof existing!=='object'){
       map[tid]={assistant_msg_idx:owner,is_error:true};
+      if(scope){ map[tid].scopes={}; map[tid].scopes[scope]=true; }
     }else{
       if(!existing.occurrences) existing.occurrences={};
       existing.occurrences[owner]=true;
       existing.is_error=true;
+      if(scope){ if(!existing.scopes) existing.scopes={}; existing.scopes[scope]=true; }
     }
   }
   return map;

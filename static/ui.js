@@ -23876,10 +23876,25 @@ function renderMessages(options){
           :(next&&next.payload&&next.payload.assistant_msg_idx!=null&&next.payload.assistant_msg_idx!=='')?next.payload.assistant_msg_idx
           :null;
         const _rowIdx=(_rowAIdx!=null&&_rowAIdx!==''&&Number.isFinite(Number(_rowAIdx)))?Number(_rowAIdx):null;
-        const _occOwned=(_rowIdx!=null)&&(
-          (_persistedEntry.assistant_msg_idx!=null&&Number(_persistedEntry.assistant_msg_idx)===_rowIdx)||
-          (!!_persistedEntry.occurrences&&_persistedEntry.occurrences[_rowIdx]===true)
-        );
+        // #7653 re-gate round 17 (11-23 review, item 3): the map retains the
+        // occurrence as well. A row that names its occurrence accepts only the
+        // verdict recorded for that same occurrence; when the entry carries
+        // scopes and the row cannot name its occurrence the attribution is
+        // unprovable, so nothing is applied (fail closed).
+        const _rowOccRaw=(next&&next.occurrence!=null&&next.occurrence!=='')?next.occurrence
+          :(next&&next.group&&next.group.occurrence!=null&&next.group.occurrence!=='')?next.group.occurrence
+          :(next&&next.payload&&next.payload.occurrence!=null&&next.payload.occurrence!=='')?next.payload.occurrence
+          :null;
+        const _rowOcc=(_rowOccRaw!=null&&_rowOccRaw!==''&&Number.isFinite(Number(_rowOccRaw)))?Number(_rowOccRaw):null;
+        let _occOwned=false;
+        if(_persistedEntry.scopes&&typeof _persistedEntry.scopes==='object'){
+          _occOwned=((_rowIdx!=null)&&(_rowOcc!=null)&&_persistedEntry.scopes[String(_rowIdx)+'#'+String(_rowOcc)]===true);
+        }else{
+          _occOwned=(_rowIdx!=null)&&(
+            (_persistedEntry.assistant_msg_idx!=null&&Number(_persistedEntry.assistant_msg_idx)===_rowIdx)||
+            (!!_persistedEntry.occurrences&&_persistedEntry.occurrences[_rowIdx]===true)
+          );
+        }
         if(_occOwned) next.is_error=true;
       }
       return next;

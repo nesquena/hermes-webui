@@ -4959,6 +4959,13 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         }
         if payload.get("is_error") is not None:
             call["is_error"] = bool(payload.get("is_error"))
+        # #7653 re-gate round 17 (11-23 review, item 3): a completion-only
+        # replay synthesizes this call from the payload alone, so the ordinal
+        # the completion carried must be carried too — otherwise this row keys
+        # as a bare tid while every other projection of the same call names an
+        # occurrence, and the call renders twice.
+        if payload.get("occurrence") is not None:
+            call["occurrence"] = payload["occurrence"]
         tool_id = _run_journal_snapshot_tool_id(payload)
         if tool_id:
             call["tid"] = tool_id
@@ -6223,6 +6230,28 @@ def _anchor_scene_tool_row(tool, order_index, message_index, stream_id=""):
     return row
 
 
+def _anchor_scene_history_occurrence_counts(messages, start):
+    """Resolved-result occurrence counts per tid over ``messages[:start]``.
+
+    #7653 re-gate round 17 (11-23 review, item 3): the journal replay must
+    number occurrences over the SAME scope as the settled/hydrated projections,
+    which count RESOLVED results from the first message
+    (``api.streaming._tool_result_occurrences_by_tid``). A declared-but-unfinished
+    call contributes nothing there, so it must contribute nothing here either.
+
+    ``api.streaming`` imports this module, so the import stays lazy.
+    """
+    if not start or start <= 0:
+        return {}
+    try:
+        from api.streaming import _tool_result_occurrences_by_tid
+
+        plan = _tool_result_occurrences_by_tid(list(messages or [])[:start])
+    except Exception:
+        return {}
+    return {str(tid): len(pairs) for tid, pairs in (plan or {}).items()}
+
+
 def _anchor_scene_tool_call_occurrences(messages, start, end):
     """Occurrence ordinal of every tool call a turn's messages emit.
 
@@ -6238,7 +6267,11 @@ def _anchor_scene_tool_call_occurrences(messages, start, end):
     Returns ``{(msg_idx, key, ordinal): occurrence}``.
     """
     out = {}
-    seen = {}
+    # #7653 re-gate round 17 (11-23 review, item 3): number occurrences from
+    # the history prefix, not from this turn's first message. The settled and
+    # hydrated projections count from the first message, so a replay that
+    # restarted at 0 made a later turn's single call hydrate as two.
+    seen = _anchor_scene_history_occurrence_counts(messages, start)
     for idx in range(max(0, start), min(end, len(messages or []))):
         message = messages[idx]
         if not isinstance(message, dict):
@@ -6630,6 +6663,25 @@ def _anchor_scene_row_occurrence_index(row):
     return None
 
 
+def _anchor_scene_split_tool_key(key: str):
+    """Split a tool row key into ``(tid, scope)`` at the FIRST coordinate separator.
+
+    #7653 re-gate round 17 (11-23 review, item 3): ``tool:<tid>#<occ>`` is the
+    ownerless journal spelling and carries no ``@``, so splitting only at ``@``
+    left the ordinal glued to the tid — two occurrences of one id then never
+    paired. The returned scope keeps the shape ``_anchor_scene_row_key_scope``
+    expects: ``""``, ``"<owner>"``, ``"<owner>#<occ>"`` or ``"#<occ>"``.
+    """
+    rest = key[len("tool:") :] if key.startswith("tool:") else key
+    at = rest.find("@")
+    hash_pos = rest.find("#")
+    if at >= 0 and (hash_pos < 0 or at < hash_pos):
+        return rest[:at], rest[at + 1 :]
+    if hash_pos >= 0:
+        return rest[:hash_pos], rest[hash_pos:]
+    return rest, ""
+
+
 def _anchor_scene_row_tid_fallback_index(key: str, seen: dict) -> int | None:
     """Merge target for a tool row whose exact key missed, via the bare-tid chain.
 
@@ -6653,7 +6705,7 @@ def _anchor_scene_row_tid_fallback_index(key: str, seen: dict) -> int | None:
     """
     if not key or not key.startswith("tool:"):
         return None
-    tid, _, key_scope = key[len("tool:") :].partition("@")
+    tid, key_scope = _anchor_scene_split_tool_key(key)
     if not tid:
         return None
     key_owner, key_occurrence = _anchor_scene_row_key_scope(key_scope)
@@ -6661,7 +6713,7 @@ def _anchor_scene_row_tid_fallback_index(key: str, seen: dict) -> int | None:
     for seen_key, index in seen.items():
         if not seen_key.startswith("tool:"):
             continue
-        seen_tid, _, seen_scope = seen_key[len("tool:") :].partition("@")
+        seen_tid, seen_scope = _anchor_scene_split_tool_key(seen_key)
         if seen_tid != tid:
             continue
         seen_owner, seen_occurrence = _anchor_scene_row_key_scope(seen_scope)
