@@ -5594,6 +5594,20 @@ main.main > #mainPlugin{display:none;}
 #mainSettings .sm-btn[onclick^="saveSettings"]:hover,
 #mainSettings .sm-btn[onclick^="saveSettings"]:focus-visible{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;color:var(--btn-primary-text)!important;}
 :root:not(.dark) #auxAdvancedSave{color:#1a1a1a!important;}
+:root[data-skin="ares"]:not(.dark) #auxAdvancedSave,
+:root[data-skin="catppuccin"]:not(.dark) #auxAdvancedSave,
+:root[data-skin="codex"]:not(.dark) #auxAdvancedSave,
+:root[data-skin="geist-contrast"]:not(.dark) #auxAdvancedSave,
+:root[data-skin="github"]:not(.dark) #auxAdvancedSave,
+:root[data-skin="graphite"]:not(.dark) #auxAdvancedSave,
+:root[data-skin="mono"]:not(.dark) #auxAdvancedSave,
+:root[data-skin="neon"]:not(.dark) #auxAdvancedSave,
+:root[data-skin="neon-soft"]:not(.dark) #auxAdvancedSave,
+:root[data-skin="poseidon"]:not(.dark) #auxAdvancedSave,
+:root[data-skin="sisyphus"]:not(.dark) #auxAdvancedSave,
+:root[data-skin="slate"]:not(.dark) #auxAdvancedSave{color:var(--btn-primary-text)!important;}
+:root[data-skin="hepburn"]:not(.dark) #auxAdvancedSave,
+:root[data-skin="nous"]:not(.dark) #auxAdvancedSave{color:#111111!important;}
 
 /* Appearance autosave status line (in-place feedback while changing theme/skin/font size). */
 #mainSettings .settings-autosave-status{

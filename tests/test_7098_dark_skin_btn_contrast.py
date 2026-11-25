@@ -712,8 +712,15 @@ def _selector_matches(selector: str, chain: list) -> bool:
 
 
 def _cascade_declarations(chain: list, inline: dict | None = None) -> dict:
-    """Winning declaration per property, honouring importance/specificity/order."""
+    """Winning declaration per property, honouring importance/specificity/order.
+
+    Only rules whose subject (last compound) is the target element contribute:
+    an ancestor rule like ``:root[data-skin="x"]{background:var(--bg)!important}``
+    styles the root, not the button, so letting it settle on the node would
+    report the page background as the control's fill.
+    """
     winners = {}
+    target = chain[-1]
 
     def consider(prop, raw, important, specificity, order):
         key = (1 if important else 0, specificity, order)
@@ -723,6 +730,8 @@ def _cascade_declarations(chain: list, inline: dict | None = None) -> dict:
     for rule in RULES:
         for selector in rule.selectors:
             if not _selector_matches(selector, chain):
+                continue
+            if not _compound_matches(_split_compounds(selector)[-1], target):
                 continue
             specificity = _specificity(selector)
             important = False
@@ -893,3 +902,83 @@ def test_control_cascade_sees_the_competing_hover_rules():
     ) > _specificity(':root[data-skin="geist-contrast"] .sm-btn:hover'), (
         "specificity model is wrong: the neutral rule only wins through !important"
     )
+
+
+# ---------------------------------------------------------------------------
+# Light-mode auxiliary Save: one ink per actual skin accent
+# ---------------------------------------------------------------------------
+
+
+def _light_skin_blocks() -> dict:
+    """Every ``:root[data-skin=...]`` light token block, keyed by skin name."""
+    blocks = {}
+    for rule in RULES:
+        if not any(key.startswith("--") for key in rule.decls):
+            continue
+        for selector in rule.selectors:
+            info = _root_info(selector)
+            if info is None:
+                continue
+            _specificity, requires_dark, skin = info
+            if skin and not requires_dark:
+                blocks.setdefault(skin, {}).update(rule.decls)
+    return blocks
+
+
+LIGHT_SKIN_BLOCKS = _light_skin_blocks()
+LIGHT_SKINS = sorted(LIGHT_SKIN_BLOCKS)
+
+
+def test_light_skin_inventory_covers_the_named_skins():
+    """Guard: an empty light inventory would make the sweep below vacuous."""
+    assert len(LIGHT_SKINS) >= 15, LIGHT_SKINS
+    for skin in ("graphite", "mono", "hepburn", "nous"):
+        assert skin in LIGHT_SKINS, f"{skin} light block missing from parse"
+
+
+@pytest.mark.parametrize("skin", [None] + LIGHT_SKINS)
+def test_light_aux_save_reaches_aa_on_every_skin_accent(skin: str | None):
+    """The light ink has to survive each skin's own ``--accent`` fill.
+
+    A single literal ink cannot serve every light accent: ``#1a1a1a`` measures
+    1.32:1 on graphite (#303030) and 3.03:1 on mono (#666666), while the light
+    ``--btn-primary-text`` (#fff) measures 3.25:1 on the default gold (#B8860B).
+    Both sides are real, so the pair is asserted per skin instead of once.
+    """
+    label = f"#auxAdvancedSave light skin={skin or 'default'}"
+    chain = _control_chain(node_id="auxAdvancedSave", mode="light", skin=skin)
+    foreground, fill, _ = _control_pair(
+        chain, "light", skin, _aux_modal_primary_declarations()
+    )
+    accent = _effective_in("light", skin, "--accent")
+    assert (fill or "").lower() == (accent or "").lower(), (
+        f"{label}: fill resolved to {fill!r}, not the skin accent {accent!r}"
+    )
+    _assert_pair(foreground, fill, label)
+
+
+def test_default_light_aux_save_keeps_the_earned_gold_pair():
+    """The repaired default-light pair must not slide back to the white token."""
+    chain = _control_chain(node_id="auxAdvancedSave", mode="light", skin=None)
+    foreground, fill, _ = _control_pair(
+        chain, "light", None, _aux_modal_primary_declarations()
+    )
+    assert (fill or "").lower() == (_effective_in("light", None, "--accent") or "").lower()
+    assert (foreground or "").lower() != "#ffffff", (
+        "default light fell back to the failing white token on the gold accent"
+    )
+    _assert_pair(foreground, fill, "#auxAdvancedSave default light")
+
+
+@pytest.mark.parametrize("skin", DARK_SKINS)
+def test_dark_aux_save_keeps_the_per_skin_token(skin: str):
+    """Control: the light overrides must not leak into dark mode."""
+    chain = _control_chain(node_id="auxAdvancedSave", mode="dark", skin=skin)
+    foreground, fill, _ = _control_pair(
+        chain, "dark", skin, _aux_modal_primary_declarations()
+    )
+    token = _effective_in("dark", skin, "--btn-primary-text")
+    assert (foreground or "").lower() == (token or "").lower(), (
+        f"dark {skin}: ink {foreground!r} is not the dark token {token!r}"
+    )
+    _assert_pair(foreground, fill, f"#auxAdvancedSave dark skin={skin}")
