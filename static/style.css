@@ -798,8 +798,8 @@
   }
   :root[data-skin="hepburn"]:not(.dark) .new-chat-btn,
   :root.dark[data-skin="hepburn"] .new-chat-btn{background:#ec5597;border-color:#ec5597;color:var(--btn-primary-text);font-weight:600;box-shadow:0 1px 3px rgba(236,85,151,0.3);}
-  :root[data-skin="hepburn"]:not(.dark) .new-chat-btn:hover,
-  :root.dark[data-skin="hepburn"] .new-chat-btn:hover{background:#c6246a;border-color:#c6246a;color:var(--btn-primary-text);}
+  :root[data-skin="hepburn"]:not(.dark) .new-chat-btn:hover{background:#c6246a;border-color:#c6246a;color:var(--btn-primary-text);}
+  :root.dark[data-skin="hepburn"] .new-chat-btn:hover{background:#c6246a;border-color:#c6246a;color:#fff;}
   :root[data-skin="hepburn"] .tool-card{background:rgba(242,120,173,0.04);border-color:var(--border);}
   :root.dark[data-skin="hepburn"] .tool-card{background:rgba(242,120,173,0.06);}
   :root[data-skin="hepburn"] .tool-card:hover{border-color:var(--accent-bg-strong);}
@@ -5590,8 +5590,10 @@ main.main > #mainPlugin{display:none;}
 /* Primary save buttons (Appearance / Preferences "Save Settings"). */
 #mainSettings .settings-btn,
 #mainSettings .sm-btn[onclick^="saveSettings"]{background:var(--accent);color:var(--btn-primary-text);border:1px solid var(--accent);border-radius:8px;padding:9px 16px;cursor:pointer;font-weight:600;font-size:13px;transition:background .15s,border-color .15s,opacity .15s;}
-#mainSettings .settings-btn:hover,
-#mainSettings .sm-btn[onclick^="saveSettings"]:hover{background:var(--accent-hover);border-color:var(--accent-hover);}
+#mainSettings .settings-btn:hover{background:var(--accent-hover);border-color:var(--accent-hover);}
+#mainSettings .sm-btn[onclick^="saveSettings"]:hover,
+#mainSettings .sm-btn[onclick^="saveSettings"]:focus-visible{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;color:var(--btn-primary-text)!important;}
+:root:not(.dark) #auxAdvancedSave{color:#1a1a1a!important;}
 
 /* Appearance autosave status line (in-place feedback while changing theme/skin/font size). */
 #mainSettings .settings-autosave-status{

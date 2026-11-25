@@ -505,3 +505,391 @@ def test_inline_primary_surfaces_use_the_token():
         f"{len(offenders)} inline solid-accent surface(s) with a literal foreground:\n  "
         + "\n  ".join(sorted(offenders))
     )
+
+
+# ---------------------------------------------------------------------------
+# control cascade (re-gate 2026-11-23T04:53:02Z)
+# ---------------------------------------------------------------------------
+#
+# The token tests above resolve custom properties.  The re-gate asked for the
+# *control* cascade instead, because three defects live where a property is not
+# the whole story:
+#
+# * Hepburn paints its New Chat hover with a fixed dark pink (#c6246a) while the
+#   ink keeps ``--btn-primary-text`` (dark pin #111) -> 3.47:1;
+# * Geist Contrast's ``:root[data-skin="geist-contrast"] .sm-btn:hover`` sets the
+#   neutral ``--hover-bg`` with ``!important``, so it beats the higher-specificity
+#   Settings-save hover fill and leaves near-black text on #111 -> 1.08:1;
+# * ``_ensureAuxAdvancedModal`` paints its Save button inline with the shared
+#   token, which resolves to #fff in light mode -> #fff on the gold accent
+#   (#B8860B) -> 3.25:1.
+#
+# So: match real selectors against a modelled control, let importance,
+# specificity and source order pick the winning declaration, then measure the
+# pair the browser would paint.
+
+_MODE_ROOT_RE = re.compile(
+    r'^(?:html|:root)(?P<dark>\.dark)?(?P<light>:not\(\.dark\))?'
+    r'(?:\[data-skin="(?P<skin>[^"]+)"\])?$'
+)
+
+
+def _root_parts(selector: str):
+    """``(specificity, requires_dark, skin)`` for a root selector, else ``None``."""
+    match = _MODE_ROOT_RE.match(selector.strip())
+    if not match:
+        return None
+    requires_dark = bool(match.group("dark"))
+    light_only = bool(match.group("light"))
+    if requires_dark and light_only:
+        return None
+    skin = match.group("skin")
+    specificity = 1 + (1 if requires_dark else 0) + (1 if light_only else 0) + (1 if skin else 0)
+    return specificity, requires_dark, skin
+
+
+def _effective_in(mode: str, skin: str | None, prop: str) -> str | None:
+    """Resolve ``prop`` for a light or dark root, optionally scoped to a skin."""
+    best = None
+    for rule in RULES:
+        if prop not in rule.decls:
+            continue
+        for selector in rule.selectors:
+            parts = _root_parts(selector)
+            if parts is None:
+                continue
+            specificity, requires_dark, selector_skin = parts
+            if mode == "dark" and not requires_dark:
+                continue
+            if mode == "light" and requires_dark:
+                continue
+            if selector_skin is not None and selector_skin != skin:
+                continue
+            candidate = (specificity, rule.order, rule.decls[prop])
+            if best is None or candidate[:2] > best[:2]:
+                best = candidate
+    if best is None:
+        return None
+    return _resolve_value_in(mode, skin, best[2])
+
+
+def _resolve_value_in(mode: str, skin: str | None, value: str | None, depth: int = 0):
+    """Resolve a declaration value (``var()`` chains included) for a mode/skin."""
+    if value is None or depth > 5:
+        return None
+    text = value.replace("!important", "").strip()
+    match = re.fullmatch(r"var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,\s*(.+))?\)", text)
+    if not match:
+        return text
+    token, fallback = match.group(1), match.group(2)
+    resolved = _effective_in(mode, skin, token)
+    if resolved is None and fallback is not None:
+        return _resolve_value_in(mode, skin, fallback, depth + 1)
+    return resolved
+
+
+class _Node:
+    """One element in the modelled chain (root -> body -> ancestors -> control)."""
+
+    __slots__ = ("tag", "node_id", "classes", "attrs", "is_root", "hover", "focus")
+
+    def __init__(self, tag, node_id=None, classes=(), attrs=None, is_root=False,
+                 hover=False, focus=False):
+        self.tag = tag
+        self.node_id = node_id
+        self.classes = set(classes)
+        self.attrs = dict(attrs or {})
+        self.is_root = is_root
+        self.hover = hover
+        self.focus = focus
+
+
+_COMPOUND_RE = re.compile(
+    r"""
+    (?P<tag>[A-Za-z][A-Za-z0-9]*)|
+    \#(?P<node_id>[A-Za-z0-9_-]+)|
+    \.(?P<cls>[A-Za-z0-9_-]+)|
+    \[(?P<attr>[A-Za-z0-9_-]+)(?:(?P<op>[\^$*~|]?=)"(?P<val>[^"]*)")?\]|
+    ::(?P<pseudo_el>[A-Za-z-]+)|
+    (?P<negation>:not\([^()]*\))|
+    :(?P<pseudo>[A-Za-z-]+)
+    """,
+    re.VERBOSE,
+)
+
+
+def _split_compounds(selector: str) -> list:
+    return [part for part in re.split(r"\s*>\s*|\s+", selector.strip()) if part]
+
+
+def _compound_matches(compound: str, node: _Node) -> bool:
+    matches = list(_COMPOUND_RE.finditer(compound))
+    leftover = _COMPOUND_RE.sub("", compound).strip()
+    if not matches or leftover:
+        # An unparsed fragment means the model cannot vouch for this selector.
+        return False
+    for match in matches:
+        if match.group("tag"):
+            if node.is_root:
+                if match.group("tag").lower() != "html":
+                    return False
+            elif node.tag != match.group("tag").lower():
+                return False
+        elif match.group("node_id"):
+            if node.node_id != match.group("node_id"):
+                return False
+        elif match.group("cls"):
+            if match.group("cls") not in node.classes:
+                return False
+        elif match.group("attr"):
+            name = match.group("attr")
+            if name not in node.attrs:
+                return False
+            actual = node.attrs[name]
+            op, value = match.group("op"), match.group("val")
+            if op == "^=" and not actual.startswith(value):
+                return False
+            if op == "=" and actual != value:
+                return False
+            if op in ("$=", "*=", "~=", "|="):
+                return False
+        elif match.group("pseudo_el"):
+            return False
+        elif match.group("negation"):
+            inner = match.group("negation")[5:-1].strip()
+            if inner == ".dark":
+                if "dark" in node.classes:
+                    return False
+            elif inner != ":disabled":
+                return False
+        elif match.group("pseudo"):
+            name = match.group("pseudo").lower()
+            if name == "root":
+                if not node.is_root:
+                    return False
+            elif name == "hover":
+                if not node.hover:
+                    return False
+            elif name in ("focus", "focus-visible"):
+                if not node.focus:
+                    return False
+            elif name == "disabled":
+                return False
+            else:
+                return False
+    return True
+
+
+def _specificity(selector: str) -> tuple:
+    ids = classes = elements = 0
+    for compound in _split_compounds(selector):
+        for match in _COMPOUND_RE.finditer(compound):
+            if match.group("node_id"):
+                ids += 1
+            elif match.group("tag") or match.group("pseudo_el"):
+                elements += 1
+            else:
+                classes += 1
+    return ids, classes, elements
+
+
+def _selector_matches(selector: str, chain: list) -> bool:
+    compounds = _split_compounds(selector)
+    if not compounds:
+        return False
+    index = len(chain) - 1
+    for compound in reversed(compounds):
+        matched = False
+        while index >= 0:
+            if _compound_matches(compound, chain[index]):
+                matched = True
+                index -= 1
+                break
+            index -= 1
+        if not matched:
+            return False
+    return True
+
+
+def _cascade_declarations(chain: list, inline: dict | None = None) -> dict:
+    """Winning declaration per property, honouring importance/specificity/order."""
+    winners = {}
+
+    def consider(prop, raw, important, specificity, order):
+        key = (1 if important else 0, specificity, order)
+        if prop not in winners or key > winners[prop][0]:
+            winners[prop] = (key, raw)
+
+    for rule in RULES:
+        for selector in rule.selectors:
+            if not _selector_matches(selector, chain):
+                continue
+            specificity = _specificity(selector)
+            important = False
+            for prop, raw in rule.decls.items():
+                important = raw.strip().endswith("!important")
+                consider(prop, raw, important, specificity, rule.order)
+    for prop, raw in (inline or {}).items():
+        # Inline styles beat every normal declaration and lose to !important.
+        consider(prop, raw, False, (9, 9, 9), 1 << 30)
+    return {prop: raw for prop, (_key, raw) in winners.items()}
+
+
+def _control_chain(*, tag="button", classes="", node_id=None, attrs=None, ancestors=(),
+                   hover=False, focus=False, mode="dark", skin=None) -> list:
+    root = _Node(
+        "html",
+        classes=({"dark"} if mode == "dark" else ()),
+        attrs=({"data-skin": skin} if skin else {}),
+        is_root=True,
+    )
+    chain = [root, _Node("body")]
+    for ancestor in ancestors:
+        chain.append(_Node("div", node_id=ancestor))
+    chain.append(
+        _Node(
+            tag,
+            node_id=node_id,
+            classes=classes.split() if classes else (),
+            attrs=attrs,
+            hover=hover,
+            focus=focus,
+        )
+    )
+    return chain
+
+
+def _control_pair(chain, mode, skin, inline=None):
+    """``(foreground, fill, declarations)`` the browser would settle on."""
+    declarations = _cascade_declarations(chain, inline)
+    background = declarations.get("background") or declarations.get("background-color")
+    foreground = _resolve_value_in(mode, skin, declarations.get("color"))
+    fill = _resolve_value_in(mode, skin, background)
+    return foreground, fill, declarations
+
+
+def _assert_pair(foreground, fill, label: str) -> None:
+    assert _is_hex(foreground or "") and _is_hex(fill or ""), (
+        f"{label}: pair did not resolve to hex colours (fg={foreground!r} bg={fill!r})"
+    )
+    ratio = contrast_ratio(foreground, fill)
+    assert ratio >= AA_RATIO, (
+        f"{label}: {foreground} on {fill} -> {ratio:.3f} (need >= {AA_RATIO})"
+    )
+
+
+@pytest.mark.parametrize("mode,hover", [("dark", True), ("dark", False), ("light", True)])
+def test_hepburn_new_chat_states_reach_aa(mode: str, hover: bool):
+    """Hepburn's hover fill is the fixed dark pink, not ``--accent-hover``.
+
+    Dark mode kept ``--btn-primary-text`` (#111) on #c6246a -> 3.47:1, so the
+    fill/ink pair has to be readable together.  The fill is deliberately not
+    pinned: either side may move.
+
+    ``dark+hover`` is the re-gate defect.  ``dark`` normal and ``light`` hover
+    are the controls the fix must keep.  The light normal state is left out on
+    purpose: it is the production pair (#fff on #ec5597, 3.33:1) that no round
+    of this CR asked to redesign, so tightening it here would turn a pre-existing
+    palette choice into an unrequested product change.
+    """
+    state = ":hover" if hover else ""
+    chain = _control_chain(classes="new-chat-btn", hover=hover, mode=mode, skin="hepburn")
+    foreground, fill, _ = _control_pair(chain, mode, "hepburn")
+    _assert_pair(foreground, fill, f"hepburn {mode} .new-chat-btn{state}")
+
+
+@pytest.mark.parametrize("mode", ["dark", "light"])
+@pytest.mark.parametrize("focus", [False, True])
+def test_geist_settings_save_hover_keeps_an_accent_pair(mode: str, focus: bool):
+    """The Settings save must not inherit Geist's neutral ``.sm-btn:hover`` wash.
+
+    ``:root[data-skin="geist-contrast"] .sm-btn:hover{background:var(--hover-bg)
+    !important}`` wins over ``#mainSettings .sm-btn[onclick^="saveSettings"]:hover``
+    by importance, leaving ``--btn-primary-text`` (#050505 dark / #ffffff light)
+    on #111 / #f5f5f5 -> 1.08:1 and 1.09:1.
+    """
+    label = f"geist-contrast {mode} Settings save :hover{' + :focus-visible' if focus else ''}"
+    chain = _control_chain(
+        classes="sm-btn",
+        attrs={"onclick": "saveSettings(true);"},
+        ancestors=("mainSettings",),
+        hover=True,
+        focus=focus,
+        mode=mode,
+        skin="geist-contrast",
+    )
+    foreground, fill, _ = _control_pair(chain, mode, "geist-contrast")
+    neutral = (_effective_in(mode, "geist-contrast", "--hover-bg") or "").lower()
+    assert (fill or "").lower() != neutral, (
+        f"{label}: fill resolves to the neutral .sm-btn:hover wash {neutral!r}"
+    )
+    _assert_pair(foreground, fill, label)
+
+
+_AUX_PRIMARY_INLINE_RE = re.compile(r"const primaryBtn='([^']*)';")
+
+
+def _aux_modal_primary_declarations() -> dict:
+    """The inline declarations ``_ensureAuxAdvancedModal`` gives its Save button."""
+    panels = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    match = _AUX_PRIMARY_INLINE_RE.search(panels)
+    assert match, "static/panels.js: the primaryBtn inline style is missing"
+    declarations = {}
+    for chunk in match.group(1).split(";"):
+        if ":" in chunk:
+            name, _, value = chunk.partition(":")
+            declarations[name.strip()] = value.strip()
+    assert "color" in declarations and "background" in declarations, declarations
+    return declarations
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_aux_advanced_save_pair_reaches_aa(mode: str):
+    """``#auxAdvancedSave`` is inline-styled with the solid accent fill.
+
+    In dark mode the shared token earns the per-skin ink; in light mode it
+    resolved to #fff on the gold accent (#B8860B) -> 3.25:1, where production
+    kept the dark ink (5.35:1).  A stylesheet ``!important`` override is the
+    only way to beat an inline declaration, so that is what this measures.
+    """
+    chain = _control_chain(node_id="auxAdvancedSave", mode=mode)
+    foreground, fill, _ = _control_pair(
+        chain, mode, None, _aux_modal_primary_declarations()
+    )
+    _assert_pair(foreground, fill, f"#auxAdvancedSave ({mode} mode)")
+
+
+def test_control_cascade_sees_the_competing_hover_rules():
+    """Guard: an empty or token-only model would make the tests above vacuous."""
+    chain = _control_chain(
+        classes="sm-btn",
+        attrs={"onclick": "saveSettings(true);"},
+        ancestors=("mainSettings",),
+        hover=True,
+        mode="dark",
+        skin="geist-contrast",
+    )
+    matched = [
+        rule for rule in RULES if any(_selector_matches(sel, chain) for sel in rule.selectors)
+    ]
+    assert len(matched) >= 5, f"only {len(matched)} rule(s) matched the Settings save"
+    competing = [
+        rule
+        for rule in matched
+        if any(
+            sel.strip() == ':root[data-skin="geist-contrast"] .sm-btn:hover'
+            for sel in rule.selectors
+        )
+    ]
+    assert competing, "the !important neutral .sm-btn:hover rule was not matched"
+    assert any(
+        raw.strip().endswith("!important")
+        for rule in competing
+        for prop, raw in rule.decls.items()
+        if prop in ("background", "background-color")
+    ), "the competing hover rule is not modelled as !important"
+    assert _specificity(
+        '#mainSettings .sm-btn[onclick^="saveSettings"]:hover'
+    ) > _specificity(':root[data-skin="geist-contrast"] .sm-btn:hover'), (
+        "specificity model is wrong: the neutral rule only wins through !important"
+    )
