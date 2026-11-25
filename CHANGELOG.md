@@ -27,6 +27,8 @@
 
 ### Security
 
+- **Two of the WebUI's fallback redaction patterns now run in linear time (#9339).** On some long inputs they could take quadratic time. Both now finish in one pass, and they redact exactly what they redacted before.
+
 - **A profile `config.yaml` that can't be parsed no longer leaves part of its content in the DEBUG log (#9322, #9327, @webtecnica).** The DEBUG line for an unparsable profile config, and the one in the external skill-root resolver, attached the parser's traceback, and for some malformed files that quoted the bad line. They now record only the config path and the error type. The level stays DEBUG, and the fallback is unchanged: an empty profile config and no external skill roots.
 
 - **Saving the default model keeps a provider you declared with a colon name, so chats stay on it (#9323, #9324).** Since exp-v0.52.742, saving the default model could rewrite such a provider to the public built-in of the same prefix (`openrouter:eu` became `openrouter`). This happened when the provider was declared by `name:` or under an alias spelling, or was switched off. Chats then went to the public built-in instead of your configured endpoint, and a provider you had switched off was replaced by one that wasn't. The save now keeps any id that routes to a configured record, switched-off records included, using the Agent's own alias rule. Undeclared picker groups are still saved as their built-in, as in #9304.
@@ -48,6 +50,10 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **The profile picker and Tasks list only the named profile homes the Agent considers live (#8897, @chhxbchhxb).** A deleted (tombstoned) or marker-less home under `profiles/` still showed up in the profile dropdown. Opening Tasks then created `cron/` folders inside it. The picker now applies the Agent's own liveness checks, as far as the installed Agent provides them, and the Tasks job list skips homes that aren't live. The default home and custom `HERMES_HOME` roots stay readable.
+
+- **The opt-in native Gateway session transport no longer reconnects forever when its socket is missing, and Stop reaches a turn in every phase (#8905, #9227, @chhxbchhxb).** With `webui_gateway_session_transport: unix` and a socket path that doesn't exist, a turn kept reconnecting every few seconds and Stop couldn't end it. A failure before the first submission now ends the turn after one attempt. Stop now reaches a turn that hasn't been submitted yet, and one whose submission acknowledgement is still pending. Failures after a submission keep the existing reconnect-and-resume behaviour.
 
 - **Tool cards saved with a turn now keep each result with its own call (#6061, @webtecnica).** When a turn's transcript had no tool-call declarations and the live progress list was missing some ids, the saved tool summaries were paired with results by position, so on reopen one tool's output could appear under another tool's command, or in the wrong order. Results are now matched by tool-call id first, and the rest are paired in order, so each card keeps its own command, arguments and output, in result order. Related: #4666 (memory tool calls missing from the stream), which this does not resolve.
 
@@ -323,6 +329,10 @@
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Internal
+
+- **The shared-memory-provider test skips cleanly when the Agent's own dependencies aren't installed (test-only, #9340).** `test_real_memory_manager_refuses_a_shared_instance_for_a_second_profile` imports the real Agent class. In a WebUI-only venv that has the Agent's source but not its third-party packages (`psutil`), it errored instead of skipping. It now skips only for those known Agent-only packages when they are truly absent. Any other missing module, including the Agent's own `run_agent` and WebUI imports, still fails.
+
+- **The slow-endpoint model-catalog test no longer fails on a busy machine (test-only, #9331).** `test_real_slow_healthy_endpoint_is_listed_and_cached` timed a real 2.5 s endpoint against the rebuild window, so on a loaded runner the rest of the rebuild could use up the slack and fail it. The test keeps the real HTTP server but runs the window on a virtual clock that moves only by the endpoint's latency, and it fails if any timed wait expires, so a shortened wait or slice is still caught.
 
 - **The context-length contract tests check behaviour again (#9254, closes #8900).** Thanks @chhxbchhxb. An earlier byte-for-byte revert of two test files also dropped later behavioural cases, which had degraded to source-string checks. They are back: the per-profile config re-read on every lookup, and safe handling of a null, empty or malformed `providers:` section.
 
