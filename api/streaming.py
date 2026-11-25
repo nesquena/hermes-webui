@@ -1915,6 +1915,28 @@ def _load_prefill_messages_script(config_data: dict) -> dict:
     return {"status": "loaded", "source": "script", "label": label, "messages": messages, "message_count": len(messages)}
 
 
+def _resolve_checkpoints_enabled(config_data: Optional[dict] = None) -> bool:
+    """Return the profile's ``checkpoints.enabled`` for a WebUI-created agent.
+
+    ``AIAgent`` defaults ``checkpoints_enabled`` to False — the agent ships
+    filesystem checkpointing as an opt-in ("most users never use /rollback") —
+    and the WebUI never passed the flag, so browser-originated sessions took no
+    snapshots even when the operator had enabled checkpoints in config.yaml.
+    The TUI and messaging gateways both resolve the flag from config; this path
+    did not.
+
+    Mirrors ``tui_gateway.checkpoints._load_checkpoints_enabled``: an absent or
+    malformed section stays False, so a profile that never opted in is
+    unaffected, and the legacy ``checkpoints: true`` scalar form still works.
+    """
+    cp_cfg = (config_data or {}).get("checkpoints", {}) if isinstance(config_data, dict) else {}
+    if isinstance(cp_cfg, bool):
+        return cp_cfg
+    if not isinstance(cp_cfg, dict):
+        return False
+    return bool(cp_cfg.get("enabled", False))
+
+
 def _load_webui_prefill_context(
     config_data: Optional[dict] = None,
 ) -> dict:
@@ -16533,6 +16555,8 @@ def _run_agent_streaming(
                 _agent_kwargs['max_iterations'] = _max_iterations_cfg
             if 'max_tokens' in _agent_params and _max_tokens_cfg is not None:
                 _agent_kwargs['max_tokens'] = _max_tokens_cfg
+            if 'checkpoints_enabled' in _agent_params:
+                _agent_kwargs['checkpoints_enabled'] = _resolve_checkpoints_enabled(_cfg)
             if 'request_overrides' in _agent_params and _main_request_overrides:
                 _agent_kwargs['request_overrides'] = _main_request_overrides
             # Params added in newer hermes-agent — skip if not supported.
