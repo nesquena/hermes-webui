@@ -57,6 +57,8 @@ const S={{session:{{session_id:'sid-1',workspace:'/deleted'}},_dirCache:{{old:tr
 let _wsTreeGen=0;
 let _wsTreeLoadSeq=0;
 let _wsTreeEntriesSeq=0;
+let _wsTreeCacheEpoch=0;
+const _wsTreeCacheListedAt=new Map();
 function bumpWorkspaceTreeGen(){{_wsTreeGen+=1;return _wsTreeGen;}}
 function _restoreExpandedDirs(){{events.push(['restore',S.session.workspace]);}}
 function _workspaceRouteForPath(){{return '';}}
@@ -107,6 +109,8 @@ const S={{
 let _wsTreeGen=0;
 let _wsTreeLoadSeq=0;
 let _wsTreeEntriesSeq=0;
+let _wsTreeCacheEpoch=0;
+const _wsTreeCacheListedAt=new Map();
 let listCalls=0;
 let resolveOldList;
 const oldList=new Promise(resolve=>{{resolveOldList=resolve;}});
@@ -161,3 +165,211 @@ let _currentPanel='workspace';
         event[0] == "toast" and "workspace_recovered_notice" in event[1]
         for event in payload["events"]
     )
+
+
+def _expanded_folder_refresh_race(order: str) -> dict:
+    """Drive the real loadDir: an older root load (A) and a refresh (B) over one expanded folder.
+
+    A gets its root listing, renders it, and waits on its prefetch of `docs`. B is the
+    refresh after a workspace write: it clears the folder cache and waits on its own root
+    listing. `order` says which arrives next: A's `docs` listing (requested before the
+    write) or B's root listing. A may still show its listing, but B fetches the folder.
+    """
+    load_dir = _extract_async_function(WORKSPACE_JS, "loadDir")
+    script = f"""
+const S={{session:{{session_id:'sid-1',workspace:'/ws'}},_dirCache:{{}},_expandedDirs:new Set(['docs'])}};
+let _wsTreeGen=0;
+let _wsTreeLoadSeq=0;
+let _wsTreeEntriesSeq=0;
+let _wsTreeCacheEpoch=0;
+const _wsTreeCacheListedAt=new Map();
+const calls={{root:0,docs:0}};
+let resolveADocs, resolveBRoot;
+function _restoreExpandedDirs(){{}}
+function _workspaceRouteForPath(path){{return path&&path!=='.'?'/dir/'+path:'';}}
+async function api(url){{
+  if(url==='/dir/docs'){{
+    calls.docs+=1;
+    if(calls.docs===1)return new Promise(resolve=>{{resolveADocs=resolve;}});
+    return {{entries:[{{name:'after_write.txt'}}]}};
+  }}
+  if(url.startsWith('/api/list')){{
+    calls.root+=1;
+    if(calls.root===1)return {{entries:[{{name:'root-before-write'}}]}};
+    return new Promise(resolve=>{{resolveBRoot=resolve;}});
+  }}
+  throw new Error('unexpected api '+url);
+}}
+function renderBreadcrumb(){{}}
+function renderFileTree(){{}}
+function renderSessionArtifacts(){{}}
+function clearPreview(){{}}
+function refreshOpenPreviewIfMutated(){{}}
+function showToast(){{}}
+function t(key){{return key;}}
+function _refreshGitBadge(){{}}
+function $(){{return null;}}
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+{load_dir}
+(async()=>{{
+  const loadA=loadDir('.');
+  await settle();  // A has rendered its root and is waiting on its docs prefetch
+  const loadB=loadDir('.',{{refreshExpanded:true}});
+  await settle();  // B has cleared the cache and is waiting on its root listing
+  if({order!r}==='a-docs-first'){{
+    resolveADocs({{entries:[{{name:'before_write.txt'}}]}});
+    await settle();
+    resolveBRoot({{entries:[{{name:'root-after-write'}}]}});
+  }}else{{
+    resolveBRoot({{entries:[{{name:'root-after-write'}}]}});
+    await settle();
+    resolveADocs({{entries:[{{name:'before_write.txt'}}]}});
+  }}
+  await Promise.all([loadA,loadB]);
+  process.stdout.write(JSON.stringify({{entries:S.entries,docs:S._dirCache.docs||null,calls}}));
+}})().catch(err=>{{console.error(err);process.exit(1);}});
+"""
+    return _run_node(script)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+@pytest.mark.parametrize("order", ["a-docs-first", "b-root-first"])
+def test_refresh_refetches_a_folder_an_older_load_listed_before_its_clear(order):
+    payload = _expanded_folder_refresh_race(order)
+
+    assert payload["entries"] == [{"name": "root-after-write"}]
+    # The folder shows what it holds after the write, from the refresh's own request.
+    assert payload["docs"] == [{"name": "after_write.txt"}]
+    assert payload["calls"] == {"root": 2, "docs": 2}
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+def test_folder_listing_requested_after_a_newer_refresh_cleared_the_cache_is_kept():
+    """A refresh (B) starts while an older root load (A) is still waiting on its root.
+
+    A's folder request goes out after B cleared the cache, so it sees the same state B
+    will. A keeps it, its completing render shows the folder (and keeps keyboard focus
+    inside it), and B does not fetch the folder again.
+    """
+    load_dir = _extract_async_function(WORKSPACE_JS, "loadDir")
+    script = f"""
+const S={{session:{{session_id:'sid-1',workspace:'/ws'}},_dirCache:{{}},_expandedDirs:new Set(['docs'])}};
+let _wsTreeGen=0;
+let _wsTreeLoadSeq=0;
+let _wsTreeEntriesSeq=0;
+let _wsTreeCacheEpoch=0;
+const _wsTreeCacheListedAt=new Map();
+const calls={{root:0,docs:0}};
+let resolveARoot, resolveBRoot;
+function _restoreExpandedDirs(){{}}
+function _workspaceRouteForPath(path){{return path&&path!=='.'?'/dir/'+path:'';}}
+async function api(url){{
+  if(url==='/dir/docs'){{calls.docs+=1;return {{entries:[{{name:'current.txt'}}]}};}}
+  if(url.startsWith('/api/list')){{
+    calls.root+=1;
+    if(calls.root===1)return new Promise(resolve=>{{resolveARoot=resolve;}});
+    return new Promise(resolve=>{{resolveBRoot=resolve;}});
+  }}
+  throw new Error('unexpected api '+url);
+}}
+function renderBreadcrumb(){{}}
+function renderFileTree(){{}}
+function renderSessionArtifacts(){{}}
+function clearPreview(){{}}
+function refreshOpenPreviewIfMutated(){{}}
+function showToast(){{}}
+function t(key){{return key;}}
+function _refreshGitBadge(){{}}
+function $(){{return null;}}
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+{load_dir}
+(async()=>{{
+  const loadA=loadDir('.');
+  await settle();
+  const loadB=loadDir('.',{{refreshExpanded:true}});
+  await settle();  // B has cleared the cache; both root listings are pending
+  resolveARoot({{entries:[{{name:'root'}}]}});
+  await loadA;     // A rendered its root, then asked for docs after B's clear
+  const docsAfterA=S._dirCache.docs||null;
+  resolveBRoot({{entries:[{{name:'root'}}]}});
+  await loadB;
+  process.stdout.write(JSON.stringify({{docsAfterA,docs:S._dirCache.docs||null,calls}}));
+}})().catch(err=>{{console.error(err);process.exit(1);}});
+"""
+    payload = _run_node(script)
+
+    assert payload["docsAfterA"] == [{"name": "current.txt"}]
+    assert payload["docs"] == [{"name": "current.txt"}]
+    assert payload["calls"] == {"root": 2, "docs": 1}
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+@pytest.mark.parametrize("order", ["b-docs-first", "a-docs-first"])
+def test_folder_listing_from_before_a_recovery_clear_never_outlives_it(order):
+    """B renders and asks for `docs`; then the older load A's root reports a workspace
+    recovery, clears the cache again and asks for `docs` in the recovered workspace.
+    Whichever `docs` listing lands first, the folder ends up with A's, requested after
+    the latest clear."""
+    load_dir = _extract_async_function(WORKSPACE_JS, "loadDir")
+    script = f"""
+const S={{session:{{session_id:'sid-1',workspace:'/ws'}},_dirCache:{{}},_expandedDirs:new Set(['docs'])}};
+let _wsTreeGen=0;
+let _wsTreeLoadSeq=0;
+let _wsTreeEntriesSeq=0;
+let _wsTreeCacheEpoch=0;
+const _wsTreeCacheListedAt=new Map();
+const calls={{root:0,docs:0}};
+let resolveARoot, resolveADocs, resolveBDocs;
+function _restoreExpandedDirs(){{}}
+function _workspaceRouteForPath(path){{return path&&path!=='.'?'/dir/'+path:'';}}
+async function api(url){{
+  if(url==='/dir/docs'){{
+    calls.docs+=1;
+    if(calls.docs===1)return new Promise(resolve=>{{resolveBDocs=resolve;}});
+    return new Promise(resolve=>{{resolveADocs=resolve;}});
+  }}
+  if(url.startsWith('/api/list')){{
+    calls.root+=1;
+    if(calls.root===1)return new Promise(resolve=>{{resolveARoot=resolve;}});
+    return {{entries:[{{name:'root'}}]}};
+  }}
+  throw new Error('unexpected api '+url);
+}}
+function renderBreadcrumb(){{}}
+function renderFileTree(){{}}
+function renderSessionArtifacts(){{}}
+function clearPreview(){{}}
+function refreshOpenPreviewIfMutated(){{}}
+function showToast(){{}}
+function t(key){{return key;}}
+function _refreshGitBadge(){{}}
+function $(){{return null;}}
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+{load_dir}
+(async()=>{{
+  const loadA=loadDir('.');
+  await settle();
+  const loadB=loadDir('.');
+  await settle();  // B rendered and is waiting on docs from the old workspace
+  resolveARoot({{entries:[{{name:'root'}}],workspace:'/fallback',workspace_recovered:true}});
+  await settle();  // A cleared the cache again and is waiting on docs in /fallback
+  const old={{entries:[{{name:'old-workspace.txt'}}]}};
+  const recovered={{entries:[{{name:'recovered.txt'}}]}};
+  if({order!r}==='b-docs-first'){{
+    resolveBDocs(old);
+    await settle();
+    resolveADocs(recovered);
+  }}else{{
+    resolveADocs(recovered);
+    await settle();
+    resolveBDocs(old);
+  }}
+  await Promise.all([loadA,loadB]);
+  process.stdout.write(JSON.stringify({{workspace:S.session.workspace,docs:S._dirCache.docs||null,calls}}));
+}})().catch(err=>{{console.error(err);process.exit(1);}});
+"""
+    payload = _run_node(script)
+
+    assert payload["workspace"] == "/fallback"
+    assert payload["docs"] == [{"name": "recovered.txt"}]
+    assert payload["calls"] == {"root": 2, "docs": 2}

@@ -997,11 +997,16 @@ if(typeof window!=='undefined') window.bumpWorkspaceTreeGen = bumpWorkspaceTreeG
 // Two loadDir() calls can be in flight at once (a conversation's deferred refresh and
 // the refresh after a workspace write), and their /api/list responses can arrive in
 // either order. Each load is numbered when it starts. An older load never replaces a
-// listing a newer load has already shown: it skips its first render, and it only
-// fills expanded-folder listings that nothing newer has written. Without this, a
+// listing a newer load has already shown: it skips its first render. Without this, a
 // response taken before a change and landing last repainted the tree as it was.
+// Each folder listing in the cache remembers the cache epoch its request was sent in.
+// Any load fills an empty slot (so an older load can still show the folder), but a
+// listing requested earlier never replaces one requested later, and a load fetches
+// again any expanded folder whose listing predates the latest clear.
 let _wsTreeLoadSeq = 0;     // the number of the most recently started loadDir()
 let _wsTreeEntriesSeq = 0;  // the number of the load whose listing S.entries holds
+let _wsTreeCacheEpoch = 0;  // goes up each time S._dirCache is cleared
+const _wsTreeCacheListedAt = new Map();  // folder -> cache epoch its listing was requested in
 
 function showWorkspaceTreeSkeleton(){
   const tree = $('fileTree');
@@ -1063,7 +1068,8 @@ async function loadDir(path, opts={}){
   try{
     if(!path||path==='.'||refreshExpanded){
       if(typeof _syncWorkspaceBirthtimeSupportScope==='function') _syncWorkspaceBirthtimeSupportScope((S.session&&S.session.workspace)||'');
-      S._dirCache={};
+      S._dirCache={};_wsTreeCacheListedAt.clear();
+      _wsTreeCacheEpoch+=1;
       _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
     S.currentDir=path||'.';
@@ -1074,7 +1080,8 @@ async function loadDir(path, opts={}){
     if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
     if(data.workspace_recovered&&data.workspace){
       S.session.workspace=String(data.workspace);
-      S._dirCache={};
+      S._dirCache={};_wsTreeCacheListedAt.clear();
+      _wsTreeCacheEpoch+=1;
       _restoreExpandedDirs();
       if(typeof syncWorkspaceDisplays==='function')syncWorkspaceDisplays();
       if(typeof syncTerminalButton==='function')syncTerminalButton();
@@ -1100,18 +1107,29 @@ async function loadDir(path, opts={}){
     // (parallelized — avoids serial waterfall when multiple dirs are expanded)
     if(!path||path==='.'||refreshExpanded){
       const expanded=S._expandedDirs||new Set();
-      const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);
+      // A folder listed before the latest clear (an older load filling the gap) is
+      // fetched again: it may predate the change the clearing load was started for.
+      const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]
+        ||(_wsTreeCacheListedAt.has(dirPath)&&_wsTreeCacheListedAt.get(dirPath)<_wsTreeCacheEpoch));
       if(pending.length){
+        const listedAt=_wsTreeCacheEpoch;  // the cache epoch these listings are requested in
         const results=await Promise.all(pending.map(dirPath=>
           api(_workspaceRouteForPath(dirPath, 'list'))
             .then(dc=>({dirPath,entries:dc.entries||[]}))
             .catch(()=>({dirPath,entries:[]}))
         ));
         if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
-        // Only the load whose listing is shown overwrites; an older one fills gaps.
+        // Any load fills an empty slot. Otherwise the listing requested in the later
+        // cache epoch wins; within one epoch (or over a listing written elsewhere),
+        // only the load whose root listing is shown overwrites.
         const ownsListing=loadSeq>=_wsTreeEntriesSeq;
         for(const {dirPath,entries} of results){
-          if(ownsListing||!S._dirCache[dirPath]) S._dirCache[dirPath]=entries;
+          const previous=_wsTreeCacheListedAt.get(dirPath);
+          if(!S._dirCache[dirPath]||(previous===undefined?ownsListing
+              :(listedAt>previous||(listedAt===previous&&ownsListing)))){
+            S._dirCache[dirPath]=entries;
+            _wsTreeCacheListedAt.set(dirPath,listedAt);
+          }
         }
       }
       if(expanded.size>0)renderFileTree({completesRefill:refill,scope:treeScope});
