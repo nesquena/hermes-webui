@@ -458,6 +458,56 @@ def _run_pending_file_ownership_harness() -> dict:
     return json.loads(proc.stdout)
 
 
+def _run_owner_state_eviction_harness() -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+
+    script = textwrap.dedent(
+        f"""
+        {_composer_authority_helpers()}
+        const browserOnlyFile={{
+          name:'browser-only.pdf', size:4, type:'application/pdf'
+        }};
+        _rememberComposerOwnerState('read-only-session','default',{{
+          text:'browser-only draft',files:[browserOnlyFile],revision:1,
+        }},1);
+        for(let index=0;index<400;index+=1){{
+          _rememberComposerOwnerState(`session-${{index}}`,'default',{{
+            text:'',files:[],revision:0,
+          }},0);
+        }}
+        const kept=_composerRememberedOwnerSnapshot('read-only-session','default');
+        const oldestEmpty=_composerRememberedOwnerSnapshot('session-0','default');
+        const newest=_composerRememberedOwnerSnapshot('session-399','default');
+        process.stdout.write(JSON.stringify({{
+          kept:kept?{{
+            text:kept.text,files:kept.files.map(file=>file.name),
+            exactFile:kept.files[0]===browserOnlyFile,
+          }}:null,
+          oldestEmpty:!!oldestEmpty,
+          newest:!!newest,
+        }}));
+        """
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+def test_owner_state_churn_keeps_browser_only_drafts():
+    result = _run_owner_state_eviction_harness()
+
+    assert result["kept"] == {
+        "text": "browser-only draft",
+        "files": ["browser-only.pdf"],
+        "exactFile": True,
+    }
+    # Empty snapshots only mirror server-persisted state, so they still churn.
+    assert result["oldestEmpty"] is False
+    assert result["newest"] is True
+
+
 def _run_new_session_harness(
     *,
     fail_create: bool,
