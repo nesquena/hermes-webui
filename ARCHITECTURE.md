@@ -861,6 +861,18 @@ Where the bindings take effect:
   own profile; the root/default project claims default-profile (and unprofiled
   legacy) rows. `_profiles_match` handles the renamed-root alias for the bind.
 
+### 4.13 External Skill Directories per Profile
+
+The Agent's `get_external_skills_dirs()` reads `skills.external_dirs` from the
+process profile's `config.yaml`. Skills API lookups are per request, so
+`_active_skill_search_dirs()` in `api/routes.py` calls
+`api.skill_runtime.profile_external_skill_dirs()` for the profile that owns the
+request's local skills dir instead. It reads the request profile's own config and resolves each entry as the
+Agent does: `$VAR`/`${VAR}` in one pass (an unknown variable stays literal), `~`,
+relative paths from the profile home, the local `skills/` dir and missing
+directories skipped. Variables come from `profile_env_binding()` (§8.1), with
+`HOME` set to the WebUI's shell home. The live process environment is never read.
+
 
 ---
 
