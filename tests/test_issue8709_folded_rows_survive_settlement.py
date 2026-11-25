@@ -29,6 +29,8 @@ from api.compression_anchor import (
     compaction_handoff_remainder,
     is_compaction_handoff_carrier,
     is_context_compression_marker,
+    is_folded_compaction_carrier,
+    is_standalone_compaction_card,
 )
 from api.models import Session
 from api.streaming import _merge_display_messages_after_agent_result
@@ -261,3 +263,167 @@ def test_standalone_cards_and_textless_carriers_are_still_dropped():
             f"{label}: textless carrier leaked its synthetic summary"
         )
         assert _rows_containing(merged, "next answer"), f"{label}: the new turn was not appended"
+
+
+# ── Structured content: the same folded rows stored as content blocks ─────────
+# The Agent also stores a row's content as a list of blocks. The display
+# projector preserves the authentic text of ``text``/``input_text``/``output_text``
+# blocks (and of type-less ``text``/``content`` blocks), so the drop predicate has
+# to reach those forms too: an empty result from a string-only parser is not proof
+# that a structured row is synthetic (review 2026-11-25T06:27:58Z).
+
+STRUCTURED_PART_TYPES = ("text", "input_text", "output_text")
+
+
+def _carrier_text(authentic):
+    return (
+        HEADER + "\n" + authentic + "\n\n" + DELIMITER + "\n\n"
+        + SUMMARY + "\n\n" + END_MARKER
+    )
+
+
+def _structured_folded(role, authentic, part_type, *, tool_calls=None, timestamp=3.0):
+    message = {
+        "role": role,
+        "content": [{"type": part_type, "text": _carrier_text(authentic)}],
+        "_compressed_summary": True,
+        "timestamp": timestamp,
+    }
+    if tool_calls is not None:
+        message["tool_calls"] = tool_calls
+    return message
+
+
+def _structured_stored_rows(part_type):
+    """The durable display transcript, with both carriers stored as block lists."""
+    return [
+        {"role": "user", "content": "first question", "timestamp": 1.0},
+        {"role": "assistant", "content": "first answer", "timestamp": 2.0},
+        _structured_folded("user", USER_AUTHENTIC, part_type, timestamp=3.0),
+        _structured_folded(
+            "assistant", ASSISTANT_AUTHENTIC, part_type,
+            tool_calls=json.loads(json.dumps(CARRIER_TOOL_CALLS)),
+            timestamp=4.0,
+        ),
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "file body",
+            "timestamp": 5.0,
+        },
+        {"role": "assistant", "content": "done", "timestamp": 6.0},
+    ]
+
+
+@pytest.mark.parametrize("part_type", STRUCTURED_PART_TYPES)
+def test_structured_folded_rows_are_preserved_by_the_drop_predicate(part_type):
+    """Premise: a structured folded carrier is a marker but must not be a card."""
+    for role, authentic in (("user", USER_AUTHENTIC), ("assistant", ASSISTANT_AUTHENTIC)):
+        carrier = _structured_folded(role, authentic, part_type)
+        assert is_context_compression_marker(carrier) is True
+        assert is_folded_compaction_carrier(carrier) is True
+        assert is_standalone_compaction_card(carrier) is False, (
+            f"{part_type}/{role}: a structured folded carrier with authentic text "
+            "was classified as a standalone card"
+        )
+
+
+@pytest.mark.parametrize("part_type", STRUCTURED_PART_TYPES)
+@pytest.mark.parametrize("branch", ["append-only", "compacted"])
+def test_structured_settlement_keeps_folded_rows(part_type, branch):
+    store = _structured_stored_rows(part_type)
+    result = _append_only_result(store) if branch == "append-only" else _compacted_result()
+    merged = _merge_display_messages_after_agent_result(
+        [dict(m) for m in store],
+        [dict(m) for m in store],
+        result,
+        "next question",
+    )
+
+    _assert_folded_rows_survived(merged, f"{part_type}/{branch} merge")
+    assert _rows_containing(merged, "next answer"), (
+        f"{part_type}/{branch}: the new turn was not appended"
+    )
+
+
+@pytest.mark.parametrize("part_type", STRUCTURED_PART_TYPES)
+def test_structured_save_and_reload_keeps_folded_rows(part_type, session_store):
+    store = _structured_stored_rows(part_type)
+    merged = _merge_display_messages_after_agent_result(
+        [dict(m) for m in store],
+        [dict(m) for m in store],
+        _append_only_result(store),
+        "next question",
+    )
+
+    session = Session(session_id="s8709foldblocks", title="folded blocks", messages=merged)
+    session.save(skip_index=True)
+
+    raw_path = Path(session_store) / "s8709foldblocks.json"
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    _assert_folded_rows_survived(raw["messages"], f"{part_type} session file")
+
+    loaded = Session.load("s8709foldblocks")
+    assert loaded is not None
+    _assert_folded_rows_survived(loaded.messages, f"{part_type} reloaded session")
+
+
+@pytest.mark.parametrize("part_type", STRUCTURED_PART_TYPES)
+def test_structured_standalone_cards_and_textless_carriers_are_still_dropped(part_type):
+    """Control: structured rows with nothing authored stay out of the transcript."""
+    card = {
+        "role": "assistant",
+        "content": [{"type": part_type, "text": CARD_CONTENT}],
+        "timestamp": 2.0,
+    }
+    pure_carrier = {
+        "role": "assistant",
+        "content": [{"type": part_type, "text": (
+            HEADER + "\n\n" + DELIMITER + "\n\n" + SUMMARY + "\n\n" + END_MARKER
+        )}],
+        "_compressed_summary": True,
+        "timestamp": 4.0,
+    }
+    # An author-less header shape without a delimiter is a card as well.
+    bare_header = {
+        "role": "assistant",
+        "content": [{"type": part_type, "text": (
+            HEADER + "\n\n" + SUMMARY + "\n\n" + END_MARKER
+        )}],
+        "_compressed_summary": True,
+        "timestamp": 4.5,
+    }
+    previous_display = [
+        {"role": "user", "content": "first question", "timestamp": 1.0},
+        card,
+        pure_carrier,
+        bare_header,
+    ]
+    previous_context = [dict(m) for m in previous_display]
+
+    for label, result in (
+        (
+            "append-only",
+            [dict(m) for m in previous_context]
+            + [
+                {"role": "user", "content": "next question", "timestamp": 7.0},
+                {"role": "assistant", "content": "next answer", "timestamp": 8.0},
+            ],
+        ),
+        ("compacted", _compacted_result()),
+    ):
+        merged = _merge_display_messages_after_agent_result(
+            [dict(m) for m in previous_display],
+            [dict(m) for m in previous_context],
+            result,
+            "next question",
+        )
+        assert _rows_containing(merged, CARD_CONTENT) == [], (
+            f"{part_type}/{label}: structured standalone card leaked"
+        )
+        assert _rows_containing(merged, "padding detail line") == [], (
+            f"{part_type}/{label}: structured textless carrier leaked its summary"
+        )
+        assert _rows_containing(merged, "next answer"), (
+            f"{part_type}/{label}: the new turn was not appended"
+        )

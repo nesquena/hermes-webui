@@ -67,6 +67,8 @@ COMPACTION_HANDOFF_HEADER_PREFIX = "[prior context"
 COMPACTION_HANDOFF_DELIMITER_PREFIX = "[end of prior context"
 COMPACTION_PROMPT_CARD_PREFIX = "[context compaction"
 
+_SUPPORTED_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
+
 
 def _marker_text(message):
     """Return the lower-cased, left-trimmed text of a transcript message."""
@@ -209,15 +211,14 @@ def is_standalone_compaction_card(message) -> bool:
 
     Returns False when *message* is not a context compression marker.
     Returns False when *message* is a folded compaction carrier that retains
-    authentic text (i.e. ``is_folded_compaction_carrier`` is True and
-    ``compaction_handoff_remainder`` returns non-empty text).
+    authentic text.
     Returns True for all other markers: standalone summary cards, folded carriers
     with no authentic text, and task list / session arc summary markers.
     """
     if not is_context_compression_marker(message):
         return False
-    if is_folded_compaction_carrier(message) and bool(compaction_handoff_remainder(message)):
-        return False
+    if is_folded_compaction_carrier(message):
+        return not _folded_carrier_retains_authentic_text(message)
     return True
 
 
@@ -267,6 +268,48 @@ def _compaction_carrier_envelope_decision(content_text: str) -> tuple[str, str]:
         return _CARRIER_PROVEN_SYNTHETIC, ""
 
     return _CARRIER_NOT_A_CARRIER, ""
+
+
+def _folded_carrier_retains_authentic_text(message) -> bool:
+    """Return True if a folded carrier retains authentic authored text.
+
+    Answers whether a folded carrier still carries authentic retained text
+    over bare string or structured content forms. List content is evaluated
+    across every supported text block and newline-joined text; content with
+    no supported text blocks or unrecognised forms answers True conservatively.
+    """
+    content = message.get("content") if isinstance(message, dict) else message
+    if isinstance(content, str):
+        decision, _ = _compaction_carrier_envelope_decision(content)
+        return decision == _CARRIER_AUTHENTIC_REMAINDER
+
+    if isinstance(content, list):
+        supported_blocks: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                supported_blocks.append(part)
+            elif isinstance(part, dict):
+                part_type = part.get("type")
+                if part_type in _SUPPORTED_TEXT_PART_TYPES or (
+                    part_type is None and ("text" in part or "content" in part)
+                ):
+                    text_key = "text" if "text" in part else ("content" if "content" in part else None)
+                    if text_key and isinstance(part[text_key], str):
+                        supported_blocks.append(part[text_key])
+
+        if not supported_blocks:
+            return True
+
+        for block in supported_blocks:
+            decision, _ = _compaction_carrier_envelope_decision(block)
+            if decision == _CARRIER_AUTHENTIC_REMAINDER:
+                return True
+
+        joined_text = "\n".join(supported_blocks)
+        decision, _ = _compaction_carrier_envelope_decision(joined_text)
+        return decision == _CARRIER_AUTHENTIC_REMAINDER
+
+    return True
 
 
 def _projected_content_has_surviving_text(content) -> bool:
