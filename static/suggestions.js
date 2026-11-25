@@ -27,8 +27,17 @@
     }catch(_){ return false; }
   }
 
+  // ui.js deklariert `const S` auf Top-Level eines klassischen Scripts: die
+  // Bindung ist global lesbar, liegt aber NICHT als window.S vor. Beides prüfen.
   function _isBusy(){
-    try{ return !!(window.S&&window.S.busy); }catch(_){ return false; }
+    try{
+      if(typeof S!=='undefined'&&S&&S.busy) return true;
+      return !!(window.S&&window.S.busy);
+    }catch(_){ return false; }
+  }
+
+  function _currentSid(){
+    try{ return (typeof S!=='undefined'&&S&&S.session&&S.session.session_id)||null; }catch(_){ return null; }
   }
 
   // Strict per SPEC: JSON array of 1..6 non-empty strings, each <=200 chars.
@@ -71,23 +80,68 @@
     const msg=document.getElementById('msg');
     if(!msg) return;
     const draft=msg.value;
+    const draftFiles=Array.isArray((typeof S!=='undefined'&&S&&S.pendingFiles))?S.pendingFiles.slice():[];
+    // Der Chat, dem der Draft gehört — send() und das Warten auf /api/chat/start
+    // können dauern, und der Nutzer kann in der Zwischenzeit den Chat wechseln.
+    const ownerSid=_currentSid();
     msg.value=label;
     try{
       const fn=window.send;
       if(typeof fn==='function') await fn();
     }finally{
-      // Restore the draft only while the composer still holds our own label (or is
-      // already empty). send() clears it at some later point, and the user may
-      // already be typing the next message by the time this resolves — never
-      // clobber that.
-      const _untouched=!msg.value.trim()||msg.value===label;
-      if(draft&&_untouched){
-        msg.value=draft;
-        if(typeof window.autoResize==='function'){
-          try{ window.autoResize(); }catch(_){}
+      if(draft){
+        // send() hat den Server-Draft dieses Chats geleert. Damit ein Reload den
+        // wiederhergestellten Text nicht verliert, ihn für den Besitzer-Chat neu
+        // hinterlegen - aber nur, wenn er dort noch hingehört.
+        if(ownerSid&&typeof _saveComposerDraft==='function'){
+          try{ _saveComposerDraft(ownerSid,draft,draftFiles); }catch(_){}
+        }
+        // In das Eingabefeld zurück nur, wenn derselbe Chat noch offen ist und
+        // niemand inzwischen getippt hat (send() leert es teils erst später).
+        const _untouched=!msg.value.trim()||msg.value===label;
+        if(_currentSid()===ownerSid&&_untouched){
+          msg.value=draft;
+          if(typeof window.autoResize==='function'){
+            try{ window.autoResize(); }catch(_){}
+          }
         }
       }
     }
+  }
+
+  function _rootEl(){
+    return document.getElementById('msgInner')||document.getElementById('messages');
+  }
+
+  // Die Nachricht, zu der ein Knoten gehört: das direkte Kind des Transcript-
+  // Roots, in dem er steckt. Bewusst ohne Klassennamen — die Struktur bleibt
+  // gleich, auch wenn Zeilen anders benannt werden.
+  function _ownerRow(node){
+    const root=_rootEl();
+    if(!root||!node||!node.parentElement) return null;
+    let el=node;
+    while(el.parentElement&&el.parentElement!==root) el=el.parentElement;
+    return el.parentElement===root?el:null;
+  }
+
+  function _lastMessageRow(){
+    const root=_rootEl();
+    if(!root||!root.children) return null;
+    const kids=root.children;
+    for(let i=kids.length-1;i>=0;i--){
+      const kid=kids[i];
+      if(kid.querySelector&&kid.querySelector('.msg-body')) return kid;
+    }
+    return null;
+  }
+
+  // Nur die letzte Nachricht im Verlauf behält klickbare Vorschläge. Sobald eine
+  // spätere User-Nachricht existiert (getippt, nicht geklickt), ist die Frage
+  // von vorhin beantwortet — ein Klick würde eine alte Frage erneut senden.
+  function _isLiveGroup(group){
+    const row=_ownerRow(group);
+    if(!row) return false;
+    return row===_lastMessageRow();
   }
 
   function _applyGroupDisabled(group,disabled){
@@ -102,7 +156,9 @@
   function _syncGroupState(group){
     if(!group||!group.isConnected) return;
     const sent=group.dataset.suggestionsSent==='1';
-    _applyGroupDisabled(group,sent||_isBusy());
+    const live=_isLiveGroup(group);
+    group.classList.toggle('inline-suggestions-stale',!live&&!sent);
+    _applyGroupDisabled(group,sent||_isBusy()||!live);
   }
 
   function _syncAllGroups(){
@@ -111,7 +167,7 @@
 
   function _handleSuggestionClick(btn,group,label){
     if(btn.disabled||group.dataset.suggestionsSent==='1') return;
-    if(_isBusy()) return;
+    if(_isBusy()||!_isLiveGroup(group)) return;
     // Mark sent BEFORE the async send so a second rapid click (or the
     // Ctrl/Cmd+Enter shortcut firing in the same tick) can never double-send.
     group.dataset.suggestionsSent='1';
@@ -153,6 +209,16 @@
     if(!pre||pre.tagName!=='PRE') return;
     const msgBody=code.closest('.msg-body');
     if(!msgBody) return;
+    // Nur Antworten bekommen Buttons: ein Beispiel-Fence in einer User-Nachricht
+    // ist Inhalt, kein Angebot. Zeilen ohne data-role gelten als Antwort.
+    const roleBody=msgBody.closest('[data-role]');
+    const role=roleBody?roleBody.getAttribute('data-role'):null;
+    if(role&&role!=='assistant'){
+      if(code._suggestionsGroup){ code._suggestionsGroup.remove(); code._suggestionsGroup=null; }
+      code.classList.remove('suggestions-validated');
+      _unhideRawBlock(pre);
+      return;
+    }
     const raw=code.textContent;
     if(code._suggestionsRaw===raw&&code._suggestionsGroup&&code._suggestionsGroup.isConnected){
       return;
@@ -201,9 +267,17 @@
     _scanTimer=setTimeout(()=>{ _scanTimer=null; _scanAll(); },SCAN_DEBOUNCE_MS);
   }
 
-  function _newestGroup(){
-    const groups=document.querySelectorAll('.inline-suggestions');
-    return groups.length?groups[groups.length-1]:null;
+  // Nur die Gruppe an der letzten Nachricht darf die Tastenkombination bedienen —
+  // sonst antwortet ein Tastendruck auf eine Frage von vor drei Zügen.
+  function _liveGroup(){
+    const root=_rootEl();
+    if(!root) return null;
+    const last=_lastMessageRow();
+    const groups=root.querySelectorAll('.inline-suggestions');
+    for(let i=groups.length-1;i>=0;i--){
+      if(_ownerRow(groups[i])===last) return groups[i];
+    }
+    return null;
   }
 
   function _isImeEnter(e){
@@ -216,7 +290,7 @@
     if(_isImeEnter(e)) return;
     const msg=document.getElementById('msg');
     if(!msg||msg.value.trim()) return;
-    const group=_newestGroup();
+    const group=_liveGroup();
     if(!group) return;
     const primary=group.querySelector('.inline-suggestion-btn.primary');
     if(!primary||primary.disabled) return;

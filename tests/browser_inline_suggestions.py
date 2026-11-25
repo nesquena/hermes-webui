@@ -322,6 +322,125 @@ def _run_checks(page, failures):
         check(state["preHasHiddenClass"] is False, f"check6: raw block NOT marked hidden for invalid block ({desc})")
         check(state["preHidden"] is False, f"check6: raw block stays visible for invalid block ({desc})")
 
+    _review_checks(page, check)
+
+
+INJECT_USER_ROW_JS = """(args) => {
+  const [rowId, raw] = args;
+  const inner = document.getElementById('msgInner');
+  const row = document.createElement('div');
+  row.className = 'msg-row';
+  row.setAttribute('data-role', 'user');
+  row.setAttribute('data-test-row', rowId);
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+  body.innerHTML = '<p>Pasted example for ' + rowId + '</p>' +
+    '<div class="pre-header">suggestions</div>' +
+    '<pre><code class="language-suggestions"></code></pre>';
+  row.appendChild(body);
+  inner.appendChild(row);
+  row.querySelector('code').textContent = raw;
+  return true;
+}"""
+
+
+def _review_checks(page, check):
+    """Regressions from the review on PR #9361 (busy flag, liveness, user rows,
+    draft ownership). Runs after the SPEC checks, on the same page."""
+    # ── Check 7: the busy flag really disables buttons ──
+    page.evaluate(INJECT_ROW_JS, ["row7", _json(["Weiter"]), False])
+    _wait(page, "(rowId) => { const r = document.querySelector('[data-test-row=\"' + rowId + '\"]'); "
+                "return r && r.querySelectorAll('.inline-suggestion-btn').length === 1; }", arg="row7")
+    page.evaluate("() => { S.busy = true; return S.busy; }")
+    page.wait_for_timeout(400)  # BUSY_SYNC_MS is 150ms
+    disabled_busy = page.evaluate(
+        "() => document.querySelector('[data-test-row=\"row7\"] .inline-suggestion-btn').disabled")
+    check(disabled_busy is True, "check7: a running turn (S.busy) disables the suggestion buttons")
+    page.evaluate("() => { S.busy = false; return S.busy; }")
+    page.wait_for_timeout(400)
+    enabled_after = page.evaluate(
+        "() => !document.querySelector('[data-test-row=\"row7\"] .inline-suggestion-btn').disabled")
+    check(enabled_after is True, "check7: buttons come back once the turn finished")
+
+    # ── Check 8: a fenced example in a USER message is never turned into buttons ──
+    page.evaluate(INJECT_USER_ROW_JS, ["row8", _json(["Yes", "No"])])
+    page.wait_for_timeout(350)
+    user_state = page.evaluate(GROUP_STATE_JS, "row8")
+    check(user_state["groupCount"] == 0, "check8: user-authored fence renders no reply buttons")
+    check(user_state["preHidden"] is False, "check8: user-authored fence stays visible as content")
+
+    # ── Check 9: only the last message keeps live buttons ──
+    older_disabled = page.evaluate(
+        "() => Array.from(document.querySelectorAll('[data-test-row=\"row7\"] .inline-suggestion-btn'))"
+        ".every(b => b.disabled)")
+    check(older_disabled is True,
+          "check9: an older reply's buttons are disabled once a later message exists")
+
+    page.evaluate(INJECT_ROW_JS, ["row9", _json(["Neu primär"]), True])
+    _wait(page, "(rowId) => { const r = document.querySelector('[data-test-row=\"' + rowId + '\"]'); "
+                "return r && r.querySelectorAll('.inline-suggestion-btn').length === 1; }", arg="row9")
+    newest_state = page.evaluate(GROUP_STATE_JS, "row9")
+    check(newest_state["disabledStates"] == [False], "check9: the newest reply's buttons are live")
+
+    sends_before = len(page.evaluate(SEND_CALLS_JS))
+    page.evaluate(SET_COMPOSER_JS, "")
+    page.evaluate(FOCUS_MSG_JS)
+    page.keyboard.press("Control+Enter")
+    page.wait_for_timeout(250)
+    sends_after = page.evaluate(SEND_CALLS_JS)
+    check(sends_after[sends_before:] == ["Neu primär"],
+          f"check9: Ctrl+Enter answers the newest reply only (got {sends_after[sends_before:]!r})")
+
+    # ── Check 10: a restored draft is saved again for the chat it belongs to ──
+    page.evaluate(INJECT_ROW_JS, ["row10", _json(["Senden"]), True])
+    _wait(page, "(rowId) => { const r = document.querySelector('[data-test-row=\"' + rowId + '\"]'); "
+                "return r && r.querySelectorAll('.inline-suggestion-btn').length === 1; }", arg="row10")
+    page.evaluate("""() => {
+      window.__draftSaves = [];
+      S.session = { session_id: 'sid-A' };
+      window._saveComposerDraft = function(sid, text, files){
+        window.__draftSaves.push([sid, text]);
+      };
+      window.__sendCalls.length = 0;
+      window.send = function(){
+        window.__sendCalls.push(document.getElementById('msg').value);
+        return Promise.resolve();
+      };
+    }""")
+    page.evaluate(SET_COMPOSER_JS, "mein Entwurf")
+    page.evaluate(CLICK_BUTTON_JS, ["row10", 0])
+    page.wait_for_timeout(300)
+    draft_saves = page.evaluate("() => window.__draftSaves.slice()")
+    restored = page.evaluate(COMPOSER_VALUE_JS)
+    check(draft_saves == [["sid-A", "mein Entwurf"]],
+          f"check10: the restored draft is persisted for its chat (got {draft_saves!r})")
+    check(restored == "mein Entwurf", f"check10: composer still gets the draft back (got {restored!r})")
+
+    # ── Check 11: switching chats mid-send must not write into the other chat ──
+    page.evaluate(INJECT_ROW_JS, ["row11", _json(["Senden"]), True])
+    _wait(page, "(rowId) => { const r = document.querySelector('[data-test-row=\"' + rowId + '\"]'); "
+                "return r && r.querySelectorAll('.inline-suggestion-btn').length === 1; }", arg="row11")
+    page.evaluate("""() => {
+      window.__draftSaves = [];
+      S.session = { session_id: 'sid-A' };
+      document.getElementById('msg').value = 'Draft für A';
+      window.send = function(){
+        window.__sendCalls.push(document.getElementById('msg').value);
+        // The user opens another chat while the send is still in flight.
+        S.session = { session_id: 'sid-B' };
+        document.getElementById('msg').value = '';
+        return Promise.resolve();
+      };
+    }""")
+    page.evaluate(CLICK_BUTTON_JS, ["row11", 0])
+    page.wait_for_timeout(300)
+    composer_b = page.evaluate(COMPOSER_VALUE_JS)
+    saves_switch = page.evaluate("() => window.__draftSaves.slice()")
+    check(composer_b == "" or composer_b == "Senden",
+          f"check11: chat B's composer does not receive chat A's draft (got {composer_b!r})")
+    check(saves_switch == [["sid-A", "Draft für A"]],
+          f"check11: the draft is parked on its own chat (got {saves_switch!r})")
+
 
 def _json(value):
     import json
