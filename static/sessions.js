@@ -122,6 +122,29 @@ function _forgetComposerPendingFiles(sid) {
   }
 }
 
+// Drop the owner's remembered live files only when they are exactly the retired
+// payload's files. A delivered steer's compare-and-clear retires its saved draft;
+// leaving that draft's attachments behind would restore them on the next visit
+// and upload them again with the following message. Files staged since (a newer
+// attachment set) are a different list and stay remembered.
+function _forgetComposerPendingFilesIfUnchanged(sid, files) {
+  if (!sid) return false;
+  const retired = Array.isArray(files) ? files.filter(_composerPendingFileIsLive) : [];
+  if (!retired.length) return false;
+  const suffix = `\u0000${sid}`;
+  let dropped = false;
+  for (const key of [..._composerPendingFilesByOwner.keys()]) {
+    if (!key.endsWith(suffix)) continue;
+    const remembered = _composerPendingFilesByOwner.get(key) || [];
+    const unchanged = remembered.length === retired.length
+      && remembered.every((file, index) => file === retired[index]);
+    if (!unchanged) continue;
+    _composerPendingFilesByOwner.delete(key);
+    dropped = true;
+  }
+  return dropped;
+}
+
 function _peekComposerPendingFiles(sid) {
   const key = _composerPendingFilesOwnerKey(sid);
   return key ? (_composerPendingFilesByOwner.get(key) || []).slice() : [];
@@ -835,6 +858,9 @@ function _clearComposerDraftIfUnchanged(sid, text, files, maxRev) {
     if (fallback && _composerDraftPayloadSignature(fallback.text, _composerDraftFilesForPersist(fallback.files)) === ifSig) {
       _forgetComposerDraftLocalFallback(sid);
     }
+    // The files are part of the retired payload: drop the matching remembered
+    // File objects so a later visit cannot restore and re-upload them.
+    _forgetComposerPendingFilesIfUnchanged(sid, files);
     _rememberComposerDraftPayloadState(sid, '', []);
     return true;
   }).catch(() => false);

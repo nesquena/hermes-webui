@@ -248,6 +248,42 @@ assert.equal(drafts.B9.text,'b draft');
 
 
 ATT = "const att={name:'a.txt',size:1,type:'text/plain'},newer={name:'new.txt',size:2,type:'text/plain'};"
+LIVE_ATT = ("const att=new File(['a'],'a.txt',{type:'text/plain'}),"
+            "newer=new File(['b'],'new.txt',{type:'text/plain'});")
+
+
+def test_retired_steer_draft_drops_its_remembered_attachments():
+    # Greptile 4698318174: a delivered steer's files stayed remembered after the
+    # compare-and-clear retired its draft, so returning to the chat restored them
+    # and the next message uploaded them again.
+    _run(LIVE_ATT + r'''
+S.pendingFiles=[att];
+const p=_trySteer('',false);await tick();
+await newSession();releaseSteer();assert.equal(await p,false);
+assert.equal(drafts.A.files.length,1,'owner draft persisted with the delivered file');
+assert.deepEqual(_peekComposerPendingFiles('A'),[att],'file remembered for the owner');
+emitLeftover('[files]');await tick();await tick();await tick();
+assert.deepEqual(drafts.A,{text:'',files:[]},'retired draft cleared');
+assert.deepEqual(_peekComposerPendingFiles('A'),[],'remembered file dropped with the retired draft');
+S.session={session_id:'A',active_stream_id:null,composer_draft:{...drafts.A}};
+S.pendingFiles=[];inp.value='';
+_restoreComposerDraft(drafts.A,'A');
+assert.deepEqual(S.pendingFiles,[],'no delivered attachment restored on return');
+assert.equal(inp.value,'');
+''')
+
+
+def test_retiring_steer_draft_keeps_newer_remembered_attachments():
+    _run(LIVE_ATT + r'''
+S.pendingFiles=[att];
+const p=_trySteer('',false);await tick();
+await newSession();releaseSteer();assert.equal(await p,false);
+// The user went back and staged a different file before the leftover landed.
+_rememberComposerPendingFiles('A',[newer]);
+emitLeftover('[files]');await tick();await tick();await tick();
+assert.deepEqual(drafts.A,{text:'',files:[]},'server retired the delivered draft');
+assert.deepEqual(_peekComposerPendingFiles('A'),[newer],'newer attachment kept');
+''')
 
 
 def test_attachment_only_retiring_draft_restores_empty_without_recursion():
