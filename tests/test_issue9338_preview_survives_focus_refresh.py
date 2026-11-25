@@ -88,17 +88,35 @@ def test_load_session_workspace_refresh_preserves_preview_for_same_session_reloa
     block = _load_session_block()
     calls = _workspace_refresh_calls(block)
     assert len(calls) >= 3, f"expected the three loadSession workspace refreshes, got {calls}"
-    for call in calls:
-        assert "preservePreview" in call or "_workspaceRefreshOpts" in call, (
-            "loadSession() must pass the same-session preview decision to every "
-            f"_deferWorkspaceRefreshForSession(sid, ...) call; got {call!r}"
+    decided = [c for c in calls if "preservePreview" in c or "_workspaceRefreshOpts" in c]
+    assert len(decided) >= 3, (
+        "loadSession() must pass the same-session preview decision to every "
+        f"_deferWorkspaceRefreshForSession(sid, ...) site; got {calls}"
+    )
+    # master's static invariants pin the plain `(sid)` form in each branch, so it
+    # survives as the navigation arm of the same decision — never on its own.
+    plain = [c for c in calls if c not in decided]
+    assert len(plain) >= 3, (
+        "every loadSession branch must keep master's plain `(sid)` deferral as the "
+        f"navigation arm; got {plain}"
+    )
+    for call in plain:
+        assert call == "_deferWorkspaceRefreshForSession(sid);", (
+            f"unexpected deferral form {call!r}"
+        )
+        assert f"if(!_workspaceRefreshOpts.preservePreview) {call}" in block, (
+            "the plain deferral may only be the navigation arm of the preview decision; "
+            f"found it standalone: {call!r}"
         )
 
     flat = block.replace(" ", "")
-    decision = "_workspaceRefreshOpts=_sessionLoadWorkspaceRefreshOpts(forceReload,currentSid,sid);"
+    decision = "_workspaceRefreshOpts="
     assert decision in flat, (
         "loadSession() must compute the workspace-refresh options ONCE from the "
         "entry-captured currentSid, like sameSessionForceReload does"
+    )
+    assert "_sessionLoadWorkspaceRefreshOpts(forceReload,currentSid,sid)" in flat, (
+        "the workspace-refresh decision must be taken from the entry-captured currentSid"
     )
     # Captured before the session is swapped in, so a reload of the same sid is
     # not mistaken for a navigation.

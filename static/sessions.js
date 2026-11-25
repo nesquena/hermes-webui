@@ -2816,7 +2816,11 @@ async function loadSession(sid){
   // #9338: captured HERE, before S.session is replaced below, so the deferred
   // workspace refresh of this load can tell a state refresh of the open session
   // from a navigation to another one. See _sessionLoadWorkspaceRefreshOpts().
-  const _workspaceRefreshOpts = _sessionLoadWorkspaceRefreshOpts(forceReload, currentSid, sid);
+  // typeof guard: harnesses that evaluate this body without the rest of the
+  // module get {} — the navigation shape, which is exactly master's behavior.
+  const _workspaceRefreshOpts = typeof _sessionLoadWorkspaceRefreshOpts==='function'
+    ? _sessionLoadWorkspaceRefreshOpts(forceReload, currentSid, sid)
+    : {};
   // Clicking the already-open session in the sidebar is a no-op. Reloading it
   // tears down active pane state and can reset the long-session scroll window
   // to the top even though the user did not navigate anywhere. Explicit
@@ -3462,7 +3466,11 @@ async function loadSession(sid){
       const liveTurn=document.getElementById('liveAssistantTurn');
       if(!liveTurn||!liveTurn.querySelector('.tool-call-group[data-tool-worklog-group="1"]')) ensureLiveWorklogShell();
     }
-    _deferWorkspaceRefreshForSession(sid, _workspaceRefreshOpts);
+    // #9338: the navigation arm keeps master's exact `(sid)` call (its static
+    // invariants pin that form after attachLiveStream); only a same-session
+    // state refresh asks the deferred refresh to keep the open preview.
+    if(!_workspaceRefreshOpts.preservePreview) _deferWorkspaceRefreshForSession(sid);
+    else _deferWorkspaceRefreshForSession(sid, _workspaceRefreshOpts);
     setBusy(true);setComposerStatus('');
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
@@ -3576,7 +3584,8 @@ async function loadSession(sid){
         if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
         else appendThinking();
       }
-      _deferWorkspaceRefreshForSession(sid, _workspaceRefreshOpts);
+      if(!_workspaceRefreshOpts.preservePreview) _deferWorkspaceRefreshForSession(sid);
+      else _deferWorkspaceRefreshForSession(sid, _workspaceRefreshOpts);
       updateQueueBadge(sid);
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
@@ -3597,7 +3606,8 @@ async function loadSession(sid){
       // Workspace refresh is guarded by session id inside loadDir(); keep it
       // after the transcript's first paint so chat switching is not competing
       // with file-tree / git badge IO.
-      _deferWorkspaceRefreshForSession(sid, _workspaceRefreshOpts);
+      if(!_workspaceRefreshOpts.preservePreview) _deferWorkspaceRefreshForSession(sid);
+      else _deferWorkspaceRefreshForSession(sid, _workspaceRefreshOpts);
     }
   }
 
