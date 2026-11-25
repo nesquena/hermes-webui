@@ -161,13 +161,20 @@ def _check(browser):
             "  text typed during the first Send was not retained: "
             f"expected {' world'!r}, got {after!r}"
         )
+    deadline = time.time() + 6
+    while not started and time.time() < deadline:
+        page.wait_for_timeout(50)
     messages = []
     for raw in started:
         try:
             messages.append(json.loads(raw).get("message"))
         except Exception:
             messages.append(None)
-    if messages and any(m != "hello" for m in messages):
+    # A first Send that never posts must fail the gate; an empty list is not a
+    # pass just because the composer retained the newer text.
+    if not messages:
+        failures.append("  the first Send never posted to /api/chat/start")
+    elif len(messages) != 1 or messages[0] != "hello":
         failures.append(f"  the first Send posted the wrong message: {messages!r}")
     page.unroute("**/api/chat/start")
     for err in errors:
