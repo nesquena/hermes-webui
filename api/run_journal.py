@@ -5,8 +5,10 @@ the existing in-process streaming path without changing execution ownership.
 """
 from __future__ import annotations
 
+import bisect
 import contextlib
 import gzip
+import hashlib
 import io
 import json
 import logging
@@ -809,6 +811,167 @@ def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
             events.append(parsed)
         else:
             malformed.append({"line": line_no, "raw": raw})
+    return events, malformed
+
+
+_AFTER_SEQ_INDEX_MAX_PATHS = 64
+_AFTER_SEQ_INDEX_STRIDE = 256
+# The path LRU alone does not bound memory: one malformed row can be arbitrarily
+# large. Keep at most 1 MiB of malformed UTF-8 bytes per indexed path. Beyond
+# this budget the current response remains complete, but that path is not cached.
+_AFTER_SEQ_INDEX_MAX_MALFORMED_BYTES = 1024 * 1024
+_after_seq_index: "OrderedDict[str, dict]" = OrderedDict()
+_after_seq_index_lock = threading.Lock()
+
+
+def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], list[dict]] | None:
+    """Tail read for ``after_seq`` via a per-path byte-offset checkpoint index.
+
+    Returns exactly what ``_read_jsonl`` would (all events, all malformed rows
+    with absolute line numbers) minus events at or below ``after_seq``, which
+    the caller filters anyway. Returns None whenever equivalence cannot be
+    guaranteed (archive/gz, CR bytes, identity change, shrink, bad seq);
+    the caller then takes the full-parse path.
+    """
+    if path.suffix == ".gz":
+        return None
+    archived = _archive_path_for(path)
+    if archived is not None and os.path.lexists(archived):
+        return None
+    key = str(path)
+    try:
+        threshold = int(after_seq)
+        with open(path, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            with _after_seq_index_lock:
+                idx = _after_seq_index.pop(key, None)
+            if idx is not None and (
+                idx["id"] != (st.st_dev, st.st_ino)
+                or st.st_size < idx["size"]
+                # A speculative reader may have indexed a complete row just
+                # before the producer's failed fsync rolled it back. Later
+                # committed rows can regrow the same inode to the exact old
+                # size; size-only validation would then skip them. ctime is
+                # the filesystem's same-inode change counter, so unchanged
+                # size with a different ctime must rebuild from real bytes.
+                or (st.st_size == idx["size"] and st.st_ctime_ns != idx.get("ctime"))
+                or len(idx.get("sigs", ())) != len(idx["offs"])
+                or "_segment_hash" not in idx
+            ):
+                idx = None
+            if idx is None:
+                idx = {"id": (st.st_dev, st.st_ino), "ctime": st.st_ctime_ns, "size": 0,
+                       "maxes": [float("-inf")], "offs": [0], "sigs": [b""],
+                       "_segment_hash": hashlib.sha256(),
+                       "lines": [0], "malformed": [], "malformed_bytes": 0, "rows": 0}
+            pos = bisect.bisect_right(idx["maxes"], threshold) - 1
+            start, line_no = idx["offs"][pos], idx["lines"][pos]
+            segment_start = idx["offs"][pos - 1] if start else 0
+            fh.seek(segment_start)
+            snapshot = fh.read()
+            # BufferedReader.read() may span several raw reads. If the producer
+            # rolls back and regrows between them, this buffer is not a coherent
+            # snapshot even though its segment happens to authenticate. Reject
+            # any observed producer generation change and take the full-reader
+            # fallback rather than splicing an old offset into new rows.
+            if _held_journal_signature(fh.fileno()) != (
+                    st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns):
+                return None
+            if start:
+                # A size/ctime pair still cannot distinguish ordinary growth
+                # from rollback followed by larger regrowth. Validate the
+                # bounded segment leading to this checkpoint against the bytes
+                # originally indexed. A discarded transient row changes that
+                # digest even when replacement rows preserve its endpoint;
+                # ordinary append-only growth leaves it intact. Coarse ctime
+                # resolution therefore cannot hide the same replay omission.
+                # Validate and replay from ONE coherent snapshot: a rollback and
+                # regrowth between separate segment and suffix reads could make
+                # an old cached offset point into a later producer generation.
+                segment_end = start - segment_start
+                segment = memoryview(snapshot)[:segment_end]
+                if (len(segment) != segment_end
+                        or hashlib.sha256(segment).digest() != idx["sigs"][pos]
+                        or snapshot[segment_end - 1:segment_end] != b"\n"):
+                    return None
+                del segment
+                data = snapshot[segment_end:]
+                del snapshot
+            else:
+                data = snapshot
+    except FileNotFoundError:
+        return None
+    except (OSError, TypeError, ValueError):
+        return None
+    if b"\r" in data:
+        return None
+    events: list[dict] = []
+    # Serve fresh diagnostic dictionaries: callers own their response, so a
+    # malformed row coming from the cached prefix must never alias the dict
+    # stored in ``_after_seq_index`` (nor a previous response's dict). The
+    # full reader returns independent dicts on every call; an indexed read
+    # must too, or an in-process caller edit would rewrite the shared index
+    # and change a later replay's diagnostics without any journal change.
+    malformed = [dict(m) for m in idx["malformed"] if m["line"] <= line_no]
+    off = start
+    prefix_max = idx["maxes"][pos]
+    for raw_b in data.split(b"\n"):
+        line_no += 1
+        line_end = off + len(raw_b) + 1
+        complete = line_end <= start + len(data)
+        extend = complete and line_end > idx["size"]
+        raw = raw_b.decode("utf-8", errors="surrogateescape")
+        if extend:
+            # Continue the digest from the prior checkpoint through every new
+            # byte, including blank/malformed rows and their newline. Checkpoints
+            # retain one digest per complete stride; a later read can therefore
+            # rehash only that bounded segment rather than the whole journal.
+            idx["_segment_hash"].update(data[max(off, idx["size"]) - start:line_end - start])
+        if raw.strip():
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                try:
+                    seq = int(parsed.get("seq") or 0)
+                except (TypeError, ValueError):
+                    return None
+                prefix_max = max(prefix_max, seq)
+                if seq > threshold:
+                    events.append(parsed)
+                if extend:
+                    idx["rows"] += 1
+                    if idx["rows"] % _AFTER_SEQ_INDEX_STRIDE == 0:
+                        idx["maxes"].append(prefix_max)
+                        idx["offs"].append(line_end)
+                        idx["sigs"].append(idx["_segment_hash"].digest())
+                        idx["_segment_hash"] = hashlib.sha256()
+                        idx["lines"].append(line_no)
+            else:
+                # The response's dict belongs to the caller; store a separate
+                # copy in the index so neither side can mutate the other.
+                entry = {"line": line_no, "raw": raw}
+                malformed.append(entry)
+                if extend:
+                    idx["malformed"].append(dict(entry))
+                    idx["malformed_bytes"] += len(raw_b)
+        if extend:
+            idx["size"] = line_end
+        off = line_end
+    if archived is not None and os.path.lexists(archived):
+        return None
+    # This is the stat captured before scanning; later same-size rewrites with
+    # a newer ctime invalidate above. A larger ordinary append may extend the
+    # old checkpoints, so its newly observed ctime becomes the saved baseline.
+    idx["ctime"] = st.st_ctime_ns
+    with _after_seq_index_lock:
+        if idx["malformed_bytes"] > _AFTER_SEQ_INDEX_MAX_MALFORMED_BYTES:
+            _after_seq_index.pop(key, None)
+        else:
+            _after_seq_index[key] = idx
+            while len(_after_seq_index) > _AFTER_SEQ_INDEX_MAX_PATHS:
+                _after_seq_index.popitem(last=False)
     return events, malformed
 
 
@@ -1667,7 +1830,8 @@ def read_run_events(
     if validated_recovery:
         events, malformed = _read_validated_recovery_events(path, str(session_id), str(run_id))
     else:
-        events, malformed = _read_jsonl(path)
+        indexed = _read_jsonl_after_seq_indexed(path, after_seq) if after_seq is not None else None
+        events, malformed = indexed if indexed is not None else _read_jsonl(path)
     if after_seq is not None:
         events = [event for event in events if int(event.get("seq") or 0) > int(after_seq)]
     if max_seq is not None:
@@ -2232,6 +2396,19 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
                 if str(Path(value[1]).parent) == dir_key
             ]:
                 del _RUN_PATH_CACHE[cache_key]
+        # Drop the after-seq offset-index entries for the removed runs too. The
+        # index retains derived malformed-row diagnostics in-process; after a
+        # confirmed deletion those diagnostics must not stay resident (a run
+        # re-created at the same path must not inherit them). Same parent-dir
+        # match as the caches above; `_after_seq_index` is keyed by the full
+        # run-file path, so its entries' parent equals ``dir_key`` exactly.
+        with _after_seq_index_lock:
+            for cache_key in [
+                entry
+                for entry in _after_seq_index
+                if str(Path(entry).parent) == dir_key
+            ]:
+                del _after_seq_index[cache_key]
     return removed
 
 
