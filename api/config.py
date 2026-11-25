@@ -10980,6 +10980,56 @@ def _read_visible_codex_cache_model_ids() -> list[str]:
     return ordered
 
 
+def _probe_url_origin(url: object) -> tuple[str, str, int] | None:
+    """Origin of a probe URL as ``(scheme, host, port)``; ``None`` when unusable.
+
+    The origin — not the full URL — is the unit a credential is bound to: a
+    record declares an endpoint's origin, and a credential that record
+    declares may reach that origin and nowhere else.
+    """
+    text = str(url or "").strip()
+    if not text:
+        return None
+    try:
+        parts = urlparse(text if "://" in text else f"http://{text}")
+        scheme = (parts.scheme or "").lower()
+        host = (parts.hostname or "").lower()
+        port = parts.port or {"https": 443, "http": 80}.get(scheme)
+    except ValueError:
+        return None
+    return (scheme, host, port) if scheme and host and port else None
+
+
+class _OriginBoundRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow same-origin redirects; refuse cross-origin ones on credentialed probes.
+
+    urllib's default redirect handling replays the request headers —
+    ``Authorization`` included — to the redirect target, another host included.
+    A ``/v1/models`` probe that 3xx-redirects off the record's own origin would
+    deliver that record's credential to an endpoint no record declared
+    (#9225). A cross-origin 3xx surfaces as an ``HTTPError`` instead; a
+    same-origin redirect keeps the credential inside the origin the record
+    declared. Same philosophy as the quota probes' no-redirect opener
+    (``api/providers._NoRedirectHandler``) and the extension sidecar proxy's
+    same-origin opener (``api/routes._extension_sidecar_proxy_same_origin_opener``).
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _probe_url_origin(newurl) != _probe_url_origin(req.full_url):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_CUSTOM_PROBE_OPENER = urllib.request.build_opener(_OriginBoundRedirectHandler())
+# Installed as this process's default opener so EVERY urllib request the WebUI
+# makes — the credential-bearing model-catalog probe included — refuses a
+# cross-origin 3xx instead of replaying its Authorization header to a host no
+# record declared (#9225). Same-origin redirects are followed unchanged.
+# Callers that patch ``urllib.request.urlopen`` (the test suite's seam) bypass
+# the opener entirely and are unaffected.
+urllib.request.install_opener(_CUSTOM_PROBE_OPENER)
+
+
 def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = False) -> dict:
     """
     Return available models grouped by provider.
