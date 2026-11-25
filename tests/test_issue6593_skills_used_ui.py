@@ -423,6 +423,7 @@ def test_active_stream_conflict_keeps_resolved_use_payload():
     messages = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
     normalize_goal_continuation_id = _extract_function(messages, "_normalizeGoalContinuationId")
     take_restored_goal_continuation_id = _extract_function(messages, "_takeRestoredDraftGoalContinuationId")
+    is_session_current_pane = _extract_function(messages, "_isSessionCurrentPane")
     send_start = messages.index("async function send(){")
     send_end = messages.index("\nasync function startRegeneration", send_start)
     send = messages[send_start:send_end]
@@ -432,6 +433,7 @@ def test_active_stream_conflict_keeps_resolved_use_payload():
         const _recoverCompressedSend = async () => false;
         %(normalize_goal_continuation_id)s
         %(take_restored_goal_continuation_id)s
+        %(is_session_current_pane)s
         const input = {value:'hello'};
         const queued = [];
         const S = {
@@ -517,6 +519,7 @@ def test_active_stream_conflict_keeps_resolved_use_payload():
     ) % {
         "normalize_goal_continuation_id": normalize_goal_continuation_id,
         "take_restored_goal_continuation_id": take_restored_goal_continuation_id,
+        "is_session_current_pane": is_session_current_pane,
         "send": send,
     }
     _run_node(script)
