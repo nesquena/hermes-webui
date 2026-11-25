@@ -9,7 +9,7 @@ import pytest
 SRC = (Path(__file__).parents[1] / 'static/sessions.js').read_text()
 
 
-@pytest.mark.parametrize('scenario', ['pending', 'success', 'failure', 'erase', 'stale', 'switch', 'immediate', 'submit', 'cross-clear'])
+@pytest.mark.parametrize('scenario', ['pending', 'success', 'failure', 'erase', 'stale', 'switch', 'immediate', 'submit', 'cross-clear', 'unauth', 'unauth-immediate'])
 def test_draft_candidate_requires_successful_current_save(scenario):
     if not shutil.which('node'):
         pytest.skip('node unavailable')
@@ -44,11 +44,11 @@ function api(url,opts){return new Promise((resolve,reject)=>requests.push({resol
 ''' + saves + clear + r'''
 (async()=>{
 const scenario=SCENARIO;
-if(scenario==='immediate')_saveComposerDraftNow('B','draft',[]);
+if(scenario==='immediate'||scenario==='unauth-immediate')_saveComposerDraftNow('B','draft',[]);
 else _saveComposerDraft('B','draft',[]);
 const before=pointer;
 if(scenario==='pending'){process.stdout.write(JSON.stringify({before,after:pointer}));return;}
-if(scenario!=='immediate')timer();
+if(scenario!=='immediate'&&scenario!=='unauth-immediate')timer();
 if(scenario==='erase')_saveComposerDraft('B','',[]);
 if(scenario==='stale')_saveComposerDraft('B','newer',[]);
 if(scenario==='switch')S.session={session_id:'C'};
@@ -57,6 +57,7 @@ if(scenario==='submit')_clearComposerDraft('B','draft',[]);
 // in-flight save claim. RED with the old global counter (pointer stayed 'A').
 if(scenario==='cross-clear')_clearComposerDraft('A','other',[]);
 if(scenario==='failure')requests[0].reject(new Error('save failed'));
+else if(scenario==='unauth'||scenario==='unauth-immediate')requests[0].resolve(undefined);
 else requests[0].resolve({});
 await new Promise(resolve=>setImmediate(resolve));
 process.stdout.write(JSON.stringify({before,after:pointer}));

@@ -273,6 +273,16 @@ function _ownsNewChatDraftSaveClaim(sid, generation) {
   return generation === (_newChatDraftSaveGenerationsBySid.get(sid) || 0);
 }
 
+// #7824 (review P1): `api()` resolves with `undefined` when the auth session
+// expired and it redirected to login, so a resolved promise is not proof that
+// the draft reached the server. Only a JSON body back from the draft route is
+// a confirmed save; anything else must leave the shared New Chat pointer alone,
+// otherwise a failed save in one tab steals the link to a draft another
+// conversation really stored.
+function _composerDraftSaveConfirmed(response) {
+  return !!(response && typeof response === 'object');
+}
+
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
@@ -310,11 +320,12 @@ function _saveComposerDraft(sid, text, files) {
         && String(_restoredCont.text || '').trim() === String(normalizedText || '').trim()) {
       _autosaveContId = _restoredCont.id;
     }
-    _postComposerDraftPayload(sid, normalizedDraft, intent, _autosaveContId).then(() => {
+    _postComposerDraftPayload(sid, normalizedDraft, intent, _autosaveContId).then((response) => {
       // Publish only server-confirmed drafts. A newer edit/clear invalidates an
       // older completion; switching sessions alone does not lose its owner.
       try {
-        if (_ownsNewChatDraftSaveClaim(sid, claimGeneration) && draftSession
+        if (_composerDraftSaveConfirmed(response)
+            && _ownsNewChatDraftSaveClaim(sid, claimGeneration) && draftSession
             && _composerDraftHasPayload(normalizedText, normalizedFiles)) {
           _rememberNewChatDraftSession(draftSession);
         }
@@ -542,9 +553,10 @@ function _saveComposerDraftNow(sid, text, files, goalContinuationId) {
     return Promise.resolve();
   }
   const intent = _setComposerDraftLocalIntent(sid, normalizedText, liveFiles);
-  return _postComposerDraftPayload(sid, normalizedDraft, intent, normalizedGoalContId).then(() => {
+  return _postComposerDraftPayload(sid, normalizedDraft, intent, normalizedGoalContId).then((response) => {
     try {
-      if (_ownsNewChatDraftSaveClaim(sid, claimGeneration) && draftSession
+      if (_composerDraftSaveConfirmed(response)
+          && _ownsNewChatDraftSaveClaim(sid, claimGeneration) && draftSession
           && _composerDraftHasPayload(normalizedText, normalizedFiles)) {
         _rememberNewChatDraftSession(draftSession);
       }
