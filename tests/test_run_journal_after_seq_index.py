@@ -5,6 +5,7 @@ import gzip
 import io
 import json
 import os
+import sys
 import threading
 import time
 
@@ -598,3 +599,47 @@ def test_read_run_events_with_infinite_after_seq(tmp_path):
     _write(path, _row(1) + _row(2))
     got_present = rj.read_run_events(SID, RID, after_seq=float("inf"), session_dir=tmp_path)
     assert got_present == {"session_id": SID, "run_id": RID, "events": [], "malformed": []}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows disallows deleting an open journal handle")
+def test_delete_between_open_and_fstat_cannot_cache_deleted_file(tmp_path, monkeypatch):
+    """Deleting a journal after open() and before os.fstat() must not poison the index."""
+    path = rj._run_path(SID, RID, session_dir=tmp_path)
+    _write(path, "".join(_row(i) for i in range(1, 200)) + "{stale\n" + _row(200))
+
+    real_open = builtins.open
+    opened = threading.Event()
+    allow_fstat = threading.Event()
+    target_fds: set[int] = set()
+    errors = []
+    results = []
+
+    def tracking_open(file, *args, **kwargs):
+        fh = real_open(file, *args, **kwargs)
+        if os.fspath(file) == os.fspath(path) and args and args[0] == "rb":
+            target_fds.add(fh.fileno())
+            opened.set()
+            assert allow_fstat.wait(10)
+        return fh
+
+    monkeypatch.setattr(builtins, "open", tracking_open)
+
+    def run_reader():
+        try:
+            results.append(rj.read_run_events(SID, RID, after_seq=0, session_dir=tmp_path))
+        except BaseException as exc:
+            errors.append(exc)
+
+    t = threading.Thread(target=run_reader)
+    t.start()
+    try:
+        assert opened.wait(10)
+        assert rj.delete_run_journal(SID, session_dir=tmp_path) is True
+    finally:
+        allow_fstat.set()
+        t.join(10)
+
+    assert not errors
+    assert len(results) == 1
+    assert target_fds
+    assert str(path) not in rj._after_seq_index

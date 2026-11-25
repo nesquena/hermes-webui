@@ -850,12 +850,12 @@ def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], li
     read_id: int | None = None
     try:
         threshold = int(after_seq)
+        with _after_seq_index_lock:
+            idx = _after_seq_index.pop(key, None)
+            read_id = next(_after_seq_read_ids)
+            _after_seq_inflight[read_id] = [dir_key, False]
         with open(path, "rb") as fh:
             st = os.fstat(fh.fileno())
-            with _after_seq_index_lock:
-                idx = _after_seq_index.pop(key, None)
-                read_id = next(_after_seq_read_ids)
-                _after_seq_inflight[read_id] = [dir_key, False]
             if idx is not None and (
                 idx["id"] != (st.st_dev, st.st_ino)
                 or st.st_size < idx["size"]
