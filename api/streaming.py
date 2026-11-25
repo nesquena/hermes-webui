@@ -16452,6 +16452,15 @@ def _run_agent_streaming(
                         model_id=resolved_model,
                         provider_id=resolved_provider,
                         base_url=resolved_base_url,
+                        # ``model`` is the model's ORIGINAL spelling: the
+                        # override lookup must see the route hint that
+                        # ``resolve_model_provider()`` already stripped
+                        # from ``resolved_model``, or a qualified override key
+                        # (``@openrouter:gpt-5.4-mini``) stays invisible here and
+                        # native streaming sends the global effort while the
+                        # status endpoint reports the override's value
+                        # (greptile P1, 2026-11-24).
+                        requested_model_id=model,
                     )
                 except Exception:
                     logger.warning("isolated reasoning config read failed; using session config", exc_info=True)
@@ -16465,6 +16474,7 @@ def _run_agent_streaming(
                         model_id=resolved_model,
                         provider_id=resolved_provider,
                         base_url=resolved_base_url,
+                        requested_model_id=model,
                     )
                 else:
                     _effort = resolve_session_reasoning_effort(

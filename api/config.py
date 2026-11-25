@@ -7480,6 +7480,7 @@ def configured_reasoning_effort_for_model(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    requested_model_id: str | None = None,
 ) -> str:
     """Resolve the configured reasoning effort for one concrete model.
 
@@ -7489,6 +7490,20 @@ def configured_reasoning_effort_for_model(
     ``max`` leaked into every model even when the core agent would have picked
     a safer per-model value.  Keep the resolution here so status, native
     streaming, and Gateway-backed streaming share one decision point.
+
+    ``model_id`` is the RESOLVED model (the bare id the capability ladder must
+    be checked against).  ``requested_model_id`` is the caller's ORIGINAL
+    spelling, which may still carry the ``@provider:model`` route hint.
+
+    The two spellings select DIFFERENT things, so a caller that only has the
+    resolved model cannot honour an override key written in the qualified
+    form: the native streaming worker resolves the model before the effort
+    lookup, so it arrives here with the hint already stripped and an
+    ``@openrouter:gpt-5.4-mini`` override key became invisible — native
+    streaming then sent the global effort while the status endpoint (which
+    reads the model from the request) reported the override's value
+    (greptile P1, 2026-11-24).  Override SELECTION therefore uses the
+    requested spelling, while capability CHECKS keep using the resolved model.
     """
     data = config_data if isinstance(config_data, dict) else {}
     agent_cfg = data.get("agent")
@@ -7505,9 +7520,25 @@ def configured_reasoning_effort_for_model(
     # to the bare id and a matching @-form override key always fell through
     # to the global effort (greptile P1).
     orig_model = model
+    # The caller's ORIGINAL spelling may be known even when the resolved model
+    # no longer carries the route hint (native streaming). Prefer it for
+    # override SELECTION so a qualified override key stays reachable.
+    requested = str(requested_model_id or "").strip()
+    if requested:
+        orig_model = requested
 
     if model:
         parsed_qualified = _parse_provider_qualified_model_id(model)
+        if parsed_qualified:
+            bare_model, parsed_provider = parsed_qualified
+            model = bare_model
+            if not provider_id:
+                provider_id = parsed_provider
+    elif orig_model:
+        # No resolved model, but the caller named one: parse the requested
+        # spelling so the bare id and the provider are still available
+        # for the override lookup and the capability check.
+        parsed_qualified = _parse_provider_qualified_model_id(orig_model)
         if parsed_qualified:
             bare_model, parsed_provider = parsed_qualified
             model = bare_model
@@ -7705,6 +7736,7 @@ def resolve_session_reasoning_effort(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    requested_model_id: str | None = None,
 ) -> str:
     """Resolve the effort used by one WebUI session for its next turn.
 
@@ -7713,6 +7745,10 @@ def resolve_session_reasoning_effort(
     resolve through :func:`configured_reasoning_effort_for_model`, so a
     per-model ``agent.reasoning_overrides`` entry still wins over the global
     ``agent.reasoning_effort`` (#7170) before the model-capability clamp.
+
+    ``requested_model_id`` carries the caller's ORIGINAL model spelling; see
+    :func:`configured_reasoning_effort_for_model` for why override selection
+    and capability checks need different spellings.
     """
     if session_effort is None:
         return configured_reasoning_effort_for_model(
@@ -7720,6 +7756,7 @@ def resolve_session_reasoning_effort(
             model_id=model_id,
             provider_id=provider_id,
             base_url=base_url,
+            requested_model_id=requested_model_id,
         )
     return coerce_reasoning_effort_for_model(
         session_effort,
@@ -7737,6 +7774,7 @@ def effective_session_reasoning_effort(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    requested_model_id: str | None = None,
 ) -> str | None:
     """Return the stored effort a session's next turn starts from.
 
@@ -7747,6 +7785,10 @@ def effective_session_reasoning_effort(
     configures no effort at all yields ``None`` rather than ``""``: an absent
     key and an explicitly empty value are indistinguishable on disk, and
     ``""`` must stay a session's own "provider default" pick.
+
+    ``requested_model_id`` carries the caller's ORIGINAL model spelling; see
+    :func:`configured_reasoning_effort_for_model` for why override selection
+    and capability checks need different spellings.
     """
     if session_effort is not None:
         return str(session_effort)
@@ -7757,6 +7799,7 @@ def effective_session_reasoning_effort(
             model_id=model_id,
             provider_id=provider_id,
             base_url=base_url,
+            requested_model_id=requested_model_id,
         )
         or None
     )
