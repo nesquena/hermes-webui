@@ -300,7 +300,10 @@ function _workspaceRouteForPathRel(path, kind, opts={}){
 }
 
 async function authorizeWorkspaceEscapeNavigation(item){
-  if(!S.session || !item || !item.path) return null;
+  // Bound to the conversation on screen when the link was clicked: a stale answer
+  // (another conversation opened, or a switch is pending) authorizes nothing.
+  const session = S.session;
+  if(!session || !item || !item.path) return null;
   const normalizedPath = _normalizeWorkspaceRelPath(item.path);
   const exactGrant = _workspaceEscapeExactGrant(normalizedPath);
   if(!exactGrant){
@@ -312,16 +315,19 @@ async function authorizeWorkspaceEscapeNavigation(item){
       hideCancel: true,
       focusCancel: false,
     });
-    if(!ok) return null;
+    if(!ok || _sessionLeftScreen(session)) return null;
   }
   try{
     const data = await api('/api/escape/authorize', {
       method: 'POST',
       body: JSON.stringify({
-        session_id: S.session.session_id,
+        session_id: session.session_id,
         path: normalizedPath,
       }),
     });
+    // Left while in flight: no grant for the pane now on screen, and the caller
+    // must not navigate its tree into this conversation's link.
+    if(_sessionLeftScreen(session)) return null;
     const grant = _storeWorkspaceEscapeGrant(data);
     if(!grant) throw new Error('Missing escape authorization token');
     showToast(t('external_link_read_only'), 2000);
