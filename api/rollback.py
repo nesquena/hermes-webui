@@ -13,6 +13,7 @@ import re
 import shutil
 import stat
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,27 @@ logger = logging.getLogger(__name__)
 # would let any authenticated caller diff or restore from another
 # allowlisted workspace's checkpoint store. (Opus pre-release advisor.)
 _CHECKPOINT_ID_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63}$")
+
+
+@dataclass(frozen=True)
+class _CheckpointRef:
+    """Where one checkpoint's objects live, in whichever layout is on disk.
+
+    ``git_dir`` is set for the shared-store layout (git is told ``--git-dir``);
+    it stays ``None`` for the legacy per-commit repository, where ``path`` is
+    itself a work tree and ``git -C path`` resolves the repo. ``id`` is the full
+    commit hash so callers never re-expand a prefix; ``project_ref`` names the
+    store ref that owns the commit (``None`` in the legacy layout).
+    """
+
+    path: Path
+    git_dir: Path | None
+    id: str
+    project_ref: str | None
+
+    @property
+    def short_id(self) -> str:
+        return self.id[:12]
 
 
 def _validate_checkpoint_id(checkpoint: str) -> str:
@@ -99,6 +121,72 @@ def _find_git() -> str:
     return shutil.which("git") or "git"
 
 
+def _git_cmd(git: str, ckpt: "_CheckpointRef", *args: str) -> list[str]:
+    """Build a git command that reads the checkpoint's object database.
+
+    The pre-v2 layout kept one shadow repository per workspace *and* per
+    commit (``<root>/<hash12>/<commit>/``), so ``git -C <dir>`` resolved the
+    repository implicitly. The current layout keeps a single shared store
+    (``<root>/store/``) with one ref per project, so a project's commits are
+    NOT reachable from any directory under ``<root>/<hash16>/`` — the caller
+    must name the store explicitly. ``_CheckpointRef`` carries whichever locator
+    applies, and this helper is the single place that translates it into argv.
+    """
+    if ckpt.git_dir is not None:
+        return [git, "--git-dir", str(ckpt.git_dir), *args]
+    return [git, "-C", str(ckpt.path), *args]
+
+
+def _resolve_checkpoint_ref(resolved: str, checkpoint: str) -> "_CheckpointRef | None":
+    """Locate one checkpoint in either on-disk layout, newest layout first.
+
+    *checkpoint* may be an abbreviated hash (the UI shows ``id[:12]``), so it is
+    matched against the project's commit list rather than only the ref tip.
+    """
+    root = _checkpoint_root()
+    full_hash = hashlib.sha256(resolved.encode()).hexdigest()
+    git = _find_git()
+
+    # Current layout: <root>/store with refs/hermes/<sha256[:16]> per project.
+    store = root / "store"
+    if store.is_dir():
+        project_hash = full_hash[:16]
+        ref_path = store / "refs" / "hermes" / project_hash
+        if ref_path.is_file():
+            matched = _match_commit(git, store, f"refs/hermes/{project_hash}", checkpoint)
+            if matched:
+                return _CheckpointRef(path=store, git_dir=store, id=matched,
+                                      project_ref=f"refs/hermes/{project_hash}")
+
+    # Legacy layout: <root>/<sha256[:12]>/<commit>/ is its own repository.
+    legacy = root / full_hash[:12] / checkpoint
+    if (legacy / ".git").is_dir():
+        return _CheckpointRef(path=legacy, git_dir=None, id=checkpoint,
+                              project_ref=None)
+    return None
+
+
+def _match_commit(git: str, git_dir: Path, ref: str, prefix: str) -> str | None:
+    """Return the full commit id under *ref* that starts with *prefix*.
+
+    Resolution goes through the ref's own history, so an abbreviated id from the
+    UI resolves to that commit and not merely to the current tip. Ambiguous
+    prefixes return None: the caller reports "not found" rather than guessing.
+    """
+    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", prefix):
+        return None
+    result = subprocess.run(
+        [git, "--git-dir", str(git_dir), "rev-list", ref],
+        capture_output=True, text=True, timeout=10,
+        creationflags=windows_hide_flags(),
+    )
+    if result.returncode != 0:
+        return None
+    matches = [line.strip() for line in result.stdout.splitlines()
+               if line.strip().startswith(prefix)]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _checkpoint_entry_modes(git: str, ckpt_dir: Path) -> dict[str, int]:
     """Return git index modes for tracked checkpoint paths in one pass."""
     result = subprocess.run(
@@ -119,6 +207,7 @@ def _checkpoint_entry_modes(git: str, ckpt_dir: Path) -> dict[str, int]:
         except ValueError:
             continue
     return modes
+
 
 
 def _checkpoint_entry_is_regular(modes: dict[str, int], rel_path: str) -> bool:
@@ -151,6 +240,74 @@ def _read_checkpoint_text(git: str, ckpt_dir: Path, modes: dict[str, int], rel_p
     if not _checkpoint_entry_is_regular(modes, rel_path):
         return None
     blob = _read_checkpoint_blob(git, ckpt_dir, rel_path)
+    if blob is None:
+        return None
+    return blob.decode(errors="replace")
+
+
+def _read_checkpoint_blob_for(
+    git: str, ckpt: "_CheckpointRef", rel_path: str,
+) -> bytes | None:
+    """``_read_checkpoint_blob`` for a resolved checkpoint in either layout."""
+    if ckpt.git_dir is None:
+        return _read_checkpoint_blob(git, ckpt.path, rel_path)
+    result = subprocess.run(
+        _git_cmd(git, ckpt, "cat-file", "blob", f"{ckpt.id}:{rel_path}"),
+        capture_output=True, timeout=10,
+        creationflags=windows_hide_flags(),
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _checkpoint_entry_modes_for(git: str, ckpt: "_CheckpointRef") -> dict[str, int]:
+    """``_checkpoint_entry_modes`` for a resolved checkpoint in either layout.
+
+    The legacy repository keeps its index in the per-commit work tree; the shared
+    store has one index per project, so the commit is read from the tree instead.
+    """
+    if ckpt.git_dir is None:
+        return _checkpoint_entry_modes(git, ckpt.path)
+
+    result = subprocess.run(
+        _git_cmd(git, ckpt, "ls-tree", "-r", "-z", ckpt.id),
+        capture_output=True, text=True, timeout=10,
+        creationflags=windows_hide_flags(),
+    )
+    if result.returncode != 0:
+        raise ValueError("Failed to list checkpoint files")
+
+    modes: dict[str, int] = {}
+    for entry in result.stdout.split("\0"):
+        if not entry.strip():
+            continue
+        meta, _sep, rel_path = entry.partition("\t")
+        parts = meta.split()
+        if len(parts) < 3 or not rel_path:
+            continue
+        try:
+            modes[rel_path] = int(parts[0], 8)
+        except ValueError:
+            continue
+    return modes
+
+
+def _read_checkpoint_text_for(
+    git: str, ckpt: "_CheckpointRef", modes: dict[str, int], rel_path: str,
+) -> str | None:
+    """``_read_checkpoint_text`` for a resolved checkpoint in either layout."""
+    if not _checkpoint_entry_is_regular(modes, rel_path):
+        return None
+    if ckpt.git_dir is None:
+        blob = _read_checkpoint_blob(git, ckpt.path, rel_path)
+    else:
+        result = subprocess.run(
+            _git_cmd(git, ckpt, "cat-file", "blob", f"{ckpt.id}:{rel_path}"),
+            capture_output=True, timeout=10,
+            creationflags=windows_hide_flags(),
+        )
+        blob = result.stdout if result.returncode == 0 else None
     if blob is None:
         return None
     return blob.decode(errors="replace")
@@ -220,27 +377,115 @@ def list_checkpoints(workspace: str) -> dict[str, Any]:
         checkpoint_dir: the checkpoint directory path
     """
     resolved = _resolve_workspace(workspace)
-    ws_hash = _workspace_hash(resolved)
-    ckpt_dir = _checkpoint_root() / ws_hash
+    root = _checkpoint_root()
 
-    checkpoints = []
-    if not ckpt_dir.is_dir():
-        return {"checkpoints": [], "workspace": resolved, "checkpoint_dir": str(ckpt_dir)}
-
-    # Each checkpoint is a git repo in <ckpt_dir>/<commit_hash>/
-    git = _find_git()
-    for entry in sorted(ckpt_dir.iterdir(), key=lambda p: p.stat().st_mtime if p.is_dir() else 0, reverse=True):
-        if not entry.is_dir():
-            continue
-        ckpt_info = _inspect_checkpoint(entry, git)
-        if ckpt_info:
-            checkpoints.append(ckpt_info)
+    checkpoints = _list_shared_store_checkpoints(resolved, root)
+    if checkpoints is None:
+        checkpoints, ckpt_dir = _list_legacy_checkpoints(resolved, root)
+    else:
+        ckpt_dir = root / "store"
 
     return {
         "checkpoints": checkpoints,
         "workspace": resolved,
         "checkpoint_dir": str(ckpt_dir),
     }
+
+
+def _list_shared_store_checkpoints(resolved: str, root: Path) -> list[dict[str, Any]] | None:
+    """List a project's checkpoints from the shared store, or None when absent.
+
+    ``None`` (not ``[]``) means "this project has no ref in the shared store",
+    which lets the caller fall back to the legacy layout. An existing ref that
+    merely has no commits yields ``[]`` — a real empty result, not a miss.
+    """
+    project_ref = _project_ref_path(root, resolved)
+    if project_ref is None:
+        return None
+
+    git = _find_git()
+    ref_name = _project_ref_name(resolved)
+    # Default git log order (newest first) is what the UI wants: the newest
+    # checkpoint is the one a rollback most often targets.
+    result = subprocess.run(
+        [git, "--git-dir", str(root / "store"), "log",
+         "--format=%H%n%s%n%aI", ref_name],
+        capture_output=True, text=True, timeout=10,
+        creationflags=windows_hide_flags(),
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+
+    checkpoints = []
+    lines = result.stdout.strip().split("\n")
+    for index in range(0, len(lines) - 2, 3):
+        commit_hash = lines[index].strip()
+        message = lines[index + 1].strip()
+        date_str = lines[index + 2].strip()
+        if not re.fullmatch(r"[0-9a-f]{40,64}", commit_hash):
+            continue
+        checkpoints.append({
+            "id": commit_hash,
+            "commit": commit_hash[:12],
+            "message": message or "checkpoint",
+            "date": date_str,
+            "date_display": _format_date_display(date_str),
+            "files": _commit_file_count(git, root / "store", commit_hash),
+            "path": str(root / "store"),
+        })
+    return checkpoints
+
+
+def _project_ref_name(resolved: str) -> str:
+    """The store ref that owns *resolved*, mirroring the agent's _project_hash."""
+    full_hash = hashlib.sha256(resolved.encode()).hexdigest()
+    return f"refs/hermes/{full_hash[:16]}"
+
+
+def _project_ref_path(root: Path, resolved: str) -> Path | None:
+    store = root / "store"
+    if not store.is_dir():
+        return None
+    full_hash = hashlib.sha256(resolved.encode()).hexdigest()
+    ref_path = store / "refs" / "hermes" / full_hash[:16]
+    return ref_path if ref_path.is_file() else None
+
+
+def _format_date_display(date_str: str) -> str:
+    if not date_str:
+        return ""
+    try:
+        return datetime.fromisoformat(date_str).strftime("%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return date_str
+
+
+def _commit_file_count(git: str, git_dir: Path, commit_hash: str) -> int:
+    result = subprocess.run(
+        [git, "--git-dir", str(git_dir), "ls-tree", "-r", "--name-only", commit_hash],
+        capture_output=True, text=True, timeout=10,
+        creationflags=windows_hide_flags(),
+    )
+    if result.returncode != 0:
+        return 0
+    return len([line for line in result.stdout.splitlines() if line.strip()])
+
+
+def _list_legacy_checkpoints(resolved: str, root: Path) -> tuple[list[dict[str, Any]], Path]:
+    """The pre-v2 layout: one shadow repository per commit under <hash12>/."""
+    ckpt_dir = root / _workspace_hash(resolved)
+    if not ckpt_dir.is_dir():
+        return [], ckpt_dir
+
+    git = _find_git()
+    checkpoints = []
+    for entry in sorted(ckpt_dir.iterdir(), key=lambda p: p.stat().st_mtime if p.is_dir() else 0, reverse=True):
+        if not entry.is_dir():
+            continue
+        ckpt_info = _inspect_checkpoint(entry, git)
+        if ckpt_info:
+            checkpoints.append(ckpt_info)
+    return checkpoints, ckpt_dir
 
 
 def _inspect_checkpoint(ckpt_path: Path, git: str) -> dict[str, Any] | None:
@@ -304,16 +549,14 @@ def get_checkpoint_diff(workspace: str, checkpoint: str) -> dict[str, Any]:
     """
     resolved = _resolve_workspace(workspace)
     checkpoint = _validate_checkpoint_id(checkpoint)
-    ws_hash = _workspace_hash(resolved)
-    ckpt_dir = _checkpoint_root() / ws_hash / checkpoint
-
-    if not ckpt_dir.is_dir():
+    ckpt = _resolve_checkpoint_ref(resolved, checkpoint)
+    if ckpt is None:
         raise ValueError(f"Checkpoint not found: {checkpoint}")
 
     git = _find_git()
 
     try:
-        entry_modes = _checkpoint_entry_modes(git, ckpt_dir)
+        entry_modes = _checkpoint_entry_modes_for(git, ckpt)
     except ValueError as e:
         raise ValueError("Failed to list checkpoint files") from e
 
@@ -325,7 +568,7 @@ def get_checkpoint_diff(workspace: str, checkpoint: str) -> dict[str, Any]:
         # Read checkpoint version from the git object database, not via the
         # checkout path. This prevents tracked symlinks in the checkpoint from
         # redirecting diff reads to arbitrary host files.
-        ckpt_content = _read_checkpoint_text(git, ckpt_dir, entry_modes, rel_path)
+        ckpt_content = _read_checkpoint_text_for(git, ckpt, entry_modes, rel_path)
         if ckpt_content is None:
             continue
 
@@ -394,16 +637,14 @@ def restore_checkpoint(workspace: str, checkpoint: str) -> dict[str, Any]:
     resolved = _resolve_workspace(workspace)
     workspace_root = Path(resolved)
     checkpoint = _validate_checkpoint_id(checkpoint)
-    ws_hash = _workspace_hash(resolved)
-    ckpt_dir = _checkpoint_root() / ws_hash / checkpoint
-
-    if not ckpt_dir.is_dir():
+    ckpt = _resolve_checkpoint_ref(resolved, checkpoint)
+    if ckpt is None:
         raise ValueError(f"Checkpoint not found: {checkpoint}")
 
     git = _find_git()
 
     try:
-        entry_modes = _checkpoint_entry_modes(git, ckpt_dir)
+        entry_modes = _checkpoint_entry_modes_for(git, ckpt)
     except ValueError as e:
         raise ValueError("Failed to list checkpoint files") from e
 
@@ -416,7 +657,7 @@ def restore_checkpoint(workspace: str, checkpoint: str) -> dict[str, Any]:
         if mode is None or not stat.S_ISREG(mode):
             continue
 
-        content = _read_checkpoint_blob(git, ckpt_dir, rel_path)
+        content = _read_checkpoint_blob_for(git, ckpt, rel_path)
         if content is None:
             continue
 
