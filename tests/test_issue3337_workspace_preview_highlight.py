@@ -14,8 +14,18 @@ WORKSPACE_JS = (Path(__file__).resolve().parent.parent / "static" / "workspace.j
 
 def _open_file_body() -> str:
     start = WORKSPACE_JS.index("async function openFile(")
-    # The plain code/text branch is the last else block before the function ends.
-    return WORKSPACE_JS[start:start + 8000]
+    param_end = WORKSPACE_JS.index(")", start)
+    brace = WORKSPACE_JS.index("{", param_end)
+    depth = 0
+    for idx in range(brace, len(WORKSPACE_JS)):
+        ch = WORKSPACE_JS[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return WORKSPACE_JS[start : idx + 1]
+    raise AssertionError("openFile() body did not close")
 
 
 def _code_preview_helper() -> str:

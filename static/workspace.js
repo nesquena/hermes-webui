@@ -636,9 +636,27 @@ function _textWriteOpTargets(text){
     if(t && !/^&?\d+$/.test(t)) push(t);
   }
   // 2. `sed -i ... <file>` — the last bare token of the sed invocation.
-  const sedRe=/(?:^|[\s;|&])sed\s+-i\b([^;|&\n]*)/g;
+  const sedRe=/(?:^|[\s;|&])sed\s+-i\b/g;
   while((m=sedRe.exec(text))){
-    const toks=(m[1]||'').split(/\s+/).filter(Boolean);
+    let quote=null;
+    let end=text.length;
+    for(let i=sedRe.lastIndex;i<text.length;i++){
+      const ch=text[i];
+      if(quote){
+        if(ch===quote) quote=null;
+        else if(quote==='"'&&ch==='\\'&&i+1<text.length) i++;
+      }else{
+        if(ch==="'"||ch==='"') quote=ch;
+        else if(ch==='\\'&&i+1<text.length) i++;
+        else if(ch===';'||ch==='|'||ch==='&'||ch==='\n'){
+          end=i;
+          break;
+        }
+      }
+    }
+    const seg=text.slice(sedRe.lastIndex,end);
+    sedRe.lastIndex=end;
+    const toks=(seg||'').split(/\s+/).filter(Boolean);
     if(toks.length) push(toks[toks.length-1]);
   }
   // 3. `patch ... -o <file>`.
@@ -770,6 +788,7 @@ function _previewRefreshPublishBlocked(path){
 // coalesce onto the single in-flight promise (F3: one mutation → at most one
 // reload; N mutations → at most N sequential reloads).
 async function _runPreviewRefreshLoop(){
+  const failedKeys=new Set();
   while(true){
     if(!S||!S.session||!_previewCurrentPath) return;
     // Bind the pass to the file it was queued for: the awaited read must not
@@ -779,6 +798,7 @@ async function _runPreviewRefreshLoop(){
     if(!current) return;
     const owner=_currentMutationOwner();
     const key=_mutationKey(owner,current);
+    if(failedKeys.has(key)) return;
     if(!_turnMutatedPreviewPaths.has(key)) return;
     // Re-checked on every pass, not just at the trigger: an edit that starts
     // while a read is in flight keeps its mutation pending for a later drain.
@@ -797,6 +817,21 @@ async function _runPreviewRefreshLoop(){
       // A read that failed (or was retired) must not eat the only copy of the
       // mutation: restore it for a later trigger, never over a newer entry.
       if(!_turnMutatedPreviewPaths.has(key)) _turnMutatedPreviewPaths.set(key,entry);
+      failedKeys.add(key);
+      const nextTarget=_previewCurrentPath;
+      const nextNorm=_normalizeArtifactPath(nextTarget,{allowBare:true});
+      const nextKey=nextNorm?_mutationKey(_currentMutationOwner(),nextNorm):null;
+      if(nextNorm && nextNorm!==current && nextKey && !failedKeys.has(nextKey)
+         && _turnMutatedPreviewPaths.has(nextKey)
+         && !(typeof _previewDirty!=='undefined'&&_previewDirty)
+         && !(typeof _previewHasUnsavedEdits==='function'&&_previewHasUnsavedEdits())
+         && !(typeof _previewRefreshPublishBlocked==='function'&&_previewRefreshPublishBlocked(nextTarget))){
+        // #5747 (review 2026-11-23): the pane open now has its own pending
+        // obligation and is eligible, so a retired read must not end the drain.
+        // A's entry stays pending for a later trigger: it is never retried here
+        // (failedKeys) and never overwrites a newer entry.
+        continue;
+      }
       return;
     }
     if(!_previewCurrentPath||_normalizeArtifactPath(_previewCurrentPath,{allowBare:true})!==current) return;
