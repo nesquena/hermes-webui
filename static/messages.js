@@ -83,14 +83,23 @@ function _takeRestoredDraftGoalContinuationId(text){
 // #7855: the writer side of the restored-continuation draft. Module scope for
 // the same reason the ID itself had to be: the restore path (static/sessions.js)
 // and send() are sibling top-level scopes.
-function _setRestoredGoalContinuationDraft(id,text){
+function _setRestoredGoalContinuationDraft(id,text,ownerSid){
   try{
     const _msg=(typeof $==='function')?$('msg'):null;
     if(!_msg||!_msg.dataset) return;
     const _id=_normalizeGoalContinuationId(id);
-    if(!_id){ delete _msg.dataset.goalContinuationId; delete _msg.dataset.goalContinuationText; return; }
+    if(!_id){ delete _msg.dataset.goalContinuationId; delete _msg.dataset.goalContinuationText; delete _msg.dataset.goalContinuationOwnerSid; return; }
     _msg.dataset.goalContinuationId=_id;
     _msg.dataset.goalContinuationText=String(text||'').trim();
+    // Which session this binding was restored for. A navigation save that
+    // flushes a departing draft must not carry a binding belonging to another
+    // pane's draft; callers that know the owner pass it, and an empty owner
+    // keeps the pre-existing text-only contract.
+    const _ownerSid=String(
+      ownerSid||(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)||''
+    ).trim();
+    if(_ownerSid) _msg.dataset.goalContinuationOwnerSid=_ownerSid;
+    else delete _msg.dataset.goalContinuationOwnerSid;
   }catch(_){ }
 }
 function _clearRestoredGoalContinuationDraft(){
@@ -99,6 +108,7 @@ function _clearRestoredGoalContinuationDraft(){
     if(!_msg||!_msg.dataset) return;
     delete _msg.dataset.goalContinuationId;
     delete _msg.dataset.goalContinuationText;
+    delete _msg.dataset.goalContinuationOwnerSid;
   }catch(_){ }
 }
 // #7855 CORE (round 7): the NON-CONSUMING read of the same binding. The
@@ -115,6 +125,7 @@ function _peekRestoredGoalContinuationDraft(){
     return {
       id:_draftId,
       text:String(_msg.dataset.goalContinuationText||'').trim(),
+      ownerSid:String(_msg.dataset.goalContinuationOwnerSid||'').trim(),
     };
   }catch(_){ return null; }
 }

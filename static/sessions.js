@@ -759,7 +759,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
       ? draft.goal_continuation_id.trim()
       : '';
     if (_restoredContId) {
-      _setRestoredGoalContinuationDraft(_restoredContId, text);
+      _setRestoredGoalContinuationDraft(_restoredContId, text, restoreSid);
     } else if (typeof _clearRestoredGoalContinuationDraft === 'function') {
       _clearRestoredGoalContinuationDraft();
     }
@@ -2927,11 +2927,29 @@ async function newSession(flash, options={}){
       if(previousSid&&sourceDraftServerWritable&&!sourceDraftAlreadySaved
          &&(sourceComposerText||sourceComposerFiles.length)
          &&typeof _saveComposerDraftNow==='function'){
+        // #7855 (round 10): a restored goal continuation belongs to the exact
+        // owner and the exact text it was stored with. Flushing the departing
+        // draft with an empty token clears it, so returning to this chat would
+        // retry as an ordinary message — the same defect the session-switch and
+        // the repaired profile-switch saves already avoid. Peek WITHOUT
+        // consuming (the one-shot marker must stay armed for the user's own
+        // resend) and carry the token only while it still belongs to this
+        // owner and still describes the text being saved.
+        let sourceContinuationId='';
+        if(typeof _peekRestoredGoalContinuationDraft==='function'){
+          const _peeked=_peekRestoredGoalContinuationDraft();
+          const _peekOwner=String((_peeked&&_peeked.ownerSid)||'').trim();
+          if(_peeked&&_peeked.id
+             &&(!_peekOwner||_peekOwner===String(previousSid))
+             &&String(_peeked.text||'').trim()===String(sourceComposerText||'').trim()){
+            sourceContinuationId=_peeked.id;
+          }
+        }
         await _saveComposerDraftNow(
           previousSid,
           sourceComposerText,
           sourceComposerFiles,
-          '',
+          sourceContinuationId,
           {rejectOnError:true, ownerProfile:previousProfile, syncOnly:true}
         );
       }
@@ -4145,7 +4163,7 @@ async function loadSession(sid){
               // user replaces or abandons the draft, the ID dies with it
               // instead of attaching to their own message.
               if(typeof _setRestoredGoalContinuationDraft==='function'){
-                _setRestoredGoalContinuationDraft(_first.goal_continuation_id||'',_first.text||'');
+                _setRestoredGoalContinuationDraft(_first.goal_continuation_id||'',_first.text||'',sid);
               }
               if(typeof autoResize==='function') autoResize();
               if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
