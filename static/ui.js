@@ -29,6 +29,11 @@ let _composerProducerSequence=0;
 const _composerOwnerStateByKey=new Map();
 const _composerSettledOwnersByGeneration=new Map();
 const _COMPOSER_OWNER_STATE_LIMIT=128;
+// Unsent text/files in a snapshot can be the only copy of a read-only session's
+// draft: those sessions never persist to the server, and _restoreComposerDraft()
+// reads this map when the user returns. Ordinary session churn must not evict
+// them, so payload snapshots get a separate (still bounded) budget.
+const _COMPOSER_OWNER_PAYLOAD_LIMIT=512;
 const _COMPOSER_SETTLED_GENERATION_LIMIT=64;
 
 function _composerOwnerKey(sid,profile){
@@ -162,11 +167,30 @@ function _rememberComposerOwnerState(sid,profile,state,generation){
   const key=_composerOwnerKey(sid,snapshot.profile);
   if(_composerOwnerStateByKey.has(key))_composerOwnerStateByKey.delete(key);
   _composerOwnerStateByKey.set(key,snapshot);
-  while(_composerOwnerStateByKey.size>_COMPOSER_OWNER_STATE_LIMIT){
-    const oldest=_composerOwnerStateByKey.keys().next().value;
-    _composerOwnerStateByKey.delete(oldest);
-  }
+  _evictComposerOwnerStates();
   return snapshot;
+}
+function _composerOwnerStateHasPayload(snapshot){
+  return !!(snapshot&&(String(snapshot.text||'')
+    ||(Array.isArray(snapshot.files)&&snapshot.files.length)));
+}
+function _evictComposerOwnerStates(){
+  while(_composerOwnerStateByKey.size>_COMPOSER_OWNER_STATE_LIMIT){
+    // Payload-free snapshots are cheap: they only mirror what the server already
+    // persists. Evict the oldest of those first so a long-lived tab cannot push
+    // an unsaved read-only draft out of the map by opening enough conversations.
+    let victim=null;
+    let payloadStates=0;
+    for(const [key,snapshot] of _composerOwnerStateByKey){
+      if(_composerOwnerStateHasPayload(snapshot))payloadStates+=1;
+      else if(victim===null)victim=key;
+    }
+    if(victim===null){
+      if(payloadStates<=_COMPOSER_OWNER_PAYLOAD_LIMIT)return;
+      victim=_composerOwnerStateByKey.keys().next().value;
+    }
+    _composerOwnerStateByKey.delete(victim);
+  }
 }
 function _composerRememberedOwnerSnapshot(sid,profile){
   const snapshot=_composerOwnerStateByKey.get(_composerOwnerKey(sid,profile));
