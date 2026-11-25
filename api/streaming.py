@@ -10740,6 +10740,47 @@ def _looks_like_current_user_turn_scan(messages, msg_text):
     return last_strong_match
 
 
+# #9233: on an expired provider prompt cache the Agent's proactive tool-result
+# prune (``agent/turn_proactive_prune.py``, ``prune_tool_results_only``) shortens
+# old tool results to a summary naming the archived original. It never adds,
+# drops or reorders rows and raises no compression signal. Local mirror of the
+# Agent's ``tools.tool_result_storage._ARCHIVE_POINTER_RE``.
+_AGENT_PRUNE_ARCHIVE_POINTER_RE = re.compile(r" \u2014 full result: \S*cache/pruned/[A-Za-z0-9_.-]+")
+
+
+def _agent_pruned_tool_row_equal(actual, expected):
+    """True iff returned ``actual`` is the Agent's prune stub of projected tool row ``expected``.
+
+    Every model-facing field except ``content`` (and ``api_content``) is identical,
+    both bodies are plain strings, and the returned body is shorter and carries the
+    archive pointer while the projected one does not. Anything else is a divergence.
+    """
+    if not isinstance(actual, dict) or not isinstance(expected, dict):
+        return False
+    if actual.get('role') != 'tool' or not actual.get('tool_call_id'):
+        return False
+    fields = (set(_EXACT_PREFIX_MODEL_FIELDS) | {'api_content'}) - {'content'}
+    if any(actual.get(field) != expected.get(field) for field in fields):
+        return False
+    body, projected_body = actual.get('content'), expected.get('content')
+    if not isinstance(body, str) or not isinstance(projected_body, str):
+        return False
+    if len(body) >= len(projected_body) or _AGENT_PRUNE_ARCHIVE_POINTER_RE.search(projected_body):
+        return False
+    return _AGENT_PRUNE_ARCHIVE_POINTER_RE.search(body) is not None
+
+
+def _restore_agent_pruned_tool_rows(result_messages, projection):
+    """Copy of ``result_messages`` with each Agent prune stub inside the projected
+    prefix put back to WebUI's own projected row, so the strict proof still checks
+    every other row exactly and the stub is never adopted (#9233)."""
+    restored = list(result_messages or [])
+    for idx, expected in enumerate(list(projection or [])[:len(restored)]):
+        if _agent_pruned_tool_row_equal(restored[idx], expected):
+            restored[idx] = expected
+    return restored
+
+
 def _proven_current_turn_suffix(projected_history, result_messages):
     """Return the proven current-turn suffix of ``result_messages``, else None.
 
@@ -10790,7 +10831,7 @@ def _proven_current_turn_suffix(projected_history, result_messages):
         # Not supplied: no proof available.
         return None
     projection = list(projected_history)
-    result_messages = list(result_messages or [])
+    result_messages = _restore_agent_pruned_tool_rows(result_messages, projection)
     if not projection:
         # Explicitly empty: the Agent was sent no history. The full returned
         # list (if any) is the current-turn suffix. An empty result is also
@@ -11598,7 +11639,7 @@ def _proven_tail_merge_exchange(
     verified tail-merge and the settle must fail closed.
     """
     projection = list(projected_history or [])
-    result = list(result_messages or [])
+    result = _restore_agent_pruned_tool_rows(result_messages, projection[:-1])
     if len(projection) < 1 or len(result) < len(projection):
         return None
     # All projected rows before the tail must match exactly — this is what makes
@@ -12854,7 +12895,6 @@ def _nearest_assistant_msg_idx(messages, msg_idx: int) -> int:
 
 def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
     """Build persisted tool-call summaries from final messages plus live progress fallback."""
-    tool_calls = []
     pending_names = {}
     pending_args = {}
     pending_asst_idx = {}
@@ -12891,36 +12931,76 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
         elif role == 'tool':
             tid = m.get('tool_call_id') or m.get('tool_use_id', '')
             raw = m.get('content', '')
-            seq = {'msg_idx': msg_idx, 'raw': raw, 'resolved': False}
+            seq = {'msg_idx': msg_idx, 'raw': raw, 'tid': tid, 'resolved': False, 'summary': None}
             if tid:
                 name = pending_names.get(tid, '')
                 if name and name != 'tool':
-                    tool_calls.append({
+                    seq['summary'] = {
                         'name': name,
                         'snippet': _tool_result_snippet(raw),
                         'tid': tid,
                         'assistant_msg_idx': pending_asst_idx.get(tid, -1),
                         'args': _truncate_tool_args(pending_args.get(tid, {})),
-                    })
+                    }
                     seq['resolved'] = True
             tool_msg_sequence.append(seq)
 
     live = [tc for tc in (live_tool_calls or []) if isinstance(tc, dict) and tc.get('name') and tc.get('name') != 'clarify']
     if live:
+        # A live entry the transcript already resolved by id belongs to that row
+        # and must not be handed to a different one. When the ledger carries no
+        # id for that position (legacy agents), claim the row's own slot so the
+        # positional pairing below keeps master's alignment.
+        claimed = set()
         for seq_idx, seq in enumerate(tool_msg_sequence):
-            if seq.get('resolved'):
+            if not seq.get('resolved'):
                 continue
-            if seq_idx >= len(live):
-                break
-            live_tc = live[seq_idx]
-            tool_calls.append({
-                'name': live_tc.get('name', 'tool'),
-                'snippet': _tool_result_snippet(seq.get('raw', '')),
-                'tid': live_tc.get('tid', '') or '',
-                'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
-                'args': _truncate_tool_args(live_tc.get('args', {}), limit=4),
-            })
+            tid = seq.get('tid')
+            matched = False
+            if tid:
+                for l_idx, ltc in enumerate(live):
+                    if l_idx not in claimed and ltc.get('tid') == tid:
+                        claimed.add(l_idx)
+                        matched = True
+                        break
+            if not matched and seq_idx < len(live) and seq_idx not in claimed and not live[seq_idx].get('tid'):
+                claimed.add(seq_idx)
 
+        unresolved = [seq for seq in tool_msg_sequence if not seq.get('resolved')]
+
+        def _append_live_summary(seq, ltc, tid):
+            seq['summary'] = {
+                'name': ltc.get('name', 'tool'),
+                'snippet': _tool_result_snippet(seq.get('raw', '')),
+                'tid': tid,
+                'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
+                'args': _truncate_tool_args(ltc.get('args', {}), limit=4),
+            }
+
+        remaining = [(l_idx, ltc) for l_idx, ltc in enumerate(live) if l_idx not in claimed]
+
+        # 1. A row whose id the ledger knows takes its own entry, wherever it sits.
+        still_unresolved = []
+        for seq in unresolved:
+            tid = seq.get('tid')
+            match = None
+            if tid:
+                for pos, (_l_idx, ltc) in enumerate(remaining):
+                    if ltc.get('tid') == tid:
+                        match = pos
+                        break
+            if match is None:
+                still_unresolved.append(seq)
+                continue
+            _l_idx, ltc = remaining.pop(match)
+            _append_live_summary(seq, ltc, tid)
+
+        # 2. Every remaining row pairs with the remaining entries in order, so an
+        #    id the ledger cannot name still keeps its result row.
+        for seq, (_l_idx, ltc) in zip(still_unresolved, remaining, strict=False):
+            _append_live_summary(seq, ltc, seq.get('tid') or ltc.get('tid') or '')
+
+    tool_calls = [seq['summary'] for seq in tool_msg_sequence if seq.get('summary') is not None]
     return tool_calls
 
 
@@ -15875,11 +15955,11 @@ def _run_agent_streaming(
 
                 # Modern Hermes Agent builds can call both tool_progress_callback
                 # and the structured tool_start/tool_complete callbacks for the
-                # same tool. Prefer the structured path when it is supported so
-                # the browser receives one tid-tagged tool card per real call.
+                # same tool. When structured callbacks are wired, suppress the
+                # legacy progress path so the structured path is the single owner
+                # of tool events (#4666).
                 if event_type in (None, 'tool.started') and 'tool_start_callback' in _agent_params:
                     return
-
                 if event_type in (None, 'tool.started'):
                     _live_tool_calls.append({
                         'name': name,
@@ -15927,7 +16007,6 @@ def _run_agent_streaming(
 
                 if event_type == 'tool.completed' and 'tool_complete_callback' in _agent_params:
                     return
-
                 if event_type == 'tool.completed':
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):

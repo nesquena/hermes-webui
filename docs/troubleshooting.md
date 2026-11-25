@@ -283,6 +283,23 @@ The on-disk locations below assume the default `~/.hermes/webui` state directory
 
 ---
 
+## "Storage on the server is full" (HTTP 507) (#9167)
+
+**Symptom.** Sending a message, or another request that saves to the WebUI state, fails with "Storage on the server is full. Free up space and try again." The request returns HTTP 507. Some requests still report the full disk their own way: uploads answer with their own error, a few routes return their own 500, and a save that fails while a reply is streaming shows up as a stream error.
+
+**Cause.** A write hit `ENOSPC` (no space left on device) or `EDQUOT` (disk quota exceeded) on the filesystem that holds the WebUI state. Before this change it surfaced as a generic "Internal server error".
+
+**Recovery.** Free space on that filesystem and retry; no restart is needed.
+
+```bash
+df -h ~/.hermes/webui
+du -sh ~/.hermes/webui/sessions ~/.hermes/webui/sessions/_run_journal*
+```
+
+In a container the state usually lives on a volume: check that path, not `/`. If the run journal is what grew, see the next section.
+
+**Note.** The error and the message that failed to save exist only in the browser; reloading the session removes them, and the typed text stays in the composer.
+
 ## Run journal is large / disk keeps filling (#7613)
 
 **Symptom.** `sessions/_run_journal/` grows without bound — hundreds of MB to several GB on installs with long-lived sessions or many long runs. Every run appends one `{run_id}.jsonl` and nothing removes them, so the directory only ever grows.
@@ -643,6 +660,8 @@ python3 -c "import hermes_constants; print(hasattr(hermes_constants, 'pin_proces
 | `has no context-local home override (older than v0.18.0)` | Hermes Agent older than v0.18.0 | All memory (external and built-in) is off for every agent. |
 | `no claim_instance; older than 2026-10-17` | Agent without `claim_instance`, and this WebUI serves several profiles (a named profile directory exists, or two profile homes were used) | External providers are off for every agent; built-in memory still works. A single-profile install keeps them. |
 | `returned the same shared provider instance that already serves profile home` | The provider plugin hands every agent one shared instance | The first profile that used it keeps it until the WebUI restarts; the others run without it. |
+
+If Hermes Agent declines to claim an external provider while building a session agent, WebUI includes that provider in the session memory status. Built-in memory remains available when otherwise enabled. This status reports the refusal; recording it does not change whether the constructed agent is cached.
 
 Session boundaries (cache eviction, a new chat, shutdown) commit memory as the session's owner. A commit that cannot run as the owner is logged as `not run` (`The work stays pending`); one the Agent refuses logs `It is NOT counted as committed; the work stays pending`. Both are retried at the next boundary. WebUI notices the Agent's refusal at the Agent's own refusal function (`agent.memory_caller_scope._refuse`), before anything is logged, so the refusal is detected whatever the logging configuration (levels above WARNING, disabled loggers, `logging.disable`) and that configuration is never changed (#8613). An Agent without that function has no caller-scope check and never refuses. An evicted agent whose owner cannot be resolved (its session file was removed outside the WebUI) gets no session end — an unknown owner never commits — but its provider is no longer left running for that alone (#8613): the WebUI releases it without a session end, and only once it can prove the evicted agent is the LAST holder of every provider instance it serves. A provider instance shared with a live agent of the same profile therefore keeps running for that agent, and a construction or a queued save that is still using the instance holds the release back until it is done. While it waits, the log says the provider `was NOT released` and names the reason. A release that only queued memory work holds back is kept, and runs on its own once that work has drained, without another session boundary.
 **Diagnostic commands.** Run the Python lines with the Agent's interpreter (the one the WebUI uses).
