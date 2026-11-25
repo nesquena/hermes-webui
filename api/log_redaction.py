@@ -32,8 +32,16 @@ Design constraints
   WARNING (``lastResort``'s level) with the default message format, so
   DEBUG/INFO still do not print and WARNING+ lines keep their exact shape.
 * When the Agent is importable the record is formatted with
-  ``agent.redact.RedactingFormatter``; when it is not, it falls back to a
+  ``agent.redact.RedactingFormatter`` — the Agent's full redaction policy,
+  which masks far more than URLs. When it is not, it falls back to a
   plain ``logging.Formatter`` and still emits (the log must not vanish).
+* The handler owns the server-log boundary, so it enforces the issue's
+  credential shape itself: the URL userinfo pair (``user:<password>@``
+  becomes ``***:***@``) is masked on this handler's own output in EVERY
+  state — no Agent, an Agent build whose formatter does not mask it, or a
+  formatter that raises. The built-in mask is idempotent over the Agent's
+  output, and an explicit Agent opt-out (``security.redact_secrets: false``)
+  is honoured.
 * Idempotent: repeated calls (import + startup call, re-entry) install at
   most ONE handler — the handler is tagged so import ordering cannot stack a
   second copy onto the root logger.
@@ -55,6 +63,27 @@ the resolution lives in ``_DeferredRedactingFormatter``: it looks the Agent's
 formatter up when a record is formatted, and an already-imported Agent is
 found through ``sys.modules`` without any import attempt.
 
+The credential-output guarantee is enforced at THIS boundary
+-------------------------------------------------------------
+The Agent's policy is the primary mask, but it is not guaranteed to cover
+the issue's shape across the supported Agent range.
+``RedactingFormatter.format`` only started calling ``redact_log_urls`` —
+the strict URL pass that masks the whole userinfo pair — in Agent v0.23.2.
+Older builds mask the password alone (``redact_sensitive_text`` passes
+``user:pass@`` through unless the caller opts into
+``redact_url_credentials``), v0.22.0 masks neither, and a host without the
+Agent has no policy at all. Left to the Agent alone, those states write
+``alice:<password>@proxy.example.invalid`` to the server log.
+
+So the handler enforces the shape itself: whatever text the formatter
+chain produces, the userinfo pair is masked before the line reaches the
+stream. The mask is idempotent over the Agent's own output (re-masking an
+already-masked pair yields the same bytes), so a current Agent's line is
+unchanged. An explicit Agent opt-out (``security.redact_secrets: false``)
+still passes raw credentials through — the WebUI honours the operator's
+policy rather than overriding it — and that opt-out is consulted only when
+the Agent is importable, since without one there is no policy to honour.
+
 Not in scope: the Logs panel (``api/logs``) reads agent.log/errors.log/
 gateway.log under HERMES_HOME/logs, which the Agent writes with its own
 handlers; that path is unaffected.
@@ -62,6 +91,7 @@ handlers; that path is unaffected.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import threading
 import time
@@ -141,6 +171,54 @@ def _resolve_agent_formatter_class() -> Optional[type]:
     return _agent_formatter_class_from_modules() or _import_agent_formatter_class()
 
 
+# The credential shape issue #8984 is about: a URL whose userinfo part is
+# ``user:<password>@host``. The Agent's formatter masks the whole pair —
+# but only from Agent v0.23.2 on, when ``RedactingFormatter.format``
+# started calling ``redact_log_urls``. Older builds mask the password alone
+# (``redact_sensitive_text`` passes ``user:pass@`` through unless the caller
+# opts into ``redact_url_credentials``), v0.22.0 masks neither, and a host
+# without the Agent has no policy at all. The handler owns the server-log
+# boundary, so it enforces the shape itself.
+_URL_USERINFO_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://)([^/@\s]+):([^/@\s]+)@")
+
+
+def _mask_url_userinfo(text: str) -> str:
+    """Mask the URL userinfo pair: the user-and-password part in front of
+    the at-sign becomes asterisks, scheme and host stay readable.
+
+    The same shape the Agent's ``RedactingFormatter`` produces, so the
+    output is identical whether the mask came from the Agent or from here
+    (re-masking an already-masked pair is a no-op). Standard library only.
+    """
+    if "://" not in text or "@" not in text:
+        return text
+    return _URL_USERINFO_RE.sub(lambda m: m.group(1) + "***:***@", text)
+
+
+def _agent_redaction_disabled() -> bool:
+    """True when the Agent is present and its policy opts out of redaction.
+
+    ``agent.redact._redact_enabled`` is the Agent's own effective switch
+    (``security.redact_secrets: false`` / ``HERMES_REDACT_SECRETS=false``)
+    and it exists across the supported Agent range. An operator who
+    deliberately allows raw credentials in logs must not be overridden
+    here, so the built-in mask stands down for that policy. Only an
+    ALREADY-IMPORTED ``agent.redact`` is consulted (no import attempt); a
+    missing or failing predicate reads as "not disabled" — the safe
+    direction.
+    """
+    module = sys.modules.get("agent.redact")
+    if module is None:
+        return False
+    predicate = getattr(module, "_redact_enabled", None)
+    if not callable(predicate):
+        return False
+    try:
+        return not predicate()
+    except Exception:
+        return False
+
+
 class _DeferredRedactingFormatter(logging.Formatter):
     """Format each record with the Agent's formatter when it is available.
 
@@ -152,8 +230,14 @@ class _DeferredRedactingFormatter(logging.Formatter):
     credentials in clear.
 
     While the Agent is unavailable the record is formatted with the plain
-    ``logging.Formatter`` — the upstream policy cannot be applied by a policy
-    that is not importable yet, and the log line must never disappear.
+    ``logging.Formatter`` — the log line must never disappear.
+
+    The handler owns the server-log boundary, so the #8984 credential shape
+    (the URL userinfo pair) is masked on this handler's own output whatever
+    the Agent's state: a missing Agent, an Agent build whose formatter does
+    not mask userinfo, and a formatter that raises are all covered. The
+    built-in mask is idempotent over the Agent's output, and it stands down
+    when the Agent's policy explicitly opts out of redaction.
     """
 
     # Minimum delay between two failed IMPORT attempts, so a busy log cannot
@@ -207,15 +291,23 @@ class _DeferredRedactingFormatter(logging.Formatter):
         return self._agent_formatter
 
     def format(self, record: logging.LogRecord) -> str:
+        text: Optional[str] = None
         agent_formatter = self._agent_formatter_or_none()
         if agent_formatter is not None:
             try:
-                return agent_formatter.format(record)
+                text = agent_formatter.format(record)
             except Exception:
-                # Fall through to the plain formatting: a failing Agent
-                # formatter must not swallow the record.
-                pass
-        return super().format(record)
+                # A failing Agent formatter must not swallow the record —
+                # fall through to the plain path below.
+                text = None
+        if text is None:
+            text = super().format(record)
+        if not _agent_redaction_disabled():
+            # The boundary guarantee: the userinfo pair never lands in clear,
+            # whatever produced the text above. Idempotent over the Agent's
+            # own mask; skipped only for an explicit Agent opt-out.
+            text = _mask_url_userinfo(text)
+        return text
 
     def refresh(self) -> bool:
         """Re-resolve the Agent's formatter now; True when one is in use."""
@@ -258,6 +350,11 @@ def install_server_log_redaction(*, stream: Optional[TextIO] = None) -> bool:
     the record still lands on the stream. The lookup happens per record, so an
     Agent that becomes importable later (the bootstrap transition) is picked
     up without reinstalling the handler.
+
+    The URL-userinfo credential shape of issue #8984 is masked on this
+    handler's output in every state — no Agent, an Agent whose formatter
+    does not mask it, or a formatter that raises — unless the Agent's own
+    policy explicitly opts out of redaction.
 
     Parameters
     ----------
