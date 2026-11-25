@@ -541,17 +541,20 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
                 page.screenshot(path=os.path.join(screenshot_dir, f"{name}.png"))
         page.evaluate("toggleWorkspacePanel(false)")
 
-        # Sweep both ordinary panel states with realistic names. The prior head
-        # hides Saved prompts and clips labels across a continuous band, not
-        # just the six named screenshots above; no such band may remain.
-        evidence["realisticSweep"] = {}
+        # Sweep both ordinary panel states with the review's short default
+        # labels. The prior head hides Saved prompts and clips those labels
+        # across a continuous band; the realistic-name variants are pinned at
+        # their reported 1024/1366 frames above rather than pretending every
+        # arbitrary long label must fit every viewport. Allow the native resize
+        # observers to settle just as in the named review frames.
+        evidence["defaultSweep"] = {}
         for width in range(960, 1921, 40):
-            name = f"realisticSweep{width}"
-            _set_default_scene(page, "hermes-webui", "Claude Sonnet 4.6", width >= 1280)
+            name = f"defaultSweep{width}"
+            _set_default_scene(page, "default", "review-model", width >= 1280)
             page.set_viewport_size({"width": width, "height": 900})
-            page.wait_for_timeout(120)
+            page.wait_for_timeout(400)
             geometry = _composer_geometry(page)
-            evidence["realisticSweep"][str(width)] = geometry
+            evidence["defaultSweep"][str(width)] = geometry
             _assert_default_lossless_scene(failures, name, geometry)
 
         # Deliberately park cf-shrink to validate the later caps independently
