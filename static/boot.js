@@ -1590,10 +1590,17 @@ function _micToastKeyForRecognitionError(error){
       // (one-shot) and intentional stops (_speechStopRequested) skip this and
       // finalize. Bounded by _micMaxRestarts so a stolen audio session can't loop.
       if(_micShouldRestartDictation()){
-        const carried=committed==null?'':committed;
-        _prefix=carried&&!carried.endsWith(' ')&&!carried.endsWith('\n')
-          ? carried+' '
-          : carried;
+        // A no-speech pause adds no contribution of its own, and `_prefix` is
+        // what this recording is still building on — the source chat's draft
+        // while a New Chat handoff owns the composer. Replacing it with an
+        // empty string makes the next result carry only the new words, so a
+        // rejected create would restore the draft and then lose it again as
+        // soon as speech resumes.
+        if(committed!=null){
+          _prefix=committed&&!committed.endsWith(' ')&&!committed.endsWith('\n')
+            ? committed+' '
+            : committed;
+        }
         _finalText='';
         _micRestartCount++;
         try{

@@ -1757,6 +1757,8 @@ def _run_dictation_end_harness(
     typing: str = "",
     result_kind: str = "interim",
     other_producer: bool = False,
+    pause_then_reject: bool = False,
+    speak_before_reject: bool = False,
 ) -> dict:
     """Drive the real recognizer callbacks through onresult → onend.
 
@@ -1764,6 +1766,9 @@ def _run_dictation_end_harness(
     ``direct`` (ordinary composer). ``typing`` injects a real keystroke before
     or after the speech result; ``other_producer`` adds a Voice Mode write so
     the no-final end cannot substitute another producer's combined text.
+    ``pause_then_reject`` runs a no-result pause first, restarts recognition
+    through the continuity path, rejects the create and only then delivers the
+    speech result.
     """
     node = shutil.which("node")
     if not node:
@@ -1806,7 +1811,11 @@ def _run_dictation_end_harness(
         let _activeCaptureMode='speech';
         let _forceMediaRecorder=false;
         const _locale={{_speech:'en-US'}};
-        global.localStorage={{getItem:()=>null,setItem:()=>{{}}}};
+        const pause={str(pause_then_reject).lower()};
+        global.localStorage={{
+          getItem:k=>(pause&&k==='hermes-mic-continuous')?'true':null,
+          setItem:()=>{{}}
+        }};
         global.navigator={{wakeLock:null}};
         global.window={{
           _micActive:false,_micPendingSend:false,
@@ -1832,7 +1841,7 @@ def _run_dictation_end_harness(
         recognition.start();
         recognition.onstart();
         const schedule={json.dumps(schedule)};
-        const tx=schedule==='direct'
+        let tx=schedule==='direct'
           ?null
           :_beginComposerOwnershipTransition('old-session','default',{{persistSourceDraft:true}});
         if(tx)_bindComposerOwnershipDestination(tx,'new-session','default');
@@ -1841,6 +1850,37 @@ def _run_dictation_end_harness(
         if({str(other_producer).lower()}){{
           _composerCommitProducerText('source draft Voice ','voice-mode');
         }}
+        if(pause){{
+          // A natural no-speech pause ends this run before any result and
+          // continuity restarts recognition; the New Chat create is rejected
+          // before or after the next speech result arrives.
+          recognition.onend();
+          const pauseValue=ta.value;
+          const pausePending=_composerPendingText();
+          const pauseRestarts=_micRestartCount;
+          if({str(speak_before_reject).lower()}){{
+            recognition.onresult({{
+              resultIndex:0,
+              results:[Object.assign([{{transcript:'late-speech'}}],{{isFinal:false,length:1}})],
+            }});
+            const bufferedBeforeReject=_composerPendingText();
+            if(tx){{_abortComposerOwnershipTransition(tx);tx=null;}}
+            process.stdout.write(JSON.stringify({{
+              pauseValue,pausePending,pauseRestarts,bufferedBeforeReject,
+              restored:ta.value,saves
+            }}));
+          }}else{{
+            if(tx){{_abortComposerOwnershipTransition(tx);tx=null;}}
+            const restored=ta.value;
+            recognition.onresult({{
+              resultIndex:0,
+              results:[Object.assign([{{transcript:'late-speech'}}],{{isFinal:false,length:1}})],
+            }});
+            process.stdout.write(JSON.stringify({{
+              pauseValue,pausePending,pauseRestarts,restored,settled:ta.value,saves
+            }}));
+          }}
+        }}else{{
         recognition.onresult({{
           resultIndex:0,
           results:[Object.assign([{{transcript:'late-speech'}}],{{
@@ -1863,6 +1903,7 @@ def _run_dictation_end_harness(
         process.stdout.write(JSON.stringify({{
           afterResult,pendingBeforeEnd,afterEnd,settled:ta.value,saves
         }}));
+        }}
         """
     )
     proc = _run_node_script(script, timeout=30)
@@ -1925,6 +1966,32 @@ def test_dictation_final_result_still_commits_through_the_handoff():
     assert result["afterResult"] == "late-speech"
     assert result["afterEnd"] == " late-speech"
     assert result["settled"] == " late-speech"
+
+
+def test_dictation_no_result_pause_keeps_the_draft_for_the_next_result():
+    result = _run_dictation_end_harness("abort", pause_then_reject=True)
+
+    # A natural no-speech pause ends the run with no contribution and
+    # continuity restarts recognition. The recording must keep the prefix it is
+    # building on: clearing it would let the create's rejection restore the
+    # source draft and then have the next result replace that draft with only
+    # the new words.
+    assert result["pauseRestarts"] == 1
+    assert result["pausePending"] == ""
+    assert result["restored"] == "source draft"
+    assert result["settled"] == "source draftlate-speech"
+
+
+def test_dictation_no_result_pause_keeps_the_draft_when_speech_precedes_rejection():
+    result = _run_dictation_end_harness(
+        "abort", pause_then_reject=True, speak_before_reject=True
+    )
+
+    # Same pause, but speech lands before the create is rejected: the restore
+    # must bring back the prefix as well, not only the words spoken after it.
+    assert result["pauseRestarts"] == 1
+    assert result["bufferedBeforeReject"] == "late-speech"
+    assert result["restored"] == "source draftlate-speech"
 
 
 def _run_native_input_harness(schedule: str) -> dict:
