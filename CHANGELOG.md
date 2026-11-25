@@ -51,6 +51,8 @@
 
 ### Fixed
 
+- **The profile picker and Tasks list only the named profile homes the Agent considers live (#8897, @chhxbchhxb).** A deleted (tombstoned) or marker-less home under `profiles/` still showed up in the profile dropdown. Opening Tasks then created `cron/` folders inside it. The picker now applies the Agent's own liveness checks, as far as the installed Agent provides them, and the Tasks job list skips homes that aren't live. The default home and custom `HERMES_HOME` roots stay readable.
+
 - **The opt-in native Gateway session transport no longer reconnects forever when its socket is missing, and Stop reaches a turn in every phase (#8905, #9227, @chhxbchhxb).** With `webui_gateway_session_transport: unix` and a socket path that doesn't exist, a turn kept reconnecting every few seconds and Stop couldn't end it. A failure before the first submission now ends the turn after one attempt. Stop now reaches a turn that hasn't been submitted yet, and one whose submission acknowledgement is still pending. Failures after a submission keep the existing reconnect-and-resume behaviour.
 
 - **Tool cards saved with a turn now keep each result with its own call (#6061, @webtecnica).** When a turn's transcript had no tool-call declarations and the live progress list was missing some ids, the saved tool summaries were paired with results by position, so on reopen one tool's output could appear under another tool's command, or in the wrong order. Results are now matched by tool-call id first, and the rest are paired in order, so each card keeps its own command, arguments and output, in result order. Related: #4666 (memory tool calls missing from the stream), which this does not resolve.
