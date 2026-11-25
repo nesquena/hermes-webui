@@ -464,21 +464,40 @@ const ARTIFACT_TEXT_MUTATION_TOOLS = new Set(['terminal','execute_code']);
 
 // #5747 re-gate (F2): collapse '.'/'..' segments so workdir-relative resolution
 // and workspace containment are exact — no path can escape via '..'.
+// Canonicalizes '/' vs '\' and normalizes Windows drive letters to uppercase.
 function _collapseDotSegments(p){
-  const parts=String(p||'').split('/');
+  let str=String(p||'').replace(/\\/g,'/');
+  if(/^\/[a-zA-Z]:/.test(str)) str=str.slice(1);
+  const m=str.match(/^([a-zA-Z]:)(.*)/);
+  if(m){
+    const drive=m[1].toUpperCase();
+    const rest=m[2];
+    const parts=rest.split('/');
+    const out=[];
+    for(const part of parts){
+      if(part===''||part==='.') continue;
+      if(part==='..'){ if(out.length) out.pop(); }
+      else out.push(part);
+    }
+    return drive + (out.length ? '/' + out.join('/') : (rest.startsWith('/') ? '/' : ''));
+  }
+  const isAbs=str.startsWith('/');
+  const parts=str.split('/');
   const out=[];
   for(const part of parts){
     if(part===''||part==='.') continue;
     if(part==='..'){ if(out.length) out.pop(); }
     else out.push(part);
   }
-  return '/'+out.join('/');
+  if(isAbs) return '/'+out.join('/');
+  return out.join('/');
 }
 
 function _normalizeArtifactPath(path, opts){
   if(!path) return '';
   path = String(path).trim().replace(/[`"'<>),.;:]+$/g,'').replace(/^[`"'(<]+/g,'');
   if(!path || path.length > 240 || path.includes('://')) return '';
+  path = path.replace(/\\/g, '/');
   // Canonicalize workspace-relative prefixes so a file-tree open ("foo.md") and a
   // tool arg recorded as "./foo.md" or "~/foo.md" compare equal for mutation
   // tracking; otherwise an agent edit via a ./-prefixed path leaves the open
@@ -492,11 +511,12 @@ function _normalizeArtifactPath(path, opts){
   // rejected ('') and the result is normalized to a workspace-relative key so
   // it compares equal to the open preview's path.
   if(opts && opts.workdir){
-    const root=(typeof S!=='undefined'&&S&&S.session&&S.session.workspace)
-      ? String(S.session.workspace).replace(/\/+$/,'') : '';
-    const wd=String(opts.workdir).replace(/\/+$/,'');
+    const rawRoot=(typeof S!=='undefined'&&S&&S.session&&S.session.workspace)
+      ? String(S.session.workspace) : '';
+    const root=rawRoot ? _collapseDotSegments(rawRoot).replace(/\/+$/,'') : '';
+    const wd=opts.workdir ? _collapseDotSegments(opts.workdir).replace(/\/+$/,'') : '';
     let abs;
-    if(path.startsWith('/')) abs=path;
+    if(path.startsWith('/') || /^[a-zA-Z]:/.test(path)) abs=path;
     else if(wd) abs=wd+'/'+path;
     else abs=path;
     abs=_collapseDotSegments(abs);
@@ -619,13 +639,76 @@ function resetTurnWorkspaceMutations(){
 // redirects, patch -o, open(...,'w'), write_file(...)) so a mere path mention
 // in prose is never treated as a mutation (F2: mention ≠ change). Each target
 // is resolved against the tool's workdir below.
-function _textWriteOpTargets(text){
+// #5747 re-gate (round 6): tracks effective directory across cd commands.
+function _textWriteOpTargets(text, opts){
   if(!text || typeof text !== 'string') return [];
+
+  // Split command text into top-level segments separated by ;, &&, ||, |, &, or newline,
+  // respecting quotes and backslash escaping. File descriptor duplications like 2>&1
+  // are preserved within their command segment.
+  const splitSegments=(t)=>{
+    const segments=[];
+    let cur='';
+    let quote=null;
+    for(let i=0;i<t.length;i++){
+      const ch=t[i];
+      if(quote==="'"){
+        cur+=ch;
+        if(ch==="'") quote=null;
+      }else if(quote==='"'){
+        cur+=ch;
+        if(ch==='\\'&&i+1<t.length){ i++; cur+=t[i]; }
+        else if(ch==='"') quote=null;
+      }else{
+        if(ch==="'"||ch==='"'){
+          quote=ch;
+          cur+=ch;
+        }else if(ch==='\\'&&i+1<t.length){
+          cur+=ch+t[i+1];
+          i++;
+        }else if(ch==='\n'||ch===';'){
+          if(cur.trim()) segments.push(cur);
+          cur='';
+        }else if(ch==='&'){
+          if(/>\s*$/.test(cur)){
+            cur+=ch;
+          }else if(i+1<t.length && t[i+1]==='&'){
+            if(cur.trim()) segments.push(cur);
+            cur='';
+            i++;
+          }else{
+            if(cur.trim()) segments.push(cur);
+            cur='';
+          }
+        }else if(ch==='|'){
+          if(i+1<t.length && t[i+1]==='|'){
+            if(cur.trim()) segments.push(cur);
+            cur='';
+            i++;
+          }else{
+            if(cur.trim()) segments.push(cur);
+            cur='';
+          }
+        }else{
+          cur+=ch;
+        }
+      }
+    }
+    if(cur.trim()) segments.push(cur);
+    return segments;
+  };
+
   const out=[];
+  const outDetailed=[];
+  const withDirs=Boolean(opts && opts.withDirs);
+  let currentDir=(opts && opts.workdir!==undefined) ? String(opts.workdir) : '';
   const push=(t)=>{
     if(!t) return;
-    const s=String(t).trim().replace(/^['"`]+|['"`;,]+$/g,'');
-    if(s) out.push(s);
+    const s=String(t).trim().replace(/^['"`]+|['"`;,]+$/g,'').replace(/\\/g, '/');
+    if(s){
+      out.push(s);
+      if(withDirs) outDetailed.push({target:s, workdir:currentDir});
+    }
   };
   const tokenize=(seg)=>{
     const toks=[];
@@ -639,16 +722,28 @@ function _textWriteOpTargets(text){
         else cur+=ch;
       }else if(quote==='"'){
         if(ch==='"') quote=null;
-        else if(ch==='\\'&&i+1<seg.length){ i++; cur+=seg[i]; }
-        else cur+=ch;
+        else if(ch==='\\'&&i+1<seg.length){
+          if(seg[i+1]==='"'||seg[i+1]==='\\'||seg[i+1]==='$'||seg[i+1]==='`'){
+            i++; cur+=seg[i];
+          }else{
+            cur+='/';
+          }
+        }else cur+=ch;
       }else{
         if(ch==="'"||ch==='"'){
           inTok=true;
           quote=ch;
         }else if(ch==='\\'&&i+1<seg.length){
           inTok=true;
-          i++;
-          cur+=seg[i];
+          if(/\s|['"`]/.test(seg[i+1])){
+            i++;
+            cur+=seg[i];
+          }else if(seg[i+1]==='\\'){
+            i++;
+            cur+='/';
+          }else{
+            cur+='/';
+          }
         }else if(/\s/.test(ch)){
           if(inTok){ toks.push(cur); cur=''; inTok=false; }
         }else{
@@ -660,80 +755,126 @@ function _textWriteOpTargets(text){
     if(inTok) toks.push(cur);
     return toks;
   };
-  let m;
-  // 1. shell redirects: `> file` / `>> file` (excludes numeric-fd / stderr dup
-  //    forms like `2> err.log` and `2>&1` — those don't mutate the target).
-  const redirRe=/(^|[\s;|&(])(?:>>?)\s*(?:"([^"]*)"|'([^']*)'|([^\s;|&<>"'`]+))/g;
-  while((m=redirRe.exec(text))){
-    const t=m[2]||m[3]||m[4];
-    if(t && !/^&?\d+$/.test(t)) push(t);
-  }
-  // 2. `sed -i ... <file>` — file operands of the sed invocation.
-  const sedRe=/(?:^|[\s;|&])sed\s+-i\b/g;
-  while((m=sedRe.exec(text))){
-    let quote=null;
-    let end=text.length;
-    for(let i=sedRe.lastIndex;i<text.length;i++){
-      const ch=text[i];
-      if(quote){
-        if(ch===quote) quote=null;
-        else if(quote==='"'&&ch==='\\'&&i+1<text.length) i++;
-      }else{
-        if(ch==="'"||ch==='"') quote=ch;
-        else if(ch==='\\'&&i+1<text.length) i++;
-        else if(ch===';'||ch==='|'||ch==='&'||ch==='\n'){
-          end=i;
-          break;
+  const updateCd=(seg)=>{
+    const toks=tokenize(seg);
+    if(!toks.length) return;
+    let idx=0;
+    while(idx<toks.length && /^[a-zA-Z_][a-zA-Z0-9_]*=/.test(toks[idx])) idx++;
+    if(idx>=toks.length || toks[idx]!=='cd') return;
+    idx++;
+    while(idx<toks.length && toks[idx].startsWith('-') && toks[idx]!=='-'){
+      if(toks[idx]==='--'){ idx++; break; }
+      idx++;
+    }
+    let targetDir=null;
+    while(idx<toks.length){
+      const tok=toks[idx];
+      if(tok.startsWith('>') || tok.startsWith('<') || /^\d+>/.test(tok)){
+        idx++;
+        continue;
+      }
+      targetDir=tok;
+      break;
+    }
+    if(targetDir===null || targetDir===''){
+      currentDir=null;
+      return;
+    }
+    if(targetDir==='-' || targetDir.includes('$') || targetDir.includes('`') ||
+       targetDir.includes('*') || targetDir.includes('?') || targetDir.includes('[') ||
+       targetDir.includes('(') || targetDir.includes(')') || targetDir.startsWith('~')){
+      currentDir=null;
+      return;
+    }
+    const normTarget=String(targetDir).replace(/\\/g, '/');
+    const isAbs=normTarget.startsWith('/') || /^[a-zA-Z]:/.test(normTarget);
+    if(isAbs){
+      currentDir=_collapseDotSegments(normTarget).replace(/\/+$/,'');
+    }else if(currentDir!==null){
+      const base=currentDir ? currentDir : '';
+      currentDir=_collapseDotSegments(base+'/'+normTarget).replace(/\/+$/,'');
+    }
+  };
+  const segments=splitSegments(text);
+  for(const seg of segments){
+    let m;
+    // 1. shell redirects: `> file` / `>> file` (excludes numeric-fd / stderr dup
+    //    forms like `2> err.log` and `2>&1` — those don't mutate the target).
+    const redirRe=/(^|[\s;|&(])(?:>>?)\s*(?:"([^"]*)"|'([^']*)'|([^\s;|&<>"'`]+))/g;
+    while((m=redirRe.exec(seg))){
+      const t=m[2]||m[3]||m[4];
+      if(t && !/^&?\d+$/.test(t)) push(t);
+    }
+    // 2. `sed -i ... <file>` — file operands of the sed invocation.
+    const sedRe=/(?:^|[\s;|&])sed\s+-i\b/g;
+    while((m=sedRe.exec(seg))){
+      let quote=null;
+      let end=seg.length;
+      for(let i=sedRe.lastIndex;i<seg.length;i++){
+        const ch=seg[i];
+        if(quote){
+          if(ch===quote) quote=null;
+          else if(quote==='"'&&ch==='\\'&&i+1<seg.length) i++;
+        }else{
+          if(ch==="'"||ch==='"') quote=ch;
+          else if(ch==='\\'&&i+1<seg.length) i++;
+          else if(ch===';'||ch==='|'||ch==='&'||ch==='\n'){
+            end=i;
+            break;
+          }
+        }
+      }
+      const s=seg.slice(sedRe.lastIndex,end);
+      sedRe.lastIndex=end;
+      const toks=tokenize(s||'');
+      let hasScript=false;
+      let endOfOptions=false;
+      for(let i=0;i<toks.length;i++){
+        const tok=toks[i];
+        if(!endOfOptions && tok==='--'){
+          endOfOptions=true;
+          continue;
+        }
+        if(!endOfOptions && tok.startsWith('-') && tok!=='-'){
+          if(tok==='-e'||tok==='--expression'){
+            hasScript=true;
+            if(i+1<toks.length) i++;
+          }else if((tok.startsWith('-e')&&!tok.startsWith('--'))||tok.startsWith('--expression=')){
+            hasScript=true;
+          }else if(tok==='-f'||tok==='--file'){
+            hasScript=true;
+            if(i+1<toks.length) i++;
+          }else if((tok.startsWith('-f')&&!tok.startsWith('--'))||tok.startsWith('--file=')){
+            hasScript=true;
+          }
+          continue;
+        }
+        if(!hasScript){
+          hasScript=true;
+        }else{
+          push(tok);
         }
       }
     }
-    const seg=text.slice(sedRe.lastIndex,end);
-    sedRe.lastIndex=end;
-    const toks=tokenize(seg||'');
-    let hasScript=false;
-    let endOfOptions=false;
-    for(let i=0;i<toks.length;i++){
-      const tok=toks[i];
-      if(!endOfOptions && tok==='--'){
-        endOfOptions=true;
-        continue;
-      }
-      if(!endOfOptions && tok.startsWith('-') && tok!=='-'){
-        if(tok==='-e'||tok==='--expression'){
-          hasScript=true;
-          if(i+1<toks.length) i++;
-        }else if((tok.startsWith('-e')&&!tok.startsWith('--'))||tok.startsWith('--expression=')){
-          hasScript=true;
-        }else if(tok==='-f'||tok==='--file'){
-          hasScript=true;
-          if(i+1<toks.length) i++;
-        }else if((tok.startsWith('-f')&&!tok.startsWith('--'))||tok.startsWith('--file=')){
-          hasScript=true;
-        }
-        continue;
-      }
-      if(!hasScript){
-        hasScript=true;
-      }else{
-        push(tok);
-      }
+    // 3. `patch ... -o <file>`.
+    const patchRe=/\bpatch\b([^;|&\n]*?)\s+-o\s+(?:"([^"]+)"|'([^']+)'|([^\s;|&<>"'`]+))/g;
+    while((m=patchRe.exec(seg))){
+      push(m[2]||m[3]||m[4]);
     }
+    // 4. python open('<path>', '<mode>') with a write-capable mode (w/a/+).
+    const openRe=/\bopen\s*\(\s*(?:"([^"]+)"|'([^']+)')\s*,\s*(?:"([^"]*)"|'([^']*)')(?:\s*,[^)]*)?\s*\)/g;
+    while((m=openRe.exec(seg))){
+      const mode=String(m[3]||m[4]||'').toLowerCase();
+      if(/^[rwa]b?\+?$/.test(mode) && (mode[0]==='w'||mode[0]==='a'||mode.includes('+'))) push(m[1]||m[2]);
+    }
+    // 5. write_file('<path>', ...) calls embedded in code text.
+    const wfRe=/\bwrite_file\s*\(\s*(?:"([^"]+)"|'([^']+)')/g;
+    while((m=wfRe.exec(seg))) push(m[1]||m[2]);
+
+    // Update effective directory for subsequent segments if this segment was `cd`
+    updateCd(seg);
   }
-  // 3. `patch ... -o <file>`.
-  const patchRe=/\bpatch\b([^;|&\n]*?)\s+-o\s+(?:"([^"]+)"|'([^']+)'|([^\s;|&<>"'`]+))/g;
-  while((m=patchRe.exec(text))){
-    push(m[2]||m[3]||m[4]);
-  }
-  // 4. python open('<path>', '<mode>') with a write-capable mode (w/a/+).
-  const openRe=/\bopen\s*\(\s*(?:"([^"]+)"|'([^']+)')\s*,\s*(?:"([^"]*)"|'([^']*)')(?:\s*,[^)]*)?\s*\)/g;
-  while((m=openRe.exec(text))){
-    const mode=String(m[3]||m[4]||'').toLowerCase();
-    if(/^[rwa]b?\+?$/.test(mode) && (mode[0]==='w'||mode[0]==='a'||mode.includes('+'))) push(m[1]||m[2]);
-  }
-  // 5. write_file('<path>', ...) calls embedded in code text.
-  const wfRe=/\bwrite_file\s*\(\s*(?:"([^"]+)"|'([^']+)')/g;
-  while((m=wfRe.exec(text))) push(m[1]||m[2]);
-  return out;
+  return withDirs ? outDetailed : out;
 }
 
 // Write-op targets resolved to canonical workspace-relative paths (or dropped
@@ -742,8 +883,19 @@ function _textWriteOpTargets(text){
 function _textPathTokens(text, workdir){
   if(!text || typeof text !== 'string') return [];
   const out=[];
-  for(const raw of _textWriteOpTargets(text)){
-    const p=_normalizeArtifactPath(raw,{allowBare:true, workdir:workdir});
+  for(const item of _textWriteOpTargets(text, {withDirs:true, workdir:workdir})){
+    const raw=(item && typeof item==='object') ? item.target : item;
+    const targetWd=(item && typeof item==='object' && item.workdir!==undefined) ? item.workdir : workdir;
+    if(targetWd===null){
+      const norm=String(raw||'').replace(/\\/g, '/');
+      const isAbs=norm.startsWith('/') || /^[a-zA-Z]:/.test(norm);
+      if(!isAbs) continue;
+      const safeWd=(typeof S!=='undefined'&&S&&S.session&&S.session.workspace) || '/';
+      const p=_normalizeArtifactPath(raw,{allowBare:true, workdir:safeWd});
+      if(p && !out.includes(p)) out.push(p);
+      continue;
+    }
+    const p=_normalizeArtifactPath(raw,{allowBare:true, workdir:targetWd});
     if(p && !out.includes(p)) out.push(p);
   }
   return out;
