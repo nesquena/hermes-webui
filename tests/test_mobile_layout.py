@@ -1098,16 +1098,34 @@ def test_composer_controls_switch_to_fit_stage_classes():
     fit_body = _js_function_body(ui_js, "_fitComposerFooter")
     assert "scrollWidth" in fit_body and "clientWidth" in fit_body, \
         "_fitComposerFooter() should measure actual left-cluster overflow"
-    assert "cf-shrink" in fit_body and "cf-icons" in fit_body and "cf-burger" in fit_body, \
-        "_fitComposerFooter() should toggle the compact stage classes"
+    assert all(stage in fit_body for stage in ("cf-tight", "cf-profile", "cf-shrink", "cf-icons", "cf-burger")), \
+        "_fitComposerFooter() should toggle every compact stage class"
     assert ".composer-footer .composer-left > *{flex-shrink:0;}" in CSS, \
         "full as well as compact fit stages must preserve direct-child control footprints"
-    # Stage ladder order: shrink is tried before icons, icons before burger.
+    # The two geometry-only rungs precede label truncation/removal. Saved
+    # prompts survives through cf-profile; only the later cf-shrink may hide it.
+    tight_add = fit_body.index("classList.add('cf-tight')")
+    profile_add = fit_body.index("classList.add('cf-profile')")
     shrink_add = fit_body.index("classList.add('cf-shrink')")
     icons_add = fit_body.index("classList.add('cf-icons')")
     burger_add = fit_body.index("classList.add('cf-burger')")
-    assert shrink_add < icons_add < burger_add, \
-        "_fitComposerFooter() must try the shrink stage before hiding labels (cf-icons) and before cf-burger"
+    assert tight_add < profile_add < shrink_add < icons_add < burger_add, \
+        "_fitComposerFooter() must exhaust lossless and profile-only compaction before cf-shrink/icons/burger"
+    for cls in ("cf-tight", "cf-profile"):
+        stage_rules = CSS[CSS.index(f".composer-footer.{cls}"):CSS.index(".composer-footer.cf-shrink .composer-left")]
+        assert ".composer-divider{display:none;}" in stage_rules, f"{cls} should reclaim divider space"
+        assert "#btnSavedPrompts" not in stage_rules, f"{cls} must not hide Saved prompts"
+        assert ".composer-model-chip{max-width:120px" not in stage_rules, f"{cls} must not prematurely cap the model chip"
+    tight_rules = CSS[CSS.index(".composer-footer.cf-tight"):CSS.index(".composer-footer.cf-profile")]
+    assert not any(label in tight_rules for label in ("composer-profile-label", "composer-model-label", "composer-workspace-label")), \
+        "cf-tight must keep every label visible and uncapped"
+    profile_rules = CSS[CSS.index(".composer-footer.cf-profile"):CSS.index(".composer-footer.cf-shrink .composer-left")]
+    assert "composer-profile-label" in profile_rules and "display:none" in profile_rules, \
+        "cf-profile should be the first rung that demotes only the profile chip to icon-only"
+    assert ".composer-footer.cf-shrink .composer-workspace-group{max-width:170px;}" in CSS, \
+        "cf-shrink should leave enough room for a realistic workspace name"
+    assert ".composer-footer.cf-shrink .composer-model-chip{max-width:180px;" in CSS, \
+        "cf-shrink should leave enough room for a realistic model name"
 
     for selector in (
         ".composer-footer.cf-icons .composer-profile-label",

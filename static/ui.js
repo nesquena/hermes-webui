@@ -7687,27 +7687,40 @@ function _fitComposerFooter(){
   // for the synchronous strip-and-measure.
   footer.classList.add('cf-measuring');
   try{
-    footer.classList.remove('cf-shrink','cf-icons','cf-burger');
+    footer.classList.remove('cf-tight','cf-profile','cf-shrink','cf-icons','cf-burger');
     if(overflows()){
-      // Intermediate stage before hiding labels outright: cap the widest
-      // labeled chips (profile/workspace/model) so their labels ellipsize —
-      // bare icons leave the footer half-empty at widths where short labels
-      // would still fit comfortably.
-      footer.classList.add('cf-shrink');
-      next='cf-shrink';
+      // Reclaim whitespace and padding first: neither labels nor actions need
+      // to disappear while the unmodified content still has room to fit.
+      footer.classList.add('cf-tight');
+      next='cf-tight';
       if(overflows()){
-        footer.classList.remove('cf-shrink');
-        footer.classList.add('cf-icons');
-        next='cf-icons';
+        footer.classList.remove('cf-tight');
+        // The lowest-information label is the next thing to fold. Saved
+        // prompts and identifying workspace/model text remain intact here.
+        footer.classList.add('cf-profile');
+        next='cf-profile';
         if(overflows()){
-          footer.classList.add('cf-burger');
-          next='cf-icons cf-burger';
+          footer.classList.remove('cf-profile');
+          // Only now use the labeled-compact stage with capped chips.
+          footer.classList.add('cf-shrink');
+          next='cf-shrink';
+          if(overflows()){
+            footer.classList.remove('cf-shrink');
+            footer.classList.add('cf-icons');
+            next='cf-icons';
+            if(overflows()){
+              footer.classList.add('cf-burger');
+              next='cf-icons cf-burger';
+            }
+          }
         }
       }
     }
   }finally{
     // Restore the measured stage, then release the frozen box in the same
     // task so no intermediate geometry is ever committed to the screen.
+    footer.classList.toggle('cf-tight',next.includes('cf-tight'));
+    footer.classList.toggle('cf-profile',next.includes('cf-profile'));
     footer.classList.toggle('cf-shrink',next.includes('cf-shrink'));
     footer.classList.toggle('cf-icons',next.includes('cf-icons'));
     footer.classList.toggle('cf-burger',next.includes('cf-burger'));

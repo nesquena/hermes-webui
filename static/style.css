@@ -3306,12 +3306,32 @@
      stay intact, including while the fit guard is active. */
   .composer-footer.cf-measuring .has-tooltip::after{position:fixed!important;}
 
-  /* Intermediate shrink stage (between full labels and .cf-icons): the fit
-     ladder in ui.js caps the widest labeled chips so their labels ellipsize
-     instead of disappearing. Labels stay readable where bare icons would
-     leave the footer half-empty; the divider, saved-prompts button and
-     tightened paddings/gap reclaim the rest. Label elements already ellipsize
-     via their own min-width:0/overflow rules. */
+  /* Two fine-grained compaction rungs come before real content is sacrificed.
+     The first only tightens whitespace and chip padding. The second additionally
+     turns the low-information profile chip into an icon while retaining every
+     action and all identifying text needed to distinguish workspace and model.
+     Direct-child controls still keep their declared click-target sizes. */
+  .composer-footer.cf-tight .composer-left,
+  .composer-footer.cf-profile .composer-left{gap:3px;}
+  .composer-footer.cf-tight .composer-divider,
+  .composer-footer.cf-profile .composer-divider{display:none;}
+  .composer-footer.cf-tight .composer-profile-chip,
+  .composer-footer.cf-tight .composer-workspace-chip,
+  .composer-footer.cf-tight .composer-model-chip,
+  .composer-footer.cf-tight .composer-reasoning-chip,
+  .composer-footer.cf-profile .composer-profile-chip,
+  .composer-footer.cf-profile .composer-workspace-chip,
+  .composer-footer.cf-profile .composer-model-chip,
+  .composer-footer.cf-profile .composer-reasoning-chip{padding-left:8px;padding-right:6px;gap:6px;}
+  .composer-footer.cf-profile .composer-profile-label,
+  .composer-footer.cf-profile .composer-profile-chevron,
+  .composer-footer.cf-profile #composerProfileLabel{display:none;}
+  .composer-footer.cf-profile .composer-profile-chip{box-sizing:border-box;width:44px;height:44px;max-width:44px;min-width:44px;min-height:44px;padding:0;justify-content:center;gap:0;font-size:11px;}
+
+  /* Only once those rungs overflow does the labeled-compact stage cap the two
+     identifying chips and fold Saved prompts away. The wider caps preserve
+     realistic names such as "hermes-webui" and "Claude Sonnet 4.6" instead of
+     replacing every Claude/workspace label with the same indistinct prefix. */
   .composer-footer.cf-shrink .composer-left{gap:3px;}
   /* Compact labels may ellipsize inside their capped chips, but the controls
      themselves must not flex-shrink to make the stage look like it fits. */
@@ -3319,18 +3339,14 @@
   .composer-footer.cf-shrink .composer-divider{display:none;}
   .composer-footer.cf-shrink #btnSavedPrompts,
   .composer-footer.cf-shrink .saved-prompts-popup{display:none!important;}
-  /* Profile goes icon-only in shrink (mirrors the cf-icons profile rule): the
-     label is almost always the active profile name and carries the least
-     information of the three labeled chips — the reclaimed width goes to the
-     workspace and model labels, which are the ones worth reading. */
   .composer-footer.cf-shrink .composer-profile-label,
   .composer-footer.cf-shrink .composer-profile-chevron,
   .composer-footer.cf-shrink #composerProfileLabel{display:none;}
   .composer-footer.cf-shrink .composer-profile-chip{box-sizing:border-box;width:44px;height:44px;max-width:44px;min-width:44px;min-height:44px;padding:0;justify-content:center;gap:0;font-size:11px;}
-  .composer-footer.cf-shrink .composer-workspace-group{max-width:140px;}
-  .composer-footer.cf-shrink .composer-workspace-chip{padding-left:8px;padding-right:6px;}
-  .composer-footer.cf-shrink .composer-model-chip{max-width:120px;padding-left:8px;padding-right:6px;}
-  .composer-footer.cf-shrink .composer-reasoning-chip{padding-left:7px;padding-right:7px;}
+  .composer-footer.cf-shrink .composer-workspace-group{max-width:170px;}
+  .composer-footer.cf-shrink .composer-workspace-chip{padding-left:8px;padding-right:6px;gap:6px;}
+  .composer-footer.cf-shrink .composer-model-chip{max-width:180px;padding-left:8px;padding-right:6px;gap:6px;}
+  .composer-footer.cf-shrink .composer-reasoning-chip{padding-left:7px;padding-right:7px;gap:6px;}
 
   .composer-footer.cf-burger .composer-left{gap:8px;}
   .composer-footer.cf-burger .composer-workspace-group{box-sizing:border-box;flex:0 0 44px;width:44px;min-width:44px;max-width:44px;min-height:44px;overflow:hidden;border:none;background:transparent;border-radius:8px;}

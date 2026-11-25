@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Real-browser regression gate for composer-tooltip measurement lifecycle.
 
-Binds the four regressions reproduced on PR #8766 (2026-11-05/07):
+Binds the regressions reproduced on PR #8766 (2026-11-05/07/25):
 
+* ordinary 960–1920px composer sweeps, with the workspace panel open where the
+  breakpoint permits, keep Saved prompts and realistic workspace/model labels
+  through lossless whitespace/profile-only stages; the later 170/180px caps do
+  not clip those identifiers either (C61-F1);
 * with Dictate visible, enabled, idle, neither hovered nor focused, Chromium's
   accessibility tree must still name #btnMic "Dictate" (Attach is the positive
   control), and its generated tooltip text must not have been destroyed;
@@ -207,6 +211,47 @@ def _set_populated_scene(page, workspace_label: str, model_label: str) -> None:
     )
 
 
+def _set_default_scene(page, workspace_label: str, model_label: str, panel_open: bool) -> None:
+    """Reproduce the review's ordinary six-control composer and panel state."""
+    _set_populated_scene(page, workspace_label, model_label)
+    page.evaluate(
+        """(panelOpen) => {
+          for (const id of ['providerQuotaChip', 'composerReasoningWrap',
+                            'ctxIndicatorWrap', 'composerStatus']) {
+            const element = document.getElementById(id);
+            element.style.display = 'none';
+            if (id === 'providerQuotaChip') element.hidden = true;
+          }
+          document.getElementById('composerStatus').textContent = '';
+          if (typeof toggleWorkspacePanel !== 'function') {
+            throw new Error('workspace panel control unavailable');
+          }
+          toggleWorkspacePanel(panelOpen);
+        }""",
+        panel_open,
+    )
+
+
+def _assert_default_lossless_scene(failures: list[str], name: str, geometry: dict) -> None:
+    """Geometry-only/profile rungs must not hide Saved prompts or clip IDs."""
+    if geometry["stage"] not in {"full", "tight", "profile"}:
+        failures.append(f"{name}: ordinary composer advanced to {geometry['stage']} before lossless rungs: {geometry}")
+    if geometry["savedPromptsDisplay"] == "none":
+        failures.append(f"{name}: Saved prompts disappeared at a lossless/profile stage: {geometry}")
+    labels = {label["id"]: label for label in geometry["labels"]}
+    for label_id, text_key in (("composerWorkspaceLabel", "workspaceText"), ("composerModelLabel", "modelText")):
+        label = labels[label_id]
+        if label["text"] != geometry["fixture"][text_key]:
+            failures.append(f"{name}: {label_id} was replaced before measurement: {label}")
+        if not label["visible"] or label["scrollWidth"] > label["clientWidth"] + 1:
+            failures.append(f"{name}: {label_id} hidden or truncated at a lossless/profile stage: {label} / {geometry['footerClasses']}")
+    profile = labels["composerProfileLabel"]
+    if geometry["stage"] in {"full", "tight"} and (not profile["visible"] or profile["scrollWidth"] > profile["clientWidth"] + 1):
+        failures.append(f"{name}: profile label hidden or truncated before cf-profile: {profile} / {geometry['footerClasses']}")
+    if geometry["leftScrollWidth"] > geometry["leftClientWidth"] + 1:
+        failures.append(f"{name}: selected stage still overflows: {geometry}")
+
+
 def _assert_scene(
     failures: list[str],
     name: str,
@@ -266,12 +311,26 @@ def _composer_geometry(page) -> dict:
             },
             stage: footer.classList.contains('cf-burger') ? 'burger'
               : footer.classList.contains('cf-shrink') ? 'shrink'
-              : footer.classList.contains('cf-icons') ? 'icons' : 'full',
+              : footer.classList.contains('cf-icons') ? 'icons'
+              : footer.classList.contains('cf-profile') ? 'profile'
+              : footer.classList.contains('cf-tight') ? 'tight' : 'full',
             footerClasses: footer.className,
             attachEnabled: !attach.disabled,
             attachWidth: rect.width,
             attachHeight: rect.height,
             attachFlexShrink: getComputedStyle(attach).flexShrink,
+            savedPromptsDisplay: getComputedStyle(document.querySelector('#btnSavedPrompts')).display,
+            labels: [['composerProfileLabel', '.composer-profile-label'], ['composerWorkspaceLabel', '#composerWorkspaceLabel'], ['composerModelLabel', '#composerModelLabel']].map(([id, selector]) => {
+              const element = document.querySelector(selector);
+              return {
+                id,
+                text: element.textContent,
+                display: getComputedStyle(element).display,
+                visible: element.getClientRects().length > 0,
+                clientWidth: element.clientWidth,
+                scrollWidth: element.scrollWidth,
+              };
+            }),
             micWidth: micRect.width,
             micHeight: micRect.height,
             micFlexShrink: getComputedStyle(mic).flexShrink,
@@ -449,6 +508,58 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
                     f"{len(blanked)}/24 frames; "
                     f"first={blanked[0]}"
                 )
+        # Release-staging C61-F1 (2026-11-25): an ordinary composer must use
+        # finer padding/profile rungs instead of hiding Saved prompts or
+        # truncating realistic workspace/model names while master still shows
+        # them. These are the exact short and panel-open/real-name frames from
+        # that review, driven through the production resize/panel handlers.
+        default_scenarios = (
+            ("default960", 960, False, "default", "review-model"),
+            ("default1000", 1000, False, "default", "review-model"),
+            ("realistic1024", 1024, False, "hermes-webui", "Claude Sonnet 4.6"),
+            ("panel1280", 1280, True, "hermes-webui", "review-model"),
+            ("realisticPanel1366", 1366, True, "hermes-webui", "Claude Sonnet 4.6"),
+            ("defaultSqueezeSweep", 1310, True, "default", "review-model"),
+        )
+        evidence["defaultLossless"] = {}
+        for name, width, panel_open, workspace_label, model_label in default_scenarios:
+            _set_default_scene(page, workspace_label, model_label, panel_open)
+            page.set_viewport_size({"width": width, "height": 900})
+            page.wait_for_timeout(400)
+            geometry = _composer_geometry(page)
+            evidence["defaultLossless"][name] = geometry
+            _assert_default_lossless_scene(failures, name, geometry)
+            screenshot_dir = os.environ.get("COMPOSER_TOOLTIP_SCREENSHOT_DIR")
+            if screenshot_dir:
+                os.makedirs(screenshot_dir, exist_ok=True)
+                page.mouse.move(5, 5)
+                page.screenshot(path=os.path.join(screenshot_dir, f"{name}.png"))
+        page.evaluate("toggleWorkspacePanel(false)")
+
+        # Sweep both ordinary panel states with realistic names. The prior head
+        # hides Saved prompts and clips labels across a continuous band, not
+        # just the six named screenshots above; no such band may remain.
+        evidence["realisticSweep"] = {}
+        for width in range(960, 1921, 40):
+            name = f"realisticSweep{width}"
+            _set_default_scene(page, "hermes-webui", "Claude Sonnet 4.6", width >= 1280)
+            page.set_viewport_size({"width": width, "height": 900})
+            page.wait_for_timeout(120)
+            geometry = _composer_geometry(page)
+            evidence["realisticSweep"][str(width)] = geometry
+            _assert_default_lossless_scene(failures, name, geometry)
+
+        # Deliberately park cf-shrink to validate the later caps independently
+        # of stage selection: even here, ordinary realistic identifying text
+        # must remain whole rather than collapsing to an ambiguous prefix.
+        _set_default_scene(page, "hermes-webui", "Claude Sonnet 4.6", False)
+        page.evaluate("document.querySelector('.composer-footer').className = 'composer-footer cf-shrink'")
+        shrink_caps = _composer_geometry(page)
+        evidence["shrinkRealisticCaps"] = shrink_caps
+        for label in shrink_caps["labels"]:
+            if label["id"] != "composerProfileLabel" and (not label["visible"] or label["scrollWidth"] > label["clientWidth"] + 1):
+                failures.append(f"shrinkRealisticCaps: realistic label unnecessarily clipped: {label}")
+
         # R1 (2026-11-05): build a synthetic populated long-name scene near
         # the shrink-to-icons boundary. Only control content/presence and the
         # viewport change; the production resize handler chooses the stage.
@@ -718,7 +829,7 @@ def main() -> int:
                         print(" - " + failure, file=sys.stderr)
                     print(json.dumps(evidence, indent=2), file=sys.stderr)
                     return 1
-                print("COMPOSER TOOLTIP GEOMETRY PASSED: idle AX + 2x24 resize frames + 1120px shrink target + Attach-last targets/tooltips + wide/phone recovery")
+                print("COMPOSER TOOLTIP GEOMETRY PASSED: ordinary 25-width lossless sweep + 6 review frames + realistic shrink caps + idle AX + 2x24 resize frames + 1120px shrink target + Attach-last targets/tooltips + wide/phone recovery")
                 return 0
             finally:
                 proc.terminate()

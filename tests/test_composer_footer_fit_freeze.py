@@ -17,9 +17,9 @@ Every class or style mutation and every overflow measurement commits a layout
 sample, so the recorded sequence of footer heights / messages client heights
 is exactly what a browser would have painted.
 
-Covered from each starting stage (full, shrink, icons, burger) and for each
-forced overflow outcome (full, shrink, icons, burger), with empty and
-caller-owned prior inline styles:
+Covered from each starting stage (full, tight, profile, shrink, icons, burger)
+and for each forced overflow outcome over that same six-rung ladder, with empty
+and caller-owned prior inline styles:
   * the resolved stage classes are correct;
   * the footer border-box height and the messages client height never move
     while the probe runs (no intermediate geometry, no resize notification);
@@ -44,9 +44,11 @@ UI_JS_PATH = REPO_ROOT / "static" / "ui.js"
 NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
-STAGES = ("full", "shrink", "icons", "burger")
+STAGES = ("full", "tight", "profile", "shrink", "icons", "burger")
 STAGE_CLASSES = {
     "full": "",
+    "tight": "cf-tight",
+    "profile": "cf-profile",
     "shrink": "cf-shrink",
     "icons": "cf-icons",
     "burger": "cf-burger cf-icons",
@@ -73,11 +75,13 @@ function extractFunc(name) {
 // cluster's content width. The left cluster's clientWidth is the width the
 // scenario makes available; scrollWidth is content width clamped to it, so
 // overflow (scrollWidth > clientWidth + 1) depends on the CURRENT stage.
-const STAGE_HEIGHT = { full: 56, shrink: 52, icons: 48, burger: 40 };
-const STAGE_LEFT_WIDTH = { full: 900, shrink: 760, icons: 600, burger: 300 };
-const OUTCOME_WIDTH = { full: 1000, shrink: 800, icons: 700, burger: 400 };
+const STAGE_HEIGHT = { full: 56, tight: 56, profile: 52, shrink: 52, icons: 48, burger: 40 };
+const STAGE_LEFT_WIDTH = { full: 1000, tight: 950, profile: 850, shrink: 700, icons: 600, burger: 300 };
+const OUTCOME_WIDTH = { full: 1100, tight: 950, profile: 850, shrink: 750, icons: 650, burger: 400 };
 const STAGE_CLASSES = {
   full: [],
+  tight: ['cf-tight'],
+  profile: ['cf-profile'],
   shrink: ['cf-shrink'],
   icons: ['cf-icons'],
   burger: ['cf-icons', 'cf-burger'],
@@ -88,6 +92,8 @@ function stageOf(classes) {
   return classes.has('cf-burger') ? 'burger'
     : classes.has('cf-icons') ? 'icons'
     : classes.has('cf-shrink') ? 'shrink'
+    : classes.has('cf-profile') ? 'profile'
+    : classes.has('cf-tight') ? 'tight'
     : 'full';
 }
 
@@ -398,6 +404,7 @@ def test_harness_detects_unfrozen_probe(outcome):
     steady = [
         r for r in outcome["control_unfrozen"]
         if r["prevHeight"] == "" and r["start"] != "full" and r["start"] == r["outcome"]
+        and r["startHeight"] != outcome["runs"][0]["startHeight"]
     ]
     assert steady and all(len(r["messagesHeights"]) > 2 for r in steady), (
         "control: an unfrozen steady-state pass from a compact stage must oscillate "
