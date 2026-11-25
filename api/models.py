@@ -17217,6 +17217,11 @@ def _merge_session_messages_append_only_impl(
                             or keep_state_rows_missing_from_sidecar
                         )
                     ):
+                        # #6637/#6638: a state-only tool-call declaration
+                        # the sidecar never observed is recovered together
+                        # with its result and final answer, under the same
+                        # narrow gate (no watermark/boundary, no
+                        # cancelled-journal state) the sibling branch uses.
                         if _insert_state_message_chronologically(merged_messages, msg):
                             seen_message_keys.add(key)
                             seen_dedup_keys.add(dedup_key)
