@@ -104,23 +104,26 @@ function _composerCommitProducerText(value, producerToken){
 // that was already there stays with the source. Aborting restores the whole live
 // value. The synthetic input event `_appendComposerText()` dispatches leaves the
 // value unchanged, so it is not mistaken for a keystroke.
-function _composerRecordNativeText(){
+function _composerOwnershipTransitionOwnsVisiblePane(){
   const tx=_composerOwnershipTransition;
-  const input=$('msg');
-  if(!tx||!input)return false;
+  if(!tx)return false;
   // Only the pane the transition actually owns may buffer. If navigation has
   // already moved to a different owner, this textarea belongs to that owner and
-  // its draft save below is the right place for the keystroke.
+  // its own draft save is the right place for the event.
   const visibleSid=(S.session&&S.session.session_id)||null;
   const visibleProfile=String(
     (S.session&&S.session.profile)||S.activeProfile||'default'
   ).trim()||'default';
   if(tx.sourceSid){
-    if(visibleSid!==tx.sourceSid)return false;
-    if(!_composerProfilesMatch(visibleProfile,tx.sourceProfile))return false;
-  }else if(visibleSid){
-    return false;
+    return visibleSid===tx.sourceSid&&_composerProfilesMatch(visibleProfile,tx.sourceProfile);
   }
+  return !visibleSid;
+}
+function _composerRecordNativeText(){
+  const tx=_composerOwnershipTransition;
+  const input=$('msg');
+  if(!tx||!input)return false;
+  if(!_composerOwnershipTransitionOwnsVisiblePane())return false;
   const value=String(input.value||'');
   const previous=String(tx.lastNativeValue==null?'':tx.lastNativeValue);
   if(value===previous)return false;

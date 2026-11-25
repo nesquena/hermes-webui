@@ -2128,6 +2128,9 @@ async function send(){
   // the created conversation must keep.
   const _createdSessionForThisSend=!S.session;
   const _composerTextBeforeCreate=_createdSessionForThisSend?String($('msg').value||''):'';
+  // The files staged for this send, captured before the create can drain newer
+  // drops into S.pendingFiles (same separation as the text snapshot below).
+  const _composerFilesBeforeCreate=_createdSessionForThisSend?[...(S.pendingFiles||[])]:[];
   if(!S.session&&!(await _ensureSessionForComposerAction({pickerClaimEpoch:_sendProjectPickerClaim}))) return;
 
   const activeSid=S.session.session_id;
@@ -2158,6 +2161,14 @@ async function send(){
       _composerTypedDuringCreate=_added.replace(/^\n+/,'');
     }
   }
+  // Files dropped while /api/session/new was in flight are newer than this
+  // message, so they stay staged in the created chat instead of being uploaded
+  // with the send that preceded them (the text rule above, for the tray).
+  let _composerFilesDuringCreate=[];
+  if(_createdSessionForThisSend){
+    _composerFilesDuringCreate=(S.pendingFiles||[])
+      .filter(file=>!_composerFilesBeforeCreate.includes(file));
+  }
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
   // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()
@@ -2179,10 +2190,13 @@ async function send(){
   // interrupt-mode send during the upload window inherits the still-live
   // S.pendingFiles and later re-uploads the first send's attachment. Detach the
   // snapshot from S.pendingFiles now so files staged AFTER this point belong to
-  // the next send only.
-  const _submittedFiles=[...(S.pendingFiles||[])];
+  // the next send only. Files the create drained in from newer drops stay
+  // behind with the newer text instead of riding this message.
+  const _submittedFiles=_createdSessionForThisSend
+    ?[..._composerFilesBeforeCreate]
+    :[...(S.pendingFiles||[])];
   const _submittedDraftFilesForClear=[..._submittedFiles];
-  S.pendingFiles=[];
+  S.pendingFiles=_createdSessionForThisSend?[..._composerFilesDuringCreate]:[];
   if(typeof renderTray==='function')renderTray();
 
   // #5912 gate SILENT fix: clear the PERSISTED draft here — alongside the
@@ -2192,10 +2206,10 @@ async function send(){
   // When input arrived during the create, the hand-off already persisted it as
   // the new chat's draft; clear only what this send submitted.
   let _composerDraftClearPromise=null;
-  if (_composerTypedDuringCreate && typeof _saveComposerDraftNow === 'function') {
+  if ((_composerTypedDuringCreate||_composerFilesDuringCreate.length) && typeof _saveComposerDraftNow === 'function') {
     try{
       Promise.resolve(_saveComposerDraftNow(
-        activeSid,_composerTypedDuringCreate,[],'',{ownerProfile:_ownerProfile}
+        activeSid,_composerTypedDuringCreate,[..._composerFilesDuringCreate],'',{ownerProfile:_ownerProfile}
       )).catch(()=>{});
     }catch(_){}
   } else if (activeSid && typeof _clearComposerDraft === 'function') {

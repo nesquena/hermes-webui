@@ -1831,7 +1831,7 @@ def test_dictation_and_voice_mode_writes_route_through_the_composer_transaction(
     input_end = BOOT_JS.index("// #5514/#5515", input_start)
     input_handler = BOOT_JS[input_start:input_end]
     assert "_composerRecordNativeText()" in input_handler
-    assert "if (!bufferedTransition && sid" in input_handler
+    assert "if (!bufferedTransition && !handoffOwnsPane && sid" in input_handler
 
     assert else_index > 0
 
@@ -3163,7 +3163,11 @@ def test_first_send_keeps_text_typed_after_its_snapshot():
     # The surviving text goes back into the textarea instead of being cleared.
     assert "$('msg').value=_composerTypedDuringCreate;" in body
     # Its draft is the newer text; the submitted draft is not cleared over it.
-    assert "if (_composerTypedDuringCreate && typeof _saveComposerDraftNow === 'function') {" in body
+    assert "if ((_composerTypedDuringCreate||_composerFilesDuringCreate.length) && typeof _saveComposerDraftNow === 'function') {" in body
+    # Files dropped during the create stay behind with the newer text.
+    assert "const _composerFilesBeforeCreate=" in body
+    assert "let _composerFilesDuringCreate=[];" in body
+    assert "S.pendingFiles=_createdSessionForThisSend?[..._composerFilesDuringCreate]:[];" in body
     assert "} else if (activeSid && typeof _clearComposerDraft === 'function') {" in body
 
 
@@ -3807,3 +3811,61 @@ def test_file_removal_during_new_session_pending_edits_the_source_profile_draft(
         "the source chat must not restore the removed attachment"
     )
     assert source_saves[-1]["profile"] == "work"
+
+
+def _run_handoff_pane_ownership_harness() -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    script = "\n".join(
+        [
+            "const S={session:{session_id:'old-session',profile:'work'},activeProfile:'work'};",
+            "let _composerOwnershipTransition=null;",
+            _function(UI_JS, "_composerProfilesMatch", "\nfunction _composerOwnerIsVisible"),
+            _function(
+                UI_JS,
+                "_composerOwnershipTransitionOwnsVisiblePane",
+                "\nfunction _composerRecordNativeText",
+            ),
+            "const cases={};",
+            "cases.noTransition=_composerOwnershipTransitionOwnsVisiblePane();",
+            "_composerOwnershipTransition={sourceSid:'old-session',sourceProfile:'work'};",
+            "cases.sourceOwned=_composerOwnershipTransitionOwnsVisiblePane();",
+            "S.session={session_id:'other-session',profile:'work'};",
+            "cases.otherPane=_composerOwnershipTransitionOwnsVisiblePane();",
+            "S.session={session_id:'old-session',profile:'default'};",
+            "cases.otherProfile=_composerOwnershipTransitionOwnsVisiblePane();",
+            "S.session=null;",
+            "cases.navigatedAway=_composerOwnershipTransitionOwnsVisiblePane();",
+            "_composerOwnershipTransition={sourceSid:null,sourceProfile:'work'};",
+            "cases.blankOwned=_composerOwnershipTransitionOwnsVisiblePane();",
+            "process.stdout.write(JSON.stringify(cases));",
+        ]
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+def test_handoff_pane_ownership_only_matches_the_transition_owner():
+    result = _run_handoff_pane_ownership_harness()
+
+    assert result["noTransition"] is False
+    assert result["sourceOwned"] is True
+    assert result["otherPane"] is False
+    assert result["otherProfile"] is False
+    assert result["navigatedAway"] is False
+    assert result["blankOwned"] is True
+
+
+def test_unchanged_input_events_during_a_handoff_skip_the_source_autosave():
+    """A synthetic input event returns false from _composerRecordNativeText();
+    while the handoff owns the pane the handler must still skip the source
+    draft save, or the destination's buffered text leaks into the old chat."""
+    input_start = BOOT_JS.index("$('msg').addEventListener('input',()=>{")
+    input_end = BOOT_JS.index("// #5514/#5515", input_start)
+    handler = BOOT_JS[input_start:input_end]
+
+    assert "_composerRecordNativeText()" in handler
+    assert "_composerOwnershipTransitionOwnsVisiblePane()" in handler
+    assert "if (!bufferedTransition && !handoffOwnsPane && sid" in handler

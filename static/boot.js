@@ -2989,9 +2989,15 @@ $('msg').addEventListener('input',()=>{
   // source draft here would duplicate the destination delta.
   const bufferedTransition=typeof _composerRecordNativeText==='function'
     && _composerRecordNativeText();
+  // An unchanged input event (for example the synthetic event a saved-prompt
+  // append dispatches while the prompt itself is buffered) returns false above.
+  // While the handoff still owns this pane, its draft save must be skipped too;
+  // otherwise the source chat would keep text already buffered for the new one.
+  const handoffOwnsPane=typeof _composerOwnershipTransitionOwnsVisiblePane==='function'
+    && _composerOwnershipTransitionOwnsVisiblePane();
   // Persist composer draft to server (debounced in _saveComposerDraft).
   const sid = S && S.session && S.session.session_id;
-  if (!bufferedTransition && sid && typeof _saveComposerDraft === 'function') {
+  if (!bufferedTransition && !handoffOwnsPane && sid && typeof _saveComposerDraft === 'function') {
     _saveComposerDraft(sid, $('msg').value, S.pendingFiles ? [...S.pendingFiles] : []);
   }
   const text=$('msg').value;
