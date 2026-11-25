@@ -1629,6 +1629,27 @@ WebUI progress guidance:
 - For direct answers or very short tasks, skip progress updates and answer normally.
 """.strip()
 
+# Inline suggestion buttons can be switched off process-wide; the prompt would
+# otherwise invite a fenced block that no client renders.
+_SUGGESTIONS_OFF_VALUES = {"0", "false", "no", "off", "disabled"}
+
+
+def _webui_suggestions_enabled() -> bool:
+    """True unless HERMES_WEBUI_SUGGESTIONS is set to a false-ish value."""
+    raw = os.environ.get("HERMES_WEBUI_SUGGESTIONS")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in _SUGGESTIONS_OFF_VALUES
+
+
+_WEBUI_SUGGESTIONS_PROMPT = """
+WebUI suggestion buttons (inline follow-up choices):
+- When a reply ends by offering the user a small set of concrete next steps (a yes/no question, or 2-4 alternatives), keep the question in your visible text and append exactly ONE fenced code block whose info string is `suggestions`. Its body is a JSON array of 1-6 short labels, each at most 200 characters.
+- The WebUI hides that block and renders the labels as clickable buttons; clicking one sends the label as the user's next message. Write labels short, self-contained and in the user's language, because the label alone becomes their message (e.g. ["Ja, einrichten", "Erst nur Advisor"]).
+- Use it only for real choices you are offering in this reply: not for summaries, not for illustrative examples, at most once per message.
+- Omit it when there is nothing to choose (finished work, plain answers), and do not repeat the labels as a bullet list in the visible text.
+""".strip()
+
 
 def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
     """Return safe WebUI session metadata for the agent's ephemeral context.
@@ -1705,6 +1726,8 @@ def _webui_ephemeral_system_prompt(
     if surface_prompt:
         parts.append(surface_prompt)
     parts.append(_WEBUI_PROGRESS_PROMPT)
+    if _webui_suggestions_enabled():
+        parts.append(_WEBUI_SUGGESTIONS_PROMPT)
     delivery_prompt = _webui_delivery_context_prompt(config_data)
     if delivery_prompt:
         parts.append(delivery_prompt)

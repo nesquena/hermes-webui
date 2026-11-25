@@ -30,7 +30,7 @@
      641-900px compact band. If the helper's logic changes, update this too. -->
 <script>(function(){try{var p=localStorage.getItem('hermes-webui-sidebar-collapsed');var compact=(window.matchMedia('(max-width: 900px)').matches&&window.matchMedia('(min-width: 641px)').matches);if(p==='1'||(p==null&&compact))document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
 <script src="static/pwa-startup.js?v=__WEBUI_VERSION__"></script>
-<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__,imgSrcExtra:__CSP_IMG_EXTRA_JSON__};</script>
+<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__,imgSrcExtra:__CSP_IMG_EXTRA_JSON__,suggestionsEnabled:__SUGGESTIONS_ENABLED__};</script>
 <script>window.__HERMES_WEBUI_BUNDLE_VERSION__='__WEBUI_VERSION__';</script>
 <script>(function(){
   var cfg=window.__HERMES_CONFIG__||{},token=cfg.csrfToken||'';
@@ -1867,6 +1867,7 @@
 <script src="static/sessions.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/suggestions.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/extension_settings.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>

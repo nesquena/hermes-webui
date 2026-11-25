@@ -17585,6 +17585,7 @@ def _render_index_shell_base() -> str:
     request and are applied by the caller against this base string.
     """
     from api.updates import WEBUI_VERSION
+    from api.streaming import _webui_suggestions_enabled
 
     index_path = api_config.get_index_html_path()
     st = index_path.stat()
@@ -17596,10 +17597,12 @@ def _render_index_shell_base() -> str:
     from urllib.parse import quote
 
     version_token = quote(WEBUI_VERSION, safe="")
+    suggestions_enabled = "true" if _webui_suggestions_enabled() else "false"
     base = (
         index_path.read_text(encoding="utf-8")
         .replace("__WEBUI_VERSION__", version_token)
         .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
+        .replace("__SUGGESTIONS_ENABLED__", suggestions_enabled)
     )
     with _INDEX_SHELL_CACHE_LOCK:
         _INDEX_SHELL_CACHE["base"] = (sig, base)
