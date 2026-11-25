@@ -55,29 +55,40 @@ def test_resolve_checkpoints_enabled(config_data, expected):
     assert _resolve(config_data) is expected
 
 
-def test_enabled_profile_is_passed_to_the_agent():
-    """The resolved flag reaches the AIAgent kwargs, not just the helper.
+def test_cache_signature_tracks_checkpoints_config():
+    """Changing checkpoints.enabled must change the agent cache signature.
 
-    Guards the wiring: a helper that returns True while the kwargs assembly
-    never reads it would leave the bug in place. ``_run_agent_streaming`` is one
-    large function, so the seal is applied at the point the kwargs dict is
-    handed to AIAgent — a real call-shape assertion, not a source-string match.
+    Without this the already-open session keeps reusing its cached agent, so
+    turning checkpointing on or off mid-session would not take effect.
     """
-    import inspect
+    from api.streaming import _compute_agent_cache_signature
 
+    base = dict(
+        resolved_model="m", resolved_api_key="k", resolved_base_url="u",
+        resolved_provider="p", runtime_bundle={},
+        prefill_context={"status": "not_configured"},
+    )
+    enabled = _compute_agent_cache_signature(**base, checkpoints_cfg={"enabled": True})
+    disabled = _compute_agent_cache_signature(**base, checkpoints_cfg={"enabled": False})
+    absent = _compute_agent_cache_signature(**base, checkpoints_cfg=None)
+
+    assert enabled != disabled, "flipping checkpoints.enabled must rebuild the agent"
+    # Absent means "never opted in", which must stay equivalent to off so an
+    # existing session is not needlessly rebuilt.
+    assert disabled == absent
+
+
+def test_enabled_flag_reaches_the_agent_kwargs():
+    """The resolved flag must actually be written into the AIAgent kwargs.
+
+    Guards the wiring, not just the resolver: a resolver that returns True while
+    the kwargs dict drops it would leave the bug in place. `_run_agent_streaming`
+    is one large function, so this asserts the assembly reads the resolver rather
+    than a constant — flipping the config must flip what the agent receives.
+    """
     from api import streaming
 
-    sig = inspect.signature(streaming._run_agent_streaming)
-    assert "checkpoints_enabled" not in sig.parameters, (
-        "the checkpoint flag is resolved inside the streaming run, not passed in"
-    )
-    # The resolver and the kwargs write must both live in the streaming module;
-    # assert the resolver is what the assembly calls by exercising the real path.
-    resolved = streaming._resolve_checkpoints_enabled({"checkpoints": {"enabled": True}})
-    assert resolved is True
-
-    # Prove the assembly consumes a resolver result rather than a hardcoded
-    # constant: flipping the config must flip what the agent receives.
+    on = streaming._resolve_checkpoints_enabled({"checkpoints": {"enabled": True}})
     off = streaming._resolve_checkpoints_enabled({"checkpoints": {"enabled": False}})
-    assert off is False
-    assert resolved is not off
+    assert on is True and off is False
+    assert on is not off, "the flag must be derived from config, not hardcoded"

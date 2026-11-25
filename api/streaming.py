@@ -14282,6 +14282,7 @@ def _compute_agent_cache_signature(
     prefill_context=None,
     profile_home: str | None = None,
     safe_profile_runtime_env: dict | None = None,
+    checkpoints_cfg=None,
 ) -> str:
     """Return the SHA256 signature identifying an agent's constructor routing state."""
     import hashlib as _hashlib
@@ -14301,6 +14302,7 @@ def _compute_agent_cache_signature(
         bool(_credential_pool),
         max_iterations_cfg or '',
         max_tokens_cfg or '',
+        _resolve_checkpoints_enabled({'checkpoints': checkpoints_cfg}) if checkpoints_cfg is not None else False,
         fallback_resolved or {},
         sorted(toolsets) if toolsets else [],
         reasoning_config or {},
@@ -16619,6 +16621,7 @@ def _run_agent_streaming(
                     prefill_context=_prefill_context,
                     profile_home=_profile_home,
                     safe_profile_runtime_env=_safe_profile_runtime_env,
+                    checkpoints_cfg=_cfg.get('checkpoints') if isinstance(_cfg, dict) else None,
                 )
 
                 agent = None
@@ -17605,6 +17608,7 @@ def _run_agent_streaming(
                                 prefill_context=_prefill_context,
                                 profile_home=_profile_home,
                                 safe_profile_runtime_env=_safe_profile_runtime_env,
+                                checkpoints_cfg=_cfg.get('checkpoints') if isinstance(_cfg, dict) else None,
                             )
                             if not _heal_cacheable:
                                 _agent_sig = None  # #8517: memory scope failed; never cache it
@@ -19177,6 +19181,7 @@ def _run_agent_streaming(
                         prefill_context=_prefill_context,
                         profile_home=_profile_home,
                         safe_profile_runtime_env=_safe_profile_runtime_env,
+                        checkpoints_cfg=_cfg.get('checkpoints') if isinstance(_cfg, dict) else None,
                     )
                     if not _heal_cacheable:
                         _agent_sig = None  # #8517: memory scope failed; never cache it
