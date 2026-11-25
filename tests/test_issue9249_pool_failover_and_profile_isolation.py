@@ -112,6 +112,28 @@ def _merge():
     return config.merge_custom_provider_runtime_bundle("custom:pooled", None, None, None)
 
 
+def _command_token_source_stub(monkeypatch):
+    """Install a stand-in ``agent.command_token_source``.
+
+    CI runs without the Agent importable, so ``key_cmd`` builds no provider
+    there and the merge ladder correctly reports "declared a credential source
+    that produced no key" — the test would pass only on a host that happens to
+    have the Agent installed. The provider build is not the unit under test;
+    the ladder is.
+    """
+    module = types.ModuleType("agent.command_token_source")
+    module.build_command_token_provider = lambda command, label: (
+        lambda: "test-token"
+    )
+    package = sys.modules.get("agent")
+    if package is None:
+        package = types.ModuleType("agent")
+        package.__path__ = []
+        monkeypatch.setitem(sys.modules, "agent", package)
+    monkeypatch.setitem(sys.modules, "agent.command_token_source", module)
+    return module
+
+
 # ── regression 2: one unresolved entry must not discard the whole pool ───────
 
 
@@ -452,6 +474,7 @@ def test_each_declared_env_reference_blocks_the_host_key(monkeypatch, field):
 def test_a_declared_key_cmd_blocks_the_host_key_too(monkeypatch):
     """``key_cmd`` mints its own bearer — the ambient host key must not replace it."""
     monkeypatch.setattr(config, "_host_gated_env_key", lambda base_url: "host-env-key")
+    _command_token_source_stub(monkeypatch)
     _patch_cfg(
         monkeypatch,
         _record(base_url="https://api.openai.com/v1", key_cmd="printf test-token"),
