@@ -88,6 +88,10 @@ FAKE_URL = "https://alice:FAKE-PASSWORD-123@proxy.example.invalid/v1"
 # The synthetic password, kept as its own name so the assertions read as
 # "the password is absent" rather than "some substring is absent".
 FAKE_PASSWORD = "FAKE-PASSWORD-123"
+# The empty-user-name shape: provider setup accepts ``https://:password@host``
+# and saves it unchanged, so the mask must not require a user name.
+EMPTY_USER_URL = "https://:EMPTY-USER-PASSWORD@proxy.example.invalid/v1"
+EMPTY_USER_PASSWORD = "EMPTY-USER-PASSWORD"
 
 
 @pytest.fixture()
@@ -582,6 +586,34 @@ def test_no_agent_fallback_masks_userinfo_and_keeps_the_line(
     # guarantee: the whole pair is masked, the password absent
     assert FAKE_PASSWORD not in out
     assert "alice" not in out
+    assert "***:***@proxy.example.invalid" in out
+
+
+def test_empty_username_userinfo_is_masked(no_agent, clean_root_logging):
+    """A password with an EMPTY user name is masked too.
+
+    ``https://:secret@host`` is a shape provider setup accepts and saves
+    unchanged. The mask used to require a non-empty user name on its first
+    userinfo group, so this URL passed through untouched and the password
+    reached the server log in clear. Only the password is required now.
+    """
+    buf = io.StringIO()
+    assert lr.install_server_log_redaction(stream=buf) is True
+
+    logging.getLogger("agent.model_metadata").warning(
+        "Could not determine context length for model %r (base_url=%s)",
+        "m",
+        EMPTY_USER_URL,
+    )
+    _webui_handler(clean_root_logging).flush()
+    out = buf.getvalue()
+
+    # delivery: the line is present — masking must not delete diagnostics
+    assert "Could not determine context length for model 'm'" in out
+    # diagnostics: the scheme and the host stay readable
+    assert "proxy.example.invalid/v1" in out
+    # guarantee: the password is absent even without a user name
+    assert EMPTY_USER_PASSWORD not in out
     assert "***:***@proxy.example.invalid" in out
 
 

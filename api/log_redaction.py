@@ -179,7 +179,11 @@ def _resolve_agent_formatter_class() -> Optional[type]:
 # opts into ``redact_url_credentials``), v0.22.0 masks neither, and a host
 # without the Agent has no policy at all. The handler owns the server-log
 # boundary, so it enforces the shape itself.
-_URL_USERINFO_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://)([^/@\s]+):([^/@\s]+)@")
+# The user name may be EMPTY: provider setup accepts
+# ``https://:password@host`` (a password with no user name) and saves it
+# unchanged, so requiring a non-empty user name here would let that password
+# reach the log in clear. Only the password is required.
+_URL_USERINFO_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://)([^/@\s]*):([^/@\s]+)@")
 
 
 def _mask_url_userinfo(text: str) -> str:
