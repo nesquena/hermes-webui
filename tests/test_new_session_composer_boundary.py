@@ -227,6 +227,7 @@ def _run_review_race_harness(schedule: str) -> dict:
         let _oldestIdx = 0;
         let _clarifySessionId = 'old-session';
         let _clarifySignature = 'sig';
+        let afterClarify = null;
         let resolveClear;
         const clearPromise = new Promise(resolve => {{ resolveClear = resolve; }});
         const saves = [];
@@ -292,6 +293,13 @@ def _run_review_race_harness(schedule: str) -> dict:
           }}else if(schedule==='clarify'||schedule==='clarify-terminal'||schedule==='clarify-abort'){{
             _stashClarifyDraft(schedule==='clarify-terminal'?'terminal':'expired');
             if(schedule==='clarify-abort')throw new Error('create failed');
+          }}else if(schedule==='clarify-native-tail'){{
+            msg.value='source draft typed';
+            _composerRecordNativeText();
+            _stashClarifyDraft('expired');
+            afterClarify=msg.value;
+            msg.value=`${{afterClarify}} more`;
+            _composerRecordNativeText();
           }}else if(schedule==='voice-clarify-abort'){{
             _composerSetText('source draft voice','source draft voice',null,'voice-producer');
             _stashClarifyDraft('expired');
@@ -350,6 +358,7 @@ def _run_review_race_harness(schedule: str) -> dict:
             activeSid:S.session&&S.session.session_id,
             text:msg.value,
             files:S.pendingFiles.map(f=>f.name),
+            afterClarify,
             saves,
           }}));
         }})().catch(error=>{{console.error(error);process.exit(1);}});
@@ -2747,6 +2756,16 @@ def test_clarify_terminal_rescue_during_create_is_persisted_to_source_owner():
     result = _run_review_race_harness("clarify-terminal")
 
     assert result["activeSid"] == "new-session"
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves[-1]["text"] == "source draft\n\nclarify answer"
+
+
+def test_clarify_rescue_during_create_keeps_input_typed_for_the_destination():
+    result = _run_review_race_harness("clarify-native-tail")
+
+    assert result["activeSid"] == "new-session"
+    assert result["afterClarify"] == "source draft\n\nclarify answer typed"
+    assert result["text"] == " typed more"
     source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
     assert source_saves[-1]["text"] == "source draft\n\nclarify answer"
 

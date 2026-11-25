@@ -15,7 +15,9 @@ WHAT IT CHECKS
   - the composer stays editable, so a click on #msg focuses it and keystrokes
     reach it (a disabled textarea refuses both);
   - the text typed before the click and the text typed while the create is
-    held are both present once the created session is current.
+    held are both present once the created session is current;
+  - a clarification answer stashed on the source chat while the create is held
+    does not drop the words typed for the destination before it arrived.
 
 SCOPE
   Agent-free: the real server.py on an ephemeral port with isolated temp state.
@@ -160,6 +162,107 @@ def _check(browser):
     return failures
 
 
+def _check_clarification_expiry(browser):
+    """A clarification answer stashed on the source chat while New Chat waits
+    must not drop the destination words typed before it arrived."""
+    failures = []
+    ctx = browser.new_context(base_url=BASE)
+    page = ctx.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto("/", wait_until="domcontentloaded")
+    page.wait_for_selector("#msg", timeout=15000)
+    if not _wait_until(
+        page, "typeof S !== 'undefined' && typeof newSession === 'function'", 15000
+    ):
+        ctx.close()
+        return ["  the app did not initialize (clarification case)"]
+    page.wait_for_timeout(1200)
+    page.evaluate(
+        "async () => { if (!S.session) { await newSession(); }"
+        " S.messages = [{role: 'user', content: 'earlier turn'}]; }"
+    )
+    before = page.evaluate("S.session && S.session.session_id")
+
+    held = []
+    page.route(
+        "**/api/session/new",
+        lambda route: held.append(route)
+        if route.request.url.split("?")[0].endswith("/api/session/new")
+        else route.continue_(),
+    )
+    page.click("#msg")
+    page.keyboard.type("alpha")
+    page.click("#btnNewChat")
+    deadline = time.time() + 6
+    while not held and time.time() < deadline:
+        page.wait_for_timeout(50)
+    if not held:
+        page.unroute("**/api/session/new")
+        ctx.close()
+        return ["  the create request was never issued (clarification case)"]
+
+    page.eval_on_selector(
+        "#msg", "el => { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }"
+    )
+    page.keyboard.type(" beta")
+    typed = page.eval_on_selector("#msg", "el => el.value")
+    if typed != "alpha beta":
+        failures.append(
+            f"  the first pending keystrokes did not reach the composer: {typed!r}"
+        )
+    # The production expiry path: the answer is appended to the source chat's
+    # draft while the destination input is still buffered in the textarea.
+    page.evaluate(
+        """() => {
+          const input = document.getElementById('clarifyInput');
+          if (input) input.value = 'answer';
+          if (typeof _stashClarifyDraft === 'function') _stashClarifyDraft('expired');
+        }"""
+    )
+    after_clarify = page.eval_on_selector("#msg", "el => el.value")
+    if " beta" not in after_clarify:
+        failures.append(
+            "  the clarification stash dropped the input typed before it: "
+            f"{after_clarify!r} (was {typed!r})"
+        )
+    page.eval_on_selector(
+        "#msg", "el => { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }"
+    )
+    page.keyboard.type(" gamma")
+
+    held[0].continue_()
+    page.unroute("**/api/session/new")
+    deadline = time.time() + 12
+    after = ""
+    while time.time() < deadline:
+        sid = page.evaluate("S.session && S.session.session_id")
+        if sid and sid != before:
+            page.wait_for_timeout(400)
+            after = page.eval_on_selector("#msg", "el => el.value")
+            break
+        page.wait_for_timeout(150)
+    sid_after = page.evaluate("S.session && S.session.session_id")
+    if not sid_after or sid_after == before:
+        failures.append(
+            "  the created session never became current (clarification case)"
+        )
+    if after != " beta gamma":
+        failures.append(
+            "  the handoff lost words typed around the clarification answer: "
+            f"expected {' beta gamma'!r}, got {after!r}"
+        )
+    for err in errors:
+        failures.append(f"  pageerror: {err}")
+    if not failures:
+        print(
+            "OK  clarification expiry — "
+            + json.dumps({"during": after_clarify, "after": after})
+        )
+    ctx.close()
+    return failures
+
+
 def main():
     try:
         from playwright.sync_api import sync_playwright
@@ -205,7 +308,7 @@ def main():
             browser = pw.chromium.launch(
                 headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
             )
-            failures = _check(browser)
+            failures = _check(browser) + _check_clarification_expiry(browser)
             browser.close()
 
         if failures:

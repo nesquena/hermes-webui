@@ -455,7 +455,22 @@ function _composerTransitionRecord(kind,value,ownerSid,abortValue,options={}){
     _rememberComposerOwnerState(tx.sourceSid,tx.sourceProfile,state,tx.generation);
     if(kind.startsWith('text-')){
       const input=$('msg');
-      if(input){input.value=state.text;tx.lastNativeValue=state.text;tx.nativeBaseline=state.text;}
+      if(input){
+        // The textarea still shows the source chat while the handoff is pending,
+        // and native input is buffered for the destination instead of being
+        // folded into `sourceState.text`. Keep that live tail when the source
+        // text changes (for example a clarification answer appended on expiry):
+        // resetting the baseline to the source text alone would make the next
+        // keystroke replace the native slot with only what follows the new
+        // baseline, dropping the words typed before the source update.
+        const baseline=String(tx.nativeBaseline==null?'':tx.nativeBaseline);
+        const live=String(input.value||'');
+        const tail=baseline&&live.startsWith(baseline)?live.slice(baseline.length):'';
+        const nextText=tail?`${state.text}${tail}`:state.text;
+        input.value=nextText;
+        tx.lastNativeValue=nextText;
+        tx.nativeBaseline=state.text;
+      }
     }
     else S.pendingFiles=[...state.files];
     return true;
