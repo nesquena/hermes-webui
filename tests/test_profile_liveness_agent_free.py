@@ -501,7 +501,8 @@ def test_custom_default_home_under_profiles_ancestor_is_readable(stub_agent, stu
 # ── Per-entry isolation: an unreadable tombstone store ───────────────────────
 
 def _install_hermes_cli_profiles_stub(monkeypatch, *, home: Path, profiles: Path, tombstone_exc=None,
-                                      optional_helpers: bool = True):
+                                      optional_helpers: bool = True, identity_helper: bool = True,
+                                      identity_exc=None):
     """Install a ``hermes_cli.profiles`` stand-in the fast path imports from.
 
     ``_build_profile_rows_fast`` imports its helpers from ``hermes_cli.profiles``
@@ -520,7 +521,14 @@ def _install_hermes_cli_profiles_stub(monkeypatch, *, home: Path, profiles: Path
     profiles_mod._check_gateway_running = lambda _home: False
     profiles_mod._PROFILE_ID_RE = _STUB_PROFILE_ID_RE
     if optional_helpers:
-        profiles_mod.named_profile_has_identity = _stub_named_profile_has_identity
+        if identity_exc is not None:
+            def _identity_raises(home_arg):
+                if home_arg.name == "liveprof":
+                    raise identity_exc
+                return _stub_named_profile_has_identity(home_arg)
+            profiles_mod.named_profile_has_identity = _identity_raises
+        elif identity_helper:
+            profiles_mod.named_profile_has_identity = _stub_named_profile_has_identity
         if tombstone_exc is None:
             profiles_mod.named_profile_is_deleted = _stub_named_profile_is_deleted
         else:
@@ -608,6 +616,61 @@ def test_unreadable_tombstone_store_keeps_the_default_row(agent_free, monkeypatc
     assert rows is not None, "the fast path must stay on (the helpers imported fine)"
     names = [row["name"] for row in rows]
     assert names == ["default"], names
+
+
+def test_profiles_default_dir_does_not_duplicate_the_default_row(agent_free, monkeypatch, tmp_path):
+    """A ``profiles/default`` dir with an identity marker must not add a second row."""
+    from api import profiles as webui_profiles
+
+    home, profiles, live, ghost, shell = _make_homes(tmp_path)
+    dup = profiles / "default"
+    dup.mkdir()
+    (dup / "config.yaml").write_text("model: z\n", encoding="utf-8")
+    _install_hermes_cli_profiles_stub(monkeypatch, home=home, profiles=profiles)
+    webui_profiles._invalidate_list_profiles_cache()
+
+    rows = webui_profiles._build_profile_rows_fast()
+
+    assert [row["name"] for row in rows] == ["default", "liveprof"]
+    assert rows[0]["path"] == str(home)
+
+
+def test_deletion_filter_survives_a_missing_identity_helper(agent_free, monkeypatch, tmp_path):
+    """An Agent exporting only ``named_profile_is_deleted`` still hides tombstones."""
+    from api import profiles as webui_profiles
+
+    home, profiles, live, ghost, shell = _make_homes(tmp_path)
+    _install_hermes_cli_profiles_stub(
+        monkeypatch, home=home, profiles=profiles, identity_helper=False,
+    )
+    webui_profiles._invalidate_list_profiles_cache()
+
+    rows = webui_profiles._build_profile_rows_fast()
+
+    assert rows is not None
+    names = [row["name"] for row in rows]
+    # No identity helper, so the marker-less shell is listed; the tombstoned one is not.
+    assert "ghostprof" not in names, names
+    assert names == ["default", "liveprof", "shellprof"], names
+
+
+def test_non_oserror_from_a_helper_keeps_the_other_rows(agent_free, monkeypatch, tmp_path):
+    """A non-OSError raised for one entry must skip only that entry."""
+    from api import profiles as webui_profiles
+
+    home, profiles, live, ghost, shell = _make_homes(tmp_path)
+    other = profiles / "otherprof"
+    other.mkdir()
+    (other / "config.yaml").write_text("model: y\n", encoding="utf-8")
+    _install_hermes_cli_profiles_stub(
+        monkeypatch, home=home, profiles=profiles, identity_exc=ValueError("boom"),
+    )
+    webui_profiles._invalidate_list_profiles_cache()
+
+    rows = webui_profiles._build_profile_rows_fast()
+
+    assert rows is not None
+    assert [row["name"] for row in rows] == ["default", "otherprof"]
 
 
 # ── Aggregator level: the real `list_profiles_api()` inside `/api/crons` ─────
