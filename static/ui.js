@@ -7619,7 +7619,8 @@ if(window.visualViewport){
 
 // ── Fit-based composer footer collapse ──────────────────────────────────────
 // Stage classes on .composer-footer:
-//   (none) full labels · .cf-shrink ellipsized labels · .cf-icons icon chips ·
+//   (none) full labels · .cf-tight reduced whitespace · .cf-profile icon-only
+//   profile · .cf-shrink capped labels · .cf-icons icon chips ·
 //   .cf-icons.cf-burger hamburger.
 let _composerFitScheduled=false;
 let _composerFitResizeObserver=null;
