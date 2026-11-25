@@ -27189,6 +27189,14 @@ function renderFileTree(opts={}){
   S._dirCache[S.currentDir||'.']=S.entries;
   // Show empty-state when no workspace is set or the directory is empty (#703)
   const emptyEl=$('wsEmptyState');
+  const previewEl=$('previewArea');
+  const previewVisible=!!(previewEl&&previewEl.classList&&previewEl.classList.contains('visible'));
+  if(previewVisible){
+    if(emptyEl) emptyEl.style.display='none';
+    treeEmptied();
+    box.style.display='none';
+    return;
+  }
   const hasWorkspace=!!(S.session&&S.session.workspace);
   if(!hasWorkspace){
     _syncWorkspaceBirthtimeSupportScope('');

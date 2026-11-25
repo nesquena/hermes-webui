@@ -1038,7 +1038,7 @@ function clearWorkspaceTreeSkeleton(){
 }
 
 async function loadDir(path, opts={}){
-  const preservePreview=!!(opts&&opts.preservePreview);
+  let preservePreview=!!(opts&&opts.preservePreview);
   const refreshExpanded=!!(opts&&opts.refreshExpanded);
   if(!S.session)return;
   const sessionId=S.session.session_id;
@@ -1096,6 +1096,12 @@ async function loadDir(path, opts={}){
         for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
       }
       if(expanded.size>0)renderFileTree({completesRefill:refill,scope:treeScope});
+    }
+    if(preservePreview && (
+      (typeof _previewBelongsToWorkspace==='function' && !_previewBelongsToWorkspace((S.session&&S.session.workspace)||''))
+      || (typeof _previewHiddenEditsOwnedHere==='function' && !_previewHiddenEditsOwnedHere())
+    )){
+      preservePreview=false;
     }
     if(!preservePreview&&typeof clearPreview==='function'){
       const hiddenEdits=typeof _previewHasUnsavedEdits==='function'&&_previewHasUnsavedEdits();
