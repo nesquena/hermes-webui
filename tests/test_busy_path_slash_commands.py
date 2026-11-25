@@ -13,6 +13,13 @@ with the parsed argument, clearing the composer, and must NOT reach steer, queue
 cancel. Commands outside that list must keep normal routing. Reverting the
 allowlist entry or the ``return`` in the intercept turns the allowlisted cases into
 queued/steered text, which these assertions reject.
+
+``/btw`` is deliberately OUTSIDE that list. The re-review of 2026-11-23 measured that
+``/api/btw`` answers ``409 session already has an active stream`` whenever the parent
+stream is live, so immediate busy dispatch lost the question; the accepted resolution
+ships ``/background`` alone and keeps ``/btw`` on normal routing until the side question
+can own its own stream. ``tests/test_issue6597_btw_question_preserved.py`` pins the
+composer half of that decision.
 """
 from __future__ import annotations
 
@@ -32,8 +39,8 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
-# Busy-control commands: the historical entries, /stop (#6951) and the two
-# action-only commands this PR adds, /btw and /background (#6597).
+# Busy-control commands: the historical entries, /stop (#6951) and the action-only
+# /background this PR adds (#6597). See the module docstring for why /btw is not here.
 ALLOWLISTED = [
     "steer",
     "interrupt",
@@ -42,9 +49,11 @@ ALLOWLISTED = [
     "goal",
     "yolo",
     "stop",
-    "btw",
     "background",
 ]
+
+# Action-only commands that stay on normal routing while busy (re-review 2026-11-23).
+NOT_INTERCEPTED = ["btw"]
 
 # Documented command that is *not* a busy control: it has to reach normal routing.
 CONTROL = "help"
@@ -124,7 +133,10 @@ async function runScenario(sc) {
 
 
 def _scenarios() -> list[dict]:
-    commands = ALLOWLISTED + [CONTROL]
+    # The registry carries /btw even though the intercept does not: the command is
+    # registered (so a real intercept would find its handler), which is exactly what
+    # makes "stays on normal routing" observable.
+    commands = ALLOWLISTED + NOT_INTERCEPTED + [CONTROL]
     scenarios = []
     for cmd in ALLOWLISTED:
         for state in ("busy", "compression"):
@@ -135,6 +147,18 @@ def _scenarios() -> list[dict]:
                     "busy": state == "busy",
                     "compression": state == "compression",
                     "mode": "steer",
+                    "commands": commands,
+                }
+            )
+    for cmd in NOT_INTERCEPTED:
+        for mode in ("queue", "steer"):
+            scenarios.append(
+                {
+                    "id": f"{cmd}::{mode}",
+                    "text": f"/{cmd} {ARG}",
+                    "busy": True,
+                    "compression": False,
+                    "mode": mode,
                     "commands": commands,
                 }
             )
@@ -190,6 +214,23 @@ def test_every_allowlisted_command_runs_immediately_while_busy(harness):
             assert rec["queued"] == [], f"{where} was queued instead of executed"
             assert rec["steered"] == [], f"{where} was steered instead of executed"
             assert rec["cancelled"] == 0, f"{where} cancelled the active stream"
+
+
+def test_btw_is_not_intercepted_while_busy(harness):
+    """The route refuses while the parent stream is live, so busy /btw must not
+    pretend to run: it keeps normal routing exactly like any other command."""
+    queued = harness["btw::queue"]
+    assert queued["handlers"] == [], "/btw ran a handler while busy"
+    assert len(queued["queued"]) == 1, queued
+    assert queued["queued"][0][1]["text"] == f"/btw {ARG}"
+    assert queued["steered"] == []
+    assert queued["cancelled"] == 0
+
+    steered = harness["btw::steer"]
+    assert steered["handlers"] == [], "/btw ran a handler while busy"
+    assert steered["queued"] == []
+    assert steered["steered"] == [["steer"]]
+    assert steered["cancelled"] == 0
 
 
 def test_command_outside_the_allowlist_keeps_normal_routing(harness):

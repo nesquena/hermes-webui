@@ -2399,6 +2399,18 @@ async function cmdUndo(){
   }catch(e){showToast(t('undo_failed')+e.message);}
 }
 async function undoLastExchange(){await cmdUndo();}
+// #6597 (re-review): the composer is cleared before this handler runs — the busy
+// intercept and the normal slash route both do it — so a refused side question
+// used to take the typed question with it. Hand the command back to the composer
+// under the production guards: only for the session that asked, and only while the
+// composer is still empty, so a newer draft or another session's draft is never
+// overwritten.
+function _restoreBtwQuestionAfterFailure(question, sid){
+  const restore=String(question||'').trim();
+  if(!restore) return false;
+  if(typeof _restoreComposerDraftAfterFailedSend!=='function') return false;
+  return _restoreComposerDraftAfterFailedSend('/btw '+restore, [], sid, null, null);
+}
 async function cmdBtw(args){
   if(!S.session){showToast(t('no_active_session'));return;}
   const question=(args||'').trim();
@@ -2407,12 +2419,12 @@ async function cmdBtw(args){
   const activeSid=S.session.session_id;
   try{
     const r=await api('/api/btw',{method:'POST',body:JSON.stringify({session_id:activeSid,question})});
-    if(r&&r.error){showToast(r.error);return;}
+    if(r&&r.error){_restoreBtwQuestionAfterFailure(question, activeSid);showToast(r.error);return;}
     // Connect to the ephemeral SSE stream
     const streamId=r.stream_id;
     const parentSid=r.parent_session_id;
     if(typeof attachBtwStream==='function') attachBtwStream(parentSid,streamId,question);
-  }catch(e){showToast(t('btw_failed')+e.message);}
+  }catch(e){_restoreBtwQuestionAfterFailure(question, activeSid);showToast(t('btw_failed')+e.message);}
 }
 async function cmdBackground(args){
   if(!S.session){showToast(t('no_active_session'));return;}
