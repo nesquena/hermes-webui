@@ -12730,14 +12730,33 @@ def _display_exact_owner_positions(session, messages):
     }
 
 
-def _display_projected_owner_positions(source_messages, messages, source_owners):
+def _display_projected_owner_positions(source_messages, messages, source_owners, aliases=None):
     """Compose saved-to-source positions with an exact-object display projection."""
     projected = {id(row): index for index, row in enumerate(messages)}
-    return {
-        owner: projected[id(source_messages[index])]
-        for owner, index in source_owners.items()
-        if 0 <= index < len(source_messages) and id(source_messages[index]) in projected
-    }
+    if aliases:
+        for source_id, target in aliases.items():
+            curr = target
+            while isinstance(curr, dict) and id(curr) in aliases:
+                curr = aliases[id(curr)]
+            if id(curr) in projected and source_id not in projected:
+                projected[source_id] = projected[id(curr)]
+    key_to_index = {}
+    for index, row in enumerate(messages):
+        if isinstance(row, dict):
+            key = _session_message_merge_key(row)
+            if key not in key_to_index:
+                key_to_index[key] = index
+    result = {}
+    for owner, index in source_owners.items():
+        if 0 <= index < len(source_messages):
+            source_row = source_messages[index]
+            if id(source_row) in projected:
+                result[owner] = projected[id(source_row)]
+            elif isinstance(source_row, dict):
+                key = _session_message_merge_key(source_row)
+                if key in key_to_index:
+                    result[owner] = key_to_index[key]
+    return result
 
 
 def _display_rebased_tool_calls(tool_calls, owner_positions):
@@ -13639,7 +13658,7 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20, 
     return merged
 
 
-def _merged_session_messages_for_display(session, cli_messages=None) -> list:
+def _merged_session_messages_for_display(session, cli_messages=None, owner_positions=None) -> list:
     """Return the message coordinate space exposed by ``GET /api/session``.
 
     Messaging sessions can have a WebUI sidecar transcript plus messages from
@@ -13649,7 +13668,10 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     the same list rather than the sidecar-only ``session.messages`` array.
     """
     cli_messages = list(cli_messages or [])
-    sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    lineage_owners = {}
+    sidecar_messages = _webui_sidecar_lineage_messages_for_display(
+        session, owner_positions=lineage_owners
+    )
     if cli_messages:
         if sidecar_messages and sidecar_messages != cli_messages:
             if len(sidecar_messages) >= len(cli_messages):
@@ -13666,7 +13688,7 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                 # proof (incoming_provenance / cancelled_journal_owner_messages),
                 # so the relaxed path is disabled whenever the session carries
                 # cancelled-journal state (#6638).
-                return merge_session_messages_append_only(
+                merged_messages = merge_session_messages_append_only(
                     sidecar_messages,
                     cli_messages,
                     truncation_watermark=getattr(session, "truncation_watermark", None),
@@ -13681,11 +13703,19 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                         is None
                     ),
                 )
+                if owner_positions is not None:
+                    owner_positions.clear()
+                    owner_positions.update(_display_projected_owner_positions(
+                        sidecar_messages, merged_messages, lineage_owners
+                    ))
+                return merged_messages
             # CLI-dominant merge: state.db has rows the sidecar has not caught
             # up to yet.  Chronological order keeps CLI lineage interleaved
             # with sidecar rows instead of rendering it after the sidecar tail.
             merged_messages = []
             seen_message_keys = set()
+            surviving_by_key = {}
+            aliases = {}
             for msg in sorted(list(cli_messages) + list(sidecar_messages), key=lambda m: (
                 float(m.get("timestamp") or 0),
                 str(m.get("role") or ""),
@@ -13693,12 +13723,38 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
             )):
                 key = _session_message_merge_key(msg)
                 if key in seen_message_keys:
+                    surviving = surviving_by_key.get(key)
+                    if surviving is not None:
+                        aliases[id(msg)] = surviving
                     continue
                 seen_message_keys.add(key)
+                surviving_by_key[key] = msg
                 merged_messages.append(msg)
+            if owner_positions is not None:
+                owner_positions.clear()
+                owner_positions.update(_display_projected_owner_positions(
+                    sidecar_messages, merged_messages, lineage_owners, aliases=aliases
+                ))
             return merged_messages
         # One source empty or they're identical — return whichever is non-empty
-        return sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
+        chosen = sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
+        if owner_positions is not None:
+            owner_positions.clear()
+            if chosen is sidecar_messages:
+                owner_positions.update(lineage_owners)
+            elif sidecar_messages and len(sidecar_messages) == len(cli_messages):
+                owner_positions.update(_display_projected_owner_positions(
+                    sidecar_messages, chosen, lineage_owners,
+                    aliases={id(sm): cm for sm, cm in zip(sidecar_messages, cli_messages, strict=False)}
+                ))
+            else:
+                owner_positions.update(_display_projected_owner_positions(
+                    sidecar_messages, chosen, lineage_owners
+                ))
+        return chosen
+    if owner_positions is not None:
+        owner_positions.clear()
+        owner_positions.update(lineage_owners)
     return sidecar_messages
 
 
@@ -17860,10 +17916,18 @@ def _handle_session_get(handler, parsed) -> bool:
                 # different slices of the same stitched conversation, merge
                 # them chronologically and dedupe exact repeats.
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
+                lineage_owners = {}
+                sidecar_messages = _webui_sidecar_lineage_messages_for_display(
+                    s, owner_positions=lineage_owners
+                )
+                _messaging_owner_positions = _display_projected_owner_positions(
+                    sidecar_messages, _all_msgs, lineage_owners
+                )
                 if _display_owner_positions is None:
-                    _messaging_owner_positions = _display_exact_owner_positions(s, _all_msgs)
                     if _messaging_owner_positions:
                         _display_owner_positions = _messaging_owner_positions
+                else:
+                    _display_owner_positions.update(_messaging_owner_positions)
             elif msg_limit is not None:
                 if _display_cache_hit is not None:
                     _all_msgs = _display_cache_hit
@@ -17925,10 +17989,18 @@ def _handle_session_get(handler, parsed) -> bool:
         else:
             if is_messaging_session and cli_messages:
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
+                lineage_owners = {}
+                sidecar_messages = _webui_sidecar_lineage_messages_for_display(
+                    s, owner_positions=lineage_owners
+                )
+                _messaging_owner_positions = _display_projected_owner_positions(
+                    sidecar_messages, _all_msgs, lineage_owners
+                )
                 if _display_owner_positions is None:
-                    _messaging_owner_positions = _display_exact_owner_positions(s, _all_msgs)
                     if _messaging_owner_positions:
                         _display_owner_positions = _messaging_owner_positions
+                else:
+                    _display_owner_positions.update(_messaging_owner_positions)
             else:
                 if metadata_summary is None:
                     metadata_summary = _message_summary(getattr(s, "messages", []) or [])

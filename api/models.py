@@ -17210,6 +17210,20 @@ def _merge_session_messages_append_only_impl(
                             seen_visible_keys.add(visible_key)
                             _remember_merged_message(msg, source="state")
                         continue
+                    elif (
+                        content_key not in seen_content_keys
+                        and (
+                            msg.get("role") == "user"
+                            or keep_state_rows_missing_from_sidecar
+                        )
+                    ):
+                        if _insert_state_message_chronologically(merged_messages, msg):
+                            seen_message_keys.add(key)
+                            seen_dedup_keys.add(dedup_key)
+                            seen_content_keys.add(content_key)
+                            seen_visible_keys.add(visible_key)
+                            _remember_merged_message(msg, source="state")
+                        continue
                     else:
                         _merge_session_display_metadata(merged_by_message_key.get(key), msg)
                         continue
