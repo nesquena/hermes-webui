@@ -183,11 +183,21 @@ class TestProviderQualifiedSessionModel:
         assert prefixed == bare
 
     @requires_agent_routing
-    def test_prefixed_model_matches_bare_with_explicit_auxiliary_vision(self):
+    def test_prefixed_model_matches_bare_with_explicit_auxiliary_vision(self, monkeypatch):
         """Parity fence: an explicit ``auxiliary.vision`` backend is a documented
         text signal for the MAIN model (agent/image_routing.py), so the prefix
         must not change that verdict either. Normalising the model must never
         bypass the explicit-signal rule."""
+        import agent.image_routing as image_routing
+
+        consulted: list[str] = []
+        real_lookup = image_routing._lookup_supports_vision
+
+        def spy(provider, model, cfg=None, **kwargs):
+            consulted.append(model)
+            return real_lookup(provider, model, cfg, **kwargs)
+
+        monkeypatch.setattr(image_routing, "_lookup_supports_vision", spy)
         cfg = _cfg_with_provider_vision("mygateway", "my-vision-model", True)
         cfg["auxiliary"] = {
             "vision": {"provider": "custom:mygateway", "model": "other-vision-model"}
@@ -200,7 +210,18 @@ class TestProviderQualifiedSessionModel:
             cfg, "custom:mygateway", "@custom:mygateway:my-vision-model",
             requested_provider="custom:mygateway",
         )
+        # ``bare == prefixed`` alone also holds on master (both sides answer
+        # "text" there), so the fence also pins the documented verdict: with an
+        # explicit ``auxiliary.vision`` backend both ids route text even though
+        # the provider model declares ``supports_vision: true``. A future
+        # normalisation that bypasses the explicit signal keeps the parity but
+        # flips both ids to "native", which this fails on.
         assert bare == prefixed
+        assert bare == "text"
+        assert prefixed == "text"
+        # The explicit-signal rule short-circuits before the capability lookup,
+        # so unwrapping the prefixed id must not turn the lookup back on.
+        assert consulted == [], f"capability lookup consulted for {consulted}"
 
 
 # ── _build_native_multimodal_message forwarding ─────────────────────────────
