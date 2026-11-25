@@ -3191,7 +3191,9 @@ def _build_profile_rows_fast() -> list | None:
                 if named_profile_is_deleted is not None and named_profile_is_deleted(entry):
                     continue
                 rows.append(_row(entry, entry.name, False))
-            except Exception:
+            except Exception as exc:
+                # Skip only this entry, but leave a trace of why it is missing.
+                logger.debug("Skipping profile dir %s in fast listing: %s", entry.name, exc)
                 continue
 
     return rows
