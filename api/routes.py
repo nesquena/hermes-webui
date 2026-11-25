@@ -10849,19 +10849,23 @@ def _resolve_compatible_session_model_state(
 
             return model, requested_provider, False
 
-    # hwc: chat-start-timeout — slash ids on an openrouter, custom, or empty
-    # profile are native model ids. Return before the live catalog, which can
-    # take over 100s when OpenRouter is cold. An omitted profile stays on the
-    # catalog so an active-provider repair can still run.
+    # hwc: chat-start-timeout — slash ids on an openrouter profile are native
+    # OpenRouter model ids. Return before the live catalog, which can take over
+    # 100s when OpenRouter is cold. Only plain openrouter: a custom profile must
+    # still build the catalog, because that publishes the endpoint's advertised
+    # ids, and the worker keeps an advertised full id such as "openai/gpt-5.4"
+    # but strips a cold, unadvertised first-party prefix. The same holds when a
+    # custom_providers entry named "openrouter" takes over the bare provider: the
+    # worker then routes it as that custom endpoint. An omitted profile also
+    # stays on the catalog so an active-provider repair can still run.
     if model and "/" in model and profile_provider is not None:
         _slash_bare, _slash_explicit = _split_provider_qualified_model(model)
         _slash_profile = str(profile_provider).strip().lower()
-        if (
-            not _slash_explicit
-            and _slash_profile in {"openrouter", "custom", ""}
-            and _slash_bare
-        ):
-            return model, profile_provider, False
+        if not _slash_explicit and _slash_bare and _slash_profile == "openrouter":
+            from api.config import _named_custom_provider_slug_for_provider
+
+            if not _named_custom_provider_slug_for_provider(profile_provider, profile_config):
+                return model, profile_provider, False
 
     # Default (human chat/start) path calls get_available_models() with NO
     # kwargs so it stays signature-compatible with the many tests that stub
