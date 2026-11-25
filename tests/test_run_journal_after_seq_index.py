@@ -327,40 +327,47 @@ def test_checkpoint_and_suffix_come_from_one_coherent_read(
     if hold_suffix_read:
         writer = threading.Thread(target=failed_append)
         writer.start()
-        assert failed_append_parked.wait(20), (thread_errors, suffix_read_waiting.is_set())
-        release_failed_fsync.set()
-        writer.join(20)
+        try:
+            assert failed_append_parked.wait(20), (thread_errors, suffix_read_waiting.is_set())
+        finally:
+            release_failed_fsync.set()
+            writer.join(20)
         assert not writer.is_alive()
     else:
         failed_append()
-    assert not thread_errors
-    assert path.read_bytes() == committed_prefix
+    try:
+        assert not thread_errors
+        assert path.read_bytes() == committed_prefix
 
-    rj.append_run_event(
-        SID, RID, "token", {"text": "committed 256", "pad": ""},
-        session_dir=tmp_path, created_at=0.0,
-    )
-    final_without_padding = (
-        len(committed_prefix)
-        + _event_line_len(256, "committed 256")
-        + _event_line_len(257, "committed 257")
-    )
-    padding = observed["size"] - final_without_padding
-    assert padding > 0
-    rj.append_run_event(
-        SID, RID, "token", {"text": "committed 257", "pad": "P" * padding},
-        session_dir=tmp_path, created_at=0.0,
-    )
-    assert path.stat().st_size == observed["size"]
-    rj.append_run_event(
-        SID, RID, "token", {"text": "committed 258", "pad": ""},
-        session_dir=tmp_path, created_at=0.0,
-    )
-    assert [event["seq"] for event in rj._read_jsonl(path)[0]][-3:] == [256, 257, 258]
+        rj.append_run_event(
+            SID, RID, "token", {"text": "committed 256", "pad": ""},
+            session_dir=tmp_path, created_at=0.0,
+        )
+        final_without_padding = (
+            len(committed_prefix)
+            + _event_line_len(256, "committed 256")
+            + _event_line_len(257, "committed 257")
+        )
+        padding = observed["size"] - final_without_padding
+        assert padding > 0
+        rj.append_run_event(
+            SID, RID, "token", {"text": "committed 257", "pad": "P" * padding},
+            session_dir=tmp_path, created_at=0.0,
+        )
+        assert path.stat().st_size == observed["size"]
+        rj.append_run_event(
+            SID, RID, "token", {"text": "committed 258", "pad": ""},
+            session_dir=tmp_path, created_at=0.0,
+        )
+        assert [event["seq"] for event in rj._read_jsonl(path)[0]][-3:] == [256, 257, 258]
+    finally:
+        if hold_suffix_read:
+            allow_suffix_read.set()
+            reader = observed.get("reader")
+            if reader is not None:
+                reader.join(20)
 
     if hold_suffix_read:
-        allow_suffix_read.set()
-        observed["reader"].join(20)
         assert not observed["reader"].is_alive()
         assert not thread_errors
         assert len(replay_result) == 1
@@ -473,9 +480,14 @@ def test_returned_malformed_diagnostics_do_not_alias_the_index(tmp_path):
     second = rj.read_run_events(SID, RID, after_seq=580, session_dir=tmp_path)
     assert second == _oracle(path, 580)
     assert second["malformed"][0]["raw"] == damaged
+    # A response served from the cached prefix must also return fresh dicts.
+    second["malformed"][0]["raw"] = "cached_hit_mutation"
+    third = rj.read_run_events(SID, RID, after_seq=580, session_dir=tmp_path)
+    assert third == _oracle(path, 580)
+    assert third["malformed"][0]["raw"] == damaged
     # Nothing stored in the index ever became the caller's dict.
     assert all(
-        m["raw"] != "reviewer_response_redaction"
+        m["raw"] not in {"reviewer_response_redaction", "cached_hit_mutation"}
         for cached in rj._after_seq_index.values()
         for m in cached["malformed"]
     )
@@ -500,3 +512,89 @@ def test_delete_run_journal_evicts_after_seq_index_entries(tmp_path):
     # A no-op delete (already gone) reports False and still leaves no entry.
     assert rj.delete_run_journal(SID, session_dir=tmp_path) is False
     assert str(path) not in rj._after_seq_index
+
+
+def test_delete_racing_in_flight_read_cannot_publish_stale_index(tmp_path, monkeypatch):
+    """A delete completing while a read is parsing prevents stale cache reuse."""
+    path = rj._run_path(SID, RID, session_dir=tmp_path)
+    old_bad = "{stale malformed"
+    _write(path, "".join(_row(i) for i in range(1, 200)) + old_bad + "\n" + _row(200))
+
+    real_loads = json.loads
+    reader_inside = threading.Event()
+    allow_reader_finish = threading.Event()
+    tripped = False
+    errors = []
+    results = []
+
+    def blocking_loads(s, *args, **kwargs):
+        nonlocal tripped
+        if not tripped and threading.current_thread() is not threading.main_thread():
+            tripped = True
+            reader_inside.set()
+            assert allow_reader_finish.wait(10)
+        return real_loads(s, *args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", blocking_loads)
+
+    def run_reader():
+        try:
+            results.append(rj.read_run_events(SID, RID, after_seq=0, session_dir=tmp_path))
+        except BaseException as exc:
+            errors.append(exc)
+
+    t = threading.Thread(target=run_reader)
+    t.start()
+    try:
+        assert reader_inside.wait(10)
+        assert rj.delete_run_journal(SID, session_dir=tmp_path) is True
+        # Recreate the same run path with valid events only.
+        _write(path, "".join(_row(i) for i in range(1, 300)))
+    finally:
+        allow_reader_finish.set()
+        t.join(10)
+
+    assert not errors
+    assert len(results) == 1
+    assert str(path) not in rj._after_seq_index
+    fresh = rj.read_run_events(SID, RID, after_seq=10, session_dir=tmp_path)
+    assert fresh == _oracle(path, 10)
+    assert fresh["malformed"] == []
+
+
+def test_cached_partial_segment_mismatch_falls_back(tmp_path):
+    """Extending from checkpoint 0 validates cached partial-segment bytes."""
+    path = rj._run_path(SID, RID, session_dir=tmp_path)
+    _write(path, _row(1) + "bad_old\n" + "".join(_row(i) for i in range(2, 50)))
+    first = rj.read_run_events(SID, RID, after_seq=0, session_dir=tmp_path)
+    assert len(first["malformed"]) == 1
+    assert str(path) in rj._after_seq_index
+
+    # Rewrite with larger clean content without deleting index state directly.
+    replacement = "".join(_row(i, pad="z" * 40) for i in range(1, 300))
+    _write(path, replacement)
+    got = rj.read_run_events(SID, RID, after_seq=10, session_dir=tmp_path)
+    assert got == _oracle(path, 10)
+    assert got["malformed"] == []
+
+
+def test_many_tiny_malformed_rows_exhaust_memory_budget(tmp_path, monkeypatch):
+    """Many small malformed rows are bounded by per-entry overhead, not raw bytes alone."""
+    monkeypatch.setattr(rj, "_AFTER_SEQ_INDEX_MAX_MALFORMED_BYTES", 1000, raising=False)
+    path = rj._run_path(SID, RID, session_dir=tmp_path)
+    _write(path, "".join(_row(i) for i in range(1, 20)) + "x\n" * 10 + _row(20))
+    got = rj.read_run_events(SID, RID, after_seq=0, session_dir=tmp_path)
+    assert got == _oracle(path, 0)
+    assert len(got["malformed"]) == 10
+    assert str(path) not in rj._after_seq_index
+
+
+def test_read_run_events_with_infinite_after_seq(tmp_path):
+    """after_seq=float('inf') returns empty events without OverflowError."""
+    got_missing = rj.read_run_events(SID, RID, after_seq=float("inf"), session_dir=tmp_path)
+    assert got_missing == {"session_id": SID, "run_id": RID, "events": [], "malformed": []}
+
+    path = rj._run_path(SID, RID, session_dir=tmp_path)
+    _write(path, _row(1) + _row(2))
+    got_present = rj.read_run_events(SID, RID, after_seq=float("inf"), session_dir=tmp_path)
+    assert got_present == {"session_id": SID, "run_id": RID, "events": [], "malformed": []}

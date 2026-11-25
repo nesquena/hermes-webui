@@ -9,9 +9,16 @@ the JSONL journal and its archived copy remain authoritative.
 The index applies only to a live `.jsonl` file with no archive present. It stores
 one entry every 256 complete rows, including the entry's maximum sequence,
 absolute byte offset, line number, and SHA-256 digest of the byte segment since
-the previous checkpoint. A bounded LRU retains at most 64 paths. Malformed-row
-text is retained only up to 1 MiB per path; the current response remains complete
-when that budget is exceeded, but the path is not cached.
+the previous checkpoint (so index checkpoints grow with journal length). A
+bounded LRU retains at most 64 paths. Malformed-row retention charges raw UTF-8
+bytes plus a fixed 200-byte per-entry overhead against the 1 MiB per-path
+budget; the current response remains complete when that budget is exceeded, but
+the path is not cached.
+
+Reusing an index entry validates any cached partial segment after the selected
+checkpoint alongside full-stride checkpoints, and session deletions
+(`delete_run_journal`) invalidate matching in-flight reads so a concurrent scan
+cannot publish a stale entry afterward.
 
 Authoritative recovery (`validated_recovery=True`) uses the existing locking and
 full-validation path, not this index. Archived/gzip data, CR bytes, invalid

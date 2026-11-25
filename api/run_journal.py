@@ -10,8 +10,10 @@ import contextlib
 import gzip
 import hashlib
 import io
+import itertools
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -817,10 +819,15 @@ def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
 _AFTER_SEQ_INDEX_MAX_PATHS = 64
 _AFTER_SEQ_INDEX_STRIDE = 256
 # The path LRU alone does not bound memory: one malformed row can be arbitrarily
-# large. Keep at most 1 MiB of malformed UTF-8 bytes per indexed path. Beyond
-# this budget the current response remains complete, but that path is not cached.
+# large, and millions of tiny malformed rows amplify per-dict Python overhead.
+# Charge raw UTF-8 bytes plus a fixed per-entry overhead against the 1 MiB
+# budget per indexed path. Beyond this budget the current response remains
+# complete, but that path is not cached.
 _AFTER_SEQ_INDEX_MAX_MALFORMED_BYTES = 1024 * 1024
+_AFTER_SEQ_INDEX_MALFORMED_ENTRY_OVERHEAD = 200
 _after_seq_index: "OrderedDict[str, dict]" = OrderedDict()
+_after_seq_inflight: "dict[int, list[Any]]" = {}
+_after_seq_read_ids = itertools.count(1)
 _after_seq_index_lock = threading.Lock()
 
 
@@ -839,12 +846,16 @@ def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], li
     if archived is not None and os.path.lexists(archived):
         return None
     key = str(path)
+    dir_key = str(path.parent)
+    read_id: int | None = None
     try:
         threshold = int(after_seq)
         with open(path, "rb") as fh:
             st = os.fstat(fh.fileno())
             with _after_seq_index_lock:
                 idx = _after_seq_index.pop(key, None)
+                read_id = next(_after_seq_read_ids)
+                _after_seq_inflight[read_id] = [dir_key, False]
             if idx is not None and (
                 idx["id"] != (st.st_dev, st.st_ino)
                 or st.st_size < idx["size"]
@@ -899,80 +910,111 @@ def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], li
                 del snapshot
             else:
                 data = snapshot
+        if idx["size"] > start:
+            # Verify any cached checkpoints and partial tail already accounted
+            # for above ``start`` before skipping them via ``extend``.
+            if len(data) < idx["size"] - start:
+                return None
+            data_view = memoryview(data)
+            try:
+                for seg_idx in range(pos, len(idx["offs"]) - 1):
+                    seg_start = idx["offs"][seg_idx] - start
+                    seg_end = idx["offs"][seg_idx + 1] - start
+                    if hashlib.sha256(data_view[seg_start:seg_end]).digest() != idx["sigs"][seg_idx + 1]:
+                        return None
+                tail_start = idx["offs"][-1] - start
+                tail_end = idx["size"] - start
+                if tail_end > tail_start and (
+                    hashlib.sha256(data_view[tail_start:tail_end]).digest()
+                    != idx["_segment_hash"].copy().digest()
+                ):
+                    return None
+            finally:
+                data_view.release()
+        if b"\r" in data:
+            return None
+        events: list[dict] = []
+        # Serve fresh diagnostic dictionaries: callers own their response, so a
+        # malformed row coming from the cached prefix must never alias the dict
+        # stored in ``_after_seq_index`` (nor a previous response's dict). The
+        # full reader returns independent dicts on every call; an indexed read
+        # must too, or an in-process caller edit would rewrite the shared index
+        # and change a later replay's diagnostics without any journal change.
+        malformed = [dict(m) for m in idx["malformed"] if m["line"] <= line_no]
+        off = start
+        prefix_max = idx["maxes"][pos]
+        for raw_b in data.split(b"\n"):
+            line_no += 1
+            line_end = off + len(raw_b) + 1
+            complete = line_end <= start + len(data)
+            extend = complete and line_end > idx["size"]
+            raw = raw_b.decode("utf-8", errors="surrogateescape")
+            if extend:
+                # Continue the digest from the prior checkpoint through every new
+                # byte, including blank/malformed rows and their newline. Checkpoints
+                # retain one digest per complete stride; a later read can therefore
+                # rehash only that bounded segment rather than the whole journal.
+                idx["_segment_hash"].update(data[max(off, idx["size"]) - start:line_end - start])
+            if raw.strip():
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    try:
+                        seq = int(parsed.get("seq") or 0)
+                    except (TypeError, ValueError):
+                        return None
+                    prefix_max = max(prefix_max, seq)
+                    if seq > threshold:
+                        events.append(parsed)
+                    if extend:
+                        idx["rows"] += 1
+                        if idx["rows"] % _AFTER_SEQ_INDEX_STRIDE == 0:
+                            idx["maxes"].append(prefix_max)
+                            idx["offs"].append(line_end)
+                            idx["sigs"].append(idx["_segment_hash"].digest())
+                            idx["_segment_hash"] = hashlib.sha256()
+                            idx["lines"].append(line_no)
+                else:
+                    # The response's dict belongs to the caller; store a separate
+                    # copy in the index so neither side can mutate the other.
+                    entry = {"line": line_no, "raw": raw}
+                    malformed.append(entry)
+                    if extend:
+                        idx["malformed_bytes"] += (
+                            len(raw_b) + _AFTER_SEQ_INDEX_MALFORMED_ENTRY_OVERHEAD
+                        )
+                        if idx["malformed_bytes"] <= _AFTER_SEQ_INDEX_MAX_MALFORMED_BYTES:
+                            idx["malformed"].append(dict(entry))
+            if extend:
+                idx["size"] = line_end
+            off = line_end
+        if archived is not None and os.path.lexists(archived):
+            return None
+        # This is the stat captured before scanning; later same-size rewrites with
+        # a newer ctime invalidate above. A larger ordinary append may extend the
+        # old checkpoints, so its newly observed ctime becomes the saved baseline.
+        idx["ctime"] = st.st_ctime_ns
+        with _after_seq_index_lock:
+            inflight = _after_seq_inflight.pop(read_id, None) if read_id is not None else None
+            read_id = None
+            invalidated = bool(inflight and inflight[1])
+            if invalidated or idx["malformed_bytes"] > _AFTER_SEQ_INDEX_MAX_MALFORMED_BYTES:
+                _after_seq_index.pop(key, None)
+            else:
+                _after_seq_index[key] = idx
+                while len(_after_seq_index) > _AFTER_SEQ_INDEX_MAX_PATHS:
+                    _after_seq_index.popitem(last=False)
+        return events, malformed
     except FileNotFoundError:
         return None
-    except (OSError, TypeError, ValueError):
+    except (OSError, TypeError, ValueError, OverflowError):
         return None
-    if b"\r" in data:
-        return None
-    events: list[dict] = []
-    # Serve fresh diagnostic dictionaries: callers own their response, so a
-    # malformed row coming from the cached prefix must never alias the dict
-    # stored in ``_after_seq_index`` (nor a previous response's dict). The
-    # full reader returns independent dicts on every call; an indexed read
-    # must too, or an in-process caller edit would rewrite the shared index
-    # and change a later replay's diagnostics without any journal change.
-    malformed = [dict(m) for m in idx["malformed"] if m["line"] <= line_no]
-    off = start
-    prefix_max = idx["maxes"][pos]
-    for raw_b in data.split(b"\n"):
-        line_no += 1
-        line_end = off + len(raw_b) + 1
-        complete = line_end <= start + len(data)
-        extend = complete and line_end > idx["size"]
-        raw = raw_b.decode("utf-8", errors="surrogateescape")
-        if extend:
-            # Continue the digest from the prior checkpoint through every new
-            # byte, including blank/malformed rows and their newline. Checkpoints
-            # retain one digest per complete stride; a later read can therefore
-            # rehash only that bounded segment rather than the whole journal.
-            idx["_segment_hash"].update(data[max(off, idx["size"]) - start:line_end - start])
-        if raw.strip():
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
-                parsed = None
-            if isinstance(parsed, dict):
-                try:
-                    seq = int(parsed.get("seq") or 0)
-                except (TypeError, ValueError):
-                    return None
-                prefix_max = max(prefix_max, seq)
-                if seq > threshold:
-                    events.append(parsed)
-                if extend:
-                    idx["rows"] += 1
-                    if idx["rows"] % _AFTER_SEQ_INDEX_STRIDE == 0:
-                        idx["maxes"].append(prefix_max)
-                        idx["offs"].append(line_end)
-                        idx["sigs"].append(idx["_segment_hash"].digest())
-                        idx["_segment_hash"] = hashlib.sha256()
-                        idx["lines"].append(line_no)
-            else:
-                # The response's dict belongs to the caller; store a separate
-                # copy in the index so neither side can mutate the other.
-                entry = {"line": line_no, "raw": raw}
-                malformed.append(entry)
-                if extend:
-                    idx["malformed"].append(dict(entry))
-                    idx["malformed_bytes"] += len(raw_b)
-        if extend:
-            idx["size"] = line_end
-        off = line_end
-    if archived is not None and os.path.lexists(archived):
-        return None
-    # This is the stat captured before scanning; later same-size rewrites with
-    # a newer ctime invalidate above. A larger ordinary append may extend the
-    # old checkpoints, so its newly observed ctime becomes the saved baseline.
-    idx["ctime"] = st.st_ctime_ns
-    with _after_seq_index_lock:
-        if idx["malformed_bytes"] > _AFTER_SEQ_INDEX_MAX_MALFORMED_BYTES:
-            _after_seq_index.pop(key, None)
-        else:
-            _after_seq_index[key] = idx
-            while len(_after_seq_index) > _AFTER_SEQ_INDEX_MAX_PATHS:
-                _after_seq_index.popitem(last=False)
-    return events, malformed
+    finally:
+        if read_id is not None:
+            with _after_seq_index_lock:
+                _after_seq_inflight.pop(read_id, None)
 
 
 def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None]:
@@ -1833,7 +1875,12 @@ def read_run_events(
         indexed = _read_jsonl_after_seq_indexed(path, after_seq) if after_seq is not None else None
         events, malformed = indexed if indexed is not None else _read_jsonl(path)
     if after_seq is not None:
-        events = [event for event in events if int(event.get("seq") or 0) > int(after_seq)]
+        if isinstance(after_seq, float) and math.isinf(after_seq):
+            if after_seq > 0:
+                events = []
+        else:
+            after_threshold = int(after_seq)
+            events = [event for event in events if int(event.get("seq") or 0) > after_threshold]
     if max_seq is not None:
         events = [event for event in events if int(event.get("seq") or 0) <= int(max_seq)]
     return {
@@ -2403,6 +2450,9 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
         # match as the caches above; `_after_seq_index` is keyed by the full
         # run-file path, so its entries' parent equals ``dir_key`` exactly.
         with _after_seq_index_lock:
+            for inflight in _after_seq_inflight.values():
+                if inflight[0] == dir_key:
+                    inflight[1] = True
             for cache_key in [
                 entry
                 for entry in _after_seq_index
