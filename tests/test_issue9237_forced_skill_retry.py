@@ -414,7 +414,13 @@ def test_control_on_screen_failure_still_restores_the_composer_and_token():
     result = _run(_type("hello"), _send(start="500", cont="goal-1"), {"snap": "after"})
     after = result["snaps"]["after"]
     assert after["composer"] == "hello"
-    assert after["dataset"] == {"goalContinuationId": "goal-1", "goalContinuationText": "hello"}
+    # The restored binding now also records which session it belongs to, so a
+    # New Chat source flush cannot carry this token to another pane's draft.
+    assert after["dataset"] == {
+        "goalContinuationId": "goal-1",
+        "goalContinuationText": "hello",
+        "goalContinuationOwnerSid": "A",
+    }
     assert result["drafts"]["A"]["contId"] == "goal-1"
 
 
