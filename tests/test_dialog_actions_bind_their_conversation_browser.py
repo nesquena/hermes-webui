@@ -31,6 +31,7 @@ the server and the disk.
 import json
 import os
 import random
+import shutil
 import socket
 import subprocess
 import sys
@@ -1100,7 +1101,8 @@ def test_workspace_op_in_flight_refreshes_a_tree_that_shows_the_same_workspace(p
     _tree_quiet(page)  # the second conversation's own deferred refresh is done
     before = _on_disk(root)
     release()
-    _outcome(page)
+    outcome = _outcome(page)
+    assert outcome.get("done") is True, f"the {op} call did not finish: {outcome}"
     _wait_until(page, "() => window.__loadDir.active === 0")
     disk = _on_disk(root)
     assert disk == change(before)
@@ -1108,6 +1110,57 @@ def test_workspace_op_in_flight_refreshes_a_tree_that_shows_the_same_workspace(p
     assert shown == {p for p in disk if "/" not in p}
     assert page.evaluate("() => S.session.session_id") == second
     assert not page.evaluate("() => _isAppDialogOpen()")
+
+
+def test_older_tree_listing_never_repaints_over_a_newer_one(page, server):
+    """An older tree listing never repaints over a newer one. A conversation's deferred
+    tree refresh can fetch its listing before a workspace write and get the response
+    after the refresh that ran after the write. Delivered last, that older listing used
+    to repaint the tree as it was before the write (the stale tree the workspace-op test
+    above sometimes saw)."""
+    root = server["state"] / f"order-{time.time_ns()}"
+    (root / "docs").mkdir(parents=True)
+    (root / "docs" / "readme.txt").write_text("readme")
+    (root / "notes.txt").write_text("notes")
+    (root / "marker.txt").write_text("marker")
+    sid = _import(server, "Listing order", root)
+    page.goto(f"/session/{sid}", wait_until="domcontentloaded")
+    page.wait_for_selector("#msg", timeout=30000)
+    _active(page, sid)
+    page.evaluate(_TRACK_LOAD_DIR)
+    _tree_settled(page, sid, "marker.txt")
+    _tree_quiet(page)
+    held = []
+    captured = []  # set once, before the fetch: only the first root listing is held
+
+    def hold_first_listing(route):
+        # The older load's response is fetched now (before the change) and delivered later.
+        if not captured:
+            captured.append(True)
+            held.append((route, route.fetch()))
+        else:
+            route.continue_()
+
+    def is_listing(url):
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        return ("/api/list" in url and query.get("session_id") == [sid]
+                and query.get("path") == ["."])
+
+    page.route(is_listing, hold_first_listing)
+    page.evaluate("() => { void loadDir('.'); return true; }")
+    deadline = time.time() + WAIT_MS / 1000
+    while not held and time.time() < deadline:
+        page.wait_for_timeout(50)
+    assert held, "the older tree load never requested its listing"
+    shutil.rmtree(root / "docs")
+    page.evaluate("() => loadDir('.', {refreshExpanded: true}).then(() => true)")
+    assert set(page.evaluate(_TREE_JS)) == {"marker.txt", "notes.txt"}
+    route, response = held.pop()
+    route.fulfill(response=response)
+    page.unroute(is_listing)
+    _wait_until(page, "() => window.__loadDir.active === 0")
+    _tree_quiet(page)
+    assert set(page.evaluate(_TREE_JS)) == {"marker.txt", "notes.txt"}
 
 
 def _outside_link(server, root):
