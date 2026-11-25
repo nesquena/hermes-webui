@@ -27,6 +27,8 @@
 
 ### Security
 
+- **Two of the WebUI's fallback redaction patterns now run in linear time (#9339).** On some long inputs they could take quadratic time. Both now finish in one pass, and they redact exactly what they redacted before.
+
 - **A profile `config.yaml` that can't be parsed no longer leaves part of its content in the DEBUG log (#9322, #9327, @webtecnica).** The DEBUG line for an unparsable profile config, and the one in the external skill-root resolver, attached the parser's traceback, and for some malformed files that quoted the bad line. They now record only the config path and the error type. The level stays DEBUG, and the fallback is unchanged: an empty profile config and no external skill roots.
 
 - **Saving the default model keeps a provider you declared with a colon name, so chats stay on it (#9323, #9324).** Since exp-v0.52.742, saving the default model could rewrite such a provider to the public built-in of the same prefix (`openrouter:eu` became `openrouter`). This happened when the provider was declared by `name:` or under an alias spelling, or was switched off. Chats then went to the public built-in instead of your configured endpoint, and a provider you had switched off was replaced by one that wasn't. The save now keeps any id that routes to a configured record, switched-off records included, using the Agent's own alias rule. Undeclared picker groups are still saved as their built-in, as in #9304.
