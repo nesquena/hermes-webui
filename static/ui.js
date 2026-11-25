@@ -288,16 +288,42 @@ function _composerRenderDestinationText(tx){
 }
 function _composerRenderAbortText(tx){
   const slots=tx.abortTextSlots;
-  const hasSet=tx.abortTextOrder.some(token=>{
-    const slot=slots.get(token);return slot&&slot.kind==='text-set';
-  });
-  let text=hasSet?'':String(tx.abortBaseText||'');
+  const base=String(tx.abortBaseText||'');
+  // Abort restores the source chat, so it starts from that owner's own draft.
+  // A whole-text producer (a `text-set` record) reports the entire composer
+  // text it built, never a segment: while the handoff is pending every producer
+  // still sees the source textarea, so two producers each report the source
+  // draft plus their own addition. Keeping only the last whole value (the old
+  // behaviour) dropped the other producer's words, so every slot keeps its own
+  // contribution at the position it first wrote.
+  //
+  // A value that does not build on the source draft is a whole replacement:
+  // the newest one wins and supersedes every contribution written before it.
+  // A native edit is free to rewrite or clear the composer that way.
+  let replacedAt=-1;
+  let replacement='';
+  if(base){
+    for(const token of tx.abortTextOrder){
+      const slot=slots.get(token);
+      if(!slot||slot.kind!=='text-set')continue;
+      const value=String(slot.value||'');
+      if(value.startsWith(base))continue;
+      const revision=Number(slot.revision||0);
+      if(revision>replacedAt){replacedAt=revision;replacement=value;}
+    }
+  }
+  let text=replacedAt>=0?replacement:base;
   for(const token of tx.abortTextOrder){
     const slot=slots.get(token);
     if(!slot)continue;
-    if(slot.semantics==='replace-all')text=String(slot.value||'');
-    else if(slot.semantics==='block-append')text=_composerBlockJoin(text,slot.value);
-    else text+=String(slot.value||'');
+    if(replacedAt>=0&&Number(slot.revision||0)<=replacedAt)continue;
+    const value=String(slot.value||'');
+    if(slot.kind==='text-set'){
+      if(!base||value.startsWith(base))text+=value.slice(base.length);
+      else text=value;
+    }
+    else if(slot.semantics==='block-append')text=_composerBlockJoin(text,value);
+    else text+=value;
   }
   tx.abortState.text=text;
   return text;
@@ -413,7 +439,8 @@ function _composerTransitionRecord(kind,value,ownerSid,abortValue,options={}){
   if(kind.startsWith('text-')){
     if(!tx.abortTextSlots.has(producerToken))tx.abortTextOrder.push(producerToken);
     tx.abortTextSlots.set(producerToken,{
-      kind,semantics,value:String(kind==='text-set'?record.abortValue:value||''),
+      kind,semantics,revision,
+      value:String(kind==='text-set'?record.abortValue:value||''),
     });
     _composerRenderAbortText(tx);
     tx.abortState.revision=record.revision;

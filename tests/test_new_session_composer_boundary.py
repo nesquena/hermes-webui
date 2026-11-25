@@ -1759,6 +1759,8 @@ def _run_dictation_end_harness(
     other_producer: bool = False,
     pause_then_reject: bool = False,
     speak_before_reject: bool = False,
+    transcripts: tuple[str, ...] = ("late-speech",),
+    replace_all_edit: str = "",
 ) -> dict:
     """Drive the real recognizer callbacks through onresult → onend.
 
@@ -1768,13 +1770,30 @@ def _run_dictation_end_harness(
     the no-final end cannot substitute another producer's combined text.
     ``pause_then_reject`` runs a no-result pause first, restarts recognition
     through the continuity path, rejects the create and only then delivers the
-    speech result.
+    speech result. ``transcripts`` delivers one or more results from the same
+    recording (the recognizer reports a cumulative transcript, so a repeat
+    replaces that recording's contribution). ``replace_all_edit`` is one more
+    native edit that rewrites the whole composer instead of extending it.
     """
     node = shutil.which("node")
     if not node:
         pytest.skip("node is required for the browser behavior harness")
     authority = _composer_authority_helpers()
     helpers = _dictation_recognition_helpers()
+    extra_results = "\n        ".join(
+        "recognition.onresult({{resultIndex:0,results:[Object.assign("
+        "[{{transcript:{0}}}],{{isFinal:false,length:1}})]}});".format(
+            json.dumps(transcript)
+        )
+        for transcript in transcripts[1:]
+    )
+    replace_all = (
+        "ta.value={0};_composerRecordNativeText();".format(
+            json.dumps(replace_all_edit)
+        )
+        if replace_all_edit
+        else ""
+    )
     script = textwrap.dedent(
         f"""
         const ta={{value:'source draft'}};
@@ -1883,15 +1902,17 @@ def _run_dictation_end_harness(
         }}else{{
         recognition.onresult({{
           resultIndex:0,
-          results:[Object.assign([{{transcript:'late-speech'}}],{{
+          results:[Object.assign([{{transcript:{json.dumps(transcripts[0])}}}],{{
             isFinal:{str(result_kind == 'final').lower()},length:1
           }})],
         }});
         const afterResult=_composerPendingText();
         if(typing==='after'){{ta.value=ta.value+' typed';_composerRecordNativeText();}}
+        {extra_results}
         const pendingBeforeEnd=_composerPendingText();
         recognition.onend();
         const afterEnd=_composerPendingText();
+        {replace_all}
         if(tx){{
           if(schedule==='settle'){{
             ta.value='';S.pendingFiles=[];
@@ -1951,6 +1972,53 @@ def test_dictation_no_final_end_preserves_mixed_input_in_both_arrival_orders():
     # Neither order may drop what the other producer wrote.
     assert typed_first["settled"] == " typedlate-speech"
     assert spoken_first["settled"] == "late-speech typed"
+
+
+def test_dictation_no_final_end_preserves_mixed_input_when_the_create_is_rejected():
+    typed_first = _run_dictation_end_harness("abort", typing="before")
+    spoken_first = _run_dictation_end_harness("abort", typing="after")
+
+    # A rejected create restores the source composer. Both producers report the
+    # source draft plus their own addition, so the restore must reconcile them
+    # instead of letting the newest whole value replace the other one.
+    assert typed_first["settled"] == "source draft typedlate-speech"
+    assert spoken_first["settled"] == "source draftlate-speech typed"
+    for result in (typed_first, spoken_first):
+        source_saves = [s for s in result["saves"] if s["sid"] == "old-session"]
+        assert source_saves, result
+        assert source_saves[-1]["text"] == result["settled"]
+
+
+def test_dictation_repeated_results_replace_their_own_contribution_on_rejection():
+    result = _run_dictation_end_harness(
+        "abort", typing="before", transcripts=("late-speech", "late-speech more")
+    )
+
+    # The recognizer reports a cumulative transcript. The second result replaces
+    # this recording's contribution in place: it must not duplicate the first,
+    # and it must not disturb the text the other producer already contributed.
+    assert result["settled"] == "source draft typedlate-speech more"
+
+
+def test_dictation_later_native_edits_stay_their_own_contribution():
+    result = _run_dictation_end_harness(
+        "abort", typing="after", replace_all_edit="only this"
+    )
+
+    # A native edit that rewrites the composer without building on the source
+    # draft is a whole replacement: it wins over the contributions written
+    # before it, exactly as the user sees it.
+    assert result["settled"] == "only this"
+    source_saves = [s for s in result["saves"] if s["sid"] == "old-session"]
+    assert source_saves and source_saves[-1]["text"] == "only this"
+
+
+def test_dictation_typing_after_the_speech_survives_a_rejected_create():
+    result = _run_dictation_end_harness("abort", typing="after")
+
+    # The later native edit keeps its own position instead of replacing the
+    # recording's contribution.
+    assert result["settled"] == "source draftlate-speech typed"
 
 
 def test_dictation_no_final_end_does_not_replace_another_producers_text():
