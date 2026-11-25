@@ -5453,12 +5453,15 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
 }
 
 async function clearConversation() {
-  if(!S.session) return;
+  // Bound to the conversation on screen when Clear was clicked.
+  const session=S.session;
+  if(!session) return;
   const _clrMsg=await showConfirmDialog({title:t('clear_conversation_title'),message:t('clear_conversation_message'),confirmLabel:t('clear'),danger:true,focusCancel:true});
-  if(!_clrMsg) return;
+  if(!_clrMsg||_sessionLeftScreen(session)) return;
   try {
     const data = await api('/api/session/clear', {method:'POST',
-      body: JSON.stringify({session_id: S.session.session_id})});
+      body: JSON.stringify({session_id: session.session_id})});
+    if(_sessionLeftScreen(session)) return;
     S.session = data.session;
     S.messages = [];
     S.toolCalls = [];
