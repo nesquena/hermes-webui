@@ -28717,7 +28717,16 @@ function renderTray(){ // non-media files use paperclip chip
     chip.querySelector('button').onclick=()=>{
       // Revoke blob URL to avoid memory leak before removing
       if(chip.dataset.blobUrl) URL.revokeObjectURL(chip.dataset.blobUrl);
-      _composerRemoveFile(f,S.session&&S.session.session_id);renderTray();
+      // Carry the visible conversation's profile: during a New Chat handoff the
+      // tray still belongs to the departing chat, and a removal without its
+      // profile is treated as a destination-role change instead of a source one.
+      _composerRemoveFile(
+        f,
+        S.session&&S.session.session_id,
+        null,
+        (S.session&&S.session.profile)||S.activeProfile||'default'
+      );
+      renderTray();
       _resumeQueuedSessionMessageIfComposerEmpty();
     };
     tray.appendChild(chip);

@@ -48,7 +48,7 @@ def test_workspace_bind_prompts_send_explicit_worktree_false():
     src = read("static/panels.js")
     sessions = read("static/sessions.js")
     assert src.count("_ensureBlankPageSession(ws,intent") >= 2
-    assert "await newSession(false,{worktree:false,contextTransition:intent" in sessions
+    assert "await newSession(false,{workspace:targetWorkspace,worktree:false,contextTransition:intent" in sessions
     # No panels.js session/new call may omit the worktree key.
     assert "body:JSON.stringify({workspace:ws})" not in src
 
@@ -60,7 +60,7 @@ def test_file_and_folder_creation_send_explicit_worktree_false():
         block = src[src.index(fn) :]
         block = block[: block.index("\n}\n")]
         assert "_ensureBlankPageSession(ws,intent" in block
-    assert "await newSession(false,{worktree:false,contextTransition:intent" in sessions
+    assert "await newSession(false,{workspace:targetWorkspace,worktree:false,contextTransition:intent" in sessions
     assert "body:JSON.stringify({workspace:ws})" not in src
 
 

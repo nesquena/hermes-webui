@@ -3662,3 +3662,148 @@ def test_staged_files_survive_a_chat_switch_repaint():
     )
     assert result["restored"] == ["A.txt"]
     assert result["sameObject"] is True
+
+
+def test_blank_page_session_mint_forwards_the_requested_workspace_explicitly():
+    """A blank-page mint must pass its target workspace to newSession().
+
+    newSession() merges an active project filter's bound workspace into the
+    request and gives that explicit option priority over the one-shot
+    S._profileSwitchWorkspace slot (see #4676's
+    ``test_new_session_explicit_options_beat_active_project_bindings``). A
+    blank-page New file / New folder action that only set the shared slot could
+    therefore mint its session in the project's pinned workspace instead of the
+    profile default it asked for.
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    script = textwrap.dedent(
+        f"""
+        {_wait_for_new_session_navigation_function()}
+
+        const S={{
+          session:null,messages:[],pendingFiles:[],activeProfile:'work',
+          _profileDefaultWorkspace:'/profile-default',_profileSwitchWorkspace:null,
+          _pendingSessionToolsets:['tools'],busy:false,_dirCache:{{}},
+        }};
+        const calls=[];
+        async function newSession(_flash,options){{
+          calls.push(options||{{}});
+          S.session={{
+            session_id:'minted',profile:S.activeProfile,
+            workspace:(options&&options.workspace)||null,message_count:0,
+          }};
+          return S.session;
+        }}
+
+        (async()=>{{
+          const session=await _ensureBlankPageSession('/profile-default');
+          process.stdout.write(JSON.stringify({{
+            calls:calls.map(call=>call.workspace||null),
+            toolsets:S._pendingSessionToolsets,
+            workspace:session&&session.workspace,
+          }}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    result = json.loads(proc.stdout)
+
+    assert result["calls"] == ["/profile-default"]
+    assert result["workspace"] == "/profile-default"
+    # The blank-page mint must not carry the empty composer's staged toolsets.
+    assert result["toolsets"] is None
+
+
+def _run_transition_tray_remove_harness(profile: str) -> dict:
+    """Compose the real tray repaint and ownership transaction, click a chip's
+    remove button while a New Chat handoff is pending, then drain the handoff."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    script = "\n".join(
+        [
+            "const _composerPendingFilesByOwner = new Map();",
+            f"const S={{session:{{session_id:'old-session',profile:{profile!r}}},activeProfile:{profile!r},pendingFiles:[]}};",
+            "const tray={innerHTML:'',classList:{add(){},remove(){}},children:[],appendChild(child){this.children.push(child);}};",
+            "function $(id){return tray;}",
+            "function updateSendBtn(){}",
+            "function esc(value){return String(value);}",
+            "function li(){return '';}",
+            "function t(key){return key;}",
+            "function _mediaKindForName(){return null;}",
+            r"const _IMAGE_EXTS=/\.(png|jpe?g)$/i;",
+            r"const _SVG_EXTS=/\.svg$/i;",
+            "const URL={createObjectURL(){return 'blob:test';},revokeObjectURL(){}};",
+            (
+                "const document={createElement(){const chip={className:'',dataset:{},"
+                "innerHTML:'',appendChild(){},querySelector(){return chip;}};"
+                "return chip;}};"
+            ),
+            "const saves=[];",
+            "function _saveComposerDraftNow(sid,text,files,cont,opts){",
+            "  saves.push({sid,text,files:files.map(file=>file.name),profile:opts&&opts.ownerProfile});",
+            "  return Promise.resolve();",
+            "}",
+            "function autoResize(){}",
+            "function _composerSetText(value){S.composerText=value;}",
+            "function _composerReplaceFiles(files){S.pendingFiles=[...files];}",
+            "function _composerAddFiles(files){S.pendingFiles=[...S.pendingFiles,...files];}",
+            "function _resumeQueuedSessionMessageIfComposerEmpty(){}",
+            _composer_authority_helpers(),
+            _function(
+                SESSIONS_JS,
+                "_composerPendingFileIsLive",
+                "\nfunction _rememberComposerPendingFiles(",
+            ),
+            _function(
+                SESSIONS_JS,
+                "_composerPendingFilesOwnerKey",
+                "\nfunction _clearComposerDraftSaveTimer(",
+            ),
+            _function(
+                SESSIONS_JS,
+                "_rememberComposerPendingFiles",
+                "\nfunction _forgetComposerPendingFiles(",
+            ),
+            _function(UI_JS, "_syncComposerFiles", "\nfunction renderTray("),
+            _function(UI_JS, "renderTray", "\nfunction _uploadTooLargeMessage("),
+            "const fileA=new File(['A'],'a.txt');",
+            "const fileB=new File(['BE'],'b.txt');",
+            "S.pendingFiles=[fileA,fileB];",
+            "const token=_beginComposerOwnershipTransition('old-session',S.session.profile,{persistSourceDraft:true});",
+            "renderTray();",
+            "const chips=tray.children.slice();",
+            "chips[0].onclick();",
+            "const afterClick=S.pendingFiles.map(file=>file.name);",
+            "_drainComposerOwnershipTransition(token);",
+            "process.stdout.write(JSON.stringify({afterClick,saves,chips:chips.length}));",
+        ]
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+def test_file_removal_during_new_session_pending_edits_the_source_profile_draft():
+    """Removing a chip during a New Chat handoff must edit the departing chat.
+
+    While the create request is held the tray still belongs to the source. In a
+    non-default profile the removal has to name that profile; otherwise the
+    ownership transaction treats it as a destination change, keeps the file in
+    the source draft, and returning to the chat restores the removed chip.
+    """
+    result = _run_transition_tray_remove_harness("work")
+
+    assert result["chips"] == 2
+    assert result["afterClick"] == ["b.txt"], (
+        "the removed attachment must leave the visible tray immediately"
+    )
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves, "the source draft must be persisted when the handoff drains"
+    assert source_saves[-1]["files"] == ["b.txt"], (
+        "the source chat must not restore the removed attachment"
+    )
+    assert source_saves[-1]["profile"] == "work"

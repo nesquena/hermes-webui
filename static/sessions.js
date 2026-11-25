@@ -2488,7 +2488,11 @@ async function _ensureBlankPageSession(workspace,contextIntent,paneNavigationGen
       // the empty composer; deliberate New Chat remains the only consumer.
       S._pendingSessionToolsets=null;
       S._profileSwitchWorkspace=targetWorkspace;
-      await newSession(false,{worktree:false,contextTransition:intent,_paneNavigationGeneration:paneNavigationGeneration});
+      // Pass the requested workspace explicitly as well: newSession() gives an
+      // active project filter's bound workspace priority over the shared
+      // profile-switch slot, so a blank-page file/folder action would otherwise
+      // mint the session in the project's workspace instead of this target.
+      await newSession(false,{workspace:targetWorkspace,worktree:false,contextTransition:intent,_paneNavigationGeneration:paneNavigationGeneration});
       return S.session||null;
     })();
     try{return await _blankPageSessionInFlight;}
