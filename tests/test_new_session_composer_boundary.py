@@ -1738,6 +1738,195 @@ def test_dictation_commit_is_restored_when_the_create_fails():
     assert source_saves and source_saves[-1]["text"] == "source draft voice addition"
 
 
+def _dictation_recognition_helpers() -> str:
+    """The real SpeechRecognition callbacks from boot.js, not a test double."""
+    return "\n".join([
+        _function(BOOT_JS, "_micDictationContinuous", "\n  // Only auto-restart"),
+        _function(BOOT_JS, "_micShouldRestartDictation", "\n  // Screen Wake Lock"),
+        _function(
+            BOOT_JS,
+            "_ensureSpeechRecognition",
+            "\n  async function _probeServerSttCapability",
+        ),
+    ])
+
+
+def _run_dictation_end_harness(
+    schedule: str,
+    *,
+    typing: str = "",
+    result_kind: str = "interim",
+    other_producer: bool = False,
+) -> dict:
+    """Drive the real recognizer callbacks through onresult → onend.
+
+    ``schedule`` is ``settle`` / ``abort`` (a New Chat create is held) or
+    ``direct`` (ordinary composer). ``typing`` injects a real keystroke before
+    or after the speech result; ``other_producer`` adds a Voice Mode write so
+    the no-final end cannot substitute another producer's combined text.
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    authority = _composer_authority_helpers()
+    helpers = _dictation_recognition_helpers()
+    script = textwrap.dedent(
+        f"""
+        const ta={{value:'source draft'}};
+        const S={{
+          session:{{session_id:'old-session',profile:'default'}},
+          pendingFiles:[],activeProfile:'default'
+        }};
+        const $=id=>id==='msg'?ta:null;
+        {authority}
+        function renderTray(){{}}
+        function autoResize(){{}}
+        function updateSendBtn(){{}}
+        const saves=[];
+        function _saveComposerDraftNow(sid,text,files,cont,opts){{
+          saves.push({{sid,text}});return Promise.resolve();
+        }}
+        let SpeechRecognition=function(){{
+          this.continuous=undefined;this.interimResults=undefined;
+          this.lang=undefined;this.onstart=null;this.onresult=null;
+          this.onend=null;this.onerror=null;
+          this.start=function(){{}};this.stop=function(){{}};
+        }};
+        let recognition=null;
+        let _finalText='';
+        let _prefix='';
+        let _dictationLastContribution=null;
+        let _dictationRecordingId=0;
+        let _isRecording=false;
+        let _speechStopRequested=false;
+        let _micWakeLock=null;
+        let _micWakeLockOp=null;
+        let _micRestartCount=0;
+        const _micMaxRestarts=20;
+        let _activeCaptureMode='speech';
+        let _forceMediaRecorder=false;
+        const _locale={{_speech:'en-US'}};
+        global.localStorage={{getItem:()=>null,setItem:()=>{{}}}};
+        global.navigator={{wakeLock:null}};
+        global.window={{
+          _micActive:false,_micPendingSend:false,
+          matchMedia:()=>({{matches:false}})
+        }};
+        global.document={{}};
+        function showToast(){{}}
+        function t(k){{return k;}}
+        function send(){{}}
+        function _setRecording(on){{
+          window._micActive=on;
+          if(!on){{_finalText='';_prefix='';_dictationLastContribution=null;}}
+        }}
+        function _releaseMicWakeLock(){{}}
+        function _applyDeferredServerSttFlip(){{}}
+        {helpers}
+
+        recognition=_ensureSpeechRecognition();
+        // Mimic _startMicCapture's speech branch entering an active session.
+        window._micActive=true;
+        _prefix=ta.value;
+        _dictationRecordingId+=1;
+        recognition.start();
+        recognition.onstart();
+        const schedule={json.dumps(schedule)};
+        const tx=schedule==='direct'
+          ?null
+          :_beginComposerOwnershipTransition('old-session','default',{{persistSourceDraft:true}});
+        if(tx)_bindComposerOwnershipDestination(tx,'new-session','default');
+        const typing={json.dumps(typing)};
+        if(typing==='before'){{ta.value='source draft typed';_composerRecordNativeText();}}
+        if({str(other_producer).lower()}){{
+          _composerCommitProducerText('source draft Voice ','voice-mode');
+        }}
+        recognition.onresult({{
+          resultIndex:0,
+          results:[Object.assign([{{transcript:'late-speech'}}],{{
+            isFinal:{str(result_kind == 'final').lower()},length:1
+          }})],
+        }});
+        const afterResult=_composerPendingText();
+        if(typing==='after'){{ta.value=ta.value+' typed';_composerRecordNativeText();}}
+        const pendingBeforeEnd=_composerPendingText();
+        recognition.onend();
+        const afterEnd=_composerPendingText();
+        if(tx){{
+          if(schedule==='settle'){{
+            ta.value='';S.pendingFiles=[];
+            _drainComposerOwnershipTransition(tx);
+          }}else if(schedule==='abort'){{
+            _abortComposerOwnershipTransition(tx);
+          }}
+        }}
+        process.stdout.write(JSON.stringify({{
+          afterResult,pendingBeforeEnd,afterEnd,settled:ta.value,saves
+        }}));
+        """
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_dictation_interim_survives_no_final_end_during_successful_handoff():
+    result = _run_dictation_end_harness("settle")
+
+    # The interim result is buffered for the new chat; recognition ending
+    # without a final result historically re-committed the unchanged source
+    # textarea and erased that buffer. It must survive the end and the settle.
+    assert result["afterResult"] == "late-speech"
+    assert result["afterEnd"] == "late-speech"
+    assert result["settled"] == "late-speech"
+
+
+def test_dictation_interim_survives_no_final_end_when_the_create_is_rejected():
+    result = _run_dictation_end_harness("abort")
+
+    assert result["afterResult"] == "late-speech"
+    assert result["afterEnd"] == "late-speech"
+    assert result["settled"] == "source draftlate-speech"
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves and source_saves[-1]["text"] == "source draftlate-speech"
+
+
+def test_dictation_no_final_end_without_a_handoff_keeps_later_typing():
+    result = _run_dictation_end_harness("direct", typing="after")
+
+    # Ordinary behavior: no handoff, so the textarea (including text typed
+    # after the interim) is the truth and onend must not replace it.
+    assert result["settled"] == "source draftlate-speech typed"
+
+
+def test_dictation_no_final_end_preserves_mixed_input_in_both_arrival_orders():
+    typed_first = _run_dictation_end_harness("settle", typing="before")
+    spoken_first = _run_dictation_end_harness("settle", typing="after")
+
+    assert "late-speech" in typed_first["settled"]
+    assert "typed" in typed_first["settled"]
+    assert "late-speech" in spoken_first["settled"]
+    assert "typed" in spoken_first["settled"]
+    # Neither order may drop what the other producer wrote.
+    assert typed_first["settled"] == " typedlate-speech"
+    assert spoken_first["settled"] == "late-speech typed"
+
+
+def test_dictation_no_final_end_does_not_replace_another_producers_text():
+    result = _run_dictation_end_harness("settle", other_producer=True)
+
+    assert "Voice" in result["settled"]
+    assert "late-speech" in result["settled"]
+
+
+def test_dictation_final_result_still_commits_through_the_handoff():
+    result = _run_dictation_end_harness("settle", result_kind="final")
+
+    assert result["afterResult"] == "late-speech"
+    assert result["afterEnd"] == " late-speech"
+    assert result["settled"] == " late-speech"
+
+
 def _run_native_input_harness(schedule: str) -> dict:
     node = shutil.which("node")
     if not node:

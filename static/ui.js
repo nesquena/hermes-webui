@@ -57,6 +57,18 @@ function _composerPendingText(){
   if(!tx)return '';
   return String(tx.destinationText||'');
 }
+// The value a pending ownership transition has buffered for one producer token.
+// `null` means no handoff currently owns the visible composer (or that producer
+// has not written yet), so callers should treat the textarea as the source of
+// truth. Dictation's no-final `onend` uses this: the textarea still shows the
+// source chat during a handoff, so falling back to it would replace the
+// recording's already-buffered interim text with empty text.
+function _composerPendingProducerText(producerToken){
+  const tx=_composerOwnershipTransition;
+  if(!tx||!_composerOwnershipTransitionOwnsVisiblePane())return null;
+  const slot=tx.destinationSlots.get(String(producerToken||''));
+  return slot?String(slot.value||''):null;
+}
 // What a producer that is about to send would be sending: the buffered
 // destination text when a handoff owns the composer, else the visible textarea.
 function _composerPendingOrVisibleText(){

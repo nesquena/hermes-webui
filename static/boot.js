@@ -1213,6 +1213,13 @@ function _micToastKeyForRecognitionError(error){
   let audioChunks=[];
   let _finalText='';
   let _prefix='';
+  // The composer text THIS dictation run last committed (interim included),
+  // bound to the recording that produced it. `ta.value` is not a safe fallback
+  // while a New Chat handoff owns the composer: the textarea deliberately still
+  // shows the source chat, so an `onend` without a final result would commit
+  // that source text and erase the interim already buffered for the destination.
+  let _dictationLastContribution=null;
+  let _dictationRecordingId=0;
   let _isRecording=false;
   // #5294 salvage — mobile composer-mic dictation continuity.
   // _speechStopRequested distinguishes an intentional stop (send/toggle) from a
@@ -1250,7 +1257,7 @@ function _micToastKeyForRecognitionError(error){
     _setButtonTooltipAndKey(btn, on ? (_rawAudioMode ? 'voice_recording_active' : 'voice_dictate_active') : (_rawAudioMode ? 'voice_send_raw' : 'voice_dictate'));
     status.style.display=on?'':'none';
     if(statusText) statusText.textContent=on?'Listening':'Listening';
-    if(!on){ _finalText=''; _prefix=''; }
+    if(!on){ _finalText=''; _prefix=''; _dictationLastContribution=null; }
   }
 
   function _updateMicTooltip(){
@@ -1535,24 +1542,47 @@ function _micToastKeyForRecognitionError(error){
         if(event.results[i].isFinal){ final+=t; _finalText=final; }
         else{ interim+=t; }
       }
+      const contribution=_prefix+(final||interim);
+      _dictationLastContribution={text:contribution,recordingId:_dictationRecordingId};
       if(typeof _composerCommitProducerText==='function'){
-        _composerCommitProducerText(_prefix+(final||interim),'dictation');
+        _composerCommitProducerText(contribution,'dictation');
       }else{
-        ta.value=_prefix+(final||interim);
+        ta.value=contribution;
       }
       autoResize();
     };
 
     sr.onend=()=>{
-      const committed=_finalText
-        ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
-            ? _prefix+' '+_finalText.trimStart()
-            : _prefix+_finalText)
-        : ta.value;
-      if(typeof _composerCommitProducerText==='function'){
-        _composerCommitProducerText(committed,'dictation');
+      const finalText=String(_finalText||'');
+      const last=_dictationLastContribution;
+      const handoffOwnsPane=typeof _composerOwnershipTransitionOwnsVisiblePane==='function'
+        &&_composerOwnershipTransitionOwnsVisiblePane();
+      // A run can end with only interim text. During a New Chat handoff the
+      // textarea still shows the source chat, so `ta.value` must not replace the
+      // contribution this recording already routed to the composer owner that
+      // received it. Keep the recording's own last text; never substitute
+      // another producer's combined composer content. With no contribution at
+      // all there is nothing to write while the handoff owns the pane.
+      let committed=null;
+      if(finalText){
+        committed=_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
+          ? _prefix+' '+finalText.trimStart()
+          : _prefix+finalText;
+      }else if(handoffOwnsPane){
+        if(last&&last.recordingId===_dictationRecordingId&&last.text
+          &&typeof _composerPendingProducerText==='function'
+          &&_composerPendingProducerText('dictation')!==null){
+          committed=last.text;
+        }
       }else{
-        ta.value=committed;
+        committed=ta.value;
+      }
+      if(committed!==null){
+        if(typeof _composerCommitProducerText==='function'){
+          _composerCommitProducerText(committed,'dictation');
+        }else{
+          ta.value=committed;
+        }
       }
       autoResize();
       // Mobile / opt-in continuity: a natural pause ends this recognition run but
@@ -1560,9 +1590,10 @@ function _micToastKeyForRecognitionError(error){
       // (one-shot) and intentional stops (_speechStopRequested) skip this and
       // finalize. Bounded by _micMaxRestarts so a stolen audio session can't loop.
       if(_micShouldRestartDictation()){
-        _prefix=committed&&!committed.endsWith(' ')&&!committed.endsWith('\n')
-          ? committed+' '
-          : committed;
+        const carried=committed==null?'':committed;
+        _prefix=carried&&!carried.endsWith(' ')&&!carried.endsWith('\n')
+          ? carried+' '
+          : carried;
         _finalText='';
         _micRestartCount++;
         try{
@@ -1693,6 +1724,7 @@ function _micToastKeyForRecognitionError(error){
     _isRecording=true;
     _finalText='';
     _prefix=ta.value;
+    _dictationLastContribution=null;
     if(_micOriginNeedsSecureContext()){
       _isRecording=false;
       window._micPendingSend=false;
@@ -1701,6 +1733,7 @@ function _micToastKeyForRecognitionError(error){
     }
     if(recognition && !_forceMediaRecorder && !_rawAudioMode){
       _activeCaptureMode='speech';
+      _dictationRecordingId+=1;
       _speechStopRequested=false;
       _micRestartCount=0;
       // Refresh continuity gate at start so a settings/orientation change takes
