@@ -203,23 +203,62 @@ def test_abbreviated_id_resolves_older_commit(monkeypatch, tmp_path):
     assert "-oldest" in result["diff"]
 
 
-def test_ambiguous_prefix_is_not_guessed(monkeypatch, tmp_path):
-    """Two commits sharing a short prefix must not silently pick one."""
+def test_match_commit_refuses_ambiguous_prefix(monkeypatch, tmp_path):
+    """A prefix matching two commits must not silently pick one.
+
+    The prefix is seven hex characters — long enough to pass
+    ``_match_commit()``'s own length guard — so the comparison itself is what
+    decides. A test using a one-character prefix would pass even if the code
+    started returning the first match.
+    """
+    store = tmp_path / "store"
+    store.mkdir()
+    subprocess.run(["git", "init", "-q", "--bare", str(store)], check=True)
+
+    shared = "abc1234"
+    first, second = shared + "0" * 33, shared + "1" * 33
+    monkeypatch.setattr(
+        rollback, "_commit_ids",
+        lambda git, git_dir, ref: [first, second],
+    )
+
+    ref = "refs/hermes/deadbeefdeadbeef"
+    # Two candidates share the prefix → refuse.
+    assert rollback._match_commit("git", store, ref, shared) is None
+    # A longer prefix unique to one commit still resolves to it.
+    assert rollback._match_commit("git", store, ref, shared + "0" * 10) == first
+    assert rollback._match_commit("git", store, ref, shared + "1" * 10) == second
+
+
+def test_packed_ref_is_still_listed(monkeypatch, tmp_path):
+    """A checkpoint whose ref git packed must not disappear from the panel.
+
+    ``git pack-refs`` (run by the agent's own pruning/GC) moves
+    ``refs/hermes/<hash>`` into ``packed-refs`` and deletes the loose file, so a
+    filesystem existence check reports a valid project as missing.
+    """
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     checkpoint_root = tmp_path / "checkpoints"
-    _init_shared_store(
+    _ref, heads = _init_shared_store(
         checkpoint_root, workspace.resolve(),
-        [("one", {"a.txt": "1\n"}), ("two", {"a.txt": "2\n"})],
+        [("before patch", {"AGENTS.md": "x\n"})],
     )
+    store = checkpoint_root / "store"
+    project_hash = hashlib.sha256(str(workspace.resolve()).encode()).hexdigest()[:16]
+    loose = store / "refs" / "hermes" / project_hash
+    assert loose.is_file(), "precondition: the ref starts out loose"
+
+    subprocess.run(["git", "--git-dir", str(store), "pack-refs", "--all"], check=True)
+    assert not loose.exists(), "precondition: pack-refs removed the loose ref"
+    assert (store / "packed-refs").is_file()
+
     monkeypatch.setattr(rollback, "_resolve_workspace", lambda arg: str(workspace.resolve()))
     monkeypatch.setattr(rollback, "_checkpoint_root", lambda: checkpoint_root)
 
-    # An empty/too-short prefix matches both commits; it must not resolve.
-    try:
-        rollback.get_checkpoint_diff(str(workspace), "a")
-    except ValueError as exc:
-        assert "not found" in str(exc).lower()
-    else:
-        raise AssertionError("an ambiguous prefix must not resolve")
+    listed = rollback.list_checkpoints(str(workspace))
+    assert len(listed["checkpoints"]) == 1, listed
+
+    diff = rollback.get_checkpoint_diff(str(workspace), heads[0][:12])
+    assert diff["total_changes"] == 1, diff
 

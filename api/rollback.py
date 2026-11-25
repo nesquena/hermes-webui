@@ -148,15 +148,16 @@ def _resolve_checkpoint_ref(resolved: str, checkpoint: str) -> "_CheckpointRef |
     git = _find_git()
 
     # Current layout: <root>/store with refs/hermes/<sha256[:16]> per project.
+    # Ask git rather than the filesystem: pack-refs deletes the loose ref file.
     store = root / "store"
     if store.is_dir():
         project_hash = full_hash[:16]
-        ref_path = store / "refs" / "hermes" / project_hash
-        if ref_path.is_file():
-            matched = _match_commit(git, store, f"refs/hermes/{project_hash}", checkpoint)
+        ref_name = f"refs/hermes/{project_hash}"
+        if _ref_exists(git, store, ref_name):
+            matched = _match_commit(git, store, ref_name, checkpoint)
             if matched:
                 return _CheckpointRef(path=store, git_dir=store, id=matched,
-                                      project_ref=f"refs/hermes/{project_hash}")
+                                      project_ref=ref_name)
 
     # Legacy layout: <root>/<sha256[:12]>/<commit>/ is its own repository.
     legacy = root / full_hash[:12] / checkpoint
@@ -175,16 +176,20 @@ def _match_commit(git: str, git_dir: Path, ref: str, prefix: str) -> str | None:
     """
     if not re.fullmatch(r"[0-9a-fA-F]{7,64}", prefix):
         return None
+    matches = [c for c in _commit_ids(git, git_dir, ref) if c.startswith(prefix)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _commit_ids(git: str, git_dir: Path, ref: str) -> list[str]:
+    """Every commit id reachable from *ref*, newest first."""
     result = subprocess.run(
         [git, "--git-dir", str(git_dir), "rev-list", ref],
         capture_output=True, text=True, timeout=10,
         creationflags=windows_hide_flags(),
     )
     if result.returncode != 0:
-        return None
-    matches = [line.strip() for line in result.stdout.splitlines()
-               if line.strip().startswith(prefix)]
-    return matches[0] if len(matches) == 1 else None
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
 def _checkpoint_entry_modes(git: str, ckpt_dir: Path) -> dict[str, int]:
@@ -399,12 +404,11 @@ def _list_shared_store_checkpoints(resolved: str, root: Path) -> list[dict[str, 
     which lets the caller fall back to the legacy layout. An existing ref that
     merely has no commits yields ``[]`` — a real empty result, not a miss.
     """
-    project_ref = _project_ref_path(root, resolved)
-    if project_ref is None:
+    ref_name = _project_ref_path(root, resolved)
+    if ref_name is None:
         return None
 
     git = _find_git()
-    ref_name = _project_ref_name(resolved)
     # Default git log order (newest first) is what the UI wants: the newest
     # checkpoint is the one a rollback most often targets.
     result = subprocess.run(
@@ -442,13 +446,32 @@ def _project_ref_name(resolved: str) -> str:
     return f"refs/hermes/{full_hash[:16]}"
 
 
-def _project_ref_path(root: Path, resolved: str) -> Path | None:
+def _project_ref_path(root: Path, resolved: str) -> str | None:
+    """Return the store ref name that owns *resolved*, or None when absent.
+
+    Existence is asked of git, not of the filesystem: ``git pack-refs`` (run by
+    the agent's own pruning/GC) moves a loose ``refs/hermes/<hash>`` into
+    ``packed-refs`` and deletes the file, so a ``Path.is_file()`` check would
+    report a perfectly valid project as missing and empty the panel.
+    """
     store = root / "store"
     if not store.is_dir():
         return None
-    full_hash = hashlib.sha256(resolved.encode()).hexdigest()
-    ref_path = store / "refs" / "hermes" / full_hash[:16]
-    return ref_path if ref_path.is_file() else None
+    ref_name = _project_ref_name(resolved)
+    if not _ref_exists(_find_git(), store, ref_name):
+        return None
+    return ref_name
+
+
+def _ref_exists(git: str, git_dir: Path, ref_name: str) -> bool:
+    """Whether *ref_name* resolves, whether it is loose or packed."""
+    result = subprocess.run(
+        [git, "--git-dir", str(git_dir), "rev-parse", "--verify", "--quiet",
+         f"{ref_name}^{{commit}}"],
+        capture_output=True, text=True, timeout=10,
+        creationflags=windows_hide_flags(),
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
 
 
 def _format_date_display(date_str: str) -> str:
