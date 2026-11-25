@@ -15744,12 +15744,8 @@ def _run_agent_streaming(
 
             def on_tool(*cb_args, **cb_kwargs):
                 nonlocal _reasoning_segments, _current_reasoning_idx, _tool_boundary_advanced
-                # #8901: the delta redactor's held tail belongs to the prose
-                # that produced it, and a tool frame opens a new activity
-                # group — release it BEFORE the tool frame, the same boundary
-                # rule as interim_assistant. Without it a held character run
-                # lands after the tool row (or is dropped at the terminal),
-                # and the live snapshot no longer matches the settled one.
+                # #8901: the delta redactor's held tail belongs to the prose that
+                # produced it — release it before this tool frame opens a new group.
                 flush_stream_delta_tail(_delta_redactor, put)
                 # #4729: a tool boundary closes/reorders the live reasoning stream — flush
                 # any buffered reasoning tail first so it isn't stranded behind the tool event.

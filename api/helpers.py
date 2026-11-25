@@ -1269,6 +1269,12 @@ def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
 # because they run to kilobytes.
 _STREAM_DELTA_WINDOW = 1024
 _STREAM_DELTA_PEM_WINDOW = 16384
+# A mask product sitting exactly at the buffer end means the secret it masks
+# is still growing. The local fallback (no Agent installed) keeps six leading
+# and four trailing characters visible — ``abcdef...wxyz`` — so the mask ends
+# in the segment's own tail. The Agent's masks end in ``***``/a bracketed tag,
+# which the tail-difference check below already handles.
+_MASK_PRODUCT_AT_END_RE = _re.compile(r"(?:\*\*\*|\S{6}\.\.\.\S{4})$")
 # KEY=value shapes (env/API assignments): the key name is where the secret
 # starts, well before the "=" that the value regexes anchor on.
 _STREAM_ENV_KEY_NAME_RE = _re.compile(
@@ -1416,6 +1422,15 @@ class StreamDeltaRedactor:
         masked = _redact_text(segment, _enabled=True)
         if masked == segment:
             return False  # nothing masked here: the start never became a secret
+        # The fallback mask KEEPS the last four characters visible, so "the
+        # masked text still ends in the segment's own tail" is exactly what a
+        # growing secret looks like — not proof that it finished. Trusting the
+        # tail comparison alone calls a long JWT complete at the window edge
+        # and strands its tail in the buffer, header-less, for every later
+        # release. A completed secret always leaves ordinary text after its
+        # mask, so the mask product no longer touches the end.
+        if _MASK_PRODUCT_AT_END_RE.search(masked):
+            return True
         shared = 0
         limit = min(len(masked), len(segment))
         while (
