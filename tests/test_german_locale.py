@@ -29,6 +29,10 @@ I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
 DE_FALLBACK_KEYS = {
     *PROFILE_CONCEPT_KEYS,
     "workspace_artifact_source_session",
+    # #7679: the no-op force-clean message is new English copy that rides the
+    # ``en`` fallback (tests/test_7679_noop_message_i18n.py pins it to ``en``
+    # only), so the German block must not carry a copy of it.
+    "update_force_no_op",
     *scripts_fallback_keys("de"),
 }
 

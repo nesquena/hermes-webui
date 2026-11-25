@@ -10798,7 +10798,6 @@ const LOCALES = {
     update_updating: 'Updating…',
     update_dirty_local_changes: 'Lokale Änderungen erkannt',
     update_force: 'Force update',
-    update_force_no_op: 'Bereits aktuell — nichts zurückzusetzen.',
     update_recovery_pending: 'Oben ist eine Wiederherstellungsaktion verfügbar.',
     force_no_longer_applicable: 'Erzwungenes Update ist nicht mehr anwendbar — der Update-Status hat sich geändert. Bitte erneut prüfen.',
     update_clear_lock_retry: 'Sperre aufheben und Update erneut versuchen',
