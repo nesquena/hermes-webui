@@ -19,9 +19,11 @@ Scenarios that drive Agent scope builders skip when the Agent is not importable.
 
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -618,8 +620,10 @@ def test_launcher_reading_matches_ctl_sh_decoding(tmp_path):
 
 
 # Line breaks, bytes and spaces bash's `read` loop treats differently from Python's text handling. Each file also
-# has an escaped value (A1), which only the launcher reading decodes. These shapes export the same values in the
-# C and in a UTF-8 locale here (GNU bash and awk).
+# has an escaped value (A1), which only the launcher reading decodes. In the C locale bash's [[:space:]] is ASCII; in
+# a UTF-8 locale it is the host C library's blank set (glibc: not the no-break spaces; Darwin: those too), so each
+# locale's export is compared with the reading for that locale. A NUL byte is dropped by bash 4 and later and ends
+# the line in bash 3.2 (macOS's /bin/bash); the reading compared is the one for the bash these tests run.
 LAUNCHER_BYTE_CASES = {
     "byte_not_utf8_in_comment": b"# DUMMY comment \xff\n",
     "byte_not_utf8_in_value": b"A2=DUMMY\xffV2\n",
@@ -627,10 +631,40 @@ LAUNCHER_BYTE_CASES = {
     "form_feed": b"B4=DUMMY_B4\x0cB5=y\n",
     "vertical_tab": b"B6=DUMMY_B6\x0bB7=z\n",
     "nul": b'C3=DUMMY\x00V3\nC4="DUMMY\x00\\tV4"\n',
+    "nul_inside_key": b"C\x005=DUMMY_C5\n",
     "nbsp_before_comment": "D1=DUMMY_V1\u00a0# c\n".encode(),
     "nbsp_after_quoted": 'D2="DUMMY\\tV2"\u00a0# c\n'.encode(),
     "info_separator_before_comment": b"D6=DUMMY_V6\x1c# c\n",
+    "ideographic_space_before_comment": "E1=DUMMY_V1\u3000# c\n".encode(),
+    "em_space_after_quoted": 'E2="DUMMY\\tV2"\u2003# c\n'.encode(),
+    "em_space_inside_key": "E\u20033=DUMMY_V3\n".encode(),
 }
+LAUNCHER_PATH = "/usr/bin:/bin"  # the PATH _ctl_sh_exports runs bash with (no Homebrew bash on a Mac: /bin/bash 3.2)
+# The code points beyond ASCII some C library counts as [[:space:]] in a UTF-8 locale; glibc's are GLIBC_BLANKS.
+GLIBC_BLANKS = "\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2008\u2009\u200a\u2028\u2029\u205f\u3000"
+UTF8_BLANK_CANDIDATES = GLIBC_BLANKS + "\u0085\u00a0\u2007\u202f"
+ASCII_SPACE = " \t\n\r\x0c\x0b"
+
+
+@functools.lru_cache(maxsize=None)
+def bash_truncates_at_nul(path: str) -> bool:
+    """Whether the bash found on *path* ends a ``read`` line at a NUL byte (bash 3.2, macOS's ``/bin/bash``) rather
+    than dropping the NUL (bash 4 and later). Probed once per PATH, so a NUL test asserts what its shell does."""
+    cp = subprocess.run(["bash", "-c", 'IFS= read -r l; printf %s "$l"'], input=b"A=x\0y\n", env={"PATH": path},
+                        capture_output=True, timeout=30)
+    assert cp.stdout in (b"A=x", b"A=xy"), f"bash on {path} read a NUL neither way: {cp.stdout!r} {cp.stderr!r}"
+    return cp.stdout == b"A=x"
+
+
+@functools.lru_cache(maxsize=None)
+def bash_utf8_blanks(path: str) -> frozenset[str]:
+    """The candidates the bash found on *path* counts as ``[[:space:]]`` under ``LANG=C.UTF-8`` (the host C
+    library's answer); empty when that locale is missing (bash then runs in the C locale)."""
+    cp = subprocess.run(["bash", "-c", 'for c in "$@"; do [[ $c == [[:space:]] ]] && printf 1 || printf 0; done',
+                         "_", *UTF8_BLANK_CANDIDATES], env={"PATH": path, "LANG": "C.UTF-8"},
+                        capture_output=True, text=True, timeout=30)
+    assert cp.returncode == 0 and len(cp.stdout) == len(UTF8_BLANK_CANDIDATES), cp.stderr
+    return frozenset(c for c, flag in zip(UTF8_BLANK_CANDIDATES, cp.stdout, strict=True) if flag == "1")
 
 
 def _ctl_sh_exports(tmp_path, data: bytes, locale: dict[str, str]) -> dict[str, str]:
@@ -642,7 +676,7 @@ def _ctl_sh_exports(tmp_path, data: bytes, locale: dict[str, str]) -> dict[str, 
     script = tmp_path / "run.sh"
     script.write_text(body.group(1) + '\n_apply_env_file_safely "$1"\nexec "$2" -c '
                       '"import json, os; print(json.dumps(dict(os.environ)))"\n', encoding="utf-8")
-    cp = subprocess.run(["bash", str(script), str(env_file), sys.executable], env={"PATH": "/usr/bin:/bin", **locale},
+    cp = subprocess.run(["bash", str(script), str(env_file), sys.executable], env={"PATH": LAUNCHER_PATH, **locale},
                         capture_output=True, text=True, timeout=60)
     assert cp.returncode == 0, cp.stderr
     return {k: v for k, v in json.loads(cp.stdout).items() if k[:1] in "ABCDE" and k[1:].isdigit()}
@@ -654,7 +688,10 @@ def _ctl_sh_exports(tmp_path, data: bytes, locale: dict[str, str]) -> dict[str, 
 def test_launcher_reading_matches_ctl_sh_for_line_breaks_bytes_and_spaces(tmp_path, case, locale):
     exported = _ctl_sh_exports(tmp_path, b'A1="DUMMY\\tV1"\n' + LAUNCHER_BYTE_CASES[case], locale)
     assert exported.get("A1") == "DUMMY\tV1", "precondition: ctl.sh decoded the escaped value"
-    assert profiles._launcher_dotenv_values(tmp_path / "t.env") == exported
+    reading = {"unicode_spaces": True} if "LANG" in locale else {}  # the UTF-8 locale's blanks: the host's
+    if b"\0" in LAUNCHER_BYTE_CASES[case] and bash_truncates_at_nul(LAUNCHER_PATH):
+        reading["nul_truncates"] = True  # bash 3.2: the line ends at the NUL
+    assert profiles._launcher_dotenv_values(tmp_path / "t.env", **reading) == exported
 
 
 def test_webui_reading_matches_its_actual_strict_utf8_text_loader(tmp_path):
@@ -663,6 +700,169 @@ def test_webui_reading_matches_its_actual_strict_utf8_text_loader(tmp_path):
     assert profiles._read_dotenv_values(env_file) == {}, "WebUI cannot load a non-UTF8 file"
     env_file.write_bytes(b"A1=DUMMY_V1\nB2=DUMMY_B2\rB3=x\n")
     assert profiles._read_dotenv_values(env_file) == {"A1": "DUMMY_V1", "B2": "DUMMY_B2", "B3": "x"}
+
+
+# 5b ── the UTF-8 reading's blanks are the host C library's, and both shells' NUL readings are recognised ──
+DARWIN_BLANKS = GLIBC_BLANKS + "\u00a0\u2007\u202f"  # Darwin's iswspace also counts the no-break spaces
+MUSL_BLANKS = GLIBC_BLANKS.replace("\u1680", "") + "\u0085"  # musl's: NEL, not the ogham space mark
+
+
+def _utf8_space_builder():
+    build = getattr(profiles, "_launcher_utf8_space", None)
+    assert build is not None, "the UTF-8 blank set is a fixed table, not the host C library's answer"
+    return build
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_launcher_utf8_space_is_the_host_bash_space_class():
+    """The UTF-8 reading counts as blanks what the host's bash counts as ``[[:space:]]`` in a UTF-8 locale: glibc's
+    set on Linux, the no-break spaces too on macOS."""
+    host = bash_utf8_blanks(LAUNCHER_PATH)
+    if "\u3000" not in host:
+        pytest.skip("no C.UTF-8 locale for bash here")
+    assert set(profiles._LAUNCHER_UTF8_SPACE) == set(ASCII_SPACE) | host
+
+
+@pytest.mark.parametrize(("libc", "blanks"), [("glibc", GLIBC_BLANKS), ("darwin", DARWIN_BLANKS),
+                                              ("musl", MUSL_BLANKS)], ids=["glibc", "darwin", "musl"])
+def test_launcher_utf8_space_follows_the_c_library_it_is_given(libc, blanks):
+    build = _utf8_space_builder()
+    assert set(build(lambda ch: ch in blanks)) == set(ASCII_SPACE + blanks)
+
+
+class _FakeLibC:
+    """A C library whose ``iswspace_l`` counts *blanks* in the locale ``newlocale`` returns (None: no UTF-8 locale)."""
+
+    def __init__(self, blanks, locale: int | None = 1):
+        self.calls = []
+        self.newlocale = lambda mask, name, base: self.calls.append(("newlocale", mask, name)) or locale
+        self.iswspace_l = lambda wc, loc: int(loc == locale and chr(wc) in blanks)
+        self.freelocale = lambda loc: self.calls.append(("freelocale", loc))
+
+
+def test_launcher_utf8_space_takes_the_c_librarys_answer_in_a_utf8_locale(monkeypatch):
+    """Through the C library: a Darwin-like ``iswspace_l`` gives Darwin's blanks, asked in a UTF-8 locale object of
+    its own (freed afterwards), never through the process's locale."""
+    import ctypes
+
+    build = _utf8_space_builder()
+    fake = _FakeLibC(DARWIN_BLANKS, locale=7)
+    monkeypatch.setattr(ctypes, "CDLL", lambda name, *a, **kw: fake)
+    monkeypatch.setattr(profiles, "_utf8_locale_names", lambda: ["DUMMY_LOCALE.UTF-8"])
+    assert set(build()) == set(ASCII_SPACE + DARWIN_BLANKS)
+    assert [call[0] for call in fake.calls] == ["newlocale", "freelocale"]
+    assert fake.calls[0][2] == b"DUMMY_LOCALE.UTF-8" and fake.calls[1] == ("freelocale", 7)
+
+
+@pytest.mark.parametrize("platform, expected", [("linux", "glibc"), ("darwin", "darwin")])
+@pytest.mark.parametrize("failure", ["no_c_library", "no_iswspace_l", "no_utf8_locale", "answers_like_c_locale",
+                                     "classifier_raises"])
+def test_launcher_utf8_space_falls_back_to_the_platform_table_when_the_c_library_cannot_answer(
+        monkeypatch, failure, platform, expected):
+    """A Mac whose C library can't be asked must still read the no-break spaces as blanks, as its bash does."""
+    import ctypes
+
+    monkeypatch.setattr(sys, "platform", platform)
+    fallback = ASCII_SPACE + (DARWIN_BLANKS if expected == "darwin" else GLIBC_BLANKS)
+    build = _utf8_space_builder()
+
+    def no_library(*_a, **_kw):
+        raise OSError("DUMMY: no C library")
+
+    def raising(_ch):
+        raise RuntimeError("DUMMY: classifier failed")
+
+    libraries = {"no_c_library": no_library,
+                 "no_iswspace_l": lambda *_a, **_kw: types.SimpleNamespace(),
+                 "no_utf8_locale": lambda *_a, **_kw: _FakeLibC(DARWIN_BLANKS, locale=None),
+                 "answers_like_c_locale": lambda *_a, **_kw: _FakeLibC("")}
+    if failure in libraries:
+        monkeypatch.setattr(ctypes, "CDLL", libraries[failure])
+        assert set(build()) == set(fallback)
+    else:
+        assert set(build(raising)) == set(fallback)
+
+
+HOST_LOCALE_CHILD = r"""
+import ctypes, json, locale, sys
+sys.path.insert(0, sys.argv[1])
+before = locale.setlocale(locale.LC_CTYPE)
+from api import profiles as P
+host = P._host_utf8_iswspace()
+libc = ctypes.CDLL(None)
+libc.iswspace.argtypes = (ctypes.c_uint32,)
+print("RESULT " + json.dumps({"before": before, "after": locale.setlocale(locale.LC_CTYPE),
+                              "process_iswspace_3000": bool(libc.iswspace(0x3000)),
+                              "host_3000": host is not None and host("\u3000"), "space": P._LAUNCHER_UTF8_SPACE}))
+"""
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_the_c_library_answers_for_a_utf8_locale_under_a_c_process_locale(tmp_path):
+    """Started with ``LC_ALL=C`` (no PEP 538 coercion: LC_CTYPE stays C, where ``iswspace`` is ASCII only), the
+    UTF-8 reading still gets the C library's UTF-8 answer, and the process's locale is left as it was."""
+    host = bash_utf8_blanks(LAUNCHER_PATH)
+    if "\u3000" not in host:
+        pytest.skip("no C.UTF-8 locale for bash here")
+    env = {"PATH": LAUNCHER_PATH, "LC_ALL": "C", "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
+           "PYTHONDONTWRITEBYTECODE": "1"}
+    cp = subprocess.run([sys.executable, "-c", HOST_LOCALE_CHILD, str(REPO)], env=env, cwd=str(REPO),
+                        capture_output=True, text=True, timeout=120)
+    lines = [line for line in cp.stdout.splitlines() if line.startswith("RESULT ")]
+    assert lines, f"child produced no result (rc={cp.returncode}): {cp.stderr[-1500:]}"
+    obs = json.loads(lines[-1][len("RESULT "):])
+    assert obs["before"] == obs["after"] == "C", "the process locale changed"
+    assert obs["process_iswspace_3000"] is False, "precondition: iswspace in the process locale is ASCII only"
+    assert obs["host_3000"] is True, "the C library was not asked in a UTF-8 locale"
+    assert set(obs["space"]) == set(ASCII_SPACE) | host
+
+
+IMPORT_INIT_CHILD = r"""
+import ctypes, json, locale, sys
+sys.path.insert(0, sys.argv[1])
+lc_all, lc_ctype, want_mask, blanks = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), json.loads(sys.argv[5])
+locale.LC_ALL, locale.LC_CTYPE = lc_all, lc_ctype  # the platform's category numbering, as the module reads it
+calls = []
+
+
+def newlocale(mask, name, base):
+    calls.append(mask)
+    return 9 if mask == want_mask else None  # only the right LC_CTYPE mask gets a UTF-8 locale
+
+
+def iswspace_l(wc, loc):
+    return int(loc == 9 and chr(wc) in blanks)
+
+
+def freelocale(loc):
+    calls.append(("free", loc))
+
+
+fake = type("FakeLibC", (), {})()  # plain functions as attributes: the module sets restype/argtypes on them
+fake.newlocale, fake.iswspace_l, fake.freelocale = newlocale, iswspace_l, freelocale
+real_cdll = ctypes.CDLL
+ctypes.CDLL = lambda name, *a, **kw: fake if name is None else real_cdll(name, *a, **kw)
+from api import profiles as P  # the blank set is taken here, at import
+print("RESULT " + json.dumps({"space": P._LAUNCHER_UTF8_SPACE, "calls": calls}))
+"""
+
+
+@pytest.mark.parametrize(("lc_all", "lc_ctype", "mask", "blanks"),
+                         [(0, 2, 2, DARWIN_BLANKS), (6, 0, 1, MUSL_BLANKS)], ids=["darwin-numbering", "glibc-numbering"])
+def test_the_blank_set_is_the_c_librarys_answer_from_import(tmp_path, lc_all, lc_ctype, mask, blanks):
+    """At import, ``_LAUNCHER_UTF8_SPACE`` is what the C library answers, asked with the LC_CTYPE mask of the
+    platform's numbering: Darwin and the BSDs count from LC_ALL = 0 (LC_CTYPE 2, mask 2), glibc and musl from 0
+    (LC_CTYPE 0, mask 1). A wrong mask gets no UTF-8 locale and would fall back to the table instead."""
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
+           "PYTHONDONTWRITEBYTECODE": "1"}
+    cp = subprocess.run([sys.executable, "-c", IMPORT_INIT_CHILD, str(REPO), str(lc_all), str(lc_ctype), str(mask),
+                         json.dumps(blanks)], env=env, cwd=str(REPO), capture_output=True, text=True, timeout=120)
+    lines = [line for line in cp.stdout.splitlines() if line.startswith("RESULT ")]
+    assert lines, f"child produced no result (rc={cp.returncode}): {cp.stderr[-1500:]}"
+    obs = json.loads(lines[-1][len("RESULT "):])
+    assert obs["calls"] and obs["calls"][0] == mask, f"asked with LC_CTYPE mask {obs['calls'][:1]}, not {mask}"
+    assert ["free", 9] in obs["calls"], "the locale object was not freed"
+    assert set(obs["space"]) == set(ASCII_SPACE + blanks), "the import-time blank set is not the C library's answer"
 
 
 # 6 ── the private Agent attribute the startup install replaces ──
@@ -761,6 +961,48 @@ def test_install_gives_a_named_launch_profile_the_current_root_env_values(monkey
 def test_install_leaves_the_root_env_to_a_root_launch_profiles_own_read(monkeypatch, tmp_path):
     module = _install_with_root_env(monkeypatch, tmp_path, "OPENROUTER_API_KEY=DUMMY_ROOT_KEY\n", launch_home=tmp_path)
     assert module._launch_env() == {"OPERATOR_ONLY_TOKEN": "DUMMY_OPERATOR_TOKEN"}
+
+
+def test_install_takes_a_root_key_bash_32_exported_up_to_a_nul_from_the_current_root_env(monkeypatch, tmp_path):
+    """macOS's /bin/bash 3.2 ends a ``read`` line at a NUL, so ctl.sh exported the value up to it: that export is
+    the root .env's, re-read from the current file (with or without the NUL), not frozen as the operator's."""
+    root_env = tmp_path / ".env"
+    module = _install_with_root_env(monkeypatch, tmp_path, "OPENROUTER_API_KEY=DUMMY_ROOT_KEY\0_TAIL\n",
+                                    launch_home=tmp_path / "profiles" / "alpha")
+    operator = {"OPERATOR_ONLY_TOKEN": "DUMMY_OPERATOR_TOKEN"}
+    assert module._launch_env() == {**operator, "OPENROUTER_API_KEY": "DUMMY_ROOT_KEY"}
+    root_env.write_text("OPENROUTER_API_KEY=DUMMY_ROOT_KEY_NEW\0_TAIL\n", encoding="utf-8")
+    assert module._launch_env() == {**operator, "OPENROUTER_API_KEY": "DUMMY_ROOT_KEY_NEW"}, \
+        "the bash 3.2 export of the root .env was frozen as an operator value"
+    root_env.write_text("OPENROUTER_API_KEY=DUMMY_ROOT_KEY_CLEAN\n", encoding="utf-8")  # Settings rewrote it
+    assert module._launch_env() == {**operator, "OPENROUTER_API_KEY": "DUMMY_ROOT_KEY_CLEAN"}
+    root_env.write_text("", encoding="utf-8")
+    assert module._launch_env() == operator
+
+
+def test_install_rereads_a_key_the_agent_reading_matched_as_the_agent_reads_it(monkeypatch, tmp_path):
+    """Coverage (``k not in agent_keys``): a launch value both the Agent's and the launcher's reading of the root .env
+    hold is re-read as the Agent reads it, so after an edit the launcher's decoding (a real tab) doesn't replace the
+    Agent's value (the escape kept literal)."""
+    monkeypatch.setattr(profiles, "_agent_env_file_reader", lambda: profiles._read_dotenv_values)  # keeps \t literal
+    module = _install_with_root_env(monkeypatch, tmp_path, "OPENROUTER_API_KEY=DUMMY_ROOT_KEY\n",
+                                    launch_home=tmp_path / "profiles" / "alpha")
+    (tmp_path / ".env").write_text('OPENROUTER_API_KEY="DUMMY_ROOT\\tKEY"\n', encoding="utf-8")
+    assert module._launch_env()["OPENROUTER_API_KEY"] == "DUMMY_ROOT\\tKEY", \
+        "a key the Agent's reading matched was re-read with the launcher's decoding"
+
+
+def test_install_leaves_a_launcher_decoded_root_key_to_roots_own_scope(monkeypatch, tmp_path):
+    """Coverage (root's ``k not in root_dotenv``): root is the process profile and the launch value equals only the
+    launcher's decoding of a key root's own reading also holds (escaped, literal there): root's scope reads that key
+    itself, so the launch env leaves it out."""
+    monkeypatch.setattr(profiles, "_agent_env_file_reader", lambda: profiles._read_dotenv_values)  # keeps \n literal
+    module = _install_with_root_env(monkeypatch, tmp_path, 'OPENROUTER_API_KEY="DUMMY_ROOT_KEY\\n"\n',
+                                    launch_home=tmp_path)
+    assert profiles._read_dotenv_values(tmp_path / ".env") == {"OPENROUTER_API_KEY": "DUMMY_ROOT_KEY\\n"}, \
+        "precondition: root's own reading holds the key, not the launch value"
+    assert module._launch_env() == {"OPERATOR_ONLY_TOKEN": "DUMMY_OPERATOR_TOKEN"}, \
+        "a key root's own scope reads was kept in the launch env"
 
 
 @pytest.mark.parametrize("agent_reader", ["no_load_env_file", "no_secret_scope_module"])

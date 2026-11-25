@@ -22,9 +22,19 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_profile_secret_scope_isolation import AGENT_DIR, _write, needs_agent_scopes
+from tests.test_profile_secret_scope_isolation import (
+    AGENT_DIR,
+    DARWIN_BLANKS,
+    GLIBC_BLANKS,
+    _write,
+    bash_truncates_at_nul,
+    bash_utf8_blanks,
+    needs_agent_scopes,
+)
 
 REPO = Path(__file__).resolve().parents[1]
+# The PATH the launcher runs with (no Homebrew bash on an Apple silicon Mac: /bin/bash 3.2 there).
+LAUNCH_PATH = "/usr/local/bin:/usr/bin:/bin"
 
 CHILD = r'''
 import json, os, sys
@@ -151,7 +161,7 @@ def _run_named_launch_root_active(tmp_path, launcher, child=CHILD, *, alpha_env:
     script = run / "launch.sh"
     _write(script, _launcher_script(launcher) if exports is None else _launcher_script(launcher, exports))
     env = {
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "PATH": LAUNCH_PATH,
         "HOME": str(run / "home"),
         "TMPDIR": str(run / "tmp"),
         "LANG": "C.UTF-8",
@@ -244,6 +254,9 @@ def _record_launch_home(monkeypatch, profiles, home):
     if hasattr(profiles, "_INITIAL_HERMES_HOME_LAUNCHER_UNICODE_DOTENV"):  # recorded since the Unicode reading
         monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME_LAUNCHER_UNICODE_DOTENV",
                             profiles._launcher_dotenv_values(env_file, unicode_spaces=True))
+    if hasattr(profiles, "_INITIAL_HERMES_HOME_LAUNCHER_NUL_TRUNCATED_DOTENVS"):  # recorded since bash 3.2's reading
+        monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME_LAUNCHER_NUL_TRUNCATED_DOTENVS",
+                            profiles._launcher_nul_truncated_readings(env_file.read_bytes()))
     monkeypatch.setattr(profiles, "_NAMED_LAUNCH_HOME_AGENT_READINGS", {})
 
 
@@ -328,6 +341,103 @@ def test_the_agent_reading_is_of_the_startup_bytes_even_after_an_edit(monkeypatc
     assert parsed == [startup_line.encode()]
 
 
+@pytest.mark.parametrize("startup_env", ["empty", "missing"])
+def test_the_agent_reading_of_a_launch_profile_env_without_values_is_kept_empty(monkeypatch, tmp_path, startup_env):
+    """Coverage: alpha's .env had no values at startup (comments only, or no file), so an empty Agent reading is its
+    real reading, not a read error: it is kept, and the file is not read again on later calls."""
+    from api import profiles
+
+    alpha = tmp_path / "profiles" / "alpha"
+    _write(alpha / ".env", "# DUMMY comment only\n")
+    _record_launch_home(monkeypatch, profiles, alpha)
+    if startup_env == "missing":
+        (alpha / ".env").unlink()
+        monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME_ENV_BYTES", None)
+    reads = []
+    monkeypatch.setattr(profiles, "_agent_env_file_reader", lambda: lambda path: reads.append(path) or {})
+    monkeypatch.setattr(profiles, "_agent_bytes_parser", lambda: None)  # an Agent without the byte parser
+    profiles._named_launch_home_readings()
+    profiles._named_launch_home_readings()
+    assert profiles._NAMED_LAUNCH_HOME_AGENT_READINGS == {str(alpha): {}}, "the empty reading was not kept"
+    assert len(reads) == (1 if startup_env == "empty" else 0), "the launch profile's .env was read again"
+
+
+# macOS's bash (Darwin's iswspace) counts the no-break spaces U+00A0, U+2007 and U+202F as [[:space:]] in a UTF-8
+# locale, so ctl.sh strips them like spaces there: alpha's line -> the value ctl.sh exported on a Mac.
+DARWIN_SHAPES = {
+    "nbsp_after_quoted": ('OPENROUTER_API_KEY="DUMMY_KEY_PROFILE_A"\u00a0# provider key\n', "DUMMY_KEY_PROFILE_A"),
+    "nbsp_unquoted": ("OPENROUTER_API_KEY=DUMMY_KEY_PROFILE_A\u00a0# provider key\n", "DUMMY_KEY_PROFILE_A"),
+    "figsp_unquoted": ("OPENROUTER_API_KEY=DUMMY_KEY_PROFILE_A\u2007# provider key\n", "DUMMY_KEY_PROFILE_A"),
+    "nnbsp_unquoted": ("OPENROUTER_API_KEY=DUMMY_KEY_PROFILE_A\u202f# provider key\n", "DUMMY_KEY_PROFILE_A"),
+    "nbsp_inside_key": ("OPENROU\u00a0TER_API_KEY=DUMMY_KEY_PROFILE_A\n", "DUMMY_KEY_PROFILE_A"),
+}
+
+
+def _root_scope_of_startup_value(monkeypatch, tmp_path, profiles, exported):
+    """operator_env() and root's ${VAR} binding for OPENROUTER_API_KEY = *exported* in the launch snapshot, by the
+    startup launcher readings alone (no Agent reading)."""
+    import api.paths as paths
+
+    root = tmp_path / "root"
+    root.mkdir(exist_ok=True)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root)
+    monkeypatch.setattr(profiles, "_agent_env_file_reader", lambda: profiles._read_dotenv_values)
+    monkeypatch.setattr(paths, "STARTUP_ENV", {"OPENROUTER_API_KEY": exported,
+                                               "OPERATOR_ONLY_TOKEN": "DUMMY_OPERATOR_TOKEN"})
+    return (profiles.operator_env().get("OPENROUTER_API_KEY"),
+            profiles.profile_env_binding(root).get("OPENROUTER_API_KEY"))
+
+
+@pytest.mark.parametrize("shape", list(DARWIN_SHAPES))
+def test_a_value_macos_ctl_sh_exported_is_recognised_with_darwins_blanks(monkeypatch, tmp_path, shape):
+    """The launcher reading takes the host C library's blanks: given Darwin's, the value macOS's bash exported from
+    alpha's .env is alpha's (null in root's scope); given glibc's, that value is not what the file says there."""
+    from api import profiles
+
+    build = getattr(profiles, "_launcher_utf8_space", None)
+    assert build is not None, "no host classifier: the UTF-8 reading's blanks are glibc's on every host"
+    line, exported = DARWIN_SHAPES[shape]
+    alpha = tmp_path / "profiles" / "alpha"
+    _write(alpha / ".env", line)
+    monkeypatch.setattr(profiles, "_LAUNCHER_UTF8_SPACE", build(lambda ch: ch in GLIBC_BLANKS))
+    _record_launch_home(monkeypatch, profiles, alpha)
+    assert _root_scope_of_startup_value(monkeypatch, tmp_path, profiles, exported) == (exported, exported), \
+        "precondition: with glibc's blanks no reading holds the value"
+    monkeypatch.setattr(profiles, "_LAUNCHER_UTF8_SPACE", build(lambda ch: ch in DARWIN_BLANKS))
+    _record_launch_home(monkeypatch, profiles, alpha)
+    assert _root_scope_of_startup_value(monkeypatch, tmp_path, profiles, exported) == (None, None), \
+        "a value macOS's ctl.sh sourced from alpha's .env reaches root's scope"
+
+
+def test_both_shells_exports_of_a_line_with_a_nul_are_recognised_and_nothing_else(monkeypatch, tmp_path):
+    """bash 4 and later drop a NUL; macOS's /bin/bash 3.2 ends the line at it, so ``C3=DUMMY\\0V3`` exports
+    ``DUMMY`` and a NUL inside a key's name exports nothing. Either export is alpha's; nothing else is."""
+    import api.paths as paths
+    from api import profiles
+
+    alpha = tmp_path / "profiles" / "alpha"
+    (alpha).mkdir(parents=True)
+    (alpha / ".env").write_bytes(b"C3=DUMMY\x00V3\nC\x005=DUMMY_C5\nC7=DUMMY_C7\n")
+    _record_launch_home(monkeypatch, profiles, alpha)
+    monkeypatch.setattr(profiles, "_agent_env_file_reader", lambda: profiles._read_dotenv_values)
+    operator_only = {"OPERATOR_ONLY_TOKEN": "DUMMY_OPERATOR_TOKEN"}
+
+    def operator_env_with(**exports):
+        monkeypatch.setattr(paths, "STARTUP_ENV", {**exports, **operator_only})
+        return profiles.operator_env()
+
+    assert operator_env_with(C3="DUMMY") == operator_only, "bash 3.2's export (cut at the NUL) reached operator_env()"
+    assert operator_env_with(C3="DUMMYV3", C5="DUMMY_C5") == operator_only, "bash 4's export reached operator_env()"
+    assert operator_env_with(C7="DUMMY_C7") == operator_only, "a line after the NUL lines was not read"
+    for value in ("V3", "DUMMY_", "DUMMY\x01V3"):  # neither shell's export: the operator's
+        assert operator_env_with(C3=value) == {"C3": value, **operator_only}
+    assert operator_env_with(C="DUMMY_C5") == {"C": "DUMMY_C5", **operator_only}, \
+        "a key cut at a NUL in its name was taken for one the launcher exported"
+    # bash 3.2 cuts only the line holding the NUL: the next line is read as usual
+    assert profiles._launcher_dotenv_values(alpha / ".env", nul_truncates=True) == {"C3": "DUMMY", "C7": "DUMMY_C7"}
+    assert profiles._launcher_dotenv_values(alpha / ".env") == {"C3": "DUMMYV3", "C5": "DUMMY_C5", "C7": "DUMMY_C7"}
+
+
 # ctl.sh sources these shapes of alpha's .env differently from Python's text handling (see the launcher reading
 # tests in tests/test_profile_secret_scope_isolation.py); the value it exported is still alpha's.
 PARITY_CHILD = r"""
@@ -356,11 +466,15 @@ except Exception as exc:  # surfaced by the parent assertion
 print("RESULT " + json.dumps(obs, sort_keys=True), flush=True)
 os._exit(0)
 """
+# The value before the NUL holds alpha's marker, so the export is alpha's whether bash drops the NUL (4 and later) or
+# ends the line there (3.2). A no-break space is a blank to macOS's bash, not to glibc's; U+3000 is one to both.
 PARITY_ALPHA_ENVS = {
     "byte_not_utf8_elsewhere": b'# DUMMY profile file \xff\nOPENROUTER_API_KEY="DUMMY_KEY\\tPROFILE_A"\n',
     "lone_cr": b"OPENROUTER_API_KEY=DUMMY_KEY_PROFILE_A\rDUMMY_TRAILER=x\n",
-    "nul": b"OPENROUTER_API_KEY=DUMMY_KEY\x00_PROFILE_A\n",
+    "nul": b"OPENROUTER_API_KEY=DUMMY_KEY_PROFILE_A\x00_TAIL\n",
     "nbsp_after_quoted": 'OPENROUTER_API_KEY="DUMMY_KEY\\tPROFILE_A"\u00a0# provider key\n'.encode(),
+    "ideographic_space_before_comment": 'OPENROUTER_API_KEY=DUMMY_KEY_PROFILE_A\u3000# provider key\n'.encode(),
+    "em_space_inside_key": 'OPENROUTER\u2003_API_KEY="DUMMY_KEY\\tPROFILE_A"\n'.encode(),
 }
 
 
@@ -598,6 +712,12 @@ def test_root_retains_the_provider_key_the_real_launcher_exported(tmp_path, line
     obs = _run_named_launch_root_active(tmp_path, 'ctl_sh', ROOT_SCOPE_CHILD, launch='root', root_env=line, exports='',
                                        alpha_env='OPENROUTER_API_KEY=DUMMY_KEY_PROFILE_A\n')
     assert obs['root_active'] is True
+    if bash_truncates_at_nul(LAUNCH_PATH):  # bash 3.2 ends the line at the NUL: the launcher exported no such key
+        assert obs['live'] is None, obs
+        assert obs['worker_live'] == 'DUMMY_KEY_PROFILE_A', obs
+        for field in ('launch_scope', 'cron_scope', 'cron_get_secret'):
+            assert obs[field] is None, (field, obs)
+        return
     assert obs['live'] == 'DUMMY_ROOT_KEY'
     assert obs['worker_live'] == 'DUMMY_KEY_PROFILE_A', obs
     assert obs['cron_during_worker'] == 'DUMMY_ROOT_KEY', obs
@@ -626,21 +746,33 @@ print('RESULT '+json.dumps(obs),flush=True)
 os._exit(0)
 '''
 
+# Each line puts a Unicode space where a blank would make ctl.sh (in a UTF-8 locale) export the operator's value: it
+# does so only where the host's bash counts that character as [[:space:]] (U+00A0: macOS, not glibc; U+3000: both).
+# Then the operator's export equals one the launcher made, and is left out (fail closed); otherwise it survives.
+OPERATOR_EXPORT_LINES = {
+    'nbsp_before_comment': ('\u00a0', b'OPENROUTER_API_KEY=DUMMY_OPERATOR_OVERRIDE\xc2\xa0# provider comment\n'),
+    'nbsp_inside_key': ('\u00a0', b'OPENROU\xc2\xa0TER_API_KEY=DUMMY_OPERATOR_OVERRIDE\n'),
+    'ideographic_space_before_comment': (
+        '\u3000', 'OPENROUTER_API_KEY=DUMMY_OPERATOR_OVERRIDE\u3000# provider comment\n'.encode()),
+    'unclosed_quote': (None, b'OPENROUTER_API_KEY="DUMMY_OPERATOR_OVERRIDE\n'),
+}
+
+
 @pytest.mark.skipif(shutil.which("bash") is None or shutil.which("awk") is None, reason="needs bash and awk")
-@pytest.mark.parametrize('line',[
-    b'OPENROUTER_API_KEY=DUMMY_OPERATOR_OVERRIDE\xc2\xa0# provider comment\n',
-    b'OPENROU\xc2\xa0TER_API_KEY=DUMMY_OPERATOR_OVERRIDE\n',
-    b'OPENROUTER_API_KEY="DUMMY_OPERATOR_OVERRIDE\n',
-],ids=['nbsp_before_comment','nbsp_inside_key','unclosed_quote'])
-def test_operator_export_not_equal_to_real_launcher_export_survives(tmp_path,line):
+@pytest.mark.parametrize('case', list(OPERATOR_EXPORT_LINES))
+def test_operator_export_not_equal_to_real_launcher_export_survives(tmp_path, case):
+    space, line = OPERATOR_EXPORT_LINES[case]
     obs=_run_named_launch_root_active(tmp_path, 'ctl_sh', OPERATOR_SCOPE_CHILD,
         alpha_env=b'# DUMMY non-UTF8 comment \xff\n'+line,
         exports='OPENROUTER_API_KEY=DUMMY_OPERATOR_OVERRIDE')
     assert obs['live']=='DUMMY_OPERATOR_OVERRIDE'
-    for field in ['operator_env','root_binding','root_config']:
-        assert obs[field]=='DUMMY_OPERATOR_OVERRIDE',(field,obs)
+    launcher_exported_it = space is not None and space in bash_utf8_blanks(LAUNCH_PATH)  # the host's bash decides
+    expected = None if launcher_exported_it else 'DUMMY_OPERATOR_OVERRIDE'
+    for field in ['operator_env','root_binding']:
+        assert obs[field]==expected,(field,obs)
+    assert obs['root_config']==(expected or '${OPENROUTER_API_KEY}'),obs
     if 'root_agent_scope' in obs:
-        assert obs['root_agent_scope']=='DUMMY_OPERATOR_OVERRIDE',obs
+        assert obs['root_agent_scope']==expected,obs
 
 
 # A launcher-only root key kept in the launch env follows edits to root's .env and goes when removed.
@@ -670,5 +802,8 @@ os._exit(0)
 def test_retained_launcher_only_root_key_tracks_edits_and_removal(tmp_path, active):
     obs = _run_named_launch_root_active(tmp_path, 'ctl_sh', ROOT_EDITS_CHILD, launch='root', active=active,
         root_env='OPENROU\0TER_API_KEY=DUMMY_ROOT_KEY\n', exports='', others={'beta':'BETA_OWN_KEY=DUMMY_BETA\n'})
+    if bash_truncates_at_nul(LAUNCH_PATH):  # bash 3.2 ends the line at the NUL: no key exported, none retained
+        assert obs == dict.fromkeys(('initial', 'changed', 'removed', 'scope_removed', 'live_after_removal'))
+        return
     assert obs == {'initial':'DUMMY_ROOT_KEY','changed':'DUMMY_ROOT_CHANGED','removed':None,
                    'scope_removed':None,'live_after_removal':'DUMMY_ROOT_KEY'}
