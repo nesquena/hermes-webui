@@ -146,3 +146,40 @@ def test_production_resolves_the_flag_once():
     assert body.count("_resolve_checkpoints_enabled(") == 1, (
         "the worker must not re-resolve the flag"
     )
+
+
+@pytest.mark.parametrize("isolated_value", [True, False, None], ids=["enabled", "disabled", "read-error"])
+def test_worker_separates_toolset_and_checkpoint_config(monkeypatch, isolated_value):
+    from api import config
+    from tests import test_issue4251_wakeup_model_picker_race as harness
+
+    session = harness.FakeSession(model="haiku-4-5")
+    session.session_id = "checkpoint-config-authority"
+    session.profile = "research"
+    captured = []
+
+    class Agent(harness.CapturingAgent):
+        def __init__(self, checkpoints_enabled=None, enabled_toolsets=None, **kwargs):
+            captured.append((checkpoints_enabled, enabled_toolsets))
+            super().__init__(enabled_toolsets=enabled_toolsets, **kwargs)
+
+    def read_config(home, *, isolate_config_override=False):
+        if isolate_config_override:
+            if isolated_value is None:
+                raise OSError("isolated config unavailable")
+            return {"checkpoints": {"enabled": isolated_value}, "toolsets": ["isolated"]}
+        return {"checkpoints": {"enabled": not isolated_value}, "toolsets": ["ambient"]}
+
+    install = harness._install_streaming_harness
+
+    def install_config(mp, fake_session):
+        install(mp, fake_session)
+        mp.setattr(streaming, "_get_ai_agent", lambda: Agent)
+        mp.setattr(config, "get_config_for_profile_home", read_config)
+        mp.setattr(config, "get_config", lambda: {"checkpoints": {"enabled": True}})
+        mp.setattr(config, "_resolve_cli_toolsets", lambda cfg: cfg["toolsets"])
+
+    monkeypatch.setattr(harness, "_install_streaming_harness", install_config)
+    monkeypatch.setattr(config, "SESSION_AGENT_CACHE", {})
+    harness._run_streaming_turn(monkeypatch, session, stream_id="checkpoint-config-turn")
+    assert captured == [(isolated_value is True, ["ambient"])]

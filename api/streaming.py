@@ -16388,13 +16388,7 @@ def _run_agent_streaming(
             # actually runs under.
             from api.config import get_config_for_profile_home as _get_config_for_home
             try:
-                # isolate_config_override=True: this streaming worker IS one of the
-                # "Gateway workers" the helper's contract names. With the default
-                # (False) a session whose named profile matches the process-active
-                # one inherits HERMES_CONFIG_PATH when that override points outside
-                # the profile home, so one profile's checkpoints.enabled (and every
-                # other setting here) could come from an unrelated file.
-                _cfg = _get_config_for_home(_profile_home, isolate_config_override=True)
+                _cfg = _get_config_for_home(_profile_home)
             except Exception:
                 from api.config import get_config as _get_config
                 _cfg = _get_config()
@@ -16593,21 +16587,17 @@ def _run_agent_streaming(
                 _agent_kwargs['max_iterations'] = _max_iterations_cfg
             if 'max_tokens' in _agent_params and _max_tokens_cfg is not None:
                 _agent_kwargs['max_tokens'] = _max_tokens_cfg
-            # Checkpoint parity: honour the profile's checkpoints.enabled.
-            # AIAgent defaults checkpoints_enabled to False — the agent ships
-            # checkpointing as an opt-in ("most users never use /rollback") — and
-            # this dict never set it, so a WebUI-created agent took no snapshots
-            # even when the operator had enabled checkpoints in config.yaml. The
-            # TUI and messaging gateways both resolve this flag from config; this
-            # path did not. Read it the same way, keeping the absent-key default
-            # at False so profiles that never opted in are unaffected.
-            #
-            # Resolved ONCE, here, and reused for both the constructor argument
-            # and the cache signature. Two independent resolutions could drift:
-            # the constructor would get one value while the signature hashed
-            # another, so a config flip would not invalidate the cached agent —
-            # the exact failure this flag is meant to fix.
-            _checkpoints_enabled = _resolve_checkpoints_enabled(_cfg)
+            # Other worker settings honour ambient overrides. Snapshot opt-in
+            # belongs to this session's profile and defaults off on read failure.
+            try:
+                _checkpoint_cfg = (
+                    _get_config_for_home(_profile_home, isolate_config_override=True)
+                    if _profile_home else {}
+                )
+            except Exception:
+                logger.warning("Could not read profile checkpoint settings", exc_info=True)
+                _checkpoint_cfg = {}
+            _checkpoints_enabled = _resolve_checkpoints_enabled(_checkpoint_cfg)
             if 'checkpoints_enabled' in _agent_params:
                 _agent_kwargs['checkpoints_enabled'] = _checkpoints_enabled
             if 'request_overrides' in _agent_params and _main_request_overrides:
