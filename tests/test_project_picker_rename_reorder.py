@@ -25,13 +25,17 @@ def test_open_picker_refresh_reorders_renames_without_losing_project_focus():
     focused.focus();
     focusCalls.length=0;
     _allProjects.find(p=>p.project_id==='p-a').name='Zzz renamed';
+    refreshMoves.length=0;
     _openProjectPicker.refreshChoices();
     const afterRename=rows().map(r=>r.getAttribute('data-project-id'));
+    const renameMoves=[...refreshMoves];
     const noOpAfterRename=_openProjectPicker.refreshChoices()===false;
     _allProjects.push({project_id:'p-new',name:'Aardvark',profile:'work'});
+    refreshMoves.length=0;
     _openProjectPicker.refreshChoices();
     const afterCreate=rows().map(r=>r.getAttribute('data-project-id'));
-    console.log(JSON.stringify({afterRename,afterCreate,noOpAfterRename,
+    const createMoves=[...refreshMoves];
+    console.log(JSON.stringify({afterRename,afterCreate,noOpAfterRename,renameMoves,createMoves,
       sameNode:rows().find(r=>r.getAttribute('data-project-id')==='p-a')===focused,
       keptFocus:document.activeElement===focused,focusAdded:focusCalls.length}));
     '''
@@ -42,8 +46,12 @@ def test_open_picker_refresh_reorders_renames_without_losing_project_focus():
     # a no-op again (the in-place order now matches the sorted order).
     assert actual['afterRename'] == ['p-b', 'p-z', 'p-a'], actual
     assert actual['noOpAfterRename'] is True
-    # A project created while the picker is open is inserted in its sorted place.
+    # Only the rows that had to move were re-inserted (the focused one never is).
+    assert actual['renameMoves'] == ['p-z', 'p-b'], actual
+    # A project created while the picker is open is inserted in its sorted place,
+    # and no existing row is touched.
     assert actual['afterCreate'] == ['p-new', 'p-b', 'p-z', 'p-a'], actual
+    assert actual['createMoves'] == ['p-new'], actual
     # The focused node was never re-inserted and kept focus without a new focus call.
     assert actual['sameNode'] is True
     assert actual['keptFocus'] is True

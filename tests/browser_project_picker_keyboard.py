@@ -2130,6 +2130,74 @@ def _check_long_list(page, seed):
     return failures
 
 
+RENAMED_FIRST = "Aaa renamed first"
+
+
+def _check_long_list_rename_keeps_focus_visible(page, seed):
+    """A rename that moves the focused project re-sorts the open picker and
+    keeps that row focused and inside the picker's box (#6577).
+
+    Focus opens on LONG_PROJECTS_LAST, revealed at the bottom of the scrolled
+    list. Renaming that project so it sorts first moves its row to the top, far
+    above the scrolled box: the refresh must keep the same focused node and
+    scroll the picker so it is still visible."""
+    failures = []
+    problem = _open_single_picker(page, seed["alpha"])
+    if problem:
+        return [f"  [rename re-sort] {problem}"]
+    before = page.evaluate(ROW_IN_BOX_JS)
+    if before.get("problem") or before["text"] != LONG_PROJECTS_LAST or not before["inside"]:
+        page.keyboard.press("Escape")
+        return [f"  [rename re-sort] did not open on a visible {LONG_PROJECTS_LAST!r} row: {before}"]
+    page.evaluate(
+        """async ({from, to}) => {
+          window.__renameRow = document.activeElement;
+          window.__renameBlur = 0;
+          __renameRow.addEventListener('blur', () => { window.__renameBlur += 1; });
+          const p = _allProjects.find(p => p.name === from);
+          await api('/api/projects/rename', {method: 'POST', body: JSON.stringify({project_id: p.project_id, name: to})});
+          await renderSessionList({deferWhileInteracting: false, keepProjectPicker: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        }""",
+        {"from": LONG_PROJECTS_LAST, "to": RENAMED_FIRST},
+    )
+    after = page.evaluate(ROW_IN_BOX_JS)
+    order = page.evaluate(
+        """() => {
+          const picker = document.querySelector('.project-picker:not(.batch-project-picker)');
+          const rows = picker ? Array.from(picker.querySelectorAll('.project-picker-item[data-project-id]'))
+            .filter(row => row.getAttribute('data-project-id')) : [];
+          return {
+            first: rows.length ? rows[0].textContent.trim() : null,
+            sameNode: document.activeElement === window.__renameRow,
+            blurs: window.__renameBlur,
+          };
+        }"""
+    )
+    if after.get("problem"):
+        failures.append(f"  [rename re-sort] {after['problem']}")
+    else:
+        if order["first"] != RENAMED_FIRST:
+            failures.append(f"  [rename re-sort] the open picker was not re-sorted: first project row is {order['first']!r}")
+        if not order["sameNode"] or order["blurs"]:
+            failures.append(f"  [rename re-sort] the focused row lost focus (same node {order['sameNode']}, blurs {order['blurs']})")
+        if after["text"] != RENAMED_FIRST:
+            failures.append(f"  [rename re-sort] focus is on {after['text']!r}, expected the renamed {RENAMED_FIRST!r}")
+        elif not after["inside"]:
+            failures.append(f"  [rename re-sort] the renamed, focused row {RENAMED_FIRST!r} is outside the picker's box")
+    page.keyboard.press("Escape")
+    # Put the name back: the batch long-list check expects LONG_PROJECTS_LAST.
+    page.evaluate(
+        """async ({from, to}) => {
+          const p = _allProjects.find(p => p.name === from);
+          if (p) await api('/api/projects/rename', {method: 'POST', body: JSON.stringify({project_id: p.project_id, name: to})});
+          await renderSessionList({deferWhileInteracting: false});
+        }""",
+        {"from": RENAMED_FIRST, "to": LONG_PROJECTS_LAST},
+    )
+    return failures
+
+
 FOCUSED_ROW_ON_SCREEN_JS = """() => {
   const row = document.activeElement;
   const picker = document.querySelector('.batch-project-picker');
@@ -3011,6 +3079,10 @@ def main():
                 failures.extend(found)
                 if not found:
                     print("OK  long list — the focused row is inside the picker's box")
+                found = _check_long_list_rename_keeps_focus_visible(page, seed)
+                failures.extend(found)
+                if not found:
+                    print("OK  rename re-sort — an open picker re-sorts and keeps the renamed, focused row visible")
                 found = _check_batch_long_list(page, seed)
                 failures.extend(found)
                 if not found:

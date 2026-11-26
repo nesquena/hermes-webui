@@ -54,6 +54,11 @@ class FakeElement {
     this.parent = null;
   }
   appendChild(child) { child.parent = this; child.isConnected = true; this.children.push(child); return child; }
+  get nextElementSibling() {
+    if (!this.parent) return null;
+    const siblings = this.parent.children;
+    return siblings[siblings.indexOf(this) + 1] || null;
+  }
   remove() {
     this.removed = true;
     this.isConnected = false;
@@ -1732,12 +1737,11 @@ FakeElement.prototype.contains = function(target) {
   return this.children.some(child => child === target || (child.contains && child.contains(target)));
 };
 FakeElement.prototype.insertBefore = function(child, before) {
-  // Chromium blurs a focused node the moment it is DOM-moved; the fake must do
-  // the same or a rebuild that relocates surviving rows would pass here while
-  // dropping the user's focus in a real browser.
-  const currentIndex = this.children.indexOf(child);
-  const alreadyInPlace = currentIndex >= 0 && this.children[currentIndex + 1] === before;
-  if (!alreadyInPlace && document.activeElement === child) document.activeElement = documentBody;
+  // Chromium blurs a focused node the moment it is DOM-moved, even when it is
+  // re-inserted where it already was; the fake must do the same or a rebuild
+  // that relocates surviving rows would pass here while dropping the user's
+  // focus in a real browser.
+  if (document.activeElement === child) document.activeElement = documentBody;
   if (child.parent) child.remove();
   const idx = this.children.indexOf(before);
   child.parent = this;
@@ -1833,14 +1837,12 @@ FakeElement.prototype.contains = function(target) {
 };
 const refreshMoves = [];
 FakeElement.prototype.insertBefore = function(child, before) {
-  // Chromium blurs a focused node the moment it is DOM-moved; mirror that so
-  // these tests catch a rebuild that relocates surviving rows.
-  const currentIndex = this.children.indexOf(child);
-  const alreadyInPlace = currentIndex >= 0 && this.children[currentIndex + 1] === before;
-  if (!alreadyInPlace) {
-    refreshMoves.push(child.getAttribute && child.getAttribute('data-project-id'));
-    if (document.activeElement === child) document.activeElement = documentBody;
-  }
+  // Chromium blurs a focused node the moment it is DOM-moved, and an
+  // insertBefore of an attached node always removes and re-inserts it, even
+  // into the place it already holds. Mirror both, and record every insert, so
+  // these tests catch a rebuild that relocates (or needlessly re-inserts) rows.
+  refreshMoves.push(child.getAttribute && child.getAttribute('data-project-id'));
+  if (document.activeElement === child) document.activeElement = documentBody;
   if (child.parent) child.remove();
   const idx = this.children.indexOf(before);
   child.parent = this;

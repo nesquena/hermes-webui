@@ -13132,6 +13132,11 @@ function _showProjectPicker(session, anchorEl){
     if(unchanged) return false;
     const active=(typeof document!=='undefined')?document.activeElement:null;
     const ownedFocus=!!(active&&typeof picker.contains==='function'&&picker.contains(active));
+    // Preserve a visible keyboard target when renamed rows change its position.
+    const focusedRect=ownedFocus?active.getBoundingClientRect():null;
+    const pickerTop=ownedFocus?picker.getBoundingClientRect().top+picker.clientTop:0;
+    const keepFocusedVisible=!!(focusedRect&&picker.clientHeight>0
+      &&focusedRect.top>=pickerTop&&focusedRect.bottom<=pickerTop+picker.clientHeight);
     const focusedId=ownedFocus&&typeof active.getAttribute==='function'
       ? active.getAttribute('data-project-id')
       : null;
@@ -13163,11 +13168,25 @@ function _showProjectPicker(session, anchorEl){
     let orderAnchor=createItem;
     for(let index=visibleProjects.length-1;index>=0;index--){
       const item=rowsById.get(String(visibleProjects[index].project_id));
-      const children=Array.from(picker.children);
-      if(item!==active&&children[children.indexOf(item)+1]!==orderAnchor){
+      // A row already right before its successor stays put: a needless
+      // insertBefore still re-inserts it, and the check stays O(1) per row.
+      if(item!==active&&item.nextElementSibling!==orderAnchor){
         picker.insertBefore(item,orderAnchor);
       }
       orderAnchor=item;
+    }
+    if(keepFocusedVisible){
+      // The caller places/re-anchors the picker after this refresh. Reveal only
+      // after that placement, without moving focus or scrolling the page.
+      requestAnimationFrame(()=>{
+        if(pointerGestureId!==null||picker.isConnected===false||document.activeElement!==active||!picker.contains(active)) return;
+        const top=picker.getBoundingClientRect().top+picker.clientTop;
+        const bottom=active===createItem?top+picker.clientHeight
+          :Math.min(top+picker.clientHeight,createItem.getBoundingClientRect().top);
+        const rect=active.getBoundingClientRect();
+        if(rect.top<top) picker.scrollTop-=top-rect.top;
+        else if(rect.bottom>bottom) picker.scrollTop+=rect.bottom-bottom;
+      });
     }
     if(ownedFocus&&active!==none&&active!==createItem){
       const fresh=Array.from(picker.querySelectorAll('.project-picker-item'));
