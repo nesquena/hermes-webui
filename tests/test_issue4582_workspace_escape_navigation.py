@@ -280,11 +280,13 @@ const api = async (path, opts) => {
 };
 const showToast = (...args) => { toasts.push(args); };
 const t = (key) => key;
+// sessions.js: the conversation the link was clicked in is still on screen.
+const _sessionLeftScreen = (session) => !session || !S.session || S.session.session_id !== session.session_id;
 const runner = new Function(
-  'S', 'showConfirmDialog', 'api', 'showToast', 't', 'URLSearchParams',
+  'S', 'showConfirmDialog', 'api', 'showToast', 't', 'URLSearchParams', '_sessionLeftScreen',
   helperBlock + '; return { authorizeWorkspaceEscapeNavigation, _workspaceRouteForPath, _workspacePathIsReadOnly, _workspaceEscapeGrantForPath };'
 );
-const apiFns = runner(S, showConfirmDialog, api, showToast, t, URLSearchParams);
+const apiFns = runner(S, showConfirmDialog, api, showToast, t, URLSearchParams, _sessionLeftScreen);
 (async () => {
   const beforeRead = apiFns._workspaceRouteForPath('escape/note.txt', 'read');
   const beforeList = apiFns._workspaceRouteForPath('escape', 'list');
@@ -365,11 +367,12 @@ const api = async (path, opts) => {
 };
 const showToast = (...args) => { toasts.push(args); };
 const t = (key) => key;
+const _sessionLeftScreen = (session) => !session || !S.session || S.session.session_id !== session.session_id;
 const runner = new Function(
-  'S', 'showConfirmDialog', 'api', 'showToast', 't', 'URLSearchParams',
+  'S', 'showConfirmDialog', 'api', 'showToast', 't', 'URLSearchParams', '_sessionLeftScreen',
   helperBlock + '; return { authorizeWorkspaceEscapeNavigation, _workspaceEscapeExactGrant };'
 );
-const apiFns = runner(S, showConfirmDialog, api, showToast, t, URLSearchParams);
+const apiFns = runner(S, showConfirmDialog, api, showToast, t, URLSearchParams, _sessionLeftScreen);
 (async () => {
   const grant = await apiFns.authorizeWorkspaceEscapeNavigation({ path: 'escape', name: 'escape' });
   console.log(JSON.stringify({

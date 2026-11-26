@@ -219,6 +219,25 @@ function _isTouchKeyboardViewport(){
   try{return matchMedia('(hover:none) and (pointer:coarse)').matches&&!_hasFinePointerCoexisting();}catch(_){return false;}
 }
 
+// Validated visualViewport read (#8531): iOS 27 standalone PWAs on foldables
+// (iPhone Duo) can report garbage geometry after fold/unfold — observed
+// height -33554432 (= -2^25) — with no corrective resize event until the
+// device rotates. Returns null when the reading is implausible so callers
+// fall back to window dimensions instead of poisoning layout math.
+function _plausibleVisualViewport(){
+  const vv=window.visualViewport;
+  if(!vv) return null;
+  const h=Number(vv.height), w=Number(vv.width);
+  const ih=window.innerHeight, iw=window.innerWidth;
+  if(!Number.isFinite(h)||h<=0||h>ih*1.5) return null;
+  if(!Number.isFinite(w)||w<=0||w>iw*1.5) return null;
+  return {
+    width:w, height:h,
+    offsetTop:Math.max(0,Number(vv.offsetTop)||0),
+    offsetLeft:Math.max(0,Number(vv.offsetLeft)||0)
+  };
+}
+
 function _syncKeyboardBottomInset(){
   const root=document.documentElement;
   if(!root) return;
@@ -235,7 +254,16 @@ function _syncKeyboardBottomInset(){
     root.style.removeProperty('--keyboard-bottom-inset');
     return;
   }
-  const inset=Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop)));
+  // Compute from one validated snapshot (#8531): a garbage reading clears the
+  // inset entirely — a cleared inset at worst lets the keyboard overlap the
+  // composer for one frame until the next sane viewport event, while any
+  // bogus-but-capped inset buries the transcript.
+  const vvOk=_plausibleVisualViewport();
+  if(!vvOk){
+    root.style.removeProperty('--keyboard-bottom-inset');
+    return;
+  }
+  const inset=Math.max(0,Math.ceil(window.innerHeight-(vvOk.height+vvOk.offsetTop)));
   if(inset>0){
     root.style.setProperty('--keyboard-bottom-inset',`${inset}px`);
   }else{
@@ -415,6 +443,10 @@ function _setWorkspacePanelMode(mode, returnFocusTo){
   }else{
     panel.classList.remove('mobile-open');
   }
+  // Closing the panel leaves the preview (and its editor) mounted, so the
+  // derived dirty state must be recomputed: a hidden editor is not unsaved work
+  // the user can be asked about (#8514).
+  if(typeof _syncPreviewDirty==='function') _syncPreviewDirty();
   syncWorkspacePanelUI();
 }
 
@@ -652,7 +684,11 @@ function _isPwaStandalone(){
 }
 
 function _isInteractiveSwipeTarget(target){
-  try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel'));}
+  // .model-dropdown: the model menu is a floating panel, not part of the page
+  // behind it. Without it a PWA sidebar swipe starting inside the open menu
+  // drags the whole layout, and the printable-key/shortcut guards below treat
+  // keys typed in the menu as page-level shortcuts.
+  try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel,.img-lightbox,.model-dropdown'));}
   catch(_){return false;}
 }
 
@@ -682,6 +718,12 @@ function _openMobileSidebarFromGesture(){
   _setPanelInert(sidebar, true);
 }
 
+function _swipeHitsRect(point,id){
+  const el=document.getElementById(id);
+  if(!el||!point) return false;
+  const r=el.getBoundingClientRect();
+  return point.clientX>=r.left&&point.clientX<=r.right&&point.clientY>=r.top&&point.clientY<=r.bottom;
+}
 function _onPwaSidebarSwipeStart(e){
   if(_isDesktopWidth())return;
   if(_isTouchPointerEvent(e))return;
@@ -691,6 +733,9 @@ function _onPwaSidebarSwipeStart(e){
   if(!point)return;
   if(point.clientX>_PWA_SIDEBAR_SWIPE_EDGE)return;
   if(_isInteractiveSwipeTarget(e.target))return;
+  // hwc: sidebar-typing-lock — composer and the message field. A real keyboard
+  // inset grows .composer-wrap padding, so this rect already covers that band.
+  if(_swipeHitsRect(point,'composerWrap')||_swipeHitsRect(point,'msg'))return;
   _pwaSidebarSwipe={startX:point.clientX,startY:point.clientY,active:true,opened:false};
 }
 
@@ -1100,7 +1145,44 @@ function _micToastKeyForRecognitionError(error){
 
   // Persist SR failure across reloads (e.g. Tailscale/network error)
   const _micForceMediaRecorderKey='mic_force_mediarecorder';
-  const _micForceMediaRecorderStored=localStorage.getItem(_micForceMediaRecorderKey);
+  const _micForceMediaRecorderExpiryKey='mic_force_mediarecorder_expires';
+  const _MIC_FORCE_MR_TTL_MS=24*60*60*1000;
+  // A persisted SR failure auto-expires after 24h: a transient outage (or a
+  // browser update that fixes SR) should not pin this device to MediaRecorder
+  // forever.
+  function _getMicForceMediaRecorderStored(){
+    try{
+      const exp=localStorage.getItem(_micForceMediaRecorderExpiryKey);
+      const stored=localStorage.getItem(_micForceMediaRecorderKey);
+      if(exp){
+        const expMs=parseInt(exp,10);
+        // A garbled expiry counts as expired too: a value that never parses
+        // would otherwise pin this device forever.
+        if(!Number.isFinite(expMs)||Date.now()>expMs){
+          localStorage.removeItem(_micForceMediaRecorderKey);
+          localStorage.removeItem(_micForceMediaRecorderExpiryKey);
+          return null;
+        }
+      }else if(stored==='0'||stored==='1'){
+        // Values saved before the expiry key existed would otherwise pin this
+        // device forever. Start the 24h window on the first read after upgrade.
+        // A full or read-only store must not discard the readable preference.
+        try{
+          localStorage.setItem(_micForceMediaRecorderExpiryKey,String(Date.now()+_MIC_FORCE_MR_TTL_MS));
+        }catch(_){}
+      }
+      return stored;
+    }catch(_){
+      return null;
+    }
+  }
+  function _setMicForceMediaRecorder(value){
+    try{
+      localStorage.setItem(_micForceMediaRecorderKey,String(value));
+      localStorage.setItem(_micForceMediaRecorderExpiryKey,String(Date.now()+_MIC_FORCE_MR_TTL_MS));
+    }catch(_){}
+  }
+  const _micForceMediaRecorderStored=_getMicForceMediaRecorderStored();
   // Prefer Hermes server-side STT (MediaRecorder -> /api/transcribe) only
   // after the server confirms an STT provider is available. No stored key must
   // keep browser SpeechRecognition as the first-click default until then; that
@@ -1264,7 +1346,7 @@ function _micToastKeyForRecognitionError(error){
   }
 
   function _allowBrowserSttFallback(){
-    return !!(SpeechRecognition&&localStorage.getItem(_micForceMediaRecorderKey)!=='1');
+    return !!(SpeechRecognition&&_getMicForceMediaRecorderStored()!=='1');
   }
 
   async function _transcribeBlob(blob, prefixSnapshot){
@@ -1282,11 +1364,31 @@ function _micToastKeyForRecognitionError(error){
         err.status=res.status;
         throw err;
       }
-      _commitTranscript(data.transcript||'', prefixSnapshot);
+      const transcript=(data.transcript||'').trim();
+      if(!transcript){
+        // Silence, not failure: the server answers 200 with an empty transcript
+        // (and no_speech) when the audio carried no speech. Committing an empty
+        // string left the user watching an unchanged composer, unable to tell a
+        // dead mic from a quiet room.
+        //
+        // A Send click while recording is an unambiguous send intent (same rule
+        // as the raw-audio path): honour it whenever the composer has anything
+        // send() would accept (text, staged files or selected context), instead
+        // of dropping the queued send and leaving the draft behind. The
+        // "no speech" toast is only for the case where there is nothing to send.
+        if(window._micPendingSend&&_composerHasContent()){
+          _commitTranscript('', prefixSnapshot);
+          return;
+        }
+        window._micPendingSend=false;
+        showToast(t('mic_no_speech'));
+        return;
+      }
+      _commitTranscript(transcript, prefixSnapshot);
     }catch(err){
       if(_isServerSttUnavailable(err)&&_allowBrowserSttFallback()){
         window._micPendingSend=false;
-        localStorage.setItem(_micForceMediaRecorderKey,'0');
+        _setMicForceMediaRecorder('0');
         _forceMediaRecorder=false;
         recognition=_ensureSpeechRecognition();
         showToast(err.message||t('mic_network'));
@@ -1490,7 +1592,7 @@ function _micToastKeyForRecognitionError(error){
       if(event.error==='network'||event.error==='not-allowed'
           ||event.error==='service-not-allowed'||event.error==='audio-capture'){
         // Persist SR failure: next reload will skip SpeechRecognition
-        localStorage.setItem(_micForceMediaRecorderKey,'1');
+        _setMicForceMediaRecorder('1');
         _forceMediaRecorder=true;
         recognition=null;
       }
@@ -1530,7 +1632,7 @@ function _micToastKeyForRecognitionError(error){
   // persisted '0' is respected and not re-flipped.
   function _applyDeferredServerSttFlip(){
     if(_serverSttAvailable&&!_forceMediaRecorder&&!window._micActive
-        &&localStorage.getItem(_micForceMediaRecorderKey)===null){
+        &&_getMicForceMediaRecorderStored()===null){
       _forceMediaRecorder=true;
       recognition=null;
     }
@@ -2658,48 +2760,23 @@ $('btnExportJSON').onclick=()=>{
   a.download=`hermes-${S.session.session_id}.json`;a.click();
 };
 $('btnShareSession').onclick=async()=>{
-  if(!S.session) return;
+  // Bind the action to the conversation on screen at click time. The shared helper
+  // never reads S.session to pick its target, and requireActive drops the dialog's
+  // answer if another conversation was opened while the dialog was up.
+  const session=S.session;
+  if(!session) return;
   try{
-    const existing=(S.session&&S.session.share_token)?new URL(`/share/${encodeURIComponent(S.session.share_token)}`,location.origin).href:null;
-    if(existing){
-      const reuse=await showConfirmDialog({
-        title:t('share_session'),
-        message:t('share_session_existing_confirm'),
-        confirmLabel:t('share_session_copy_existing'),
-        cancelLabel:t('share_session_refresh_snapshot'),
-      });
-      if(reuse){
-        await _copyText(existing);
-        showToast(t('share_session_link_copied'));
-        window.open(existing,'_blank','noopener');
-        return;
-      }
-    }
-    const res=await api('/api/share/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
-    if(res&&res.session) S.session=res.session;
-    const href=new URL(String(res&&res.share&&res.share.url||''),location.origin).href;
-    await _copyText(href);
-    showToast(t('share_session_created'));
-    if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
-    window.open(href,'_blank','noopener');
+    await _createOrRefreshSessionShare(session,{requireActive:true});
   }catch(err){
     showToast(t('share_session_failed')+(err&&err.message?err.message:String(err||'')),4000,'error');
   }
 };
 $('btnStopSharingSession').onclick=async()=>{
-  if(!S.session||!S.session.share_token) return;
-  const ok=await showConfirmDialog({
-    title:t('stop_sharing_session'),
-    message:t('stop_sharing_session_confirm'),
-    confirmLabel:t('stop_sharing_session'),
-    danger:true,
-  });
-  if(!ok) return;
+  // Bound to the conversation on screen at click time, like Share above.
+  const session=S.session;
+  if(!session||!session.share_token) return;
   try{
-    const res=await api('/api/share/revoke',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
-    if(res&&res.session) S.session=res.session;
-    showToast(t('share_session_revoked'));
-    if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
+    await _revokeSessionShare(session,{requireActive:true});
   }catch(err){
     showToast(t('share_session_revoke_failed')+(err&&err.message?err.message:String(err||'')),4000,'error');
   }
@@ -2771,7 +2848,10 @@ function clearPreview(opts={}){
   const pc=$('previewCode');if(pc)pc.textContent='';
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
-  _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
+  _previewCurrentPath='';_previewCurrentMode='';
+  // Reset the editor baseline as well, so a later preview cannot inherit a
+  // stale "unsaved" comparison from the file that was just closed (#8514).
+  if(typeof _resetPreviewDirty==='function') _resetPreviewDirty(); else _previewDirty=false;
   if(typeof _previewOpenGen==='number') _previewOpenGen++;
   // #6710: retire any in-flight preview open (guarded so harnesses that extract
   // this function alone keep working).
@@ -2995,6 +3075,19 @@ function _isNumpadEnter(e){
 // falls through to the `else { send() }` branch — sending the message instead
 // of inserting a newline (issue: mobile Enter sends on fresh page load).
 try{ window._sendKey=localStorage.getItem('hermes-pref-send_key')||'enter'; }catch(_){ window._sendKey='enter'; }
+// hwc: send-key — clarify and inline edit share this Enter decision.
+// The composer listener below keeps its own branches, including _mobileDefault.
+function _composerShouldSendOnKey(e){
+  if(!e||e.key!=='Enter') return false;
+  if(typeof _isImeEnter==='function'?_isImeEnter(e):(e.isComposing||e.keyCode===229)) return false;
+  const isNumpadEnter=typeof _isNumpadEnter==='function'&&_isNumpadEnter(e);
+  const _mobileDefault=_isTouchOnlyDevice()
+    &&(window._sendKey==='enter'||typeof window._sendKey==='undefined');
+  if(window._sendKey==='shift+enter') return !!e.shiftKey;
+  if(window._sendKey==='ctrl+enter'||_mobileDefault) return !!(isNumpadEnter||e.ctrlKey||e.metaKey);
+  return !e.shiftKey;
+}
+window._composerShouldSendOnKey=_composerShouldSendOnKey;
 $('msg').addEventListener('keydown',e=>{
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');
@@ -3062,7 +3155,10 @@ document.addEventListener('keydown',async e=>{
   // shortcuts (e.g. bold in some embedded editors) are never stolen.
   if((e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey&&(e.key==='b'||e.key==='B')){
     const t=e.target;
-    const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
+    const active=document.activeElement;
+    const _isTextEl=el=>!!(el&&(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable));
+    // hwc: sidebar-typing-lock — also the focused element, not only the event target.
+    const isText=_isTextEl(t)||_isTextEl(active);
     if(!isText&&typeof toggleSidebar==='function'&&_isDesktopWidth()){
       e.preventDefault();
       toggleSidebar();
@@ -3105,6 +3201,8 @@ document.addEventListener('keydown',async e=>{
     const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
     if(isText) return;
     e.preventDefault();
+    // A shared app dialog is modal: never open a new chat underneath it.
+    if(typeof _isAppDialogOpen==='function'&&_isAppDialogOpen()) return;
     // If the current session has no messages AND nothing is in flight, just focus
     // the composer rather than creating another empty session that will clutter
     // the sidebar list (#1171). See the matching guard in $('btnNewChat').onclick
@@ -3206,12 +3304,25 @@ $('msg').addEventListener('paste',e=>{
     const pasteTs=Date.now();
     const files=imageItems.map((i,idx)=>{
       const blob=i.getAsFile();
+      // A clipboard can advertise an image item whose data never materialized
+      // (delayed-render screenshot tools, cloud clipboards, some browser
+      // implementations). Two shapes occur in practice: `getAsFile()` returns
+      // null, or it returns a zero-length Blob — real browsers do the latter
+      // for a declared image with no payload. `new File([null], ...)` and
+      // `new File([emptyBlob], ...)` both yield a broken attachment whose name
+      // still looks like a screenshot, so skip both rather than fabricate one.
+      // A legitimate image is never zero bytes.
+      if(!blob||blob.size===0)return null;
       const ext=i.type.split('/')[1]||'png';
       const suffix=imageItems.length>1?`-${idx+1}`:'';
       return new File([blob],`screenshot-${pasteTs}${suffix}.${ext}`,{type:i.type});
-    });
-    addFiles(files);
-    setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));
+    }).filter(Boolean);
+    if(files.length){
+      addFiles(files);
+      setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));
+    }else{
+      setStatus(t('image_paste_failed'),'error');
+    }
     return;
   }
   const plainText=e.clipboardData?.getData('text/plain')||'';
@@ -3236,6 +3347,10 @@ function applyEmptyStatePanelPref(){
 }
 
 window.addEventListener('resize',()=>{
+  // Resync the keyboard inset on every window resize even when visualViewport
+  // exists (#8531): fold transitions can change window geometry without a
+  // trustworthy visualViewport event, so the inset must be re-validated here.
+  _syncKeyboardBottomInset();
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
   // Re-apply the sidebar state on viewport change (e.g. foldable unfold:
@@ -3877,6 +3992,9 @@ function _applyComposerFooterVisibilitySettings(){
     // when buttons are visible (Greptile feedback).
     _divider.classList.toggle('composer-control-hidden',_allLeftHidden);
   }
+  // #9101: hide_composer_yolo hides the YOLO pill only while YOLO is off
+  // (while it is on, the pill shrinks to its ⚡ icon).
+  if(typeof _updateYoloPill==='function') _updateYoloPill();
 }
 window._applyComposerFooterVisibilitySettings=_applyComposerFooterVisibilitySettings;
 
@@ -3972,6 +4090,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
     window._showTokenUsage=!!s.show_token_usage;
     window._showQuotaChip=s.show_quota_chip===true;
+    window._quotaChipWindow=_normalizeQuotaChipWindow(s.quota_chip_window);
     window._showConversationOutline=s.show_conversation_outline===true;
     document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
@@ -3999,6 +4118,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       : 'compact_worklog';
     window._transparentStream=window._chatActivityDisplayMode==='transparent_stream';
     window._transparentEventTimestamps=s.transparent_stream_event_timestamps!==false;
+    if(typeof setScreenReaderMode==='function') setScreenReaderMode(s.screen_reader_mode);
     window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
     window._worklogDetailsExpandedByDefault=!!(
       Object.prototype.hasOwnProperty.call(s,'worklog_details_expanded_default')
@@ -4144,6 +4264,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._sendKey='enter';
     window._showTokenUsage=false;
     window._showQuotaChip=false;
+    window._quotaChipWindow='most_constrained';
     window._showConversationOutline=false;
     document.documentElement.dataset.conversationOutline='disabled';
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();

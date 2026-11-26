@@ -214,29 +214,66 @@ def python_admitted(constraints, version: tuple[int, int]) -> bool:
     return all(_clause_admits(op, release, wildcard, tuple(version)) for op, release, wildcard in clauses)
 
 
+def _constraint_majors(constraints) -> list[int]:
+    """Every major version the declared range names, ascending."""
+    clauses, gate = constraints
+    majors = {release[0] for _, release, _ in clauses}
+    if gate is not None:
+        majors.add(gate[0])
+    return sorted(majors)
+
+
+def _select_on_major(constraints, base_python, major, gate):
+    """Nearest admissible interpreter on ``major``, or None when it has none.
+
+    The search stays inside one major version so the window stays finite, and
+    the base interpreter's own minor is preferred whenever it is admissible.
+    """
+    clauses, _ = constraints
+    base = tuple(base_python)
+    anchor = base[1] if base[0] == major else (gate[1] if gate is not None and gate[0] == major else 0)
+    bounds = [anchor] + [release[1] for _, release, _ in clauses if release[0] == major and len(release) > 1]
+    if gate is not None and gate[0] == major:
+        bounds.append(gate[1])
+    for minor in sorted(range(max(bounds) + 2), key=lambda m: (abs(m - anchor), -m)):
+        # The base interpreter is a concrete release: judge it by its full
+        # version, so 3.12.13 satisfies `>=3.12.1` (#8360 gate). Any other
+        # minor is a request uv resolves later; rebuild_agent_venv re-checks
+        # the interpreter uv actually installed (``--admits``).
+        candidate = base if (major, minor) == base[:2] else (major, minor)
+        if python_admitted(constraints, candidate):
+            return candidate
+    return None
+
+
 def select_agent_python(constraints, base_python: tuple[int, int]) -> tuple[int, int] | None:
     """The admissible interpreter to build on, nearest the base image's; None if none is.
 
     The base interpreter wins whenever it is admissible (no download). Otherwise
     the nearest admissible minor is chosen (the newer of two equally near ones),
     so a 3.14 floor over a 3.12 base resolves to 3.14, not to anything newer,
-    and a `<3.12` ceiling resolves to 3.11. Every minor above the highest one a
-    clause or the gate mentions behaves like the first of them, so the search
-    window is finite and complete.
+    and a `<3.12` ceiling resolves to 3.11.
+
+    The declared range may name a major version the base image does not carry
+    (`>=4.0,<4.2` on a 3.12 image). Such a major is searched too — otherwise the
+    range has no candidate at all and the plan falls back to the base
+    interpreter, which is the #8113 signature: a venv on 3.12 with the agent's
+    4.x dependencies silently dropped. Majors *below* the image's own are not
+    searched: the image cannot run them.
     """
     clauses, gate = constraints
-    major = gate[0] if gate is not None else (base_python[0] or 3)
-    anchor = base_python[1] if base_python[0] == major else (gate[1] if gate is not None else 0)
-    bounds = [anchor] + [release[1] for _, release, _ in clauses if release[0] == major and len(release) > 1]
-    if gate is not None:
-        bounds.append(gate[1])
-    for minor in sorted(range(max(bounds) + 2), key=lambda m: (abs(m - anchor), -m)):
-        # The base interpreter is a concrete release: judge it by its full
-        # version, so 3.12.13 satisfies `>=3.12.1` (#8360 gate). Any other
-        # minor is a request uv resolves later; rebuild_agent_venv re-checks the
-        # interpreter uv actually installed (``--admits``).
-        candidate = tuple(base_python) if (major, minor) == tuple(base_python[:2]) else (major, minor)
-        if python_admitted(constraints, candidate):
+    base = tuple(base_python)
+    base_major = base[0] or 3
+    primary = gate[0] if gate is not None else base_major
+
+    order = [primary]
+    for major in _constraint_majors(constraints):
+        if major != primary and major >= base_major:
+            order.append(major)
+
+    for major in order:
+        candidate = _select_on_major(constraints, base, major, gate)
+        if candidate is not None:
             return candidate
     return None
 
@@ -403,6 +440,83 @@ def _parse_version(text: str) -> tuple[int, ...] | None:
         return None
 
 
+def uv_override_dependencies(pyproject_text: str) -> list[str]:
+    """The staged agent's ``[tool.uv] override-dependencies`` (#8524).
+
+    The agent resolves its own dependency set with these overrides (Agent
+    v0.22.5 overrides browser-harness's ``pillow==12.3.0`` pin to take Pillow
+    13's security fixes), but ``uv pip install`` never reads a project's
+    ``[tool.uv]`` table. Without passing them as ``--overrides`` the agent's
+    requirements are unsatisfiable and the container exits during install.
+
+    Returns the entries verbatim, markers included. Anything unreadable, an
+    absent table or a malformed entry yields no override for that entry, so
+    the caller falls back to the plain install it ran before this existed.
+    """
+    if tomllib is None:
+        return []
+    try:
+        data = tomllib.loads(pyproject_text)
+    except (tomllib.TOMLDecodeError, ValueError):
+        return []
+    tool = data.get("tool")
+    uv = tool.get("uv") if isinstance(tool, dict) else None
+    entries = uv.get("override-dependencies") if isinstance(uv, dict) else None
+    if not isinstance(entries, list):
+        return []
+    # uv reads the overrides file as requirements.txt syntax, so a line starting with
+    # "-" is a directive (-r/-c/-e/--index-url, which uv acts on, fetching -r URLs,
+    # before it judges the entry; uv also strips a leading BOM first), and a trailing
+    # "\" joins the next line. [tool.uv] override-dependencies only accepts PEP 508
+    # requirements, whose name starts with an ASCII letter or digit: keep exactly those.
+    # Keep one requirement per line: never let an entry span lines.
+    kept = []
+    for entry in entries:
+        if not isinstance(entry, str) or "\n" in entry or "\r" in entry:
+            _report_dropped(entry)
+            continue
+        entry = entry.strip()
+        if not entry or not (entry[0].isascii() and entry[0].isalnum()) or entry.endswith("\\"):
+            if entry:
+                _report_dropped(entry)
+            continue
+        kept.append(entry)
+    return kept
+
+
+def _report_dropped(entry: object) -> None:
+    # The value comes from the authorized Agent tree, so naming it is safe; a
+    # silent drop would leave only uv's "unsatisfiable" to explain a failed install.
+    print(f"-- Ignoring a [tool.uv] override-dependencies entry that is not a plain requirement: {entry!r}",
+          file=sys.stderr)
+
+
+def _run_uv_overrides(argv: list[str]) -> int:
+    """``docker_venv_python.py --uv-overrides <pyproject> <out_file>``.
+
+    Writes the staged agent's ``[tool.uv] override-dependencies`` to
+    ``out_file``, one per line, for ``uv pip install --overrides``. An empty file
+    means there is nothing to override. Exit status is non-zero only when the
+    file could not be written, so docker_init.bash falls back to the plain
+    install.
+    """
+    if len(argv) != 4:
+        print("usage: docker_venv_python.py --uv-overrides <pyproject> <out_file>", file=sys.stderr)
+        return 2
+    try:
+        text = Path(argv[2]).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"-- could not read {argv[2]} for [tool.uv] overrides: {exc}", file=sys.stderr)
+        text = ""
+    entries = uv_override_dependencies(text)
+    try:
+        Path(argv[3]).write_text("".join(entry + "\n" for entry in entries), encoding="utf-8")
+    except OSError as exc:
+        print(f"-- could not write the uv overrides file {argv[3]}: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _run_admits(argv: list[str]) -> int:
     """``docker_venv_python.py --admits <pyproject> <venv_dir>``.
 
@@ -450,6 +564,8 @@ def main(argv: list[str]) -> int:
         return _run_verify(argv)
     if len(argv) >= 2 and argv[1] == "--admits":
         return _run_admits(argv)
+    if len(argv) >= 2 and argv[1] == "--uv-overrides":
+        return _run_uv_overrides(argv)
 
     if len(argv) != 4:
         print("usage: docker_venv_python.py <pyproject> <venv_dir> <major.minor[.micro]>", file=sys.stderr)

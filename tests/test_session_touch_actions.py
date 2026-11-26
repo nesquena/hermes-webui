@@ -83,7 +83,7 @@ def test_mobile_session_menu_opens_from_long_press_and_hides_dots():
     mobile_touch = STYLE_CSS[STYLE_CSS.find("@media (hover:none) and (pointer:coarse)"):STYLE_CSS.find("@media (max-width: 340px)")]
     assert ".session-item{padding-right:6px;}" in mobile_touch
     assert ".session-item.streaming,.session-item.unread{padding-right:40px;}" in mobile_touch
-    assert ".session-item:focus-within,.session-item.menu-open{padding-right:6px;}" in mobile_touch
+    assert ".session-item:has(:focus-visible),.session-item.menu-open{padding-right:6px;}" in mobile_touch
 
 
 def test_nested_fork_mobile_menu_uses_long_press_fallback():
@@ -102,6 +102,20 @@ def test_nested_fork_mouse_context_menu_preserves_picker_point():
     handler = SESSIONS_JS[start:end]
     assert "_recordProjectPickerContextPoint(actions,e);" in handler
     assert "_openSessionActionMenu(child, actions||row);" in handler
+
+
+def test_rename_input_keeps_long_press_text_toolbar():
+    guard = "e.target.closest('.session-title-input')) return;"
+    row_menu = _sessions_block("row.oncontextmenu=(e)=>{", "childList.appendChild(row);")
+    assert guard in row_menu
+    assert row_menu.find(guard) < row_menu.find("e.preventDefault();")
+    el_menu = _sessions_block("el.oncontextmenu=(e)=>{", "// Use release events")
+    assert guard in el_menu
+    assert el_menu.find(guard) < el_menu.find("e.preventDefault();")
+    rename_rule = STYLE_CSS[STYLE_CSS.find(".session-title-input{flex:1"):STYLE_CSS.find("}", STYLE_CSS.find(".session-title-input{flex:1")) + 1]
+    assert "user-select:text" in rename_rule
+    assert "-webkit-user-select:text" in rename_rule
+    assert "-webkit-touch-callout:default" in rename_rule
 
 
 def test_open_session_menu_consumes_next_row_activation():

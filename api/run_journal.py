@@ -5,8 +5,10 @@ the existing in-process streaming path without changing execution ownership.
 """
 from __future__ import annotations
 
+import bisect
 import contextlib
 import gzip
+import hashlib
 import io
 import json
 import logging
@@ -812,6 +814,167 @@ def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
     return events, malformed
 
 
+_AFTER_SEQ_INDEX_MAX_PATHS = 64
+_AFTER_SEQ_INDEX_STRIDE = 256
+# The path LRU alone does not bound memory: one malformed row can be arbitrarily
+# large. Keep at most 1 MiB of malformed UTF-8 bytes per indexed path. Beyond
+# this budget the current response remains complete, but that path is not cached.
+_AFTER_SEQ_INDEX_MAX_MALFORMED_BYTES = 1024 * 1024
+_after_seq_index: "OrderedDict[str, dict]" = OrderedDict()
+_after_seq_index_lock = threading.Lock()
+
+
+def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], list[dict]] | None:
+    """Tail read for ``after_seq`` via a per-path byte-offset checkpoint index.
+
+    Returns exactly what ``_read_jsonl`` would (all events, all malformed rows
+    with absolute line numbers) minus events at or below ``after_seq``, which
+    the caller filters anyway. Returns None whenever equivalence cannot be
+    guaranteed (archive/gz, CR bytes, identity change, shrink, bad seq);
+    the caller then takes the full-parse path.
+    """
+    if path.suffix == ".gz":
+        return None
+    archived = _archive_path_for(path)
+    if archived is not None and os.path.lexists(archived):
+        return None
+    key = str(path)
+    try:
+        threshold = int(after_seq)
+        with open(path, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            with _after_seq_index_lock:
+                idx = _after_seq_index.pop(key, None)
+            if idx is not None and (
+                idx["id"] != (st.st_dev, st.st_ino)
+                or st.st_size < idx["size"]
+                # A speculative reader may have indexed a complete row just
+                # before the producer's failed fsync rolled it back. Later
+                # committed rows can regrow the same inode to the exact old
+                # size; size-only validation would then skip them. ctime is
+                # the filesystem's same-inode change counter, so unchanged
+                # size with a different ctime must rebuild from real bytes.
+                or (st.st_size == idx["size"] and st.st_ctime_ns != idx.get("ctime"))
+                or len(idx.get("sigs", ())) != len(idx["offs"])
+                or "_segment_hash" not in idx
+            ):
+                idx = None
+            if idx is None:
+                idx = {"id": (st.st_dev, st.st_ino), "ctime": st.st_ctime_ns, "size": 0,
+                       "maxes": [float("-inf")], "offs": [0], "sigs": [b""],
+                       "_segment_hash": hashlib.sha256(),
+                       "lines": [0], "malformed": [], "malformed_bytes": 0, "rows": 0}
+            pos = bisect.bisect_right(idx["maxes"], threshold) - 1
+            start, line_no = idx["offs"][pos], idx["lines"][pos]
+            segment_start = idx["offs"][pos - 1] if start else 0
+            fh.seek(segment_start)
+            snapshot = fh.read()
+            # BufferedReader.read() may span several raw reads. If the producer
+            # rolls back and regrows between them, this buffer is not a coherent
+            # snapshot even though its segment happens to authenticate. Reject
+            # any observed producer generation change and take the full-reader
+            # fallback rather than splicing an old offset into new rows.
+            if _held_journal_signature(fh.fileno()) != (
+                    st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns):
+                return None
+            if start:
+                # A size/ctime pair still cannot distinguish ordinary growth
+                # from rollback followed by larger regrowth. Validate the
+                # bounded segment leading to this checkpoint against the bytes
+                # originally indexed. A discarded transient row changes that
+                # digest even when replacement rows preserve its endpoint;
+                # ordinary append-only growth leaves it intact. Coarse ctime
+                # resolution therefore cannot hide the same replay omission.
+                # Validate and replay from ONE coherent snapshot: a rollback and
+                # regrowth between separate segment and suffix reads could make
+                # an old cached offset point into a later producer generation.
+                segment_end = start - segment_start
+                segment = memoryview(snapshot)[:segment_end]
+                if (len(segment) != segment_end
+                        or hashlib.sha256(segment).digest() != idx["sigs"][pos]
+                        or snapshot[segment_end - 1:segment_end] != b"\n"):
+                    return None
+                del segment
+                data = snapshot[segment_end:]
+                del snapshot
+            else:
+                data = snapshot
+    except FileNotFoundError:
+        return None
+    except (OSError, TypeError, ValueError):
+        return None
+    if b"\r" in data:
+        return None
+    events: list[dict] = []
+    # Serve fresh diagnostic dictionaries: callers own their response, so a
+    # malformed row coming from the cached prefix must never alias the dict
+    # stored in ``_after_seq_index`` (nor a previous response's dict). The
+    # full reader returns independent dicts on every call; an indexed read
+    # must too, or an in-process caller edit would rewrite the shared index
+    # and change a later replay's diagnostics without any journal change.
+    malformed = [dict(m) for m in idx["malformed"] if m["line"] <= line_no]
+    off = start
+    prefix_max = idx["maxes"][pos]
+    for raw_b in data.split(b"\n"):
+        line_no += 1
+        line_end = off + len(raw_b) + 1
+        complete = line_end <= start + len(data)
+        extend = complete and line_end > idx["size"]
+        raw = raw_b.decode("utf-8", errors="surrogateescape")
+        if extend:
+            # Continue the digest from the prior checkpoint through every new
+            # byte, including blank/malformed rows and their newline. Checkpoints
+            # retain one digest per complete stride; a later read can therefore
+            # rehash only that bounded segment rather than the whole journal.
+            idx["_segment_hash"].update(data[max(off, idx["size"]) - start:line_end - start])
+        if raw.strip():
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                try:
+                    seq = int(parsed.get("seq") or 0)
+                except (TypeError, ValueError):
+                    return None
+                prefix_max = max(prefix_max, seq)
+                if seq > threshold:
+                    events.append(parsed)
+                if extend:
+                    idx["rows"] += 1
+                    if idx["rows"] % _AFTER_SEQ_INDEX_STRIDE == 0:
+                        idx["maxes"].append(prefix_max)
+                        idx["offs"].append(line_end)
+                        idx["sigs"].append(idx["_segment_hash"].digest())
+                        idx["_segment_hash"] = hashlib.sha256()
+                        idx["lines"].append(line_no)
+            else:
+                # The response's dict belongs to the caller; store a separate
+                # copy in the index so neither side can mutate the other.
+                entry = {"line": line_no, "raw": raw}
+                malformed.append(entry)
+                if extend:
+                    idx["malformed"].append(dict(entry))
+                    idx["malformed_bytes"] += len(raw_b)
+        if extend:
+            idx["size"] = line_end
+        off = line_end
+    if archived is not None and os.path.lexists(archived):
+        return None
+    # This is the stat captured before scanning; later same-size rewrites with
+    # a newer ctime invalidate above. A larger ordinary append may extend the
+    # old checkpoints, so its newly observed ctime becomes the saved baseline.
+    idx["ctime"] = st.st_ctime_ns
+    with _after_seq_index_lock:
+        if idx["malformed_bytes"] > _AFTER_SEQ_INDEX_MAX_MALFORMED_BYTES:
+            _after_seq_index.pop(key, None)
+        else:
+            _after_seq_index[key] = idx
+            while len(_after_seq_index) > _AFTER_SEQ_INDEX_MAX_PATHS:
+                _after_seq_index.popitem(last=False)
+    return events, malformed
+
+
 def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None]:
     raw = str(raw or "").strip()
     if not raw:
@@ -1192,6 +1355,159 @@ class RunJournalWriter:
         )
 
 
+# Blocking prompt-tool names whose journal rows are settled by a later
+# ``tool_complete`` row for the same tool. ``clarify`` is a blocking tool call:
+# the tool's completion row (user answered, timed out, or was cancelled)
+# terminates that prompt's lifecycle, so replaying the prompt row after the
+# settle point only resurrects a dead card. ``approval`` is deliberately NOT
+# listed: approvals are a queue (``pending_count`` > 1 is a real shape) and a
+# single name-level settle row cannot prove every queued prompt resolved.
+REPLAY_PROMPT_TOOL_NAMES = frozenset({"clarify"})
+# Prompt row names that participate in replay filtering at all. ``approval``
+# rows carry no tool name (they are notification-queue events, not tool
+# calls), so the prompt-row gate keys on the SSE event name directly.
+# ``approval`` is settled ONLY by the run's terminal row: approvals are a
+# queue (#527, pending_count > 1) and the respond path writes no journal row,
+# so no per-entry settle evidence exists.
+REPLAY_PROMPT_EVENT_NAMES = frozenset({"clarify", "approval"})
+
+
+def settled_prompt_events(events) -> set[tuple[str, int]]:
+    """Return ``(run_id, seq)`` keys for prompt-settling journal rows.
+
+    A row settles a prompt when it is a ``tool_complete`` whose payload names a
+    blocking prompt tool (see ``REPLAY_PROMPT_TOOL_NAMES``) — the tool call that
+    asked the question has finished, whether by answer, timeout, or cancel.
+    Malformed rows are skipped (they contribute no evidence), never raise.
+    """
+    settled: set[tuple[str, int]] = set()
+    for event in events or []:
+        if not isinstance(event, dict):
+            continue
+        name = str(event.get("event") or event.get("type") or "")
+        if name != "tool_complete":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("name") or "") not in REPLAY_PROMPT_TOOL_NAMES:
+            continue
+        try:
+            seq = int(event.get("seq") or 0)
+        except (TypeError, ValueError):
+            continue
+        if seq <= 0:
+            continue
+        run_id = str(event.get("run_id") or "") or _run_id_from_event_id(
+            event.get("event_id")
+        )
+        settled.add((run_id, seq))
+    return settled
+
+
+def terminal_settled_prompt_events(events) -> dict[tuple[str, int], int]:
+    """Return ``{(run_id, prompt_seq): terminal_seq}`` for prompt rows proven
+    dead by their run's terminal row.
+
+    Approvals cannot be settled per-entry: the respond path runs on the HTTP
+    thread and writes no journal row (verified against a real resolved
+    approval: the next row after ``approval`` was the tool's own
+    ``tool_complete``), and parallel approvals (#527) make any
+    tool-complete-to-approval pairing unsound. What IS sound is the run's
+    terminal row: once the run is done/cancelled/errored, no tool can still be
+    blocking on a prompt, so every prompt row BEFORE the first terminal row
+    of the same run is dead. Prompt rows AFTER the terminal row (late
+    notifications) stay visible. Only rows carrying ``terminal: true`` count
+    as evidence; malformed rows contribute nothing (fail open).
+    """
+    settled: dict[tuple[str, int], int] = {}
+    pending: dict[str, list[tuple[int, str]]] = {}
+    for event in events or []:
+        if not isinstance(event, dict):
+            continue
+        name = str(event.get("event") or event.get("type") or "")
+        try:
+            seq = int(event.get("seq") or 0)
+        except (TypeError, ValueError):
+            continue
+        run_id = str(event.get("run_id") or "") or _run_id_from_event_id(
+            event.get("event_id")
+        )
+        if name in TERMINAL_SSE_EVENTS and event.get("terminal") is True and seq > 0:
+            # Every prompt row seen so far in this run (seq < terminal seq)
+            # is now settled at this terminal seq.
+            for prompt_seq, _n in pending.get(run_id) or []:
+                key = (run_id, prompt_seq)
+                if key not in settled:
+                    settled[key] = seq
+            pending[run_id] = []
+        elif name in REPLAY_PROMPT_EVENT_NAMES and seq > 0:
+            pending.setdefault(run_id, []).append((seq, name))
+    return settled
+
+
+def journal_replay_prompt_visible(
+    event, settled_prompts, terminal_settled=None
+) -> bool:
+    """Return True when a prompt row (clarify/approval) should still be replayed.
+
+    Two independent settle proofs, both scoped to the SAME run (journal seqs
+    are causal within a run; session replay aggregates several runs whose seqs
+    are not comparable):
+
+    * ``settled_prompts`` — ``tool_complete`` rows for blocking prompt TOOLS
+      (clarify). A completed clarify tool call proves that prompt dead.
+      Kind-scoped: this evidence is consulted ONLY for clarify-kind rows —
+      it never settles an approval (whose lifecycle it says nothing about).
+    * ``terminal_settled`` — the run's terminal row (done/cancel/apperror/
+      error/stream_end with ``terminal: true``). Nothing can still be
+      blocking once the run ended, so every prompt row before it is dead.
+      This is the ONLY sound proof for approval rows (queue semantics, no
+      per-entry journal evidence on resolve).
+
+    A prompt with no settle evidence stays visible: a reconnecting tab must
+    still be able to answer it. Fails open on malformed input (visible).
+    """
+    if not isinstance(event, dict):
+        return True
+    name = str(event.get("event") or event.get("type") or "")
+    if name not in REPLAY_PROMPT_EVENT_NAMES:
+        return True
+    try:
+        seq = int(event.get("seq") or 0)
+    except (TypeError, ValueError):
+        return True
+    if seq <= 0:
+        return True
+    run_id = str(event.get("run_id") or "") or _run_id_from_event_id(
+        event.get("event_id")
+    )
+    # Kind-scoped: ``settled_prompts`` holds ``tool_complete`` rows for
+    # blocking prompt TOOLS (clarify). That evidence proves only a clarify
+    # lifecycle ended — it says nothing about an approval entry, so an
+    # approval must never consult it. A mixed journal (pending approval +
+    # completed clarify in the same run) would otherwise drop the still
+    # answerable approval card; approvals settle ONLY via the same-run
+    # terminal proof below.
+    if name in REPLAY_PROMPT_TOOL_NAMES:
+        for settle_run, settle_seq in settled_prompts or ():
+            if settle_run == run_id and settle_seq >= seq:
+                return False
+    if terminal_settled is not None:
+        terminal_seq = terminal_settled.get((run_id, seq))
+        if terminal_seq is not None:
+            return False
+    return True
+
+
+def _run_id_from_event_id(event_id) -> str:
+    """Extract the run id from ``<run_id>:<seq>``; empty string when unusable."""
+    raw = str(event_id or "")
+    if not raw or ":" not in raw:
+        return ""
+    return raw.rsplit(":", 1)[0]
+
+
 def journal_replay_visible(event) -> bool:
     """Return True when a journal row should be streamed to a reconnecting tab.
 
@@ -1514,7 +1830,8 @@ def read_run_events(
     if validated_recovery:
         events, malformed = _read_validated_recovery_events(path, str(session_id), str(run_id))
     else:
-        events, malformed = _read_jsonl(path)
+        indexed = _read_jsonl_after_seq_indexed(path, after_seq) if after_seq is not None else None
+        events, malformed = indexed if indexed is not None else _read_jsonl(path)
     if after_seq is not None:
         events = [event for event in events if int(event.get("seq") or 0) > int(after_seq)]
     if max_seq is not None:
@@ -2079,6 +2396,19 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
                 if str(Path(value[1]).parent) == dir_key
             ]:
                 del _RUN_PATH_CACHE[cache_key]
+        # Drop the after-seq offset-index entries for the removed runs too. The
+        # index retains derived malformed-row diagnostics in-process; after a
+        # confirmed deletion those diagnostics must not stay resident (a run
+        # re-created at the same path must not inherit them). Same parent-dir
+        # match as the caches above; `_after_seq_index` is keyed by the full
+        # run-file path, so its entries' parent equals ``dir_key`` exactly.
+        with _after_seq_index_lock:
+            for cache_key in [
+                entry
+                for entry in _after_seq_index
+                if str(Path(entry).parent) == dir_key
+            ]:
+                del _after_seq_index[cache_key]
     return removed
 
 
@@ -3460,6 +3790,10 @@ def _sweep_session_entries(
     max_bytes = int(caps["max_bytes_per_session"])
     retained_bytes = 0
     size_cap_exceeded = False
+    # Runs the persisted session still needs for recovery stay LIVE: a release that predates the archive format
+    # (rolling back to v0.52.492, for one) reads only live journals, so archiving the one copy of a pending answer
+    # would lose it there. Read lazily, once per session, only when a run is due for archival.
+    session_refs = None
     for rank, (name, st) in enumerate(entries):
         size = int(st.st_size)
         archived = False
@@ -3483,20 +3817,27 @@ def _sweep_session_entries(
                         size_cap_exceeded = True
                         over_size = True
                 if over_ttl or over_count or over_size:
-                    archived = _try_archive_entry(
-                        session_root,
-                        session_journal_dir,
-                        name,
-                        st,
-                        session_fd,
-                        archive_fd,
-                        counters,
-                        size,
-                        age_seconds,
-                        budget,
-                        archive_root_fd=archive_root_fd,
-                        chain_synced_before=chain_synced_before,
-                    )
+                    if session_refs is None:
+                        session_refs = _session_sidecar_run_refs(
+                            session_root, session_journal_dir.name, any_marker_keeps_all=False
+                        )
+                    if session_refs is _KEEP_ALL_RUNS or name[: -len(".jsonl")] in session_refs:
+                        counters["retained_referenced"] += 1
+                    else:
+                        archived = _try_archive_entry(
+                            session_root,
+                            session_journal_dir,
+                            name,
+                            st,
+                            session_fd,
+                            archive_fd,
+                            counters,
+                            size,
+                            age_seconds,
+                            budget,
+                            archive_root_fd=archive_root_fd,
+                            chain_synced_before=chain_synced_before,
+                        )
         if not archived:
             # Everything that stays live — including a run that could not be
             # proven terminal — counts against the per-session budget.
@@ -3782,6 +4123,56 @@ def _recover_archive_claims(session_root: Path) -> None:
             pass
 
 
+_KEEP_ALL_RUNS = object()
+
+
+def _session_sidecar_run_refs(session_root: Path, session_id: str, *, any_marker_keeps_all: bool = True):
+    """The run ids the persisted session still needs, read once: a set, or ``_KEEP_ALL_RUNS``.
+
+    ``_KEEP_ALL_RUNS`` when the sidecar exists but is not a plain, readable, parseable file (an unreadable reference
+    is UNKNOWN, not absent), and for a recovery marker: any marker when ``any_marker_keeps_all`` (the archive-TTL
+    prune guard's long-standing rule), otherwise only a marker without a ``_journal_retry_stream_id``. The lazy
+    retry reads exactly that run, in every release since the marker gained the id, so a marker WITH the id adds just
+    that run: a marker can stay flagged forever behind a later normal assistant turn (the retry stops at that turn),
+    and keep-all would then switch the live-journal caps off for the session. An empty set only for a CONFIRMED
+    missing sidecar, or one that references no run. See ``_session_sidecar_keeps_run`` for why each field counts.
+    """
+    sidecar = session_root / f"{session_id}.json"
+    try:
+        st = sidecar.lstat()
+    except FileNotFoundError:
+        return frozenset()
+    except OSError:
+        return _KEEP_ALL_RUNS
+    if not stat.S_ISREG(st.st_mode):
+        return _KEEP_ALL_RUNS
+    try:
+        raw = sidecar.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return frozenset()
+    except OSError:
+        return _KEEP_ALL_RUNS
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return _KEEP_ALL_RUNS
+    if not isinstance(data, dict):
+        return _KEEP_ALL_RUNS
+    refs = set()
+    active = str(data.get("active_stream_id") or "")
+    if active:
+        refs.add(active)
+    for message in data.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        retry = str(message.get("_journal_retry_stream_id") or "")
+        if message.get("_pending_journal_recovery") and (any_marker_keeps_all or not retry):
+            return _KEEP_ALL_RUNS
+        if retry:
+            refs.add(retry)
+    return frozenset(refs)
+
+
 def _session_sidecar_keeps_run(session_root: Path, session_id: str, run_id: str) -> bool:
     """True while the persisted session still needs this run's journal.
 
@@ -3798,37 +4189,8 @@ def _session_sidecar_keeps_run(session_root: Path, session_id: str, run_id: str)
     Only a CONFIRMED missing sidecar — the session was deleted, so nothing can
     ever recover from the archive — lets the prune proceed.
     """
-    sidecar = session_root / f"{session_id}.json"
-    try:
-        st = sidecar.lstat()
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-    if not stat.S_ISREG(st.st_mode):
-        return True
-    try:
-        raw = sidecar.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return True
-    if not isinstance(data, dict):
-        return True
-    if str(data.get("active_stream_id") or "") == run_id:
-        return True
-    for message in data.get("messages") or []:
-        if not isinstance(message, dict):
-            continue
-        if message.get("_pending_journal_recovery"):
-            return True
-        if str(message.get("_journal_retry_stream_id") or "") == run_id:
-            return True
-    return False
+    refs = _session_sidecar_run_refs(session_root, session_id)
+    return refs is _KEEP_ALL_RUNS or str(run_id) in refs
 
 
 def _prune_run_journal_archive(session_root: Path, caps: dict, now: float, counters: dict) -> None:
@@ -4031,6 +4393,7 @@ def sweep_run_journal(
         "archived_bytes": 0,
         "files_scanned": 0,
         "retained_open": 0,
+        "retained_referenced": 0,
         "pruned_archives": 0,
         "sessions_scanned": 0,
         "skipped_files": 0,

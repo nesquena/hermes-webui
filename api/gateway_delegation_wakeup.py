@@ -42,8 +42,12 @@ POLL_INTERVAL_S = 5.0
 BACKOFF_MAX_S = 300.0
 RESERVATION_OWNER = "hermes-webui"
 RESERVATION_TTL_S = 120.0
-WAKE_PROMPT = ("[IMPORTANT: A delegated subagent finished. Its result is already in your "
-               "conversation history above; review it and continue the task.]")
+WAKE_PROMPT = ("[IMPORTANT: A delegated subagent is reporting back. Its result is already in your "
+               "conversation history above; review it and continue the task. If that result carries "
+               "recovery evidence (an owner exit, a \"Last persisted unit status\" line, a RE-DISPATCH "
+               "list), read it first: keep the results it recorded, resume only the work it lists as "
+               "unfinished, starting each from its transcript tail and existing worktree, and do not "
+               "retry a side effect whose outcome is unrecorded.]")
 _LEASE_API = ("reserve_caller_history_deliveries", "commit_caller_history_deliveries",
                  "release_caller_history_deliveries")
 # Rows older than this at first sight are left for the next user turn to fold.
@@ -151,9 +155,15 @@ def _live_webui_sid(webui_sid: str, profile: str) -> str | None:
     A sealed parent is never reopened by a wake (the rows stay for the next turn's fold)."""
     from api.compression_continuation import durable_compression_continuation
     from api.config import SESSION_DIR
-    from api.models import get_session
+    from api.models import SessionFileNamesOtherSession, get_session
 
-    sealed, tip = durable_compression_continuation(get_session(webui_sid))
+    try:
+        session = get_session(webui_sid)
+    except SessionFileNamesOtherSession:
+        # #9019: the sidecar holds another session's body, so its owner can't be verified.
+        # Retry next poll without a warning; never wake it or record it as another profile's.
+        raise OwnershipUnknown(webui_sid) from None
+    sealed, tip = durable_compression_continuation(session)
     if not sealed:
         return webui_sid
     sidecar = Path(SESSION_DIR) / f"{tip}.json" if tip else None

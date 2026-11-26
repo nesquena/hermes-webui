@@ -304,6 +304,68 @@ def test_fresh_container_honours_an_upper_bound_below_the_base(tmp_path):
     assert plan["python"] == (3, 11)
 
 
+# A range that names a major the base image does not ship. The base image
+# carries 3.12; this agent declares ">=4.0,<4.2" and its dependencies carry no
+# python_version gate — the #8113 shape across a major boundary (the agent
+# needs an interpreter the image cannot provide, and nothing else states it).
+AGENT_PYPROJECT_NEXT_MAJOR = """
+[project]
+name = "hermes-agent"
+requires-python = ">=4.0,<4.2"
+dependencies = [
+  "python-dotenv==1.2.2",
+]
+"""
+
+
+def test_cross_major_range_creates_on_an_admissible_interpreter(tmp_path):
+    """A declared major the base image lacks must still be reachable.
+
+    The candidate search used to stop at the base image's major, so
+    ">=4.0,<4.2" had no candidate at all and the plan fell back to the base
+    interpreter — exactly the #8113 signature: a venv on 3.12 with the
+    agent's 4.x dependencies silently dropped.
+    """
+    agent = _agent_dir(tmp_path, AGENT_PYPROJECT_NEXT_MAJOR)
+
+    plan = dvp.plan_agent_venv(agent / "pyproject.toml", tmp_path / "absent", base_python=(3, 12))
+
+    assert plan["action"] == "create"
+    assert plan["python"] == (4, 0)
+    assert plan["required"] == (4, 0)
+
+
+def test_cross_major_range_rebuilds_a_venv_on_the_base_major(tmp_path):
+    """A 3.12 venv cannot satisfy a ">=4.0,<4.2" agent; it must be rebuilt.
+
+    Keeping it would pin a venv the agent cannot be installed into, so every
+    restart would report healthy while `run_agent` fails to import.
+    """
+    agent = _agent_dir(tmp_path, AGENT_PYPROJECT_NEXT_MAJOR)
+    venv_dir = _make_venv(tmp_path, "3.12.15")
+    (venv_dir / ".deps_installed").write_text("", encoding="utf-8")
+
+    plan = dvp.plan_agent_venv(agent / "pyproject.toml", venv_dir, base_python=(3, 12))
+
+    assert plan["action"] == "rebuild"
+    assert plan["python"] == (4, 0)
+    assert plan["clear_deps_marker"] is True
+
+
+def test_a_lower_declared_major_is_not_selected_below_the_base_image(tmp_path):
+    """The image's own major is the floor: never build a venv below it.
+
+    The base image is 3.12; a "<3" range admits nothing the image can run, so
+    there is no candidate and the base interpreter is left in place.
+    """
+    agent = _agent_dir(tmp_path, _range_pyproject(">=2.7,<3"))
+
+    plan = dvp.plan_agent_venv(agent / "pyproject.toml", tmp_path / "absent", base_python=(3, 12))
+
+    assert plan["action"] == "create"
+    assert plan["python"] is None
+
+
 def test_unsatisfiable_constraints_keep_the_existing_venv(tmp_path):
     """No admissible interpreter: do not delete a working environment first.
 

@@ -488,6 +488,68 @@ def test_a_focused_row_can_be_seen():
     assert ".project-picker-item.active:focus-visible{color:var(--blue);}" in STYLE_CSS
 
 
+def test_on_a_light_theme_the_ring_is_the_text_accent_and_the_pointer_has_a_wash():
+    """The white wash and the translucent --focus-ring are both near invisible
+    on a light picker. Scoped to :root:not(.dark), so a dark theme keeps both.
+    The ring is --accent-text, not --accent, which is under 3:1 against the
+    picker on the palest skins; the numbers are the browser gate's."""
+    assert (
+        ":root:not(.dark) .project-picker-item:focus-visible{outline-color:var(--accent-text);}"
+        in STYLE_CSS
+    )
+    assert "outline-color:var(--accent);}" not in _between(
+        STYLE_CSS, ":root:not(.dark) .project-picker-item:hover{", "@media (pointer:coarse){.project-picker-item{"
+    )
+    # "+ New project" is drawn at 70% opacity, which would dim its ring too.
+    assert ":root:not(.dark) .project-picker-create:focus-visible{opacity:1;}" in STYLE_CSS
+    assert ":root:not(.dark) .project-picker-item:hover{background:var(--hover-bg);}" in STYLE_CSS
+    # That rule outranks ".project-picker-create:hover", so the row's accent
+    # tint is restated right after it, in master's OPAQUE form: the row is
+    # sticky and the list scrolls under it, so a bare translucent tint would
+    # let pinned rows show through (#27ad682b9).
+    create = (
+        ":root:not(.dark) .project-picker-create:hover"
+        "{background:linear-gradient(var(--accent-bg),var(--accent-bg)),var(--sidebar);}"
+    )
+    assert STYLE_CSS.index(":root:not(.dark) .project-picker-item:hover{") < STYLE_CSS.index(create)
+    assert ".project-picker-create:hover{background:var(--accent-bg);}" not in STYLE_CSS
+
+
+def test_the_sticky_create_row_stays_opaque_under_keyboard_focus():
+    """Fable r6: ".project-picker-item:focus-visible" paints a translucent tint
+    at (0,2,0), which outranks the sticky "+ New project" row's opaque
+    var(--sidebar) at (0,1,0). With the list scrolled, a row underneath showed
+    through the focused create row in both themes. Restate the tint over
+    var(--sidebar) after the item rule so the sticky row stays opaque."""
+    item = ".project-picker-item:focus-visible{background:rgba(255,255,255,.08);"
+    create = (
+        ".project-picker-create:focus-visible"
+        "{background:linear-gradient(rgba(255,255,255,.08),rgba(255,255,255,.08)),var(--sidebar);}"
+    )
+    assert item in STYLE_CSS
+    assert create in STYLE_CSS
+    assert STYLE_CSS.index(item) < STYLE_CSS.index(create)
+
+
+def test_the_menu_that_opens_the_picker_has_finger_tall_rows_on_touch():
+    assert (
+        "@media (pointer:coarse){.session-action-opt .ws-opt-action{min-height:44px;}}" in STYLE_CSS
+    )
+    # The row's own box is the .ws-opt-action inside it: that is what is padded.
+    assert ".session-action-opt .ws-opt-action{display:flex;flex-direction:row;align-items:center;" in STYLE_CSS
+
+
+def test_a_key_that_moves_focus_in_the_menu_reveals_the_row():
+    """With 44px rows the menu scrolls inside itself on a phone on its side,
+    and its rows are focused with preventScroll. What this does on a real
+    screen is in the browser gate."""
+    mount = _between(SESSIONS_JS, "function _mountSessionActionMenu(", "function _findSessionRenameRow(")
+    focus = "try{items[nextIndex].focus({preventScroll:true});}catch(_){items[nextIndex].focus();}"
+
+    assert mount.count("items[nextIndex].scrollIntoView({block:'nearest'});") == 1
+    assert mount.index(focus) < mount.index("items[nextIndex].scrollIntoView({block:'nearest'});")
+
+
 def test_the_button_keeps_the_rows_look():
     """A bare <button> brings its own border, background, font and centring. The
     reset has no specificity and sits before the row rules, so the create row's
@@ -585,3 +647,171 @@ def test_a_hidden_sidebar_is_a_collapsed_one_or_a_closed_drawer():
     assert "function _isDesktopWidth(){" in boot
     assert "window.matchMedia('(min-width:641px)').matches" in boot
 
+
+def test_a_resize_reveals_the_menu_row_that_has_focus():
+    """Turning a phone caps the menu shorter than its rows and leaves it
+    scrolled to the top. What that does on a real screen is in the browser
+    gate."""
+    resize = _between(SESSIONS_JS, "window.addEventListener('resize',()=>{\n  if(!_sessionActionMenu", "// Generation counter")
+    position = "_positionSessionActionMenu(_sessionActionAnchor);"
+    reveal = "if(focused && _sessionActionMenu.contains(focused)) focused.scrollIntoView({block:'nearest'});"
+
+    assert resize.count(reveal) == 1
+    assert resize.index(position) < resize.index(reveal)
+
+
+def test_focus_that_falls_out_of_the_open_menu_onto_nothing_comes_back():
+    """A touch that opened the menu lifts over something unfocusable, and the
+    browser's mousedown for it leaves focus on <body>. Focus that goes to
+    another control is left where it went."""
+    mount = _between(SESSIONS_JS, "function _mountSessionActionMenu(", "function _findSessionRenameRow(")
+    handler = _between(mount, "menu.addEventListener('focusout',e=>{", "const firstAction=menuItems()[0];")
+
+    assert "if(e.relatedTarget||leavingByTab) return;" in handler
+    assert "if(_sessionActionMenu!==menu||!menu.isConnected) return;" in handler
+    assert "if(active&&active!==document.body&&active!==document.documentElement) return;" in handler
+    assert "row.focus({preventScroll:true})" in handler
+
+
+def test_the_touch_that_opened_the_menu_does_not_click_what_is_under_it():
+    """With 44px rows the menu can open over the finger. A cancelled touchend
+    sends no compatibility click; the listener has to be non-passive to cancel.
+    What a real touch does is in the browser gate."""
+    end = SESSIONS_JS.index("    el.addEventListener('touchend',(e)=>{")
+    handler = SESSIONS_JS[end : SESSIONS_JS.index("    return el;", end)]
+    # Master's handler (#8214) cancels after the gesture finishes, for a tap
+    # handled on the row or a long press that opened the menu; the ⋮ button
+    # returns first because a touch on it begins no row gesture.
+    cancel = "if((tapHandledHere||_longPressMenuOpened)&&e.cancelable){"
+    action_return = "if(_isSessionActionTarget(e.target)) return;"
+
+    assert handler.count(cancel) == 1
+    assert handler.index("_finishSessionGesture(") < handler.index(cancel)
+    assert handler.index(cancel) < handler.index("e.preventDefault();")
+    assert handler.index(action_return) < handler.index("_finishSessionGesture(")
+    assert handler.rstrip().endswith("},{passive:false});")
+
+
+def test_a_fork_row_cancels_the_same_click_and_disarms_its_one_shot_guard():
+    """No click follows a cancelled touchend, so the guard that would have
+    swallowed it is cleared, or the next tap on the fork would be lost."""
+    start = SESSIONS_JS.index("        rowEl.addEventListener('touchend',(e)=>{")
+    handler = SESSIONS_JS[start : SESSIONS_JS.index("        rowEl.onpointercancel=", start)]
+
+    assert "if(!_longPressMenuOpened||!e.cancelable) return;" in handler
+    assert handler.index("e.preventDefault();") < handler.index("rowEl._skipNextChildOpen=false;")
+    assert handler.rstrip().endswith("},{passive:false});")
+
+
+def test_a_touch_on_the_menu_button_is_never_the_one_that_gets_cancelled():
+    """The long-press flag is reset when a press begins on the row, and a press
+    on the ⋮ button begins none. Left over from an earlier long press, it would
+    cancel a tap on the button, which then opens nothing. Both handlers leave
+    before they read the flag."""
+    end = SESSIONS_JS.index("    el.addEventListener('touchend',(e)=>{")
+    handler = SESSIONS_JS[end : SESSIONS_JS.index("    return el;", end)]
+    leave = "if(_isSessionActionTarget(e.target)) return;"
+    assert handler.count(leave) == 1
+    assert handler.index(leave) < handler.index("_longPressMenuOpened")
+
+    start = SESSIONS_JS.index("        rowEl.addEventListener('touchend',(e)=>{")
+    handler = SESSIONS_JS[start : SESSIONS_JS.index("        rowEl.onpointercancel=", start)]
+    leave = "if(_isForkActionTarget(e.target)) return;"
+    assert handler.count(leave) == 1
+    assert handler.index(leave) < handler.index("_longPressMenuOpened")
+
+
+def test_tab_out_of_the_menu_is_not_brought_back():
+    """Tab from the last row also leaves focus on nothing, on its way out of
+    the page. The flag is up only while that key moves the focus: a finger
+    lifting later is still brought back."""
+    mount = _between(SESSIONS_JS, "function _mountSessionActionMenu(", "function _findSessionRenameRow(")
+    keys = _between(mount, "menu.addEventListener('keydown',e=>{", "menu.addEventListener('focusout',e=>{")
+
+    assert mount.count("let leavingByTab=false;") == 1
+    assert "if(e.key==='Tab'){\n      leavingByTab=true;\n      setTimeout(()=>{leavingByTab=false;},0);\n    }" in keys
+    # Before the Escape branch returns, and Tab itself is left to the browser.
+    assert keys.index("leavingByTab=true;") < keys.index("if(e.key==='Escape'){")
+    assert "e.key==='Tab'" not in keys[keys.index("if(e.key==='Escape'){") :]
+
+
+def test_a_pen_stays_on_the_row_it_pressed_once_its_long_press_opens_the_menu():
+    """A pen sends no touch events, and its release and click go to what is
+    under it: the menu its own long press opened. Captured, they come to the
+    row, as a finger's do. Captured from the press on, a pen dragged off a
+    fork's button and lifted elsewhere would click the button, so the press is
+    only noted, and the capture is the long press's. What a pen pointer then
+    does is in the browser gate."""
+    helper = _between(SESSIONS_JS, "function _keepPenOnPressedElement(press){", "\n}\n")
+    assert "try{press.target.setPointerCapture(press.pointerId);}catch(_){}" in helper
+    capture = "if(_gesturePointerType==='pen') _keepPenOnPressedElement(_penPress);"
+    assert SESSIONS_JS.count("_keepPenOnPressedElement(") == 3  # the helper and the two long presses
+
+    down = _between(SESSIONS_JS, "    el.onpointerdown=(e)=>{", "    el.onpointermove=(e)=>{")
+    assert "_penPress=e;" in _between(down, "if(e.pointerType==='pen'){", "\n    };")
+    assert "setPointerCapture" not in down and "_keepPenOnPressedElement" not in down
+    # Not for a press on the ⋮ button, which begins no gesture on the row.
+    assert down.index("if(_isSessionActionTarget(e.target)) return;") < down.index("_penPress=e;")
+    timer = _between(SESSIONS_JS, "    const _scheduleSessionLongPressMenu=()=>{", "    const _isSessionSwipeTarget=")
+    assert timer.count(capture) == 1
+    assert timer.index("_longPressMenuOpened=true;") < timer.index(capture) < timer.index("_openSessionActionMenu(s, el);")
+
+    fork = _between(SESSIONS_JS, "        rowEl.onpointerdown=(e)=>{", "        rowEl.onpointermove=(e)=>{")
+    assert "if(e.pointerType==='pen') _penPress=e;" in fork
+    assert "setPointerCapture" not in fork and "_keepPenOnPressedElement" not in fork
+    assert fork.index("_isForkActionTarget(e.target)) return;") < fork.index("_penPress=e;")
+    timer = _between(SESSIONS_JS, "        const _scheduleForkLongPressMenu=()=>{", "        const _paintForkSwipe=")
+    assert timer.count(capture) == 1
+    assert timer.index("_longPressMenuOpened=true;") < timer.index(capture) < timer.index("_openSessionActionMenu(childSession, rowEl);")
+
+
+def test_a_pen_that_leaves_a_conversation_row_ends_its_press():
+    """Uncaptured, a pen that leaves the row sends it no release, and the
+    long-press timer would open the menu after the pen had lifted elsewhere.
+    The fork row already ended a pen's press when it left; a finger's press is
+    not ended, its events keep coming to the row."""
+    leave = _between(SESSIONS_JS, "    el.onpointerleave=()=>{", "    el.onpointerup=(e)=>{")
+    assert "if(_gesturePointerType==='pen'&&_gestureState!=='idle') _clearPointerDragState();" in leave
+    assert "touch" not in leave
+
+    fork = _between(SESSIONS_JS, "        rowEl.onpointerleave=()=>{", "\n        };")
+    assert "if(_gesturePointerType!=='mouse'&&_gestureState!=='idle') _clearForkPointerState();" in fork
+
+
+def test_once_the_long_press_has_opened_the_menu_the_gesture_does_nothing_more():
+    """A drag after the long press used to go on as a swipe: the row was drawn
+    sliding under the open menu, and lifting far enough to the right archived
+    the conversation (to the left, asked to delete it). Every path that moves
+    or releases reads the flag before it acts, on both kinds of row. What a
+    finger and a pen then do is in the browser gate."""
+    update = _between(SESSIONS_JS, "    const _updateSessionGesture=(clientX,clientY)=>{", "    const _canSwipeDeleteSession=")
+    guard = "if(_longPressMenuOpened){"
+    assert update.count(guard) == 1
+    assert update.index("if(_gestureState==='idle') return false;") < update.index(guard)
+    assert update.index(guard) < update.index("_promoteSessionDrag(dx,dy);") < update.index("_paintSessionSwipe(signedDx);")
+
+    finish = _between(SESSIONS_JS, "    const _finishSessionGesture=(clientX,clientY,target,pointerType)=>{", "    el.onpointerdown=(e)=>{")
+    leave = "if(_longPressMenuOpened){_gestureState='idle';return true;}"
+    assert finish.count(leave) == 1
+    assert finish.index(leave) < finish.index("_commitSessionSwipe();")
+
+    move = _between(SESSIONS_JS, "        rowEl.onpointermove=(e)=>{", "        rowEl.onpointerup=(e)=>{")
+    assert move.count("if(_longPressMenuOpened) return;") == 1
+    assert move.index("if(_longPressMenuOpened) return;") < move.index("rowEl.classList.add('dragging');")
+    assert move.index("if(_longPressMenuOpened) return;") < move.index("_paintForkSwipe(signedDx);")
+    up = _between(SESSIONS_JS, "        rowEl.onpointerup=(e)=>{", "        rowEl.addEventListener('touchend',(e)=>{")
+    assert up.index("if(_longPressMenuOpened){_gestureState='idle';return;}") < up.index("_handleForkSwipe(")
+
+
+def test_opening_the_menu_closes_a_picker_left_open():
+    """A long press sends no click any more and a right click never did, so
+    the picker's own close-on-outside-click cannot be what closes it."""
+    opener = _between(SESSIONS_JS, "function _openSessionActionMenu(session, anchorEl){", "const menu=document.createElement('div');")
+    assert opener.count("_dismissOpenProjectPicker();") == 1
+    # After the toggle that closes the same row's menu and leaves.
+    assert opener.index("return;") < opener.index("_dismissOpenProjectPicker();")
+    assert SESSIONS_JS.count("_dismissOpenProjectPicker();") == 1
+
+    dismiss = _between(SESSIONS_JS, "function _dismissOpenProjectPicker(){", "\n}\n")
+    assert "if(open&&open.picker.isConnected) open.dismiss({restoreFocus:false});" in dismiss
+    assert "_openProjectPicker=null;" in dismiss

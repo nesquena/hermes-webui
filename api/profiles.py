@@ -8,6 +8,8 @@ Profile switches update os.environ['HERMES_HOME'] and monkey-patch module-level
 cached paths in hermes-agent modules (skills_tool, skill_manager_tool,
 cron/jobs) that snapshot HERMES_HOME at import time.
 """
+import copy
+import inspect
 import json
 import logging
 import os
@@ -67,10 +69,55 @@ def _read_dotenv_values(env_path) -> dict[str, str]:
     return values
 
 
+_LAUNCHER_DOUBLE_QUOTED = re.compile(r'^"((?:[^"\\]|\\.)*)"(\s*#.*)?\s*$')
+_LAUNCHER_SINGLE_QUOTED = re.compile(r"^'([^']*)'(\s*#.*)?\s*$")
+_LAUNCHER_ESCAPES = {'n': '\n', 'r': '\r', 't': '\t', '"': '"', '\\': '\\'}
+
+
+def _launcher_dotenv_values(env_path) -> dict[str, str]:
+    """A .env file's values as ctl.sh's ``_apply_env_file_safely`` exports them; {} on error.
+
+    Double-quoted values decode ``\\n \\r \\t \\" \\\\`` (other escapes stay as written), single-quoted
+    values are literal, and an unquoted value ends at its first whitespace-then-``#``. The Agent's
+    ``.env`` reader decodes fewer escapes, so by-value provenance checks against both readings."""
+    values: dict[str, str] = {}
+    try:
+        text = Path(env_path).expanduser().read_text(encoding="utf-8")
+    except Exception:
+        return values
+    for line in text.splitlines():
+        line = line.lstrip()
+        if not line or line.startswith('#'):
+            continue
+        if re.match(r'export\s+', line):
+            line = re.sub(r'^export\s+', '', line)
+        if '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        key = re.sub(r'\s', '', key)
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key) or key in ('UID', 'GID', 'EUID', 'EGID', 'PPID'):
+            continue
+        value = value.lstrip()
+        if m := _LAUNCHER_DOUBLE_QUOTED.match(value):
+            # ctl.sh decodes through awk inside $(...), which drops trailing newlines.
+            value = re.sub(r'\\(.)', lambda e: _LAUNCHER_ESCAPES.get(e.group(1), e.group(0)), m.group(1)).rstrip('\n')
+        elif m := _LAUNCHER_SINGLE_QUOTED.match(value):
+            value = m.group(1)
+        else:
+            value = re.split(r'\s#', value, maxsplit=1)[0].rstrip()
+        values[key] = value
+    return values
+
+
 # The launch home's .env as it was at startup. Shell launchers (ctl.sh) source $HERMES_HOME/.env before Python
 # starts, so for a NAMED profile home those values sit in os.environ looking like launcher exports; this snapshot
 # is the provenance record that tells them apart (#8432).
 _INITIAL_HERMES_HOME_DOTENV = _read_dotenv_values(Path(_INITIAL_HERMES_HOME) / '.env') if _INITIAL_HERMES_HOME else {}
+# The same file as ctl.sh exported it (escapes decoded, inline comment dropped); the Agent's reading is recorded
+# at startup by _named_launch_home_readings().
+_INITIAL_HERMES_HOME_LAUNCHER_DOTENV = (
+    _launcher_dotenv_values(Path(_INITIAL_HERMES_HOME) / '.env') if _INITIAL_HERMES_HOME else {})
+_NAMED_LAUNCH_HOME_AGENT_READINGS: dict[str, dict[str, str]] = {}
 _INITIAL_ISOLATED_PROFILE_OPT_IN = os.getenv('HERMES_WEBUI_ISOLATED_PROFILE', '').strip().lower()
 _ISOLATED_SYMLINK_WARNING_EMITTED = False
 _ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED = False
@@ -92,8 +139,11 @@ _tls = threading.local()
 # env var is not a stable identity; see _pin_process_profile_home().
 _PROCESS_PROFILE_HOME: Optional[str] = None
 
-_SKILL_HOME_MODULES = ("tools.skills_tool", "tools.skill_manager_tool")
+_SKILLS_TOOL_MODULE = "tools.skills_tool"
+_SKILL_HOME_MODULES = (_SKILLS_TOOL_MODULE, "tools.skill_manager_tool")
 _SKILL_HOME_MODULE_PATCH_LOCK = threading.RLock()
+# Module globals through which an Agent skill module keeps its own skills-dir state.
+_SKILL_HOME_OWN_STATE_ATTRS = ("HERMES_HOME", "SKILLS_DIR", "_SKILLS_DIR_AT_IMPORT")
 
 
 def snapshot_skill_home_modules() -> dict[str, dict[str, object]]:
@@ -114,9 +164,66 @@ def snapshot_skill_home_modules() -> dict[str, dict[str, object]]:
     return snapshot
 
 
+def _skill_module_shares_skills_tool_resolver(module, skills_tool) -> bool:
+    """True when *module* has no skills-dir state of its own and resolves through skills_tool.
+
+    Agents with upstream 17b953d8b7cd dropped ``HERMES_HOME``, ``SKILLS_DIR``,
+    ``_SKILLS_DIR_AT_IMPORT`` and ``_skills_dir()`` from tools.skill_manager_tool,
+    which now imports ``tools.skills_tool._skills_dir``. Such a module is exactly as
+    dynamic as skills_tool, whose own globals the caller still checks. Any other
+    shape (a stray global, or a ``_skills_dir`` that is a different function) is
+    not recognised, so callers keep the legacy whole-turn lock.
+    """
+    if skills_tool is None or module is skills_tool:
+        return False
+    if any(hasattr(module, attr) for attr in _SKILL_HOME_OWN_STATE_ATTRS):
+        return False
+    shared_resolver = getattr(skills_tool, '_skills_dir', None)
+    return callable(shared_resolver) and getattr(module, '_skills_dir', None) is shared_resolver
+
+
+def _skill_module_skills_dir_unpatched(module_name: str, module) -> bool:
+    """True when *module*'s ``SKILLS_DIR`` still equals its ``_SKILLS_DIR_AT_IMPORT``."""
+    if not hasattr(module, 'SKILLS_DIR'):
+        logger.debug("Skill capability check: %s missing SKILLS_DIR", module_name)
+        return False
+
+    if not hasattr(module, '_SKILLS_DIR_AT_IMPORT'):
+        logger.debug("Skill capability check: %s missing _SKILLS_DIR_AT_IMPORT", module_name)
+        return False
+
+    try:
+        current_skills_dir = Path(module.SKILLS_DIR).expanduser()
+        import_skills_dir = Path(module._SKILLS_DIR_AT_IMPORT).expanduser()
+    except Exception:
+        logger.debug(
+            "Skill capability check: %s has invalid SKILLS_DIR or _SKILLS_DIR_AT_IMPORT",
+            module_name,
+            exc_info=True,
+        )
+        return False
+
+    if current_skills_dir != import_skills_dir:
+        logger.debug(
+            "Skill capability check: %s.SKILLS_DIR %r does not match imported baseline %r",
+            module_name,
+            current_skills_dir,
+            import_skills_dir,
+        )
+        return False
+    return True
+
+
 def _skill_modules_support_profile_home(profile_home: Path) -> bool:
-    """Return ``True`` when both skill modules resolve to this profile home."""
+    """Return ``True`` when both skill modules resolve to this profile home.
+
+    A module qualifies when its ``SKILLS_DIR`` still equals its
+    ``_SKILLS_DIR_AT_IMPORT`` (so ``_skills_dir()`` follows the live home), or when
+    it shares skills_tool's resolver and carries none of those globals itself.
+    tools.skills_tool is always held to the first rule.
+    """
     expected_dir = (Path(profile_home) / 'skills').expanduser()
+    skills_tool = sys.modules.get(_SKILLS_TOOL_MODULE)
 
     for module_name in _SKILL_HOME_MODULES:
         module = sys.modules.get(module_name)
@@ -124,32 +231,11 @@ def _skill_modules_support_profile_home(profile_home: Path) -> bool:
             logger.debug("Skill capability check: %s not pre-imported in sys.modules", module_name)
             return False
 
-        if not hasattr(module, 'SKILLS_DIR'):
-            logger.debug("Skill capability check: %s missing SKILLS_DIR", module_name)
-            return False
-
-        if not hasattr(module, '_SKILLS_DIR_AT_IMPORT'):
-            logger.debug("Skill capability check: %s missing _SKILLS_DIR_AT_IMPORT", module_name)
-            return False
-
-        try:
-            current_skills_dir = Path(module.SKILLS_DIR).expanduser()
-            import_skills_dir = Path(module._SKILLS_DIR_AT_IMPORT).expanduser()
-        except Exception:
-            logger.debug(
-                "Skill capability check: %s has invalid SKILLS_DIR or _SKILLS_DIR_AT_IMPORT",
-                module_name,
-                exc_info=True,
-            )
-            return False
-
-        if current_skills_dir != import_skills_dir:
-            logger.debug(
-                "Skill capability check: %s.SKILLS_DIR %r does not match imported baseline %r",
-                module_name,
-                current_skills_dir,
-                import_skills_dir,
-            )
+        if _skill_module_shares_skills_tool_resolver(module, skills_tool):
+            # Dynamic exactly when skills_tool is, so skills_tool must pass the SKILLS_DIR rule.
+            if not _skill_module_skills_dir_unpatched(_SKILLS_TOOL_MODULE, skills_tool):
+                return False
+        elif not _skill_module_skills_dir_unpatched(module_name, module):
             return False
 
         skills_dir = getattr(module, '_skills_dir', None)
@@ -180,16 +266,23 @@ def _skill_modules_support_profile_home(profile_home: Path) -> bool:
 
 
 def patch_skill_home_modules(home: Path) -> None:
-    """Patch imported skill modules that cache HERMES_HOME at import time."""
+    """Patch imported skill modules that cache HERMES_HOME at import time.
+
+    Only globals a module already defines are rebound. A skill_manager_tool that
+    resolves through tools.skills_tool has none; creating them would give it
+    skills-dir state nothing reads and stop it matching that shape.
+    """
     for module_name in _SKILL_HOME_MODULES:
         module = sys.modules.get(module_name)
         if module is None:
             continue
-        try:
-            module.HERMES_HOME = home
-            module.SKILLS_DIR = home / "skills"
-        except AttributeError:
-            logger.debug("Failed to patch %s module", module_name)
+        for attr, value in (("HERMES_HOME", home), ("SKILLS_DIR", home / "skills")):
+            if not hasattr(module, attr):
+                continue
+            try:
+                setattr(module, attr, value)
+            except AttributeError:
+                logger.debug("Failed to patch %s.%s", module_name, attr)
 
 
 def restore_skill_home_modules(snapshot: dict[str, dict[str, object]]) -> None:
@@ -236,6 +329,11 @@ def _unwrap_profile_home_to_base(home: Path) -> Path:
 # escape isolation (#4589).
 _PROTECTED_ENV_KEYS = frozenset({
     'HERMES_WEBUI_ISOLATED_PROFILE',
+    # Where the Agent reads the executing tree's install stamp (its pm/paths.py
+    # install_root()). docker_init decides at boot whether a mounted Agent would
+    # relaunch from that stamp (#8593); a profile .env moving it would change the
+    # answer for the next in-app update restart, which skips docker_init (#8594).
+    'HERMES_INSTALL_ROOT',
     # Server-wide sidebar window; a profile .env must not widen the per-request query.
     'HERMES_WEBUI_VISIBLE_SESSION_LIMIT',
     # #7656 round-3: HERMES_WEBUI_MAX_SESSION_RESOLVE is a process-wide resource
@@ -246,6 +344,11 @@ _PROTECTED_ENV_KEYS = frozenset({
     # the operator intended. Same shape as the isolated-profile key: only
     # the operator/launcher env at startup can set it.
     'HERMES_WEBUI_MAX_SESSION_RESOLVE',
+    # Hermes Agent launch-only key (hermes_constants.LAUNCH_ONLY_ENV_KEYS): the
+    # administrator-managed scope directory is chosen once per process. A profile
+    # .env must never redirect it for every thread through a worker or turn mirror
+    # or a reload (the Agent's own .env readers drop it too).
+    'HERMES_MANAGED_DIR',
 })
 
 
@@ -865,6 +968,95 @@ class cron_profile_context:
         return False
 
 
+# ── Lock-free per-thread cron store scope (#7295, #6753) ─────────────────────
+# A long in-process cron job (the scheduled fire wrapped by
+# install_cron_scheduler_profile_isolation(), or the in-chat cronjob
+# action=run) holds _cron_env_lock and points os.environ['HERMES_HOME'] and the
+# cron module path globals at its own profile for the whole run. Request
+# handlers that only touch the cron store must not wait for that, and must not
+# read those globals either. Newer Agents expose context-local overrides that
+# take priority over the globals:
+#   * cron.jobs.use_cron_store(home)            -> jobs.json / output / locks
+#   * hermes_constants.set_hermes_home_override  -> get_hermes_home() readers
+#     (executions/notepad DBs, config.yaml timezone and model-pin reads)
+# cron_store_scope*() binds both for the current thread only and never takes
+# _cron_env_lock. If either helper is missing (older Agent, test stub) it falls
+# back to the lock-based contexts above, unchanged. Callers whose code path
+# reads process-global state (os.environ, cron.scheduler._hermes_home, gateway
+# status via get_process_hermes_home) must keep using the lock-based contexts.
+
+
+_RLOCK_TYPES = tuple(
+    t for t in (type(threading.RLock()), getattr(threading, '_PyRLock', None)) if isinstance(t, type)
+)
+
+
+def _agent_jobs_lock_is_reentrant(cron_jobs_mod) -> bool:
+    """True when the thread holding the Agent's ``_jobs_lock()`` may re-enter it.
+
+    The lock-free paths hold ``_jobs_lock()`` around Agent calls that take it
+    again internally (Create's two writes, Resume, List/Run reads). Agents that
+    ship ``use_cron_store`` nest it through a thread-local depth counter over an
+    ``RLock`` (``_jobs_lock_state`` / ``_jobs_file_lock``). Older Agents (e.g.
+    e5b4cf7bea2) use a plain ``threading.Lock``, where that outer hold
+    deadlocks the inner acquire. Anything else is treated as non-reentrant,
+    which keeps the locked fallback (slower, never a hang).
+    """
+    return isinstance(getattr(cron_jobs_mod, '_jobs_file_lock', None), _RLOCK_TYPES) and isinstance(
+        getattr(cron_jobs_mod, '_jobs_lock_state', None), threading.local
+    )
+
+
+def _cron_store_scope_helpers():
+    """Return ``(use_cron_store, hermes_constants)`` when the Agent supports it."""
+    try:
+        import cron.jobs as _cj
+    except Exception:
+        return None
+    use_cron_store = getattr(_cj, 'use_cron_store', None)
+    if not callable(use_cron_store) or not callable(getattr(_cj, 'get_cron_output_dir', None)):
+        return None
+    # Lock-free writers rely on the Agent's jobs.json lock to serialize against
+    # each other and against a running job's bookkeeping (Resume holds it across
+    # its read/compute/write), and hold it around Agent calls that take it
+    # again, so it must be re-entrant. Otherwise keep the locked fallback.
+    if not callable(getattr(_cj, '_jobs_lock', None)) or not _agent_jobs_lock_is_reentrant(_cj):
+        return None
+    home_mod = _resolve_hermes_home_override()
+    if home_mod is None:
+        return None
+    return use_cron_store, home_mod
+
+
+@contextmanager
+def cron_store_scope_for_home(home: Path):
+    """Route cron store access in this thread to *home* without the env lock."""
+    home = Path(home)
+    helpers = _cron_store_scope_helpers()
+    if helpers is None:
+        with cron_profile_context_for_home(home):
+            yield home
+        return
+    use_cron_store, home_mod = helpers
+    token = home_mod.set_hermes_home_override(str(home))
+    try:
+        with use_cron_store(home):
+            yield home
+    finally:
+        home_mod.reset_hermes_home_override(token)
+
+
+@contextmanager
+def cron_store_scope():
+    """TLS-active-profile variant of :func:`cron_store_scope_for_home`."""
+    if _cron_store_scope_helpers() is None:
+        with cron_profile_context():
+            yield
+        return
+    with cron_store_scope_for_home(get_active_hermes_home()):
+        yield
+
+
 def get_hermes_home_for_profile(name: str) -> Path:
     """Return the HERMES_HOME Path for *name* without mutating any process state.
 
@@ -877,6 +1069,300 @@ def get_hermes_home_for_profile(name: str) -> Path:
     traversal such as '../../etc').
     """
     return _resolve_profile_home_for_name(name)
+
+
+# Mirrors of the modern marker/tombstone rule, applied ONLY when no Agent is
+# importable at all (a WebUI-only deployment): there is no installed producer
+# to match, so an identity-marked and non-tombstoned named home is admitted and
+# everything else is denied as the fail-closed proxy. An installed core that
+# merely predates the helpers is NOT governed by this mirror — those cores
+# decide named-profile existence by directory existence, and
+# _named_profile_is_live_without_helper applies that rule instead.
+_PROFILE_IDENTITY_MARKERS = ('config.yaml', '.env', 'SOUL.md', 'profile.yaml', 'auth.json', 'state.db')
+_DELETED_PROFILES_DIRNAME = '.deleted'
+
+
+def _named_profile_home_shape(path) -> Path | None:
+    """Return the ``<root>/profiles/<id>`` component of *path*, using path shape only.
+
+    Import-independent fallback used when the installed Agent's classifier
+    (``hermes_constants.named_profile_home``) is unavailable, and as the
+    fail-closed proxy when that classifier raises. It preserves the same
+    ``.hermes`` stop boundary the classifier uses: a default home that merely
+    lives under a coincidental ``profiles/`` ancestor (for example
+    ``<root>/profiles/operator/.hermes``) is NOT called a named home, and only
+    the deepest matching component is authoritative.
+
+    It is deliberately looser than ``hermes_constants.named_profile_home`` in
+    provenance (it cannot prove the ``profiles`` parent is a real Hermes
+    root), so on Agent-absent deployments a custom home such as
+    ``<root>/profiles/project/custom-root`` may still be over-restrictively
+    treated as named and denied — the safe direction for a ghost shell.
+    """
+    try:
+        current = Path(path).expanduser()
+    except Exception:
+        return None
+    for candidate in (current, *current.parents):
+        # Default-home boundary: a `.hermes` component ends the walk, exactly
+        # like the installed classifier, so an unrelated `profiles/` ancestor
+        # above it is never treated as a profiles root.
+        if candidate.name == ".hermes":
+            return None
+        if candidate.parent.name == "profiles" and not candidate.name.startswith("."):
+            if _PROFILE_ID_RE.fullmatch(candidate.name):
+                return candidate
+    return None
+
+
+def _named_home_under_resolved_profiles_root(path: Path) -> Path | None:
+    """Return the logical ``<root>/profiles/<id>`` home for a path under the RESOLVED profiles root.
+
+    ``get_hermes_home_for_profile()`` resolves the final path, so when
+    ``profiles`` itself is a symlink the home arrives as ``<resolved>/<id>`` —
+    the ``profiles`` component is gone and neither the shape grammar nor the
+    installed classifier can see it. The resolved root still identifies the
+    home, and the LOGICAL path keeps the identity the liveness checks need (the
+    ``.deleted`` tombstone lives beside ``profiles/<id>``, reachable through
+    the symlink). Only the first component under the root is a profile id;
+    deeper components are inside the home, not a second home.
+    """
+    try:
+        resolved_root = _profiles_root()
+        resolved = Path(path).resolve(strict=False)
+        if resolved == resolved_root or resolved_root not in resolved.parents:
+            return None
+        name = resolved.relative_to(resolved_root).parts[0]
+        if not _PROFILE_ID_RE.fullmatch(name):
+            return None
+    except Exception:
+        return None
+    return _DEFAULT_HERMES_HOME / "profiles" / name
+
+
+def _is_configured_default_home(path) -> bool:
+    """Whether *path* is this process's configured default (root) Hermes home.
+
+    ``_DEFAULT_HERMES_HOME`` is resolved at import from ``HERMES_BASE_HOME`` /
+    ``HERMES_HOME`` by the same rule the Agent's ``get_default_hermes_root()``
+    applies, so the two agree on every layout either side accepts — including a
+    custom root that lives *under* a ``profiles/`` ancestor.
+    """
+    try:
+        default_home = Path(_DEFAULT_HERMES_HOME).expanduser()
+        candidate = Path(path).expanduser()
+        if candidate == default_home:
+            return True
+        return candidate.resolve(strict=False) == default_home.resolve(strict=False)
+    except Exception:
+        return False
+
+
+def _logical_named_profile_home(owner_profile, path) -> Path | None:
+    """Return the logical ``<root>/profiles/<owner_profile>`` home for *path*.
+
+    A profile directory may itself be a symlink (``profiles/worker`` ->
+    ``profiles/storage/worker-home``). Both the Agent and WebUI list it, but
+    ``get_hermes_home_for_profile()`` returns the RESOLVED path, whose own
+    ``profiles`` ancestor is a different — often marker-less — profile. Checking
+    the resolved path therefore validates the wrong home's identity/tombstone
+    and the live profile's jobs vanish from Tasks.
+
+    The route passes the LOGICAL name, so the guard can check that home's
+    identity and tombstone while the resolved path stays authoritative for
+    containment and cron I/O. Returns ``None`` when *owner_profile* does not
+    name a distinct named profile (root alias, invalid id) or when *path* is not
+    that home's resolved form, so the caller falls back to path-only
+    classification instead of trusting a mismatched name.
+    """
+    name = str(owner_profile or '').strip()
+    if not name or not _PROFILE_ID_RE.fullmatch(name):
+        return None
+    try:
+        if _is_root_profile(name):
+            return None
+        logical = _DEFAULT_HERMES_HOME / 'profiles' / name
+        if logical.resolve(strict=False) != Path(path).expanduser().resolve(strict=False):
+            return None
+    except Exception:
+        return None
+    return logical
+
+
+def _named_profile_home_for_reads(path, owner_profile: str | None = None) -> Path | None:
+    """Classify *path* as a named profile home; the caller checks its liveness.
+
+    Returns the canonical ``<root>/profiles/<id>`` home, or ``None`` for a
+    provably non-named (default/custom) home.
+
+    Classification order:
+
+    1. The configured default home is admitted outright, before any ancestor
+       classifier runs. A legal custom ``HERMES_HOME`` such as
+       ``<root>/.hermes/profiles/storage/custom-root`` is the default root for
+       both the Agent and WebUI, yet every ancestor classifier maps it to the
+       marker-less ``storage`` profile — which silently dropped the default
+       profile's own jobs. Isolated-profile handling is untouched: the pinned
+       startup home is a named home, not this root.
+    2. The LOGICAL *owner_profile* the route resolved the home from wins over
+       path shape: a symlinked profile dir resolves into another profile's
+       home, and only the logical home's identity/tombstone describes the row
+       (see :func:`_logical_named_profile_home`).
+    3. A path under the RESOLVED profiles root is owned by that root's logical
+       ``<root>/profiles/<id>`` home, and that confirmed mapping comes next.
+       When ``profiles`` is a symlink whose target itself sits under another
+       ``profiles`` root, the resolved path the readers pass carries a second
+       ``profiles`` ancestor — every ancestor classifier then answers with that
+       (possibly live) ancestor instead of the requested child, so the guard
+       would validate the wrong home. The logical child keeps the
+       identity/tombstone checks meaningful through the symlink.
+    4. Outside that root the installed Agent's ``named_profile_home`` is
+       authoritative: it stops at a ``.hermes`` component and proves the
+       ``profiles`` parent is a real Hermes root, so a legitimate
+       default/custom home that merely sits under a coincidental ``profiles/``
+       ancestor is not a named home.
+    5. When the classifier is unavailable (Agent-absent deployment) or raises,
+       the import-independent shape grammar decides, with the same ``.hermes``
+       stop boundary — a path that still *looks* named is denied rather than
+       admitted while classification cannot be confirmed.
+    """
+    try:
+        current = Path(path).expanduser()
+    except Exception:
+        return None
+
+    # The configured default home is never a named profile, whatever ancestors
+    # it happens to live under.
+    if _is_configured_default_home(current):
+        return None
+
+    # The logical owner_profile names the row; the resolved path only proves it.
+    logical_home = _logical_named_profile_home(owner_profile, current)
+    if logical_home is not None:
+        return logical_home
+
+    # Confirmed configured-root ownership outranks every ancestor classifier:
+    # the resolved root maps the path back to its logical home, which is the
+    # home whose identity/tombstone must be checked.
+    resolved_home = _named_home_under_resolved_profiles_root(current)
+    if resolved_home is not None:
+        return resolved_home
+
+    try:
+        from hermes_constants import named_profile_home
+    except Exception:
+        named_profile_home = None
+    if named_profile_home is None:
+        return _named_profile_home_shape(current)
+    try:
+        return named_profile_home(current)
+    except Exception:
+        # Classifier failed: fall back to the shape grammar (fail closed).
+        return _named_profile_home_shape(current)
+
+
+def _named_profile_is_live_without_helper(home) -> bool:
+    """Apply the installed core's own liveness rule when ``named_profile_is_live`` is absent.
+
+    Agent cores that predate the helper still import ``hermes_constants`` and
+    still serve ``cron.jobs``, so a missing helper must not read as "not live":
+    denying there fired the deny branch for every live named profile on every
+    ``/api/crons`` call and blanked Tasks on those deployments.
+
+    The rule applied is the one the *installed producer itself* uses, decided by
+    the marker helpers it exports:
+
+    * both ``named_profile_has_identity`` and ``named_profile_is_deleted`` —
+      that core's own identity/tombstone rule (its marker set stays
+      authoritative);
+    * only one of them — check the half that core checks, and nothing more;
+    * neither one, but ``hermes_constants`` imports — a pre-marker core
+      (the ``e5b4cf7bea`` shape): its ``profile_exists`` is plain directory
+      existence and it has no tombstone concept, so a live directory must
+      stay readable rather than be judged by a rule that core never applied;
+    * ``hermes_constants`` itself is unimportable (no Agent at all) — mirror
+      the modern rule as a fail-closed proxy: an identity marker must be
+      present and no tombstone may exist, or deny.
+
+    A raising check still denies, exactly like the helper path.
+    """
+    try:
+        home = Path(home)
+        if not home.is_dir():
+            return False
+        try:
+            import hermes_constants as installed
+        except Exception:
+            installed = None
+        if installed is not None:
+            named_profile_has_identity = getattr(installed, 'named_profile_has_identity', None)
+            named_profile_is_deleted = getattr(installed, 'named_profile_is_deleted', None)
+            if named_profile_has_identity is None and named_profile_is_deleted is None:
+                # Pre-marker core: directory existence is its own profile rule.
+                return True
+            if named_profile_has_identity is not None and not bool(named_profile_has_identity(home)):
+                return False
+            if named_profile_is_deleted is not None and bool(named_profile_is_deleted(home)):
+                return False
+            return True
+        if not any(
+            (home / marker).is_file() or (home / marker).is_symlink()
+            for marker in _PROFILE_IDENTITY_MARKERS
+        ):
+            return False
+        return not (home.parent / _DELETED_PROFILES_DIRNAME / home.name).exists()
+    except Exception:
+        return False
+
+
+def is_live_profile_home_for_reads(home, owner_profile: str | None = None) -> bool:
+    """Whether a cross-profile reader may touch *home*.
+
+    A named profile home must still be live — identity marker present and no
+    delete tombstone — or reading it would call ``ensure_dirs()`` and create
+    ``cron/`` + ``cron/output/`` inside a ghost shell. The default/custom homes
+    are not under ``profiles/`` and stay readable.
+
+    Classification first admits the configured default home, then honours the
+    logical *owner_profile* the route resolved *home* from (a symlinked profile
+    dir resolves into another profile's home, so only the logical home's
+    identity/tombstone describes the row), then the configured RESOLVED
+    profiles root (the logical home owned by that root, see
+    :func:`_named_profile_home_for_reads`), and finally falls back to the
+    installed Agent's ``named_profile_home(actual_home)`` classifier, which
+    preserves the ``.hermes`` boundary and profiles-root provenance; named homes
+    are then liveness-checked on their canonical home. The import-independent
+    fallback keeps Agent-absent deployments working: provably non-named homes
+    are admitted, uncertain named homes are denied.
+
+    Fails CLOSED for named homes: when the liveness check raises, a named home
+    is treated as NOT readable. AGENTS.md requires identity checks to deny
+    access when safety cannot be confirmed — returning ``True`` there let a
+    stale profile name reach ``list_jobs()`` on any helper failure, which is
+    exactly the ghost-shell write this predicate exists to prevent. A helper
+    that is merely MISSING (older Agent cores) is not a failure: those cores
+    serve cron jobs with their own liveness rule, which is applied instead.
+    """
+    named = _named_profile_home_for_reads(home, owner_profile=owner_profile)
+    if named is None:
+        # Provably not under a profiles/ root: the default/custom home is readable.
+        return True
+    try:
+        from hermes_constants import named_profile_is_live
+    except Exception:
+        # Older Agent cores never shipped the helper but still load and serve
+        # cron jobs, so their own liveness rule decides — denying here would
+        # blank Tasks for every named profile on those deployments.
+        return _named_profile_is_live_without_helper(named)
+    try:
+        return bool(named_profile_is_live(named))
+    except Exception as exc:
+        logger.warning(
+            "profile liveness check failed for %s (%s) — denying cross-profile read",
+            named,
+            exc,
+        )
+        return False
 
 
 _TERMINAL_ENV_MAPPINGS = {
@@ -927,25 +1413,34 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
     of that run.
     """
     home = Path(home).expanduser()
+    dotenv = _read_profile_dotenv(home)
     env: dict[str, str] = {}
 
-    try:
-        from api import yaml_compat as _yaml
+    # config.yaml keeps raw ``${VAR}`` references (#8032): resolve terminal
+    # values under the profile's own env binding before projecting them. A
+    # scalar that stays unresolved is left unset rather than handed to the
+    # Agent as a literal placeholder (host, image, cwd...).
+    from api.config import _has_env_ref
 
-        cfg_path = home / 'config.yaml'
-        cfg = _yaml.safe_load(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
-        if not isinstance(cfg, dict):
-            cfg = {}
+    try:
+        cfg = load_profile_config(home, env=_profile_env_binding(home, dotenv))
     except Exception:
         cfg = {}
-
-    terminal_cfg = cfg.get('terminal', {}) if isinstance(cfg, dict) else {}
+    terminal_cfg = cfg.get('terminal', {})
     if isinstance(terminal_cfg, dict):
         for key, env_key in _TERMINAL_ENV_MAPPINGS.items():
-            if key in terminal_cfg and terminal_cfg[key] is not None:
-                env[env_key] = _stringify_env_value(terminal_cfg[key])
+            value = terminal_cfg.get(key)
+            if value is not None and not _has_env_ref(value):
+                env[env_key] = _stringify_env_value(value)
 
-    env_path = home / '.env'
+    env.update(dotenv)
+    return env
+
+
+def _read_profile_dotenv(home: Path) -> dict[str, str]:
+    """Return a profile's ``.env`` assignments (operator-protected keys skipped)."""
+    env: dict[str, str] = {}
+    env_path = Path(home) / '.env'
     if env_path.exists():
         try:
             for line in env_path.read_text(encoding='utf-8').splitlines():
@@ -964,8 +1459,170 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
                         env[k] = v
         except Exception:
             logger.debug("Failed to read runtime env from %s", env_path)
-
     return env
+
+
+# ── Reading config VALUES from a profile's raw config.yaml (#8032) ───────────
+# Writers keep ``${VAR}`` references on disk, so any reader of a raw document
+# must expand it under the env of the profile that OWNS the document — never
+# the live process env, which streaming turns and background workers overwrite
+# with their own profile's values while they run. Route value reads through
+# load_profile_config() / expand_profile_config();
+# tests/test_issue8032_profile_env_binding.py fails on any new raw load in api/.
+
+def _is_root_profile_home(home) -> bool:
+    try:
+        return Path(home).expanduser().resolve() == Path(_DEFAULT_HERMES_HOME).expanduser().resolve()
+    except Exception:
+        return False
+
+
+def _value_from_dotenv(key, value, dotenv: dict[str, str]) -> bool:
+    """True when non-empty *value* equals *dotenv*'s value for *key* (both stripped): the #8435
+    by-value provenance rule (fail closed when the launcher exported the same value too)."""
+    value = str(value or "").strip()
+    return bool(value) and key in dotenv and str(dotenv[key] or "").strip() == value
+
+
+def _agent_env_file_reader():
+    """The Agent's ``.env`` reader (``agent.secret_scope.load_env_file``); WebUI's on an older Agent."""
+    try:
+        from agent.secret_scope import load_env_file
+    except Exception:
+        logger.debug("Hermes Agent has no secret_scope.load_env_file; reading .env files with WebUI's reader")
+        return _read_dotenv_values
+    return load_env_file
+
+
+def _named_launch_home_readings() -> tuple[dict[str, str], ...]:
+    """The launch home's ``.env`` as it was at startup, by each reading a launcher's export can equal: WebUI's
+    and ctl.sh's (recorded at import) and the Agent's (``load_env_file``; what ``set -a; . file`` exports),
+    recorded by ``init_profile_state()``. A reading through WebUI's fallback reader (Agent not importable yet,
+    or without ``load_env_file``) is not recorded, so a later call takes the Agent's; WebUI's is already here."""
+    if not _INITIAL_HERMES_HOME:
+        return ()
+    home = str(_INITIAL_HERMES_HOME)
+    if home not in _NAMED_LAUNCH_HOME_AGENT_READINGS:
+        reader = _agent_env_file_reader()
+        if reader is _read_dotenv_values:
+            return _INITIAL_HERMES_HOME_DOTENV, _INITIAL_HERMES_HOME_LAUNCHER_DOTENV
+        _NAMED_LAUNCH_HOME_AGENT_READINGS[home] = reader(Path(home).expanduser() / '.env')
+    return _INITIAL_HERMES_HOME_DOTENV, _INITIAL_HERMES_HOME_LAUNCHER_DOTENV, _NAMED_LAUNCH_HOME_AGENT_READINGS[home]
+
+
+def _matches_launch_home_env(key, value, readings=None) -> bool:
+    """True when *value* for *key* equals the launch home's ``.env`` value by any startup reading: a shell
+    launcher sourced it before Python started (#8435 provenance, by value; fail closed when the launcher exported
+    the same value too). No root check: callers decide whether the launch home is a NAMED profile."""
+    readings = _named_launch_home_readings() if readings is None else readings
+    return any(_value_from_dotenv(key, value, dotenv) for dotenv in readings)
+
+
+def operator_env() -> dict[str, str]:
+    """The trusted operator/deployment env: the launch-time snapshot (``api.paths.STARTUP_ENV``,
+    captured at import, before any profile ``.env`` load or worker mirror) without the values a
+    shell launcher sourced from a NAMED launch home's ``.env``. Never the live ``os.environ``.
+
+    Root's ``${VAR}`` binding (``profile_env_binding``) layers root's ``.env`` over it, and the
+    Agent's launch-profile secret scopes are built from it (``init_profile_state``)."""
+    from api import paths as _paths
+
+    if not _INITIAL_HERMES_HOME or _is_root_profile_home(_INITIAL_HERMES_HOME):
+        return dict(_paths.STARTUP_ENV)
+    readings = _named_launch_home_readings()
+    return {k: v for k, v in _paths.STARTUP_ENV.items() if not _matches_launch_home_env(k, v, readings)}
+
+
+def _profile_env_binding(home, dotenv: dict[str, str]) -> dict[str, str]:
+    env: dict[str, str] = {}
+    if _is_root_profile_home(home):
+        # Explicit ROOT binding from the launch-time snapshot, taken at import:
+        # it predates every _reload_dotenv() and every worker that mirrors a
+        # named profile into os.environ, so a key the loader mirrored later is
+        # still the LAUNCHER's value here and root keeps it. The only
+        # profile-owned values the snapshot can hold are those a shell launcher
+        # (ctl.sh) sourced from a NAMED launch home's .env before Python
+        # started; operator_env() drops them (#8435). Root's own .env below
+        # restores the keys it defines.
+        env.update(operator_env())
+    env.update(filter_runtime_env_for_gateway_parity(dotenv))
+    env['HERMES_HOME'] = str(Path(home).expanduser())
+    return env
+
+
+def profile_env_binding(home) -> dict[str, str]:
+    """The env a profile's config.yaml ``${VAR}`` references resolve against.
+
+    * named profile: its own ``.env`` only, never the server process env
+      (fail-closed profile isolation, #3961);
+    * root profile: the launch-time env snapshot (``api.paths.STARTUP_ENV``,
+      taken before any worker mirrors a named profile into ``os.environ``)
+      without the values a shell launcher sourced from a NAMED launch home's
+      ``.env`` (``_INITIAL_HERMES_HOME_DOTENV``, #8435), under root's own
+      ``.env``. It is bound
+      explicitly instead of falling back to live ``os.environ``: a
+      process-wide switch loads a named profile's ``.env`` into it and every
+      streaming turn / background worker mirrors its named profile's env into
+      it while it runs.
+
+    ``HERMES_HOME`` is the profile's home in both cases.
+    """
+    return _profile_env_binding(home, _read_profile_dotenv(Path(home).expanduser()))
+
+
+def expand_profile_config(home, raw, *, env: Optional[dict] = None):
+    """Expand ``${VAR}`` in a RAW config document (or any subtree of it) that
+    belongs to the profile at *home*, under ``profile_env_binding(home)``.
+
+    Returns a fresh structure; *raw* is never mutated. A reference the binding
+    cannot resolve stays the literal ``${VAR}`` (``api.config._has_env_ref``
+    is true for it), and a caller that forwards a value treats that as absent.
+    Pass *env* to reuse a binding computed earlier (e.g. before taking a lock).
+    The binding is applied to the calling thread only, for the expansion.
+    """
+    from api.config import _expand_env_vars, _thread_ctx
+
+    if env is None:
+        env = profile_env_binding(home)
+    previous_env = getattr(_thread_ctx, 'env', None)
+    previous_block = getattr(_thread_ctx, 'block_process_env_fallback', False)
+    _thread_ctx.env = dict(env)
+    _thread_ctx.block_process_env_fallback = True
+    try:
+        try:
+            return _expand_env_vars(raw)
+        except RecursionError:
+            # A recursive YAML alias elsewhere in the document must not hide
+            # the profile's ordinary settings: keep the raw tree (its ${VAR}
+            # literals read as absent via _has_env_ref) instead of {}.
+            logger.debug("profile config at %s has a recursive alias; served unexpanded", home)
+            return copy.deepcopy(raw)
+    finally:
+        _thread_ctx.block_process_env_fallback = previous_block
+        if previous_env is None:
+            del _thread_ctx.env
+        else:
+            _thread_ctx.env = previous_env
+
+
+def load_profile_config(home, *, env: Optional[dict] = None) -> dict:
+    """Return the profile's config.yaml with every ``${VAR}`` expanded under that
+    profile's env binding (see ``expand_profile_config``); ``{}`` when the file
+    is missing or unparsable. Parsed fresh on every call, like the readers it
+    replaced, so an out-of-band edit is never served stale.
+    """
+    config_path = Path(home).expanduser() / 'config.yaml'
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
+    except Exception as exc:
+        # #9322: no traceback/snippet — the parser's message quotes the bad line,
+        # which may hold a value the operator does not want in a log file.
+        logger.debug("Failed to load profile config %s: %s", config_path, type(exc).__name__)
+        return {}
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    expanded = expand_profile_config(home, raw, env=env)
+    return expanded if isinstance(expanded, dict) else {}
 
 
 # Match Hermes Agent gateway behavior: profile-scoped WebUI runs should
@@ -1130,14 +1787,19 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
         return names
 
     custom_providers = payload.get("custom_providers") if isinstance(payload, dict) else None
-    if not isinstance(custom_providers, list):
-        return names
-    for custom_provider in custom_providers:
+    entries = list(custom_providers) if isinstance(custom_providers, list) else []
+    # Scrubbing is intentionally independent of catalog visibility/precedence:
+    # even disabled or shadowed native records declare profile-owned secrets.
+    native_providers = payload.get("providers") if isinstance(payload, dict) else None
+    if isinstance(native_providers, dict):
+        entries.extend(native_providers.values())
+    for custom_provider in entries:
         if not isinstance(custom_provider, dict):
             continue
-        key_env = str(custom_provider.get("key_env") or "").strip()
-        if key_env:
-            names.add(key_env)
+        for field in ("key_env", "api_key_env"):
+            key_env = str(custom_provider.get(field) or "").strip()
+            if key_env:
+                names.add(key_env)
         api_key = str(custom_provider.get("api_key") or "").strip()
         match = re.fullmatch(r"\$\{([^}]+)\}", api_key)
         if match:
@@ -1185,6 +1847,41 @@ def _resolve_secret_scope_module():
         except ImportError:
             _secret_scope_available = False
     return None
+
+
+# #9084: Hermes Agent's ``set_secret_scope`` takes a keyword-only ``profile_home``
+# that stamps the scope with the home its mapping was built for. An unstamped scope
+# counts as the process (launch) home's, so the Agent's post-plugin-discovery
+# ``refresh_installed_secret_scope(get_hermes_home())`` skips a named profile's
+# turn. Older Agents lack the keyword: decide ONCE per module (and setter) from the
+# signature instead of retrying on TypeError, which would mask real setter errors.
+# Only a parameter actually named ``profile_home`` counts: a bare ``**kwargs``
+# wrapper may forward to a legacy setter, and a TypeError there would leave the
+# turn with no scope at all, where the unstamped install is today's behaviour.
+_secret_scope_stamp_support = None  # (module, setter, accepts_profile_home)
+
+
+def _set_secret_scope_for_profile(mod, secrets, profile_home):
+    """Install *secrets* as *mod*'s secret scope, stamped with *profile_home* when the
+    installed Agent's ``set_secret_scope`` accepts it (unstamped otherwise)."""
+    global _secret_scope_stamp_support
+    setter = mod.set_secret_scope
+    cached = _secret_scope_stamp_support
+    if cached is not None and cached[0] is mod and cached[1] is setter:
+        accepts_profile_home = cached[2]
+    else:
+        try:
+            param = inspect.signature(setter).parameters.get("profile_home")
+            accepts_profile_home = param is not None and param.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        except Exception:
+            accepts_profile_home = False
+        _secret_scope_stamp_support = (mod, setter, accepts_profile_home)
+    if accepts_profile_home:
+        return setter(secrets, profile_home=str(profile_home))
+    return setter(secrets)
 
 
 # #5567: hermes-agent v0.18.0+ exposes a CONTEXT-LOCAL Hermes-home override
@@ -1298,7 +1995,9 @@ def profile_env_for_background_worker(
         _has_scope = False
         if _secret_scope_mod is not None:
             try:
-                _scope_token = _secret_scope_mod.set_secret_scope(thread_env)
+                _scope_token = _set_secret_scope_for_profile(
+                    _secret_scope_mod, thread_env, profile_home_path
+                )
                 _has_scope = True
             except Exception:
                 pass
@@ -1561,7 +2260,9 @@ def profile_env_for_active_request_readonly(
         _has_scope = False
         if _secret_scope_mod is not None:
             try:
-                _scope_token = _secret_scope_mod.set_secret_scope(thread_env)
+                _scope_token = _set_secret_scope_for_profile(
+                    _secret_scope_mod, thread_env, profile_home_path
+                )
                 _has_scope = True
             except Exception:
                 pass
@@ -1764,6 +2465,59 @@ def init_profile_state() -> None:
     _set_hermes_home(home)  # also pins the process-profile home (MCP routing anchor)
     install_cron_scheduler_profile_isolation()
     _reload_dotenv(home)
+    _named_launch_home_readings()  # the Agent's reading of the launch home's .env, recorded now (Agent on sys.path)
+    _install_operator_env_as_agent_launch_env()
+
+
+def _install_operator_env_as_agent_launch_env() -> None:
+    """Build the Agent's launch-profile secret scopes from ``operator_env()`` (frozen here), not
+    from the live ``os.environ``, which holds another profile's values while that profile's
+    worker, chat turn or save runs. Patches the private
+    ``tui_gateway.launch_profile_policy._launch_env``; when it is absent, logs and keeps the
+    Agent's default (the live env).
+
+    When the launcher sourced the root ``.env`` (``HERMES_HOME`` unset or the root; ctl.sh sources
+    ``${HERMES_HOME:-$HOME/.hermes}/.env``) it also leaves out the values equal to that file (read
+    as the Agent reads it), by value as ``operator_env()`` does for a named launch home. Root's
+    scope reads the file itself; a named launch profile (a saved active profile) gets exactly
+    those keys from the current file each time its launch env is built, under its own ``.env``.
+    Either way a key changed or removed in Settings applies without a restart."""
+    try:
+        from tui_gateway import launch_profile_policy as _lpp
+    except Exception:
+        return  # no Agent launch-profile scopes to feed
+    if not callable(getattr(_lpp, '_launch_env', None)):
+        logger.warning("Hermes Agent has no launch_profile_policy._launch_env; "
+                       "launch-profile secret scopes keep reading the live process env")
+        return
+    load_env_file = _agent_env_file_reader()
+    root_env = Path(_DEFAULT_HERMES_HOME) / '.env'
+    root_dotenv: dict[str, str] = {}
+    root_launcher: dict[str, str] = {}
+    if not _INITIAL_HERMES_HOME or _is_root_profile_home(_INITIAL_HERMES_HOME):
+        root_dotenv = load_env_file(root_env)
+        root_launcher = _launcher_dotenv_values(root_env)
+        if not root_dotenv:
+            logger.debug("No readable root .env values to leave out of the frozen launch env")
+    launch_env = operator_env()
+    # A key matches the root .env as the Agent reads it or as ctl.sh decoded it (double-quoted \n \r \t);
+    # each is re-read the way it matched, so a saved active named profile keeps the value base gave it.
+    agent_keys = {k for k, v in launch_env.items() if _value_from_dotenv(k, v, root_dotenv)}
+    launcher_keys = {k for k, v in launch_env.items()
+                     if k not in agent_keys and _value_from_dotenv(k, v, root_launcher)}
+    root_keys = agent_keys | launcher_keys
+    frozen = {k: v for k, v in launch_env.items() if k not in root_keys}
+    if not root_keys or _is_root_profile_home(get_process_profile_home()):
+        _lpp._launch_env = lambda: dict(frozen)
+        return
+
+    def _launch_env_with_current_root_values() -> dict[str, str]:
+        current = load_env_file(root_env)
+        decoded = _launcher_dotenv_values(root_env) if launcher_keys else {}
+        return {**frozen, **{k: current[k] for k in agent_keys if k in current},
+                **{k: decoded[k] for k in launcher_keys if k in decoded}}
+
+    _lpp._launch_env = _launch_env_with_current_root_values
 
 
 def _pin_process_profile_home(home: Path) -> None:
@@ -1885,13 +2639,13 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         from api.config import get_config
         cfg = get_config()
     else:
-        # Direct disk read — does not touch _cfg_cache
+        # Direct disk read — does not touch _cfg_cache. config.yaml keeps raw
+        # ``${VAR}`` references (#8032), so expand them under the TARGET
+        # profile's env binding (root included: a worker's mirrored env must
+        # not resolve root's references) before handing defaults to the
+        # frontend; otherwise New Chat would send the literal placeholders.
         try:
-            from api import yaml_compat as _yaml
-            cfg_path = home / 'config.yaml'
-            cfg = _yaml.safe_load(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
-            if not isinstance(cfg, dict):
-                cfg = {}
+            cfg = load_profile_config(home)
         except Exception:
             cfg = {}
     model_cfg = cfg.get('model', {})
@@ -1902,6 +2656,12 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     elif isinstance(model_cfg, dict):
         default_model = model_cfg.get('default')
         default_model_provider = model_cfg.get('provider')
+    # A reference the target profile can't resolve stays a literal ``${VAR}``
+    # after expansion; never hand that placeholder to New Chat (#8032).
+    if isinstance(default_model, str) and '${' in default_model:
+        default_model = None
+    if isinstance(default_model_provider, str) and '${' in default_model_provider:
+        default_model_provider = None
 
     # Read the target profile's workspace directly from *home* rather than via
     # get_last_workspace() which routes through the thread-local/process-global active
@@ -1963,8 +2723,43 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     }
 
 
-_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, int, float, str | None]] = {}
-_SKILLS_STATS_CACHE_TTL = 300.0  # seconds — long because .clear() handles programmatic changes
+# Cache entry: (enabled, compat, mtime_ns, hard_expiry, org, validated_at).
+# mtime_ns/org are the change-detection snapshot taken before the compute;
+# validated_at is when the entry was last confirmed (or written).
+_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, int, float, str | None, float]] = {}
+_SKILLS_STATS_CACHE_TTL = 300.0  # seconds — long because invalidate_profile_skills_stats() handles programmatic changes
+
+# Stale-while-revalidate window (#7940). The stat-only probe still walks the
+# whole skill tree (thousands of stat() calls on a large library), so running
+# it on EVERY call made the probe itself the dominant /api/profiles cost —
+# that was the remaining half of #7940 after the cache-survives-switch and
+# no-list_profiles_api pieces landed. Inside the window a hit serves purely
+# from memory (zero I/O); past it a hit returns the stale counts immediately
+# and revalidates on a background thread. Bound on out-of-band (CLI/git)
+# staleness: REVALIDATE_AFTER + one probe/compute (~seconds), versus the old
+# per-call guarantee. Programmatic changes stay immediate via
+# invalidate_profile_skills_stats(). Sized >> _LIST_PROFILES_CACHE_TTL (4s) so a
+# steady poll costs ~1 probe per 30s per profile instead of one per rebuild,
+# and << TTL (300s) so the hard safety net is unaffected.
+_SKILLS_STATS_REVALIDATE_AFTER = 30.0
+_SKILLS_STATS_REVALIDATE_INFLIGHT: set[Path] = set()
+_SKILLS_STATS_REVALIDATE_GUARD = threading.Lock()
+_SKILLS_STATS_GENERATION = 0
+
+
+def invalidate_profile_skills_stats() -> None:
+    """Drop all cached skill stats and fence off computes that started earlier."""
+    global _SKILLS_STATS_GENERATION
+    with _SKILLS_STATS_REVALIDATE_GUARD:
+        _SKILLS_STATS_GENERATION += 1
+        _SKILLS_STATS_CACHE.clear()
+
+
+def _publish_skills_stats(profile_dir: Path, generation: int, entry: tuple) -> None:
+    """Publish unless an invalidation landed after ``generation`` was captured."""
+    with _SKILLS_STATS_REVALIDATE_GUARD:
+        if generation == _SKILLS_STATS_GENERATION:
+            _SKILLS_STATS_CACHE[profile_dir] = entry
 
 # Per-profile compute locks (#5364). Without these, concurrent cold-startup
 # requests (ThreadingHTTPServer runs one OS thread per request) all miss the
@@ -2064,29 +2859,6 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     if not skills_dir.is_dir():
         return (0, 0)
 
-    disabled = set()
-    config_path = profile_dir / "config.yaml"
-    if config_path.exists():
-        try:
-            from api import yaml_compat as _yaml
-            cfg = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            if isinstance(cfg, dict):
-                skills_cfg = cfg.get("skills")
-                if isinstance(skills_cfg, dict):
-                    # Align with get_disabled_skill_names(platform="webui") behavior:
-                    platform_disabled = (skills_cfg.get("platform_disabled") or {}).get("webui")
-                    if platform_disabled is not None:
-                        disabled_val = platform_disabled
-                    else:
-                        disabled_val = skills_cfg.get("disabled")
-
-                    if disabled_val is not None:
-                        if isinstance(disabled_val, str):
-                            disabled_val = [disabled_val]
-                        disabled = {str(v).strip() for v in disabled_val if str(v).strip()}
-        except Exception:
-            pass
-
     try:
         from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
     except ImportError as exc:
@@ -2100,6 +2872,30 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         # count it produced would be inaccurate. The UI omits the skills line
         # when the total is 0, so the profile picker stays fully usable.
         return (0, 0)
+
+    disabled = set()
+    try:
+        # Expanded under the profile's own env (#8032: ``disabled: ${VAR}``
+        # stays a reference on disk), then decoded like the Skills reader does
+        # (a serialized ``'["a","b"]'`` string is a list, #7120).
+        skills_cfg = load_profile_config(profile_dir).get("skills")
+        if isinstance(skills_cfg, dict):
+            # Align with get_disabled_skill_names(platform="webui") behavior:
+            platform_disabled = (skills_cfg.get("platform_disabled") or {}).get("webui")
+            if platform_disabled is not None:
+                disabled_val = platform_disabled
+            else:
+                disabled_val = skills_cfg.get("disabled")
+
+            if disabled_val is not None:
+                parse_list = getattr(sys.modules.get("agent.skill_utils"), "parse_config_string_list", None)
+                if parse_list is not None:
+                    disabled_val = parse_list(disabled_val)
+                elif isinstance(disabled_val, str):
+                    disabled_val = [disabled_val]
+                disabled = {str(v).strip() for v in disabled_val if str(v).strip()}
+    except Exception:
+        pass
 
     seen_names = set()
     enabled_count = 0
@@ -2125,14 +2921,83 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     return (enabled_count, compatible_count)
 
 
-def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
-    """Calculate (enabled_count, compatible_count) with two-tier mtime cache.
+def _maybe_trigger_skills_stats_revalidate(profile_dir: Path) -> None:
+    """Start a single-flight background revalidate for a stale cache entry."""
+    with _SKILLS_STATS_REVALIDATE_GUARD:
+        if profile_dir in _SKILLS_STATS_REVALIDATE_INFLIGHT:
+            return
+        _SKILLS_STATS_REVALIDATE_INFLIGHT.add(profile_dir)
+    try:
+        _start_skills_stats_revalidate_thread(profile_dir)
+    except Exception:
+        logger.debug("skills-stats revalidate spawn failed for %s", profile_dir, exc_info=True)
+        with _SKILLS_STATS_REVALIDATE_GUARD:
+            _SKILLS_STATS_REVALIDATE_INFLIGHT.discard(profile_dir)
 
-    A cheap stat-only mtime probe runs on EVERY call so out-of-band (CLI/git)
-    skill changes are reflected promptly — the expensive part (reading + parsing
-    every SKILL.md) is what the cache avoids, not the change detection. The TTL
-    is only a safety-net upper bound that forces an occasional full recompute
-    even when the mtime probe sees no change.
+
+def _start_skills_stats_revalidate_thread(profile_dir: Path) -> None:
+    """Spawn the daemon worker (seam for tests: patch to run synchronously)."""
+    threading.Thread(
+        target=_revalidate_skills_stats_worker, args=(profile_dir,), daemon=True
+    ).start()
+
+
+def _revalidate_skills_stats_worker(profile_dir: Path) -> None:
+    """Re-probe one stale entry off the request thread and republish it.
+
+    Runs under the per-profile compute lock so it can never duplicate a
+    concurrent synchronous miss; skips silently when one is already in flight
+    (the sync path will publish fresh data anyway). Never extends the hard
+    expiry on a no-change probe — the TTL safety net must still fire.
+    """
+    import time
+    try:
+        lock = _skills_stats_lock_for(profile_dir)
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            generation = _SKILLS_STATS_GENERATION
+            cached = _SKILLS_STATS_CACHE.get(profile_dir)
+            if cached is None:
+                return  # .clear()ed since the trigger — next request sync-misses
+            enabled, compat, old_mtime_ns, expiry, old_org, _ = cached
+            skills_dir = profile_dir / "skills"
+            config_path = profile_dir / "config.yaml"
+            # Snapshot BEFORE compute (same TOCTOU rule as the sync path).
+            new_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+            new_org = _active_org_marker(skills_dir)
+            now = time.time()
+            if new_mtime_ns == old_mtime_ns and new_org == old_org and now < expiry:
+                # No change: refresh only validated_at; keep the original hard
+                # expiry so the TTL safety net still fires on schedule.
+                _publish_skills_stats(profile_dir, generation, (
+                    enabled, compat, old_mtime_ns, expiry, old_org, now
+                ))
+            else:
+                res = _compute_profile_skills_stats(profile_dir)
+                _publish_skills_stats(profile_dir, generation, (
+                    res[0], res[1], new_mtime_ns,
+                    time.time() + _SKILLS_STATS_CACHE_TTL, new_org, time.time(),
+                ))
+        finally:
+            lock.release()
+    except Exception:
+        logger.debug("skills-stats background revalidate failed for %s", profile_dir, exc_info=True)
+    finally:
+        with _SKILLS_STATS_REVALIDATE_GUARD:
+            _SKILLS_STATS_REVALIDATE_INFLIGHT.discard(profile_dir)
+
+
+def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
+    """Calculate (enabled_count, compatible_count) with a revalidating mtime cache.
+
+    Stale-while-revalidate (#7940): a fresh-window hit serves with zero I/O; a
+    stale hit returns immediately and re-probes on a background thread. The
+    probe + full compute still run — just off the request path — so out-of-band
+    (CLI/git) changes surface within ~REVALIDATE_AFTER + one probe, while
+    programmatic changes stay immediate via invalidate_profile_skills_stats(). The
+    TTL remains the hard upper bound that forces a synchronous recompute even
+    when the probe can't see a change (mtime-preserving git checkout).
     """
     import time
     profile_dir = Path(profile_dir).resolve()
@@ -2140,33 +3005,30 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     skills_dir = profile_dir / "skills"
     config_path = profile_dir / "config.yaml"
 
-    # Always run the cheap stat-only probe first — this is what catches an
-    # out-of-band create/edit/delete within the same request (not after the TTL).
-    current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
-    current_org = _active_org_marker(skills_dir)
-
     # Read via .get() (not membership-check + index) so a concurrent
     # _SKILLS_STATS_CACHE.clear() on another thread can't raise KeyError
     # between the `in` test and the lookup.
     cached = _SKILLS_STATS_CACHE.get(profile_dir)
     if cached is not None:
-        enabled, compat, cached_mtime_ns, expiry, cached_org = cached
-        # Fast path: files unchanged (by the cheap probe above) AND still within
-        # the TTL → serve cached without re-reading any SKILL.md. The mtime probe
-        # already ran, so an out-of-band change is caught immediately regardless
-        # of the TTL. On TTL expiry we deliberately fall through to a full
-        # recompute (the TTL is a safety net for mtime-preserving changes that
-        # the probe can't see — e.g. a git checkout that restores the old mtime).
-        # The active-org marker is carried IN the same tuple, so a reader never
-        # sees a new org beside stale counts (single atomic publish below).
-        if (
-            current_mtime_ns == cached_mtime_ns
-            and now < expiry
-            and cached_org == current_org
-        ):
+        enabled, compat, _, expiry, cached_org, validated_at = cached
+        # SWR fast path: entry inside its hard TTL serves straight from memory.
+        # Within the revalidate window it is still fresh → zero I/O. Past it the
+        # stale counts still answer now while a background worker re-probes —
+        # the whole point is that the tree walk never runs on the request path.
+        # The org marker is one small read, so an org pull stays next-call (#7972).
+        if now < expiry and cached_org == _active_org_marker(skills_dir):
+            if now - validated_at < _SKILLS_STATS_REVALIDATE_AFTER:
+                return enabled, compat
+            _maybe_trigger_skills_stats_revalidate(profile_dir)
             return enabled, compat
 
-    # Cache miss, mtime changed, active org changed, or TTL expired — serialize per-profile so a
+    # Cache miss or hard-TTL expiry — the probe runs here (and only here) so the
+    # synchronous path keeps its immediate out-of-band detection on a cold or
+    # expired entry. Falls through to the serialized compute below.
+    current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+    current_org = _active_org_marker(skills_dir)
+
+    # Cache miss or hard-TTL expiry — serialize per-profile so a
     # burst of concurrent misses (cold startup) collapses to ONE compute instead
     # of a thundering herd of simultaneous os.walk + SKILL.md parses (#5364).
     lock = _skills_stats_lock_for(profile_dir)
@@ -2176,7 +3038,7 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         # still matches and the entry is within its TTL — no second compute.
         cached = _SKILLS_STATS_CACHE.get(profile_dir)
         if cached is not None:
-            enabled, compat, cached_mtime_ns, expiry, cached_org = cached
+            enabled, compat, cached_mtime_ns, expiry, cached_org, _ = cached
             if (
                 current_mtime_ns == cached_mtime_ns
                 and time.time() < expiry
@@ -2187,15 +3049,17 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         # Snapshot mtime BEFORE compute so any concurrent SKILL.md write during
         # the compute window causes a mismatch on the next probe instead of
         # silently serving stale data (TOCTOU).
+        generation = _SKILLS_STATS_GENERATION
         new_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
         new_org = _active_org_marker(skills_dir)
         res = _compute_profile_skills_stats(profile_dir)
-        # Publish counts + mtime + org in ONE tuple assignment: a lock-free
-        # fast-path reader sees either the whole old entry or the whole new one,
-        # never a new org tag beside pre-rewrite counts.
-        _SKILLS_STATS_CACHE[profile_dir] = (
-            res[0], res[1], new_mtime_ns, time.time() + _SKILLS_STATS_CACHE_TTL, new_org
-        )
+        # Publish counts + mtime + org + validation time in ONE tuple assignment:
+        # a lock-free fast-path reader sees either the whole old entry or the
+        # whole new one, never a new org tag beside pre-rewrite counts. A compute
+        # overtaken by an invalidation returns its result without caching it.
+        _publish_skills_stats(profile_dir, generation, (
+            res[0], res[1], new_mtime_ns, time.time() + _SKILLS_STATS_CACHE_TTL, new_org, time.time()
+        ))
         return res
 
 
@@ -2241,6 +3105,16 @@ def _build_profile_rows_fast() -> list | None:
         )
     except Exception:
         return None
+    # Optional exports: cores that predate the marker/tombstone helpers list
+    # named profiles by directory existence and would still build correct rows
+    # here. Their absence must degrade the row FILTER, not disable the whole
+    # fast path (a None return drops the listing to the slow alias-scanning
+    # path on every request). When a helper is absent, skip only the check it
+    # would have performed — matching the producer that is actually installed.
+    try:
+        from hermes_cli.profiles import named_profile_has_identity, named_profile_is_deleted
+    except Exception:
+        named_profile_has_identity = named_profile_is_deleted = None
 
     def _row(home: Path, name: str, is_default: bool) -> dict:
         try:
@@ -2276,12 +3150,40 @@ def _build_profile_rows_fast() -> list | None:
 
     profiles_root = _get_profiles_root()
     if profiles_root.is_dir():
-        for entry in sorted(profiles_root.iterdir()):
-            if not entry.is_dir():
+        try:
+            entries = sorted(profiles_root.iterdir())
+        except OSError:
+            # An unreadable profiles root cannot contribute named homes, but it
+            # must not erase the default row above.
+            entries = []
+        for entry in entries:
+            # Per-entry isolation: the native liveness helpers read sibling
+            # paths, notably ``profiles/.deleted``. An unreadable entry — a
+            # directory the operator cannot stat, or an unreadable tombstone
+            # store that makes ``named_profile_is_deleted`` raise — must skip
+            # only THAT profile. Letting the error escape takes down the whole
+            # listing, including the default home that the cron aggregator
+            # needs before it can return any job at all.
+            try:
+                if not entry.is_dir():
+                    continue
+                if not _UPSTREAM_PROFILE_ID_RE.match(entry.name):
+                    continue
+                # Upstream `_iter_named_profile_dirs()` lists a dir as a profile only when it
+                # carries an identity marker and is not tombstoned. This fast path used to
+                # stop at "is a dir + valid id", so a marker-less shell left behind by a
+                # delete (or by a recovery-artifact mkdir) showed up in the dropdown and was
+                # then read by /api/crons. Match upstream here or the two lists disagree.
+                # Each check runs only when the installed core exports it: a pre-marker
+                # core applies neither, and filtering by a rule it does not have would
+                # hide live rows it lists.
+                if named_profile_has_identity is not None and not named_profile_has_identity(entry):
+                    continue
+                if named_profile_is_deleted is not None and named_profile_is_deleted(entry):
+                    continue
+                rows.append(_row(entry, entry.name, False))
+            except OSError:
                 continue
-            if not _UPSTREAM_PROFILE_ID_RE.match(entry.name):
-                continue
-            rows.append(_row(entry, entry.name, False))
 
     return rows
 
@@ -2874,7 +3776,7 @@ def create_profile_api(name: str, clone_from: str = None,
     _drop_profile_models_cache(name)
     # Invalidate cached root-profile-name lookup; create_profile may have added
     # a new profile that flips is_default semantics on the agent side (#1612).
-    _SKILLS_STATS_CACHE.clear()
+    invalidate_profile_skills_stats()
     _invalidate_list_profiles_cache()
     _invalidate_root_profile_cache()
 
@@ -2945,7 +3847,7 @@ def delete_profile_api(name: str) -> dict:
 
     _drop_profile_models_cache(name)
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
-    _SKILLS_STATS_CACHE.clear()
+    invalidate_profile_skills_stats()
     _invalidate_list_profiles_cache()
     _invalidate_root_profile_cache()
     return {'ok': True, 'name': name}

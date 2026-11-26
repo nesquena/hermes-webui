@@ -88,7 +88,13 @@ def test_autolink_after_safe_tags_pass():
     content = read_ui_js()
     # Accept either the new _tag() sanitizer or the legacy SAFE_TAGS line so this
     # test works on both the old and new renderer.
-    sanitizer_idx = content.find('s=s.replace(/<\\/?[a-z][^>]*>/gi,tag=>_tag(tag));')
+    # Current form: the same pass also sets aside every "<" that starts no tag
+    # as "&lt;" until autolinking is done (an HTML comment "<!--" is kept).
+    sanitizer_idx = content.find(
+        "s=s.replace(/<\\/?[a-z][^>]*>|<(?!!--)/gi,m=>m==='<'?(_al_stash.push('&lt;'),`\\x00B${_al_stash.length-1}\\x00`):_tag(m));"
+    )
+    if sanitizer_idx == -1:
+        sanitizer_idx = content.find('s=s.replace(/<\\/?[a-z][^>]*>/gi,tag=>_tag(tag));')
     if sanitizer_idx == -1:
         sanitizer_idx = content.find('s=s.replace(/<\\/?[a-z][^>]*>/gi,tag=>SAFE_TAGS.test(tag)?tag:esc(tag));')
     autolink_idx = content.find('// Autolink: convert plain URLs')
