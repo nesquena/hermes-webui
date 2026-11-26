@@ -189,6 +189,64 @@ def test_listing_is_stable_across_polls_with_a_foreign_body_copy(store):
     )
 
 
+# --- the full-scan fallback (no usable index) ----------------------------------------
+
+
+@pytest.mark.parametrize("index_state", ["missing", "corrupt", "empty_list", "wrong_shape"])
+def test_cold_listing_without_a_usable_index_admits_only_owning_names(store, monkeypatch, index_state):
+    """#8861's first reproduction row, on the fallback that has no index to trust.
+
+    ``all_sessions()`` falls back to a full scan when there is no index, or
+    ``_index.json`` is corrupt, ``[]`` or the wrong shape. That loop used to
+    admit every sidecar and dedupe nothing, so the foreign copy was listed
+    under the owner's id and titled "Copy" — deterministically, before any
+    write. The fallback now follows the rebuild's admission (the file name
+    must name its session) and its dedup (the fuller copy wins).
+    """
+    from api import models
+
+    _victim(store)
+    _keep(store)
+    _copy(store, message_count=20)  # larger than the owner: dedup must not let it win
+    index = store / "_index.json"
+    # save() maintains an index of its own: start every case from no index at
+    # all, then install the unusable shape the case is about.
+    if index.exists():
+        index.unlink()
+    owner_bytes = (store / f"{VICTIM}.json").read_bytes()
+    if index_state == "corrupt":
+        index.write_text("{not json", encoding="utf-8")
+    elif index_state == "empty_list":
+        index.write_text("[]", encoding="utf-8")
+    elif index_state == "wrong_shape":
+        index.write_text('{"sessions": {}}', encoding="utf-8")
+    # No background rebuild may land mid-assertion: this is the cold listing a
+    # request serves before the rebuild writes anything.
+    monkeypatch.setattr(models, "_start_session_index_rebuild_thread", lambda: None)
+    listing = models.all_sessions()
+    victim_rows = [r for r in listing if r.get("session_id") == VICTIM]
+    assert len(listing) == 2, (
+        "unexpected rows on the cold listing: "
+        f"{[(r.get('session_id'), r.get('title')) for r in listing]}"
+    )
+    assert len(victim_rows) == 1, "the foreign copy was listed as a second row for the owner's id"
+    owner = victim_rows[0]
+    assert owner.get("message_count") == 10, "the larger copy's metadata replaced the owner's row"
+    assert owner.get("profile") == "work"
+    assert owner.get("title") == "Victim"
+    keep = [r for r in listing if r.get("session_id") == KEEP][0]
+    assert keep.get("message_count") == 6, "an unrelated session's row was damaged"
+    assert not any(r.get("title") == "Copy" for r in listing), (
+        "the foreign copy was listed as a session of its own"
+    )
+    # The read must not have repaired the copy: it is neither renamed nor
+    # rescued, and the owner's sidecar is untouched.
+    assert (store / f"{COPY}.json").exists(), "the listing removed the foreign copy"
+    assert (store / f"{VICTIM}.json").read_bytes() == owner_bytes, (
+        "the listing rewrote the owner's sidecar"
+    )
+
+
 # --- other rows are not collaterally damaged -----------------------------------------
 
 

@@ -10141,6 +10141,14 @@ def all_sessions(
     # Full scan fallback
     _diag_stage(diag, "all_sessions.full_scan")
     out = []
+    # #8861: this path has no index to trust, so every sidecar is admitted on
+    # its own: only a file whose NAME names its session may list it, and the
+    # fuller copy wins when the same id appears twice — the same admission +
+    # dedup rule the rebuild uses (~695-703). Without it a foreign copy whose
+    # body names its owner's id (Copy.json carrying session_id=victim) is
+    # listed as the owner's row titled "Copy", which is #8861's first
+    # reproduction row.
+    seen_ids: dict[str, "Session"] = {}
     # #4985: the tombstone is intentionally NOT a blind-drop filter on the
     # full-scan fallback either. A tombstoned sid whose sidecar is still
     # on disk must be loaded here so the post-recovery prune helper
@@ -10154,9 +10162,16 @@ def all_sessions(
         if p.name.startswith('_'): continue
         try:
             s = _load_session_for_listing(p.stem)  # never saves (#9007)
-            if s: out.append(s)
+            if not s: continue
+            sid = s.session_id
+            if not sid or not _sidecar_stem_names_session(p.stem, sid):
+                continue
+            prev = seen_ids.get(sid)
+            if prev is None or len(s.messages) > len(prev.messages):
+                seen_ids[sid] = s
         except Exception:
             logger.debug("Failed to load session from %s", p)
+    out = list(seen_ids.values())
     _diag_stage(diag, "all_sessions.full_scan_overlay")
     for s in SESSIONS.values():
         if all(s.session_id != x.session_id for x in out): out.append(s)
