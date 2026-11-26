@@ -5,6 +5,8 @@
 
 ### Performance
 
+- **Resuming a long run's event stream reads less of its journal (#8991, @CharlesMcquade).** Replaying a run's events after a given point (`after_seq`) used to read and parse the whole run journal on every request. WebUI now keeps a small per-journal index of checkpoints, so a repeated lookup starts reading near the requested point instead of at the beginning. On the Gate's matched fixture, a warm lookup read 146,416 bytes instead of 3,648,926. The first lookup still reads the whole journal. Lookups fall back to the full reader whenever the file was rewritten, archived or rolled back, and the response is the same as before in every case tested.
+
 - **Fork a scheduled-job (cron) conversation into your own editable chat.** Cron-run sessions are read-only (the scheduler owns them), so you couldn't continue one. You can now branch/fork a cron session into a new WebUI-owned conversation — the original read-only session is never modified, and the fork picks up its history so you can carry on. Only genuine cron sessions qualify (verified by the server-side source, not a guessable id), and every other read-only session stays unbranchable. Thanks @rodboev. (#5555, #5477)
 
 - **Pick the exact time and day for scheduled jobs — no cron syntax needed.** The Tasks "New job" form now builds the schedule as a plain sentence: choose a frequency (Hourly / Daily / Weekdays / Weekly / Monthly / Custom) and it shows just the controls that matter — a time picker, a day-of-week dropdown, or a day-of-month dropdown — e.g. "Weekly on Monday at 09:00." The generated cron expression is previewed inline, and the raw cron field now appears only under "Custom." Thanks @rodboev. (#5554, #5552)
@@ -50,6 +52,8 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **The profile picker and Tasks list only the named profile homes the Agent considers live (#8897, @chhxbchhxb).** A deleted (tombstoned) or marker-less home under `profiles/` still showed up in the profile dropdown. Opening Tasks then created `cron/` folders inside it. The picker now applies the Agent's own liveness checks, as far as the installed Agent provides them, and the Tasks job list skips homes that aren't live. The default home and custom `HERMES_HOME` roots stay readable.
 
 - **The opt-in native Gateway session transport no longer reconnects forever when its socket is missing, and Stop reaches a turn in every phase (#8905, #9227, @chhxbchhxb).** With `webui_gateway_session_transport: unix` and a socket path that doesn't exist, a turn kept reconnecting every few seconds and Stop couldn't end it. A failure before the first submission now ends the turn after one attempt. Stop now reaches a turn that hasn't been submitted yet, and one whose submission acknowledgement is still pending. Failures after a submission keep the existing reconnect-and-resume behaviour.
 
