@@ -13138,10 +13138,8 @@ function _showProjectPicker(session, anchorEl){
     const focusedIndex=ownedFocus?oldItems.indexOf(active):-1;
     const byId=new Map(oldProjectItems.map(item=>[String(item.getAttribute('data-project-id')),item]));
     const retained=new Set();
-    // Keep every surviving choice exactly where it is: in real browsers a DOM
-    // move drops the focus of the row the user is on (Chromium blurs a focused
-    // node the moment it is re-inserted), so only genuinely new choices are
-    // inserted — each one before the next expected row, or in the tail.
+    // Reuse choices by identity. Insert new rows before the next expected
+    // row; reconcile renamed rows after stale choices have been removed.
     let anchor=createItem;
     for(let index=visibleProjects.length-1;index>=0;index--){
       const p=visibleProjects[index];
@@ -13158,6 +13156,18 @@ function _showProjectPicker(session, anchorEl){
     }
     for(const item of oldProjectItems){
       if(!retained.has(item)) item.remove();
+    }
+    // Reconcile presentation order after a rename, keeping the focused node mounted.
+    const rowsById=new Map(Array.from(picker.querySelectorAll('.project-picker-item[data-project-id]'))
+      .map(item=>[String(item.getAttribute('data-project-id')),item]));
+    let orderAnchor=createItem;
+    for(let index=visibleProjects.length-1;index>=0;index--){
+      const item=rowsById.get(String(visibleProjects[index].project_id));
+      const children=Array.from(picker.children);
+      if(item!==active&&children[children.indexOf(item)+1]!==orderAnchor){
+        picker.insertBefore(item,orderAnchor);
+      }
+      orderAnchor=item;
     }
     if(ownedFocus&&active!==none&&active!==createItem){
       const fresh=Array.from(picker.querySelectorAll('.project-picker-item'));

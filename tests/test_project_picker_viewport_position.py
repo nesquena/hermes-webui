@@ -1797,6 +1797,7 @@ _openProjectPicker.refreshChoices();
 const afterFocusedDelete = {
   labels: labels(),
   focusedId: document.activeElement.getAttribute('data-project-id'),
+  focusedCreate: String(document.activeElement.className).split(/\s+/).includes('project-picker-create'),
   preventScroll: focusCalls.at(-1)?.preventScroll === true,
 };
 console.log(JSON.stringify({afterUnchanged,afterMutation,afterFocusedDelete}));
@@ -1811,10 +1812,16 @@ console.log(JSON.stringify({afterUnchanged,afterMutation,afterFocusedDelete}));
     assert data["afterMutation"]["focusedId"] == "p1"
     assert data["afterMutation"]["sameNode"] is True
     assert data["afterMutation"]["focusCalls"] == 0
+    # The open picker follows the alphabetical order after the rename and the
+    # create: "Renamed project" moves to the end without moving the focused node
+    # ("No project", id '', stays first).
+    assert [row["id"] for row in data["afterMutation"]["labels"]] == [
+        "", "new-project", "p10", "p11", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "p1",
+    ]
     assert "p1" not in {row["id"] for row in data["afterFocusedDelete"]["labels"]}
-    assert data["afterFocusedDelete"]["focusedId"] in {
-        row["id"] for row in data["afterFocusedDelete"]["labels"]
-    }
+    # The deleted focused row was the last project, so focus moves to the row
+    # now in its position: "+ New project" (the same rule as master).
+    assert data["afterFocusedDelete"]["focusedCreate"] is True
     assert data["afterFocusedDelete"]["preventScroll"] is True
 
 
