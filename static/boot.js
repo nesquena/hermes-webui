@@ -2858,6 +2858,7 @@ function clearPreview(opts={}){
     renderFileTree({});
   }
   _previewCurrentPath='';_previewCurrentMode='';
+  _previewOpenWorkspace='';
   // Reset the editor baseline as well, so a later preview cannot inherit a
   // stale "unsaved" comparison from the file that was just closed (#8514).
   if(typeof _resetPreviewDirty==='function') _resetPreviewDirty(); else _previewDirty=false;
