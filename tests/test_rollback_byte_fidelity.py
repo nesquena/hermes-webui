@@ -19,6 +19,8 @@ import hashlib
 import os
 import subprocess
 
+import pytest
+
 from api import rollback
 
 
@@ -124,3 +126,55 @@ def test_non_utf8_filename_appears_in_diff(monkeypatch, tmp_path):
     assert diff["total_changes"] == 1, diff
     assert diff["files_changed"][0]["status"] == "deleted"
     assert os.fsencode(diff["files_changed"][0]["file"]) == raw_name
+
+
+# The reviewer's six-case probe: LF and tab are the controls that passed before
+# the repair; CR and 0xFF are the shapes that lost their name. All four go
+# through `ls-tree -z`, so all four must round-trip.
+PATHNAME_CASES = [
+    ("lf", b"plain-name.txt"),
+    ("tab", b"with\ttab.txt"),
+    ("cr", b"with\rcarriage.txt"),
+    ("byte-ff", b"with-\xff-byte.txt"),
+]
+
+
+@pytest.mark.parametrize("label,raw_name", PATHNAME_CASES, ids=[c[0] for c in PATHNAME_CASES])
+def test_listing_recovers_every_pathname_shape(monkeypatch, tmp_path, label, raw_name):
+    """`_checkpoint_entry_modes_for` must return the exact bytes for each shape."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    checkpoint_root = tmp_path / "checkpoints"
+    head = _init_shared_store(checkpoint_root, workspace.resolve(), {raw_name: b"x\n"})
+
+    monkeypatch.setattr(rollback, "_resolve_workspace", lambda arg: str(workspace.resolve()))
+    monkeypatch.setattr(rollback, "_checkpoint_root", lambda: checkpoint_root)
+
+    ref = rollback._resolve_checkpoint_ref(str(workspace.resolve()), head)
+    assert ref is not None
+    modes = rollback._checkpoint_entry_modes_for(rollback._find_git(), ref)
+
+    assert len(modes) == 1, f"{label}: {modes}"
+    assert os.fsencode(next(iter(modes))) == raw_name, label
+
+
+@pytest.mark.parametrize("label,raw_name", PATHNAME_CASES, ids=[c[0] for c in PATHNAME_CASES])
+def test_edited_file_is_reported_under_its_exact_name(monkeypatch, tmp_path, label, raw_name):
+    """A checkpoint-only path must reach `files_changed` under its exact bytes.
+
+    This is the reviewer's symptom: a name that loses bytes or fails to decode
+    never appears in the diff at all.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    checkpoint_root = tmp_path / "checkpoints"
+    head = _init_shared_store(checkpoint_root, workspace.resolve(), {raw_name: b"before\n"})
+
+    monkeypatch.setattr(rollback, "_resolve_workspace", lambda arg: str(workspace.resolve()))
+    monkeypatch.setattr(rollback, "_checkpoint_root", lambda: checkpoint_root)
+
+    diff = rollback.get_checkpoint_diff(str(workspace), head)
+
+    assert diff["total_changes"] == 1, f"{label}: {diff}"
+    assert os.fsencode(diff["files_changed"][0]["file"]) == raw_name, label
+
