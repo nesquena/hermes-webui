@@ -44,7 +44,7 @@ import pytest
 import api.upload as upload
 from api.routes import _normalize_chat_attachments
 from api.streaming import _build_native_multimodal_message
-from api.upload import handle_upload
+from api.upload import handle_upload, handle_upload_extract
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
 
@@ -150,6 +150,21 @@ def _upload(monkeypatch, session_id: str, filename: str, data: bytes) -> _FakeHa
     return handler
 
 
+def _upload_extract(monkeypatch, session_id: str, filename: str, data: bytes) -> _FakeHandler:
+    """The archive-upload route (/api/upload/extract), same driver shape."""
+    monkeypatch.setattr(
+        upload, "get_session", lambda sid: SimpleNamespace(session_id=sid, profile=None)
+    )
+    monkeypatch.setattr(upload, "_get_active_profile_name", lambda: "default")
+    body, content_type = _multipart_body(
+        fields={"session_id": session_id},
+        files={"file": (filename, data, "application/zip")},
+    )
+    handler = _FakeHandler(body, content_type)
+    handle_upload_extract(handler)
+    return handler
+
+
 def _embeds(path: Path, workspace: Path) -> bool:
     """True when the vision allow-check passes *path* into the model context."""
     atts = _normalize_chat_attachments(
@@ -193,11 +208,13 @@ def test_upload_before_inbox_redirect_still_lands_in_inbox(tmp_path, monkeypatch
     assert (att / "sess-2" / "notes.txt").read_bytes() == b"hello"
 
 
-def test_unresolvable_inbox_refuses_upload_instead_of_resolving_by_name(tmp_path, monkeypatch):
-    """A root that cannot be resolved fails closed: refuse, never fall back.
+def test_structural_refusal_during_root_resolution_stays_a_refusal(tmp_path, monkeypatch, capsys):
+    """A root that can never be the inbox fails closed: refuse, never fall back.
 
     The fallback would re-introduce the bug, so None must mean "no upload",
-    not "resolve by name again".
+    not "resolve by name again".  The injected fault is structural (ELOOP,
+    a symlink loop): the refusal stays a client-side 400 with no server-error
+    log -- the #9231 classification must not over-correct into a 500 here.
     """
     att = tmp_path / "attachments"
     _put(att)
@@ -211,13 +228,15 @@ def test_unresolvable_inbox_refuses_upload_instead_of_resolving_by_name(tmp_path
 
     def resolve(self, strict=False):
         if str(self) == str(moved):
-            raise OSError(5, "Input/output error")
+            raise OSError(errno.ELOOP, os.strerror(errno.ELOOP))
         return real_resolve(self, strict=strict)
 
     monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(moved))
     monkeypatch.setattr(Path, "resolve", resolve)
     h = _upload(monkeypatch, "sess-3", "x.txt", b"x")
     assert h.status == 400, h.payload()
+    assert "[webui] upload error:" not in capsys.readouterr().out
+    assert not list(tmp_path.rglob("x.txt"))
 
 
 def test_symlink_loop_inbox_refuses_upload(tmp_path, monkeypatch):
@@ -354,3 +373,143 @@ def test_invalid_path_errnos_from_mkdir_are_upload_refusals(tmp_path, monkeypatc
     assert h.status == 400, h.payload()
     assert "[webui] upload error:" not in capsys.readouterr().out
     assert not target.exists()
+
+
+# --- 4. #9231 gate: a startup storage fault is a logged 500, not a silent 400
+#
+# The startup trust decision (resolve + usability probe) used to cache a bare
+# None on ANY failure, and _session_attachment_dir() turned that into
+# ValueError('Attachment inbox is unavailable') -- both upload routes then
+# answered HTTP 400 with no operator log, hiding a server/storage fault as a
+# client mistake.  The fix classifies the cached failure: structural refusals
+# (ELOOP/ENOTDIR/RuntimeError/ValueError) keep the fail-closed 400, storage
+# faults (EIO, EACCES, ENOSPC, EDQUOT, EROFS, ...) become a logged 500
+# carrying the errno and a restart diagnostic.  No automatic re-trust: the
+# cache is not re-resolved mid-process, so a fault repaired after startup is
+# still reported until restart (the gate's "recovered-storage" cases).
+
+_STARTUP_STORAGE_FAULTS = [errno.EIO, errno.EACCES]
+
+
+def _inject_resolve_errno(monkeypatch, target: Path, err: int) -> None:
+    """Make the startup by-name resolve() of *target* fail with *err*."""
+    real_resolve = Path.resolve
+
+    def resolve(self, strict=False):
+        if str(self) == str(target):
+            raise OSError(err, os.strerror(err))
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+
+
+def _inject_stat_errno(monkeypatch, target: Path, err: int) -> None:
+    """Make the startup usability stat() of *target* fail with *err*."""
+    real_stat = os.stat
+
+    def stat(path, *args, **kwargs):
+        if str(path) == str(target):
+            raise OSError(err, os.strerror(err))
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(upload.os, "stat", stat)
+
+
+@pytest.mark.parametrize("err", _STARTUP_STORAGE_FAULTS, ids=lambda e: errno.errorcode[e])
+@pytest.mark.parametrize("seam", ["resolve", "stat"], ids=lambda s: f"seam-{s}")
+def test_startup_storage_fault_is_logged_500_with_restart_diagnostic(
+    tmp_path, monkeypatch, capsys, err, seam
+):
+    """A storage fault during root initialization is a server error, not a 400.
+
+    The fault exists only while the startup call runs; the request below
+    sees a healthy filesystem (the gate's recovered-storage cases).  The
+    cached failure must still surface: HTTP 500, an operator error log, and
+    a restart diagnostic naming the errno.  Nothing is written anywhere.
+    """
+    att = tmp_path / "attachments"
+    _put(att)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(att))
+    if seam == "resolve":
+        _inject_resolve_errno(monkeypatch, att, err)
+    else:
+        _inject_stat_errno(monkeypatch, att, err)
+    # The startup trust decision under the injected fault (the same call the
+    # server makes at import), after which the filesystem is healthy again.
+    upload._trusted_attachment_root()
+
+    h = _upload(monkeypatch, "sess-9231", "x.txt", b"x")
+
+    assert h.status == 500, h.payload()
+    out = capsys.readouterr().out
+    assert "[webui] upload error:" in out
+    assert "Attachment inbox is unavailable" in out
+    assert f"[Errno {err}]" in out
+    assert "restart the server" in out
+    assert not list(tmp_path.rglob("x.txt"))
+
+
+@pytest.mark.parametrize("err", _STARTUP_STORAGE_FAULTS, ids=lambda e: errno.errorcode[e])
+def test_startup_storage_fault_on_extract_route_is_logged_500(
+    tmp_path, monkeypatch, capsys, err
+):
+    """The archive-upload route reports the same fault the same way.
+
+    /api/upload/extract shares _session_attachment_dir(), so a startup
+    storage fault must reach its HTTP500 branch and error log too -- the
+    gate's reproduced silent 400 was on both routes.
+    """
+    att = tmp_path / "attachments"
+    _put(att)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(att))
+    _inject_stat_errno(monkeypatch, att, err)
+    upload._trusted_attachment_root()
+
+    h = _upload_extract(monkeypatch, "sess-9231x", "bundle.zip", b"PK\x03\x04payload")
+
+    assert h.status == 500, h.payload()
+    out = capsys.readouterr().out
+    assert "[webui] upload extract error:" in out
+    assert "Attachment inbox is unavailable" in out
+    assert f"[Errno {err}]" in out
+    assert "restart the server" in out
+    assert not list(tmp_path.rglob("bundle"))
+
+
+def test_root_failure_classification_split():
+    """The classification itself: structural refusals vs storage faults."""
+    loop = upload._classify_root_failure(OSError(errno.ELOOP, os.strerror(errno.ELOOP)))
+    assert loop.kind == "refusal" and loop.errno == errno.ELOOP
+    notdir = upload._classify_root_failure(OSError(errno.ENOTDIR, os.strerror(errno.ENOTDIR)))
+    assert notdir.kind == "refusal" and notdir.errno == errno.ENOTDIR
+    # macOS resolve() raises RuntimeError for a symlink loop; a spelling the
+    # OS rejects outright raises ValueError.  Both are structural.
+    assert upload._classify_root_failure(RuntimeError("loop")).kind == "refusal"
+    assert upload._classify_root_failure(ValueError("embedded null byte")).kind == "refusal"
+    for err in (errno.EIO, errno.EACCES, errno.ENOSPC, errno.EDQUOT, errno.EROFS):
+        fault = upload._classify_root_failure(OSError(err, os.strerror(err)))
+        assert fault.kind == "storage", err
+        assert fault.errno == err
+
+
+def test_failure_query_never_disagrees_with_the_root(tmp_path, monkeypatch):
+    """_trusted_attachment_root_failure() mirrors the root's availability.
+
+    Healthy spelling: a root and no failure.  Storage-faulted spelling: no
+    root and a classified failure.  The two readers share one cache entry,
+    so they cannot drift.
+    """
+    att = tmp_path / "attachments"
+    _put(att)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(att))
+    assert upload._trusted_attachment_root() == att.resolve()
+    assert upload._trusted_attachment_root_failure() is None
+
+    moved = tmp_path / "attachments-renamed"
+    os.rename(att, moved)
+    _inject_stat_errno(monkeypatch, moved, errno.EIO)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(moved))
+    assert upload._trusted_attachment_root() is None
+    failure = upload._trusted_attachment_root_failure()
+    assert failure is not None
+    assert failure.kind == "storage" and failure.errno == errno.EIO

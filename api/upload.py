@@ -8,6 +8,7 @@ import re as _re
 import stat
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
 from api.helpers import (
@@ -223,15 +224,113 @@ def _attachment_root() -> Path:
     return (STATE_DIR / 'attachments').resolve()
 
 
-_TRUSTED_ATTACHMENT_ROOTS: dict[str, Path | None] = {}
-
 # mkdir() failures that mean the destination path can never become the inbox
 # (and are therefore upload refusals): a symlink loop, or a path component
 # that is not a directory. Every other errno out of mkdir() -- ENOSPC, EDQUOT,
 # EROFS, EIO, EACCES -- is a server-side storage fault and propagates to
-# handle_upload()'s HTTP500 branch.
+# handle_upload()'s HTTP500 branch. The same split classifies a root that
+# fails during startup resolution/probe (see _classify_root_failure()).
 _UPLOAD_REFUSAL_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR})
 
+
+class _AttachmentRootFailure(NamedTuple):
+    """Why the startup-trusted attachment root is unavailable (#9231 gate).
+
+    ``kind`` is ``'refusal'`` when the configured spelling can never name a
+    usable inbox -- a symlink loop, a non-directory component, a path the OS
+    rejects outright -- and ``'storage'`` when the server/storage side failed
+    while resolving or probing the root (EIO, EACCES, ENOSPC, EDQUOT, EROFS,
+    ...).  A refusal keeps the fail-closed 400 the upload handlers already
+    answer; a storage fault is the operator's to see and becomes a logged
+    500 with a restart diagnostic (see ``_session_attachment_dir``).
+    ``detail`` is the operator-facing reason and ``errno`` the failing
+    syscall's errno when the failure came from an ``OSError`` (None for
+    RuntimeError/ValueError refusals).
+    """
+
+    kind: str
+    detail: str
+    errno: int | None
+
+
+class AttachmentInboxStorageError(RuntimeError):
+    """The startup-trusted inbox is unavailable after a server/storage fault.
+
+    Raised instead of ``ValueError`` so the upload handlers'
+    ``except Exception`` branch answers HTTP 500 and logs the traceback: a
+    storage fault during startup root resolution is a server-side failure
+    the operator must see, not a client mistake (a silent 400 would hide
+    it).  The message carries the actionable diagnostic -- trust is
+    established once at startup, so the inbox is only re-resolved after a
+    restart.
+    """
+
+
+def _classify_root_failure(exc: BaseException) -> _AttachmentRootFailure:
+    """Classify a startup root-resolution/probe failure (#9231 gate).
+
+    Structural refusals stay refusals; every other failure is a storage
+    fault.  The errno sets mirror ``_upload_destination()``'s mkdir()
+    handling, so a root that fails at startup is classified exactly like a
+    destination that fails at write time.
+    """
+    err = getattr(exc, 'errno', None)
+    if isinstance(exc, OSError) and err in _UPLOAD_REFUSAL_ERRNOS:
+        # ELOOP / ENOTDIR: the path can never become the inbox.
+        return _AttachmentRootFailure('refusal', str(exc), err)
+    if isinstance(exc, (RuntimeError, ValueError)):
+        # macOS resolve() raises RuntimeError for a symlink loop, and a
+        # spelling the OS rejects outright (embedded NUL) raises ValueError:
+        # both are structural, never storage.
+        return _AttachmentRootFailure('refusal', f'{type(exc).__name__}: {exc}', None)
+    if isinstance(exc, OSError):
+        return _AttachmentRootFailure('storage', str(exc), err)
+    return _AttachmentRootFailure('storage', f'{type(exc).__name__}: {exc}', None)
+
+
+# The startup trust decision per configured spelling: the resolved root, or
+# the classified reason it is unavailable.  The reason is cached beside the
+# root (not dropped) so an upload can tell a structural refusal from a
+# server/storage fault instead of answering a silent 400 for both (#9231).
+_TRUSTED_ATTACHMENT_ROOTS: dict[str, Path | _AttachmentRootFailure] = {}
+
+
+
+def _attachment_root_cache_key() -> str:
+    """The configured spelling the startup trust decision is cached under."""
+    return os.getenv('HERMES_WEBUI_ATTACHMENT_DIR', '').strip() or str(STATE_DIR / 'attachments')
+
+
+def _resolve_trusted_attachment_root(key: str) -> Path | _AttachmentRootFailure:
+    """Resolve and probe *key* once, classifying any failure (#9231 gate).
+
+    Returns the resolved root when it can be used as the inbox, otherwise a
+    classified failure -- never a bare None, so the reason survives the cache.
+    """
+    try:
+        resolved = Path(key).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        return _classify_root_failure(exc)
+    # A resolved path is only trusted when it can actually be used as
+    # the inbox. A symlink loop can resolve WITHOUT raising on some
+    # platforms (macOS raises RuntimeError, Linux returns a path),
+    # and the root is then unusable: mkdir() there fails with ELOOP
+    # and the upload would surface as a 500 instead of a refusal.
+    # stat() distinguishes the two cases by errno -- ENOENT means
+    # "not created yet", which is fine (the upload creates it), while
+    # ELOOP (and any other error) means the path can never be a
+    # directory, so the root fails closed on every platform.
+    try:
+        usable = stat.S_ISDIR(os.stat(resolved).st_mode)
+    except FileNotFoundError:
+        usable = True
+    except OSError as exc:
+        return _classify_root_failure(exc)
+    if not usable:
+        # The path exists but is not a directory: structurally it can never
+        # become the inbox.
+        return _AttachmentRootFailure('refusal', f'{resolved} is not a directory', None)
+    return resolved
 
 
 def _trusted_attachment_root() -> Path | None:
@@ -244,32 +343,28 @@ def _trusted_attachment_root() -> Path | None:
     walking it no-follow (public shares), so a symlink planted later (e.g.
     inside a workspace that contains the inbox) cannot move it.  A root that
     cannot be resolved is None (fail closed): uploads refuse, shares drop it,
-    and the vision allow-check stops allowing it.
+    and the vision allow-check stops allowing it.  The reason it is None is
+    cached beside it -- ``_trusted_attachment_root_failure()`` -- so an upload
+    can tell a structural refusal from a server/storage fault (#9231) instead
+    of answering a silent 400 for both.
     """
-    key = os.getenv('HERMES_WEBUI_ATTACHMENT_DIR', '').strip() or str(STATE_DIR / 'attachments')
+    key = _attachment_root_cache_key()
     if key not in _TRUSTED_ATTACHMENT_ROOTS:
-        try:
-            resolved = Path(key).expanduser().resolve()
-        except (OSError, RuntimeError, ValueError):
-            _TRUSTED_ATTACHMENT_ROOTS[key] = None
-        else:
-            # A resolved path is only trusted when it can actually be used as
-            # the inbox. A symlink loop can resolve WITHOUT raising on some
-            # platforms (macOS raises RuntimeError, Linux returns a path),
-            # and the root is then unusable: mkdir() there fails with ELOOP
-            # and the upload would surface as a 500 instead of a refusal.
-            # stat() distinguishes the two cases by errno -- ENOENT means
-            # "not created yet", which is fine (the upload creates it), while
-            # ELOOP (and any other error) means the path can never be a
-            # directory, so the root fails closed on every platform.
-            try:
-                usable = stat.S_ISDIR(os.stat(resolved).st_mode)
-            except FileNotFoundError:
-                usable = True
-            except OSError:
-                usable = False
-            _TRUSTED_ATTACHMENT_ROOTS[key] = resolved if usable else None
-    return _TRUSTED_ATTACHMENT_ROOTS[key]
+        _TRUSTED_ATTACHMENT_ROOTS[key] = _resolve_trusted_attachment_root(key)
+    entry = _TRUSTED_ATTACHMENT_ROOTS[key]
+    return entry if isinstance(entry, Path) else None
+
+
+def _trusted_attachment_root_failure() -> _AttachmentRootFailure | None:
+    """The cached startup failure for the active spelling, if there is one.
+
+    Reads the same cache entry ``_trusted_attachment_root()`` reads, so the
+    two can never disagree about the active spelling.  Returns None when the
+    root is available (or has not been resolved yet -- callers consult this
+    only after a None root, which resolves it first).
+    """
+    entry = _TRUSTED_ATTACHMENT_ROOTS.get(_attachment_root_cache_key())
+    return entry if isinstance(entry, _AttachmentRootFailure) else None
 
 
 _trusted_attachment_root()
@@ -328,6 +423,22 @@ def _session_attachment_dir(session_id: str, *, root: Path | None = None) -> Pat
         # back to a by-name resolve, which would leave the hole open.
         root = _trusted_attachment_root()
         if root is None:
+            failure = _trusted_attachment_root_failure()
+            if failure is not None and failure.kind == 'storage':
+                # #9231: a server/storage fault during startup resolution is
+                # not a client mistake.  Raise a non-ValueError so the
+                # handlers' except-Exception branch answers 500 and logs the
+                # traceback, with the restart diagnostic: trust is
+                # established once at startup, so the fault is only
+                # re-resolved after a restart.
+                raise AttachmentInboxStorageError(
+                    'Attachment inbox is unavailable after a server storage '
+                    f'fault during startup resolution ({failure.detail}); '
+                    'repair the storage fault and restart the server to '
+                    're-resolve the inbox'
+                )
+            # Structural refusal (symlink loop, non-directory component,
+            # unparseable spelling): fail closed exactly as before.
             raise ValueError('Attachment inbox is unavailable')
     else:
         root = root.resolve()
