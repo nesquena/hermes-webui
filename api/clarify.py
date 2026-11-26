@@ -133,7 +133,9 @@ def sse_unsubscribe(session_id: str, q: queue.Queue) -> None:
                 _clarify_sse_subscribers.pop(session_id, None)
 
 
-def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
+def submit_pending(
+    session_key: str, data: dict, gateway_owner: tuple[str, str] | None = None,
+) -> _ClarifyEntry:
     """Queue a pending clarify request and notify the UI callback if registered."""
     data = _with_timeout_metadata(data)
     with _lock:
@@ -149,6 +151,8 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
                 and (not data.get("clarify_id") or data["clarify_id"] == last.clarify_id)
             ):
                 entry = last
+                if entry.gateway_owner is None and gateway_owner:
+                    entry.gateway_owner = gateway_owner
                 # Dedup re-uses the existing entry with its original clarify_id.
                 # If a future caller pre-populates clarify_id in data, it is
                 # silently discarded here — the original entry's id wins.
@@ -168,6 +172,8 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
                 return entry
 
         entry = _ClarifyEntry(data)
+        # Owner is bound before the entry is visible to readers or subscribers.
+        entry.gateway_owner = gateway_owner
         # Ensure clarify_id is present in the serialised data the frontend receives.
         entry.data["clarify_id"] = entry.clarify_id
         gw_queue.append(entry)
@@ -288,12 +294,11 @@ def submit_gateway_run_pending(
         q = _gateway_queues.get(session_key) or []
         if any(entry.clarify_id == clarify_id for entry in q):
             return dict(q[0].data), len(q)
-    entry = submit_pending(session_key, data)
+    gateway_owner = None
+    if owner and str(owner[0] or "").strip():
+        gateway_owner = (str(owner[0]), str(owner[1] or ""))
+    submit_pending(session_key, data, gateway_owner=gateway_owner)
     with _lock:
-        if entry.clarify_id == clarify_id and entry.gateway_owner is None and owner:
-            base_url, api_key = owner
-            if str(base_url or "").strip():
-                entry.gateway_owner = (str(base_url), str(api_key or ""))
         q = _gateway_queues.get(session_key) or []
         return (dict(q[0].data) if q else None), len(q)
 

@@ -437,6 +437,31 @@ def test_respond_delivers_only_to_owning_gateway(_other_default_gateway):
     ]
 
 
+def test_answer_at_first_visibility_reaches_owner(_other_default_gateway):
+    """An answer sent the moment the card becomes visible (notify hook) is
+    delivered to the owner, not rejected as expired."""
+    data = gateway_chat._gateway_runs_clarify_event(_request(), RUN)
+    assert data is not None
+    calls, ctx = _gateway_post_with_auth({"status": "resolved"})
+    seen = {}
+
+    def answer_now(_card):
+        seen["pending"] = clarify.get_pending(SID)
+        with ctx:
+            seen["out"] = _respond({"session_id": SID, "clarify_id": data["clarify_id"], "response": "blue"})
+
+    clarify.register_gateway_notify(SID, answer_now)
+    try:
+        clarify.submit_gateway_run_pending(SID, data, owner=("http://owner-gw:9000", "owner-secret"))
+    finally:
+        clarify.unregister_gateway_notify(SID)
+    assert "owner-secret" not in json.dumps(seen["pending"])
+    assert seen["out"]["status"] == 200
+    assert [(url, auth) for url, auth, _b in calls] == [
+        (f"http://owner-gw:9000/v1/runs/{RUN}/clarify", "Bearer owner-secret"),
+    ]
+
+
 def test_respond_fails_closed_when_owner_unknown(_other_default_gateway):
     """A Gateway-run mirror whose owning Gateway was never established is never
     answered through a default/shared Gateway or credential."""
