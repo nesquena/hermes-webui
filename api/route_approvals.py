@@ -152,6 +152,15 @@ _pending = getattr(_agent_approval, "_pending", None)
 if not isinstance(_pending, dict):
     _pending = {}
 
+# A prompt auto-answered the instant it arrived never entered the queue, yet the
+# Gateway can describe the same prompt again through its ``pending_controls``
+# projection. The event's consent markers are kept here for the very same
+# prompt — same session, run, identity and generation — so that second
+# description stays classifiable instead of being parked as unclassified.
+# Nothing is inferred from a miss: an unknown prompt stays unclassified.
+_answered_approval_markers: dict[tuple[str, str, str, int], tuple[list[str], str]] = {}
+_ANSWERED_APPROVAL_MARKERS_MAX = 32
+
 APPROVAL_BRIDGE = {
     "agent": _agent_approval is not None,
     "available": not any(n in _missing_agent_names for n in _BRIDGE_CRITICAL_NAMES),
@@ -534,6 +543,76 @@ def is_protected_approval(approval) -> bool:
     return _is_protected_surface(str(approval.get("surface") or "").strip())
 
 
+def is_classified_approval(approval) -> bool:
+    """True when the payload states WHICH kind of gate this prompt is.
+
+    A consent prompt and an ordinary command approval are told apart by the
+    Agent's own marker (``pattern_key`` / ``pattern_keys``) or by the consent
+    surface. A payload carrying none of them cannot be classified at all:
+    the canonical Gateway producer rebuilds a pending approval from kind,
+    prompt id, generation, command, description and choices, and its
+    ``pending_controls`` projection has no marker either (#9108).
+
+    Missing classification is NOT evidence that the prompt is an ordinary
+    command, so it must not buy an automatic answer; callers park the prompt
+    as a card instead.
+    """
+    if not isinstance(approval, dict):
+        return False
+    keys = [str(approval.get("pattern_key") or "")] + [
+        str(k) for k in (approval.get("pattern_keys") or [])
+    ]
+    if any(key.strip() for key in keys):
+        return True
+    return bool(str(approval.get("surface") or "").strip())
+
+
+def may_auto_answer_approval(approval) -> bool:
+    """True only for a CLASSIFIED, non-consent approval.
+
+    Session YOLO may answer this one automatically. Everything else is left to
+    an explicit answer: a consent prompt because YOLO never covers consent, and
+    an unclassified prompt because nothing in the payload proves it is not one.
+    """
+    return is_classified_approval(approval) and not is_protected_approval(approval)
+
+
+def remember_answered_approval_markers(session_key: str, approval: dict) -> None:
+    """Remember the consent markers of a prompt WebUI just settled.
+
+    The Gateway describes one prompt twice: an ``approval.request`` event that
+    carries the Agent's marker, and a ``pending_controls`` projection that may
+    carry none. When the event is answered before the projection arrives, the
+    queue entry is gone and the projection would look unclassified, so the
+    markers are remembered against the prompt itself — same session, run,
+    identity and execution generation — and dropped oldest-first once the
+    bound is reached.
+    """
+    if not isinstance(approval, dict):
+        return
+    prompt_id = str(
+        approval.get("prompt_id") or approval.get("approval_id") or ""
+    ).strip()
+    run_id = str(approval.get("run_id") or "").strip()
+    generation = approval.get(_GATEWAY_EXECUTION_GENERATION)
+    if not prompt_id or not run_id or type(generation) is not int:
+        return
+    keys = [str(approval.get("pattern_key") or "")] + [
+        str(k) for k in (approval.get("pattern_keys") or [])
+    ]
+    keys = [key.strip() for key in keys if key.strip()]
+    surface = str(approval.get("surface") or "").strip()
+    if not keys and not surface:
+        return
+    with _lock:
+        _answered_approval_markers[(session_key, run_id, prompt_id, generation)] = (
+            keys,
+            surface,
+        )
+        while len(_answered_approval_markers) > _ANSWERED_APPROVAL_MARKERS_MAX:
+            _answered_approval_markers.pop(next(iter(_answered_approval_markers)))
+
+
 def known_approval_consent_markers(
     session_key: str,
     *identifiers: str,
@@ -611,6 +690,21 @@ def known_approval_consent_markers(
                 if single:
                     pattern_keys.append(single)
             surface = surface or str(entry.get("surface") or "").strip()
+        if (
+            not pattern_keys
+            and not surface
+            and wanted_run_id
+            and type(execution_generation) is int
+        ):
+            # The prompt may have been settled before this projection arrived;
+            # the markers then live in the answered-prompt table, not the queue.
+            for identifier in wanted:
+                cached = _answered_approval_markers.get(
+                    (session_key, wanted_run_id, identifier, execution_generation)
+                )
+                if cached is not None:
+                    pattern_keys, surface = list(cached[0]), cached[1]
+                    break
     return pattern_keys, surface
 
 

@@ -569,7 +569,8 @@ def _settle_gateway_run_approval(
     """
     from api.route_approvals import (
         gateway_yolo_handoff,
-        is_protected_approval,
+        may_auto_answer_approval,
+        remember_answered_approval_markers,
         settle_gateway_pending_run,
         submit_gateway_pending_mirror,
     )
@@ -580,7 +581,7 @@ def _settle_gateway_run_approval(
     with gateway_yolo_handoff(session_id):
         if cancel_event is not None and cancel_event.is_set():
             return False, None, 0
-        if not is_protected_approval(approval_data) and _gateway_session_yolo_enabled(session_id):
+        if may_auto_answer_approval(approval_data) and _gateway_session_yolo_enabled(session_id):
             try:
                 _auto_approve_gateway_run(
                     base_url,
@@ -593,6 +594,10 @@ def _settle_gateway_run_approval(
                         else {}
                     ),
                 )
+                # A second description of this prompt (the pending_controls
+                # projection) may arrive after the queue entry is gone; keep
+                # the markers the event carried so it stays classifiable.
+                remember_answered_approval_markers(session_id, approval_data)
                 return True, None, 0
             except Exception:
                 # Fail closed: if remote approval fails, surface the real card

@@ -464,6 +464,14 @@ Concretely:
   auto-answered on the Runs API path and not released by the local/no-run
   drain. An ordinary command approval next to it is still answered, and a
   later ordinary command does not release an older protected one.
+- **An unclassified prompt is never auto-answered.** When the Gateway omits
+  every consent marker — its `pending_controls` projection keeps none, and on
+  some Agent versions the `approval.request` event drops them too — nothing in
+  the payload proves the prompt is an ordinary command. YOLO leaves such a
+  prompt as a card for an explicit answer instead of inferring permission from
+  the missing classification. This is the compatibility boundary: a Gateway
+  that publishes the Agent's markers keeps automatic command approval, and one
+  that strips them parks every prompt until a person answers it.
 - **Enabling YOLO is refused while a protected approval is parked.** The
   request answers `409` with `{"code": "gateway_protected_approval_pending",
   "error": "A protected approval (an MCP elicitation or a publish action) is

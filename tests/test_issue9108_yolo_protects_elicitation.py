@@ -187,6 +187,12 @@ def _clear(session_id):
     with route_approvals._lock:
         route_approvals._gateway_queues.pop(session_id, None)
         route_approvals._pending.pop(session_id, None)
+        for key in [
+            key
+            for key in route_approvals._answered_approval_markers
+            if key[0] == session_id
+        ]:
+            del route_approvals._answered_approval_markers[key]
 
 
 def _park(session_id, data):
@@ -597,6 +603,54 @@ def test_gateway_approval_request_event_is_not_auto_answered_by_yolo(
     assert _parked_protected_rows(sid), "the consent card must stay published"
 
 
+def test_a_first_seen_unclassified_event_is_parked_for_a_manual_answer(
+    sid, yolo_state, runner_spy
+):
+    """The canonical producer can omit every marker from the event itself.
+
+    ``PendingControls.register()`` rebuilds a pending prompt from kind, prompt
+    id, generation, command, description and choices — no ``pattern_key`` and
+    no ``surface``. On a first observation there is no earlier mirror to
+    recover from, so nothing in the payload proves this is an ordinary command.
+    Missing classification must not buy an automatic answer.
+    """
+    yolo_state["enabled"].add(sid)
+
+    payload = _gateway_event_payload(COMMON)
+    payload.pop("pattern_key", None)
+    payload.pop("pattern_keys", None)
+
+    relayed, sink = _relay_gateway_event(sid, payload)
+
+    assert relayed is True
+    assert runner_spy == [], (
+        "an unclassified prompt must not be auto-answered; "
+        f"remote answers: {runner_spy!r}"
+    )
+    assert sink.approvals, "the unclassified prompt must still surface as a card"
+
+
+def test_a_first_seen_unclassified_projection_is_parked_for_a_manual_answer(
+    sid, yolo_state, runner_spy
+):
+    """Projection-first/reattach with an empty local cache.
+
+    The authority projection carries no marker, and this session has mirrored
+    nothing for the prompt, so there is nothing to recover. The prompt must
+    stay a card rather than becoming an automatic answer.
+    """
+    yolo_state["enabled"].add(sid)
+
+    relayed, sink = _relay_gateway_event(sid, _gateway_projection_payload(COMMON))
+
+    assert relayed is True
+    assert runner_spy == [], (
+        "an unclassified projection must not be auto-answered; "
+        f"remote answers: {runner_spy!r}"
+    )
+    assert sink.approvals, "the unclassified prompt must still surface as a card"
+
+
 @pytest.mark.parametrize("approval", PROTECTED, ids=PROTECTED_IDS)
 def test_gateway_pending_controls_projection_does_not_answer_a_consent_prompt(
     sid, yolo_state, runner_spy, approval
@@ -868,8 +922,15 @@ def test_a_newer_generation_does_not_inherit_the_old_consent_markers(
     assert relayed is True
     assert runner_spy == [], "the consent prompt must not be answered"
 
-    # Generation 9 re-uses the prompt id for an ordinary command.
-    newer = _gateway_projection_payload(COMMON, prompt_id="prompt-9108", generation=9)
+    # Generation 9 re-uses the prompt id for an ordinary command. Its marker
+    # is explicit: an unclassified description is parked for a manual answer
+    # by design, so the projection has to carry the ordinary classification
+    # for this test to isolate INHERITANCE rather than classification.
+    newer = {
+        **_gateway_projection_payload(COMMON, prompt_id="prompt-9108", generation=9),
+        "pattern_key": "recursive delete",
+        "pattern_keys": ["recursive delete"],
+    }
     relayed, _sink = _relay_gateway_event(
         sid, newer, run_id="run-9108"
     )

@@ -549,9 +549,9 @@ def _run_with_approval_events(monkeypatch, *, yolo_enabled, auto_error=None):
 
     event_lines = [
         b'event: approval.request\n',
-        b'data: {"event":"approval.request","approval_id":"approval-1","tool":"terminal","command":"one"}\n',
+        b'data: {"event":"approval.request","approval_id":"approval-1","tool":"terminal","command":"one","pattern_key":"command","pattern_keys":["command"]}\n',
         b'event: approval.request\n',
-        b'data: {"event":"approval.request","approval_id":"approval-2","tool":"terminal","command":"two"}\n',
+        b'data: {"event":"approval.request","approval_id":"approval-2","tool":"terminal","command":"two","pattern_key":"command","pattern_keys":["command"]}\n',
         b'event: run.completed\n',
         b'data: {"event":"run.completed","output":"done"}\n',
     ]
@@ -1177,6 +1177,8 @@ def test_yolo_post_serializes_post_snapshot_gateway_approval(monkeypatch):
     workers = []
     auto_approved = []
     approval = {
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "command": "touch /tmp/webui-yolo-test",
         "description": "test",
         "approval_id": "approval-post-snapshot",
@@ -1358,6 +1360,8 @@ def test_yolo_disable_linearizes_after_selected_gateway_autoapproval(monkeypatch
     worker_results = []
     response = {}
     approval = {
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "approval_id": "approval-disable-race",
         "run_id": "run-disable-race",
         "_gateway_agent_identity_v1": True,
@@ -1525,6 +1529,8 @@ def test_yolo_post_first_relay_serializes_next_gateway_approval(monkeypatch):
     stream_workers = []
     auto_approved = []
     approval_a = {
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "command": "touch /tmp/webui-yolo-a",
         "description": "first",
         "approval_id": "approval-first",
@@ -1533,6 +1539,8 @@ def test_yolo_post_first_relay_serializes_next_gateway_approval(monkeypatch):
         "_gateway_agent_identity_v1": True,
     }
     approval_b = {
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "command": "touch /tmp/webui-yolo-b",
         "description": "second",
         "approval_id": "approval-second",
@@ -1628,6 +1636,8 @@ def test_card_yolo_first_relay_serializes_next_gateway_approval(monkeypatch, rel
     stream_workers = []
     auto_approved = []
     approval_a = {
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "command": "touch /tmp/webui-yolo-a",
         "description": "first",
         "approval_id": "approval-card-first",
@@ -1636,6 +1646,8 @@ def test_card_yolo_first_relay_serializes_next_gateway_approval(monkeypatch, rel
         "_gateway_agent_identity_v1": True,
     }
     approval_b = {
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "command": "touch /tmp/webui-yolo-b",
         "description": "second",
         "approval_id": "approval-card-second",
