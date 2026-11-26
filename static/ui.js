@@ -349,18 +349,19 @@ function _composerRenderAbortText(tx){
     }
   }
   let text=replacedAt>=0?replacement:base;
-  // Every `text-append` record paints the live textarea as it is recorded
-  // (`_composerAppendText`). A later native edit therefore already contains
-  // that append in its whole-text snapshot: replaying the append slot on top of
-  // it duplicates the rescued clarification answer (or any painted append).
-  // The native snapshot is the visible truth for those slots, so skip appends
-  // that predate it; later appends still compose after the snapshot.
+  // A source-owned `text-append` (the rescued clarification answer) is painted
+  // into the live textarea as it is recorded. A later native edit therefore
+  // already contains it in its whole-text snapshot: replaying that append on
+  // top duplicates the answer. Destination appends (a saved prompt) are only
+  // buffered, never painted, so they must survive even when a native snapshot
+  // comes later.
   const nativeRevision=Number(tx.abortNativeRevision||0);
   for(const token of tx.abortTextOrder){
     const slot=slots.get(token);
     if(!slot)continue;
     if(replacedAt>=0&&Number(slot.revision||0)<=replacedAt)continue;
-    if(slot.kind==='text-append'&&Number(slot.revision||0)<nativeRevision)continue;
+    if(slot.kind==='text-append'&&slot.painted
+      &&Number(slot.revision||0)<nativeRevision)continue;
     const value=String(slot.value||'');
     if(slot.kind==='text-set'){
       if(value===text)continue;
@@ -491,6 +492,11 @@ function _composerTransitionRecord(kind,value,ownerSid,abortValue,options={}){
     tx.abortTextSlots.set(producerToken,{
       kind,semantics,revision,
       value:String(kind==='text-set'?record.abortValue:value||''),
+      // Only a source-owned append is painted into the live textarea by the
+      // source-update block below. A destination append (saved prompt) stays
+      // buffered and is never visible, so a later native snapshot cannot
+      // contain it.
+      painted:sourceOwned&&kind==='text-append',
     });
     _composerRenderAbortText(tx);
     tx.abortState.revision=record.revision;

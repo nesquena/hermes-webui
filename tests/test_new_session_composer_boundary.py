@@ -341,6 +341,11 @@ def _run_review_race_harness(schedule: str, source: str = "source draft") -> dic
             insertSavedPromptIntoComposer('saved prompt');
             msg.value='source draft typed';
             _composerRecordNativeText();
+          }}else if(schedule==='prompt-then-native-abort'){{
+            insertSavedPromptIntoComposer('saved prompt');
+            msg.value='source draft typed';
+            _composerRecordNativeText();
+            throw new Error('create failed');
           }}else if(schedule==='voice-prompt-voice'){{
             _composerSetText('source draft interim','interim',null,'voice-producer');
             insertSavedPromptIntoComposer('saved prompt');
@@ -3059,6 +3064,17 @@ def test_saved_prompt_and_voice_producers_compose_in_arrival_order(schedule, exp
 
     assert result["activeSid"] == "new-session"
     assert result["text"] == expected
+
+
+def test_aborted_create_keeps_a_saved_prompt_buffered_before_a_native_edit():
+    # A saved prompt appended during the handoff is buffered for the
+    # destination, never painted into the textarea. The native snapshot that
+    # follows cannot contain it, so abort must still restore it.
+    result = _run_review_race_harness("prompt-then-native-abort")
+
+    assert result["error"] == "create failed"
+    assert result["activeSid"] == "old-session"
+    assert result["text"] == "source draft\n\nsaved prompt\n\n typed"
 
 
 def test_voice_final_replaces_its_interim_slot_without_dropping_saved_prompt():
