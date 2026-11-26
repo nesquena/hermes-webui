@@ -7102,6 +7102,71 @@ def _republish_session_after_shrink(sid, session) -> None:
         _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
 
 
+def _publish_reloaded_session(sid, snapshot, *, promote_cache=True):
+    """Make a reloaded snapshot the canonical object, or serve the newer one (#9229).
+
+    ``_resolve_session_once`` returns the object a mutation consumer will
+    shrink and save. That object must be the one the cache holds: publishing
+    a snapshot while returning a different object -- or returning one while
+    the cache keeps another -- lets a mutation act on state that is not
+    canonical, and the next save writes the wrong transcript.
+
+    Two cases must not publish ``snapshot``:
+
+      * a resident that is at least as new as the sidecar already exists --
+        it is the object mutation consumers will read, so serve it;
+      * the sidecar has SHRUNK past the snapshot (a retry/undo save landed
+        after this read). Publishing the pre-shrink snapshot puts the
+        removed reply back in the cache, and the next save makes that
+        resurrection durable. Reload the durable state and publish that.
+
+    Returns the object the resolver should hand back.
+    """
+    if snapshot is None:
+        with LOCK:
+            return SESSIONS.get(sid)
+    with LOCK:
+        resident = SESSIONS.get(sid)
+        if resident is snapshot:
+            if promote_cache:
+                SESSIONS.move_to_end(sid)
+            return snapshot
+    if resident is not None and not _cached_session_lags_disk(resident):
+        # Another writer published an object that already matches the
+        # sidecar. That object is canonical -- mutation consumers will get
+        # it -- so serve it instead of a snapshot taken before its write.
+        return resident
+    # The resident (if any) lags the sidecar, so a reload was required. The
+    # sidecar can still have moved past the snapshot: retry/undo save a
+    # SHORTER transcript, and publishing the earlier read would resurrect
+    # the removed rows. Reload the durable state and publish THAT.
+    snapshot_count = len(getattr(snapshot, 'messages', None) or [])
+    disk_count = _persisted_message_count(sid)
+    if disk_count is not None and disk_count < snapshot_count:
+        try:
+            reloaded = Session.load(sid)
+        except Exception:
+            logger.debug(
+                "reload after a shrunk sidecar failed for session %s", sid, exc_info=True,
+            )
+            return resident if resident is not None else snapshot
+        if reloaded is not None:
+            snapshot = reloaded
+    if snapshot is None:
+        with LOCK:
+            return SESSIONS.get(sid)
+    with LOCK:
+        current = SESSIONS.get(sid)
+        if current is None or current is resident or current is snapshot:
+            SESSIONS[sid] = snapshot
+            if promote_cache:
+                SESSIONS.move_to_end(sid)
+            return snapshot
+        # Another writer published in the gap: never replace it with the
+        # snapshot we already know is behind.
+        return current
+
+
 def _persisted_message_count(sid) -> int | None:
     """Return the on-disk message count for *sid* without a full load (#4765).
 
@@ -7551,14 +7616,13 @@ def _resolve_session_once(
                     # is current: read the sidecar again.
                 else:
                     # Every attempt was overtaken. Publish the newest snapshot
-                    # actually read -- this branch is entered because the
-                    # pre-reload object lags the sidecar, so handing that one
-                    # back would serve a transcript known to be stale.
-                    with LOCK:
-                        SESSIONS[sid] = disk_session
-                        if promote_cache:
-                            SESSIONS.move_to_end(sid)
-                    cached = disk_session
+                    # actually read -- but only as canonical: never replace an
+                    # object another writer already published, and never
+                    # publish a pre-shrink read (that is what resurrects a
+                    # removed reply, #9229).
+                    cached = _publish_reloaded_session(
+                        sid, disk_session, promote_cache=promote_cache
+                    )
             except Exception:
                 logger.debug(
                     "cached session disk-freshness check failed for session %s", sid, exc_info=True,
@@ -7566,8 +7630,14 @@ def _resolve_session_once(
                 if disk_session is not None:
                     # Never fall back to the pre-reload object once a reload
                     # has run: this branch already knows that object lags the
-                    # sidecar.
-                    cached = disk_session
+                    # sidecar. Keep the returned object and the cache entry
+                    # the same one mutation consumers read.
+                    try:
+                        cached = _publish_reloaded_session(
+                            sid, disk_session, promote_cache=promote_cache
+                        )
+                    except Exception:
+                        cached = disk_session
         if not metadata_only and _inactive_cache_tail_needs_disk_check(cached):
             if not allow_full_load:
                 raise _FullSessionResolveRequired

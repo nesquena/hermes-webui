@@ -733,3 +733,227 @@ def test_undo_with_a_conflicting_reload_and_eviction_undoes_the_right_turn(
     assert contents == ["q1", "a1", "q2", "a2"], (
         f"undo removed the wrong turn after a conflicting reload: {contents}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Gate round 3: the resolved session state and the canonical cache entry must
+# be the SAME object. A reload that loses a race may neither hand back a
+# snapshot the cache does not hold (a mutation would shrink a non-canonical
+# object) nor publish a pre-shrink snapshot the sidecar has already moved
+# past (that resurrects the removed reply, and the next save makes it durable).
+# ---------------------------------------------------------------------------
+
+
+def _six_message_sidecar(session_id: str):
+    from api.models import Session
+
+    return Session(
+        session_id=session_id,
+        messages=[
+            _msg("user", "q1", 1.0, "u1"),
+            _msg("assistant", "a1", 2.0, "a1"),
+            _msg("user", "q2", 3.0, "u2"),
+            _msg("assistant", "a2", 4.0, "a2"),
+            _msg("user", "q3", 5.0, "u3"),
+            _msg("assistant", "a3", 6.0, "a3"),
+        ],
+    )
+
+
+def _seed_lagging_cache(models, session_id: str):
+    """Cache four messages, sidecar six: a full read must reload."""
+    resident = models.Session(
+        session_id=session_id, messages=_six_message_sidecar(session_id).messages[:4]
+    )
+    resident.save()
+    models.SESSIONS[session_id] = resident
+    other = models.Session.load(session_id)
+    other.messages = _six_message_sidecar(session_id).messages
+    other.save()
+    models.SESSIONS[session_id] = resident
+    return resident
+
+
+def test_selector_only_control_serves_the_newer_sidecar(monkeypatch, tmp_path):
+    """Selector-only control: with no concurrent mutation, the resolver must
+    serve the sidecar's newer transcript instead of the lagging cache.
+
+    This is the control the gate-regression tests below are measured against:
+    it proves the fixture's lag is real and the selector path alone is sound,
+    so neither regression can pass by serving a synthetic or unreadable
+    snapshot.
+    """
+    models = _prepare_session_dir(monkeypatch, tmp_path, "selectoronly")
+    _seed_lagging_cache(models, "selectoronly")
+
+    resolved = models.get_session("selectoronly")
+    contents = [m["content"] for m in (resolved.messages or [])]
+    assert contents == ["q1", "a1", "q2", "a2", "q3", "a3"], (
+        f"the selector served the lagging cache instead of the sidecar: {contents}"
+    )
+    with models.LOCK:
+        cached = models.SESSIONS.get("selectoronly")
+    assert cached is resolved, (
+        "the selector returned an object the cache does not hold: a mutation "
+        "consumer would shrink a non-canonical snapshot"
+    )
+
+
+def test_a_conflicting_reload_that_fails_keeps_resolved_state_canonical(
+    monkeypatch, tmp_path
+):
+    """Gate round 3: a reload that raises must not return an unpublished snapshot.
+
+    The cache holds four messages and the sidecar six. The reader reloads; the
+    first load succeeds and another thread makes a field-only write, so the
+    reload retries -- and the retry raises. The resolver already knows the
+    pre-reload object lags the sidecar, so it keeps the reloaded snapshot, but
+    it must also make that snapshot canonical: returning six messages while
+    the cache still holds the four-message object is exactly the split state
+    that lets the next mutation shrink and save the wrong transcript.
+    """
+    models = _prepare_session_dir(monkeypatch, tmp_path, "reloadraise")
+    _seed_lagging_cache(models, "reloadraise")
+
+    real_load = models.Session.load.__func__
+    reads = {"count": 0}
+
+    def _load(cls, sid):
+        session = real_load(cls, sid)
+        if (
+            sid == "reloadraise"
+            and threading.current_thread().name == "reload-raise-reader"
+        ):
+            reads["count"] += 1
+            if reads["count"] == 1:
+                def _field_writer():
+                    models.set_session_reasoning_effort("reloadraise", "high")
+
+                writer = threading.Thread(
+                    target=_field_writer, name="reload-raise-writer"
+                )
+                writer.start()
+                writer.join(10)
+                assert not writer.is_alive(), "the concurrent writer never finished"
+            elif reads["count"] == 2:
+                raise RuntimeError("injected fault after a successful reload")
+        return session
+
+    monkeypatch.setattr(models.Session, "load", classmethod(_load))
+
+    results: dict = {}
+
+    def _read():
+        try:
+            results["session"] = models.get_session("reloadraise")
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion
+            results["error"] = exc
+
+    reader = threading.Thread(target=_read, name="reload-raise-reader")
+    reader.start()
+    reader.join(10)
+    assert not reader.is_alive(), "the reader never finished"
+    assert "error" not in results, f"the reader raised: {results.get('error')}"
+
+    resolved = results["session"]
+    contents = [m["content"] for m in (resolved.messages or [])]
+    assert contents == ["q1", "a1", "q2", "a2", "q3", "a3"], (
+        f"the failed reload served the lagging snapshot: {contents}"
+    )
+    with models.LOCK:
+        cached = models.SESSIONS.get("reloadraise")
+    assert cached is resolved, (
+        "the resolver returned a snapshot the canonical cache does not hold: "
+        f"resolved={[m['content'] for m in resolved.messages or []]}, "
+        f"cached={[m['content'] for m in (cached.messages or [])] if cached else None}"
+    )
+
+
+def test_every_attempt_overtaken_never_republishes_a_pre_shrink_snapshot(
+    monkeypatch, tmp_path
+):
+    """Gate round 3: durable history preservation when every reread is overtaken.
+
+    The cache holds four messages and the sidecar six. Every reread loses its
+    race: the first two against field-only writes, the last against a real
+    retry-style shrink+save, together with the detach retry/undo perform. The
+    snapshot the reader holds still carries the removed turn, so publishing it
+    puts the reply back in the cache -- and the next save writes it to disk,
+    undoing the user's retry. The resolver must publish the durable state
+    instead.
+    """
+    models = _prepare_session_dir(monkeypatch, tmp_path, "alltaken")
+    _seed_lagging_cache(models, "alltaken")
+
+    real_load = models.Session.load.__func__
+    reads = {"count": 0}
+
+    def _load(cls, sid):
+        session = real_load(cls, sid)
+        if sid == "alltaken" and threading.current_thread().name == "all-taken-reader":
+            reads["count"] += 1
+            attempt = reads["count"]
+            if attempt > 3:
+                return session
+
+            def _writer():
+                if attempt in (1, 2):
+                    models.set_session_reasoning_effort("alltaken", "high")
+                else:
+                    shrunk = models.Session.load("alltaken")
+                    last_user = max(
+                        i for i, m in enumerate(shrunk.messages)
+                        if m.get("role") == "user"
+                    )
+                    shrunk.messages = shrunk.messages[:last_user]
+                    shrunk.save()
+                with models.LOCK:
+                    # retry/undo drop the entry in the same critical section
+                    # that publishes the shrink; no republish has happened yet.
+                    models.SESSIONS.pop("alltaken", None)
+
+            writer = threading.Thread(target=_writer, name="all-taken-writer")
+            writer.start()
+            writer.join(10)
+            assert not writer.is_alive(), "the concurrent writer never finished"
+        return session
+
+    monkeypatch.setattr(models.Session, "load", classmethod(_load))
+
+    results: dict = {}
+
+    def _read():
+        try:
+            results["session"] = models.get_session("alltaken")
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion
+            results["error"] = exc
+
+    reader = threading.Thread(target=_read, name="all-taken-reader")
+    reader.start()
+    reader.join(10)
+    assert not reader.is_alive(), "the reader never finished"
+    assert "error" not in results, f"the reader raised: {results.get('error')}"
+
+    # The retry removed q3/a3 from the durable transcript. Nothing may put
+    # them back: not the cache, and not a later save of whatever the reader
+    # resolved.
+    with models.LOCK:
+        cached = models.SESSIONS.get("alltaken")
+    if cached is not None:
+        cached_contents = [m["content"] for m in (cached.messages or [])]
+        assert "q3" not in cached_contents and "a3" not in cached_contents, (
+            f"the overtaken reload republished the removed turn: {cached_contents}"
+        )
+
+    resolved = results["session"]
+    resolved_contents = [m["content"] for m in (resolved.messages or [])]
+    assert "q3" not in resolved_contents and "a3" not in resolved_contents, (
+        f"the overtaken reload served the removed turn: {resolved_contents}"
+    )
+
+    resolved.save()
+    on_disk = models.Session.load("alltaken")
+    disk_contents = [m["content"] for m in (on_disk.messages or [])]
+    assert "q3" not in disk_contents and "a3" not in disk_contents, (
+        f"the removed turn came back on disk: {disk_contents}"
+    )
