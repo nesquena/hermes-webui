@@ -44,9 +44,9 @@ _C_INT_MAX = 2**31 - 1
 _DISABLED = frozenset({"0", "off", "false"})
 _EXEC_ENVIRON = "/proc/self/environ"  # exec-time env block; only the arena keys are read
 # How glibc's tunable parser reads an arena setting once leading spaces and
-# tabs are skipped: optional "+", then 0x hex, a leading-0 octal number or a
+# tabs are skipped: optional sign, then 0x hex, a leading-0 octal number or a
 # decimal number, and nothing after it (_dl_strtoul plus the end-of-value check).
-_GLIBC_NUMBER = re.compile(r"\+?(?:0[xX](?P<hex>[0-9a-fA-F]*)|(?P<oct>0[0-7]*)|(?P<dec>[1-9][0-9]*))")
+_GLIBC_NUMBER = re.compile(r"(?P<sign>[+-]?)(?:0[xX](?P<hex>[0-9a-fA-F]*)|(?P<oct>0[0-7]*)|(?P<dec>[1-9][0-9]*))")
 _GLIBC_DIGITS = {16: 16, 8: 22, 10: 20}  # most significant digits a 64-bit value can have
 _U64_MAX = 2**64 - 1
 _UNSET: Any = object()
@@ -66,28 +66,42 @@ def _glibc_malloc() -> Any | None:
 
 
 def _arena_max_setting(env: Mapping[str, str], invalid: dict[tuple[str, str], None]) -> tuple[str, str] | None:
-    """``(name, value)`` of the arena cap *env* asks glibc for, or ``None``.
+    """``(name, value)`` of the arena cap glibc put in force from *env*, or ``None``.
 
-    The exact ``glibc.malloc.arena_max`` item in ``GLIBC_TUNABLES`` wins over
-    ``MALLOC_ARENA_MAX``, as it does in glibc. A blank value counts as unset
-    (glibc ignores it too). So does a value that is not a positive integer:
-    glibc ignores zero and non-numeric values and reads a negative one as a
-    huge cap, so the process would run uncapped. Such a setting is added to
-    *invalid*.
+    Mirrors glibc (measured on 2.39): every ``glibc.malloc.arena_max`` item in
+    ``GLIBC_TUNABLES`` is read in order and the last one glibc accepts wins;
+    an accepted tunable wins over ``MALLOC_ARENA_MAX``, which is read only when
+    no tunable item was accepted. A value glibc rejects (zero, non-numeric,
+    trailing text, ``08``) is skipped, as glibc skips it. A negative value is
+    accepted but wraps to a huge cap, so it is in force yet caps nothing; that
+    ends the search with ``None``, because the setting glibc kept is no cap.
+    Rejected and wrapping values are added to *invalid*. A blank value counts
+    as unset, quietly.
     """
-    settings = [
-        ("GLIBC_TUNABLES glibc.malloc.arena_max", value)
-        for name, sep, value in (item.partition("=") for item in (env.get("GLIBC_TUNABLES") or "").split(":"))
-        if sep and name == "glibc.malloc.arena_max"
-    ]
-    settings.append(("MALLOC_ARENA_MAX", env.get("MALLOC_ARENA_MAX") or ""))
-    for name, value in settings:
-        if not value.strip():
-            continue
-        if _arena_number(value) is not None:
-            return name, value
+    tunable = "GLIBC_TUNABLES glibc.malloc.arena_max"
+    in_force: tuple[str, str, int | None] | None = None
+    for name, sep, value in (item.partition("=") for item in (env.get("GLIBC_TUNABLES") or "").split(":")):
+        if sep and name == "glibc.malloc.arena_max" and value.strip():
+            accepted, cap = _glibc_read(value)
+            if accepted:
+                in_force = (tunable, value, cap)  # a later accepted item replaces it
+            else:
+                invalid[(tunable, value)] = None
+    if in_force is None:
+        value = env.get("MALLOC_ARENA_MAX") or ""
+        if value.strip():
+            accepted, cap = _glibc_read(value)
+            if accepted:
+                in_force = ("MALLOC_ARENA_MAX", value, cap)
+            else:
+                invalid[("MALLOC_ARENA_MAX", value)] = None
+    if in_force is None:
+        return None
+    name, value, cap = in_force
+    if cap is None:
         invalid[(name, value)] = None
-    return None
+        return None
+    return name, value
 
 
 def _launch_environ() -> dict[str, str] | None:
@@ -113,20 +127,19 @@ def _launch_environ() -> dict[str, str] | None:
     return found
 
 
-def _arena_number(value: str) -> int | None:
-    """*value* read exactly as glibc reads an arena setting, when that gives a
-    positive cap; ``None`` when glibc would set no cap from it.
+def _glibc_read(value: str) -> tuple[bool, int | None]:
+    """How glibc's tunable parser takes *value*: ``(accepted, cap)``.
 
-    glibc skips leading spaces and tabs, takes an optional ``+``, then ``0x``
-    hex digits, a leading-``0`` octal number (``010`` is 8, ``08`` is
-    rejected) or a decimal number, and rejects the value if anything follows
-    (``4 ``) or the number does not fit 64 bits. Zero is below the tunable's
-    minimum. A ``-`` sign wraps to a huge cap, which is no cap, so it counts
-    as invalid here too.
+    Follows ``_dl_strtoul`` plus the tunable checks: leading spaces and tabs
+    are skipped, then an optional sign, then ``0x`` hex digits, a leading-``0``
+    octal number (``010`` is 8, ``08`` is rejected) or a decimal number.
+    Anything after the number (``4 ``), zero (below the minimum of 1) or a
+    number that does not fit 64 bits is rejected. A ``-`` sign is accepted and
+    wraps to a huge cap, which is no cap: ``(True, None)``.
     """
     match = _GLIBC_NUMBER.fullmatch(value.lstrip(" \t"))
     if match is None:
-        return None
+        return False, None
     if match["hex"] is not None:
         digits, base = match["hex"], 16
     elif match["oct"] is not None:
@@ -135,9 +148,16 @@ def _arena_number(value: str) -> int | None:
         digits, base = match["dec"], 10
     digits = digits.lstrip("0")
     if not digits or len(digits) > _GLIBC_DIGITS[base]:
-        return None
+        return False, None
     number = int(digits, base)
-    return number if number <= _U64_MAX else None
+    if number > _U64_MAX:
+        return False, None
+    return True, (None if match["sign"] == "-" else number)
+
+
+def _arena_number(value: str) -> int | None:
+    """The positive cap glibc reads from *value*, or ``None`` when it sets none."""
+    return _glibc_read(value)[1]
 
 
 def _positive_c_int(value: str) -> int | None:

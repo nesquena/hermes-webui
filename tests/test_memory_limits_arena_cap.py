@@ -248,6 +248,52 @@ def test_invalid_tunable_falls_through_to_a_valid_malloc_arena_max(info_log):
     assert "operator set MALLOC_ARENA_MAX='4' at launch" in line
 
 
+_TUNABLE = "GLIBC_TUNABLES glibc.malloc.arena_max"
+
+
+@pytest.mark.parametrize(
+    ("tunables", "malloc_arena_max", "in_force", "warned"),
+    [
+        # Measured on glibc 2.39 with 40 threads (arenas in brackets). The last
+        # tunable item glibc accepts wins; an accepted one beats MALLOC_ARENA_MAX.
+        pytest.param("glibc.malloc.arena_max=3:glibc.malloc.arena_max=5", None, "'5'", [], id="last-accepted-wins[5]"),
+        pytest.param("glibc.malloc.arena_max=3:glibc.malloc.arena_max=0", None, "'3'", ["'0'"], id="rejected-later-item-skipped[3]"),
+        pytest.param("glibc.malloc.arena_max=-3:glibc.malloc.arena_max=5", None, "'5'", [], id="wrapped-then-valid[5]"),
+        pytest.param("glibc.malloc.arena_max=3", "5", "'3'", [], id="tunable-beats-alias[3]"),
+    ],
+)
+def test_setting_in_force_follows_glibc_precedence(tunables, malloc_arena_max, in_force, warned, info_log):
+    env = {"GLIBC_TUNABLES": tunables}
+    if malloc_arena_max is not None:
+        env["MALLOC_ARENA_MAX"] = malloc_arena_max
+    applied, libc = _apply(env, launch_environ=dict(env))
+    assert (applied, libc.calls) == (False, [])
+    (line,) = _info_lines(info_log)
+    assert f"operator set {_TUNABLE}={in_force} at launch" in line
+    assert _warning_lines(info_log) == [
+        f"malloc arena cap: ignoring invalid {_TUNABLE}={value} (not a positive integer)" for value in warned
+    ]
+
+
+@pytest.mark.parametrize(
+    ("env", "warned"),
+    [
+        # glibc accepts a negative tunable (it wraps to a huge cap) and then never
+        # reads MALLOC_ARENA_MAX: measured 41 arenas, so the 4 must not be reported
+        # as in force (#9382 review).
+        pytest.param({"GLIBC_TUNABLES": "glibc.malloc.arena_max=-3", "MALLOC_ARENA_MAX": "4"},
+                     f"{_TUNABLE}='-3'", id="negative-tunable-shadows-alias[41]"),
+        pytest.param({"GLIBC_TUNABLES": "glibc.malloc.arena_max=3:glibc.malloc.arena_max=-3"},
+                     f"{_TUNABLE}='-3'", id="later-negative-item-wins[41]"),
+        pytest.param({"MALLOC_ARENA_MAX": "-0x4"}, "MALLOC_ARENA_MAX='-0x4'", id="negative-hex"),
+    ],
+)
+def test_wrapping_negative_setting_in_force_gets_the_default_cap(env, warned, info_log):
+    applied, libc = _apply(env, launch_environ=dict(env))
+    assert (applied, libc.calls) == (True, [(M_ARENA_MAX, 2)])
+    assert _warning_lines(info_log) == [f"malloc arena cap: ignoring invalid {warned} (not a positive integer)"]
+
+
 def test_same_invalid_value_at_launch_and_in_process_warns_once(info_log):
     env = {"MALLOC_ARENA_MAX": "abc"}
     applied, _ = _apply(env, launch_environ=dict(env))
@@ -598,6 +644,8 @@ def test_real_invalid_launch_value_warns_once_and_caps(tmp_path, launch_env, sho
         pytest.param({"MALLOC_ARENA_MAX": "08"}, id="08-not-octal"),
         pytest.param({"MALLOC_ARENA_MAX": "4 "}, id="trailing-blank"),
         pytest.param({"GLIBC_TUNABLES": "glibc.malloc.arena_max=08"}, id="tunable-08"),
+        pytest.param({"GLIBC_TUNABLES": "glibc.malloc.arena_max=-3", "MALLOC_ARENA_MAX": "4"},
+                     id="negative-tunable-shadows-alias"),
     ],
 )
 def test_real_glibc_rejected_value_still_ends_capped(tmp_path, launch_env):
