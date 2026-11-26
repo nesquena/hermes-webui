@@ -26,7 +26,6 @@ import api.routes as routes
 from api import updates
 from tests.js_source_extract import extract_function
 from tests.test_issue9056_manual_force_completion import (
-    NODE,
     PANELS_JS_PATH,
     _dispatch_get,
     _dispatch_post,
