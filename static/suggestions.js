@@ -116,8 +116,12 @@
         if(typeof window.renderTray==='function'){ try{ window.renderTray(); }catch(_){} }
       }
       // Text nur zurücklegen, wenn niemand getippt hat und wir im selben Chat
-      // sind: ein neuerer Entwurf wird nie überschrieben.
-      if(_sameChat&&_untouched){
+      // sind: ein neuerer Entwurf wird nie überschrieben. Ein leerer Entwurf
+      // überschreibt nichts: hat send() nach einem fehlgeschlagenen
+      // /api/chat/start den Vorschlagstext als Retry-Draft zurückgelegt, bleibt
+      // der stehen, statt von '' ersetzt zu werden.
+      const _liveText=_sameChat?String(msg.value||''):'';
+      if(_sameChat&&_untouched&&draft){
         msg.value=draft;
         if(typeof window.autoResize==='function'){
           try{ window.autoResize(); }catch(_){}
@@ -130,10 +134,19 @@
       //    ursprüngliche Text — auch bei reinen Anhang-Entwürfen ohne Text;
       //  - ohne Anhänge wie bisher nur den erfassten Text (gleicher Chat und
       //    unangetastet, oder nach einem Chatwechsel).
-      const _saveText=(_sameChat&&!_untouched)?msg.value:draft;
-      const _persistDraft=!!(parkedFiles&&parkedFiles.length)||(!!draft&&(_untouched||!_sameChat));
+      // Ein leerer Ursprungsentwurf ist kein Text: dann zählt der Feldwert, den
+      // send() nach einem fehlgeschlagenen Start als Retry-Draft hinterlassen hat.
+      const _saveText=(_sameChat&&!_untouched)?_liveText:(draft||_liveText);
+      // Anhänge: im selben Chat ist der Tray nach dem Zurücklegen die Wahrheit,
+      // nicht der Klick-Zeitpunkt — sonst gingen Dateien verloren, die der Nutzer
+      // während des Sendens hinzugefügt hat (dieser Save bricht den neueren
+      // Autosave ab). Nach einem Chatwechsel gehört der Tray dem anderen Chat,
+      // dort also weiterhin nur die gemerkten Dateien des Entwurfs.
+      const _saveFiles=(_sameChat&&typeof S!=='undefined'&&S&&Array.isArray(S.pendingFiles))
+        ?S.pendingFiles.slice():draftFiles;
+      const _persistDraft=!!(parkedFiles&&parkedFiles.length)||(!!_saveText&&(_untouched||!_sameChat));
       if(_persistDraft&&ownerSid&&typeof _saveComposerDraft==='function'){
-        try{ _saveComposerDraft(ownerSid,_saveText,draftFiles); }catch(_){}
+        try{ _saveComposerDraft(ownerSid,_saveText,_saveFiles); }catch(_){}
       }
     }
   }

@@ -24,11 +24,12 @@ stubs respondClarify):
   6. an invalid block (non-JSON, or an array with a non-string entry) renders
      no buttons and leaves the raw block visible (fail-safe).
 
-Review follow-ups (checks 7-16) cover: the busy flag, liveness of older replies,
+Review follow-ups (checks 7-18) cover: the busy flag, liveness of older replies,
 fences authored by the user, draft ownership across a chat switch, a draft typed
 mid-send, a draft's staged attachments (never uploaded with a suggestion,
 restored with the draft text, and kept when the user types or switches chats
-while the send is in flight), and the shared radius tokens.
+while the send is in flight), the shared radius tokens, a file staged mid-send
+(still in the saved draft), and a failed send (its retry text survives).
 
 A final phase repeats the important parts in a 390x844 touch context (labels
 wrap, nothing overflows, no clipped labels, the keyboard hint is hidden, and a
@@ -612,6 +613,70 @@ def _review_checks(page, check):
           f"check16: the attachment-only draft is parked on its own chat (got {saves16!r})")
     check(tray16 == [],
           f"check16: the other chat's tray stays untouched (got {tray16!r})")
+
+    # ── Check 17: a file added mid-send is part of the persisted draft ──
+    page.evaluate(INJECT_ROW_JS, ["row17", _json(["Senden"]), True])
+    _wait(page, "(rowId) => { const r = document.querySelector('[data-test-row=\\\"' + rowId + '\\\"]'); "
+                "return r && r.querySelectorAll('.inline-suggestion-btn').length === 1; }", arg="row17")
+    page.evaluate("""() => {
+      window.__draftSaves = [];
+      S.session = { session_id: 'sid-H' };
+      window._saveComposerDraft = function(sid, text, files){
+        window.__draftSaves.push([sid, text, (files || []).map(f => f && f.name)]);
+      };
+      document.getElementById('msg').value = 'Entwurf mit alter Datei';
+      S.pendingFiles = [{ name: 'vertrag.pdf' }];
+      renderTray();
+      window.send = function(){
+        S.pendingFiles = [];
+        renderTray();
+        // The user stages another file while /api/chat/start is still pending;
+        // that file's debounced autosave is still queued when our save runs.
+        S.pendingFiles = [{ name: 'neu.png' }];
+        renderTray();
+        return Promise.resolve();
+      };
+    }""")
+    page.evaluate(CLICK_BUTTON_JS, ["row17", 0])
+    page.wait_for_timeout(300)
+    saves17 = page.evaluate("() => window.__draftSaves.slice()")
+    tray17 = sorted(page.evaluate("() => (S.pendingFiles || []).map(f => f && f.name)"))
+    check(tray17 == ['neu.png', 'vertrag.pdf'],
+          f"check17: the tray holds the parked and the newly added file (got {tray17!r})")
+    check(len(saves17) == 1 and saves17[0][:2] == ['sid-H', 'Entwurf mit alter Datei']
+          and sorted(saves17[0][2]) == ['neu.png', 'vertrag.pdf'],
+          f"check17: the persisted draft carries the merged tray, not the click-time snapshot (got {saves17!r})")
+
+    # ── Check 18: a failed send keeps the text it restored for retry ──
+    page.evaluate(INJECT_ROW_JS, ["row18", _json(["Nochmal senden"]), True])
+    _wait(page, "(rowId) => { const r = document.querySelector('[data-test-row=\\\"' + rowId + '\\\"]'); "
+                "return r && r.querySelectorAll('.inline-suggestion-btn').length === 1; }", arg="row18")
+    page.evaluate("""() => {
+      window.__draftSaves = [];
+      S.session = { session_id: 'sid-I' };
+      window._saveComposerDraft = function(sid, text, files){
+        window.__draftSaves.push([sid, text, (files || []).map(f => f && f.name)]);
+      };
+      // Empty composer: there is no draft text to put back.
+      document.getElementById('msg').value = '';
+      S.pendingFiles = [];
+      renderTray();
+      window.send = function(){
+        // Real send() clears the composer and, when /api/chat/start fails,
+        // restores the label so the user can retry without retyping it.
+        document.getElementById('msg').value = '';
+        document.getElementById('msg').value = 'Nochmal senden';
+        return Promise.resolve();
+      };
+    }""")
+    page.evaluate(CLICK_BUTTON_JS, ["row18", 0])
+    page.wait_for_timeout(300)
+    text18 = page.evaluate(COMPOSER_VALUE_JS)
+    saves18 = page.evaluate("() => window.__draftSaves.slice()")
+    check(text18 == 'Nochmal senden',
+          f"check18: the failed send's retry text stays in the composer (got {text18!r})")
+    check(saves18 == [['sid-I', 'Nochmal senden', []]],
+          f"check18: the retry text is what gets persisted, not an empty draft (got {saves18!r})")
 
 
 def _narrow_checks(browser, base, check):
