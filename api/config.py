@@ -5241,6 +5241,30 @@ def _custom_record_names_identity(display_name: object, provider_key: object, pi
     )
 
 
+def _generic_record_names_slug(record: object, pid: str, slug: str) -> bool:
+    """True when the generic ``providers['custom']`` record IS ``pid`` by its own fields.
+
+    :func:`_custom_record_claims_slug` answers the same question but skips a bare
+    non-ASCII value, because the fallback identity such a value reaches is MINTED
+    by this change and must not outrank a route that names the slug outright
+    (#8164 r37 MUST-FIX). That exclusion is about PRECEDENCE, not about identity:
+    the Agent's own alias set accepts ``custom:晨光`` for a record whose display
+    name is ``晨光``, which is why that record reserves the alias in
+    :func:`_custom_provider_identity_owners` in the first place. This helper is the
+    identity test without the precedence rule, for callers that place the record
+    BELOW every route that declares the slug.
+    """
+    if not isinstance(record, dict):
+        return False
+    for field in _CUSTOM_RECORD_IDENTITY_FIELDS:
+        value = record.get(field)
+        if not str(value or "").strip():
+            continue
+        if _custom_record_names_identity(value, "custom", pid, slug):
+            return True
+    return False
+
+
 # ``hermes_cli.config._ENV_REF_RE``: the references the Agent expands in string values.
 _AGENT_ENV_REF_RE = re.compile(r"\$\{([^}]+)\}")
 
@@ -5854,6 +5878,22 @@ def _select_custom_provider_record(
             # ``model.provider`` names — here, THIS slug. That is a provenance
             # tie rather than a declaration, so anything naming the slug outright
             # (above) outranks it.
+            yield provider_custom, "providers"
+        if (
+            has_generic_custom
+            and not generic_claims_slug
+            and _generic_record_names_slug(provider_custom, pid, slug)
+        ):
+            # Below every rung that NAMES the slug, for the same precedence reason:
+            # a generic record that reaches this slug only through the non-ASCII
+            # fallback (#8017's minted identity) must not outrank a route that
+            # declares it, so this rung sits after the ``model:`` block and the
+            # ``named_by_model`` tie instead of joining ``generic_claims_slug``
+            # (#8164 r37 MUST-FIX). It still has to SERVE the id it reserved: the
+            # owners scan reserves the record's whole alias set so no list entry
+            # mints an identity over the Agent's own route, and without a rung here
+            # the reserved id answered ``missing`` and the provider left the picker
+            # even though the Agent routes it (#8164 greptile P1).
             yield provider_custom, "providers"
 
     for cand, source in _candidates():

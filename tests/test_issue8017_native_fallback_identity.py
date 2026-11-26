@@ -554,3 +554,58 @@ def test_generic_agent_alias_keeps_new_fallback_from_minting_its_id(monkeypatch)
     assert (
         config._custom_provider_entry_identity(entry, data["custom_providers"], data["providers"], data["model"]) == ""
     )
+
+
+def test_the_reserved_generic_alias_still_answers_for_its_own_id(monkeypatch):
+    """The id the generic record reserves must resolve, and stay in the picker.
+
+    Red on the round-18 head: the record's alias set reserved ``custom:晨光`` (so
+    the list entry minted nothing, above), but no candidate could SERVE that id —
+    ``_unique_raw_provider_record`` skips ``providers['custom']``, its bare name is
+    not a claim, and ``model.provider`` is the bare ``custom`` rather than the slug.
+    The lookup answered ``(None, None)`` where the installed Agent routes the id to
+    this record, and the provider left the picker (#8164 greptile P1).
+    """
+    entry = {"name": "晨光", "base_url": "https://entry.invalid/v1", "api_key": "DUMMY_ENTRY", "model": "chat-a"}
+    data = {
+        "model": {"provider": "custom", "default": "old-model", "base_url": "https://generic.invalid/v1", "api_key": "DUMMY_GENERIC"},
+        "providers": {
+            "custom": {"name": "晨光", "base_url": "https://generic.invalid/v1", "api_key": "DUMMY_GENERIC"},
+        },
+        "custom_providers": [entry],
+    }
+    _bind(monkeypatch, data)
+    assert config.resolve_custom_provider_connection("custom:晨光") == (
+        "DUMMY_GENERIC",
+        "https://generic.invalid/v1",
+    )
+    # The authority is the record the Agent routes this id to, not the list entry
+    # that used to mint the id (and point it at its own endpoint).
+    _record, source, is_exact, status = config._select_custom_provider_record(
+        "custom:晨光", "晨光", data
+    )
+    assert source == "providers"
+    assert is_exact is False
+    assert status == config.CUSTOM_SELECTION_KEYED
+
+
+def test_a_generic_alias_never_outranks_a_route_that_declares_the_slug(monkeypatch):
+    """Control: the rung that serves a reserved alias sits below the declaring ones.
+
+    Same record, same reserved id, but a ``model:`` block that names the slug and
+    carries its own connection. That block is the authority: the new rung must not
+    move the route to the generic record's endpoint (#8164 r37 MUST-FIX).
+    """
+    entry = {"name": "晨光", "base_url": "https://entry.invalid/v1", "api_key": "DUMMY_ENTRY", "model": "chat-a"}
+    data = {
+        "model": {"provider": "custom:晨光", "default": "chat-a", "base_url": "https://declared.invalid/v1", "api_key": "DUMMY_DECLARED"},
+        "providers": {
+            "custom": {"name": "晨光", "base_url": "https://generic.invalid/v1", "api_key": "DUMMY_GENERIC"},
+        },
+        "custom_providers": [entry],
+    }
+    _bind(monkeypatch, data)
+    assert config.resolve_custom_provider_connection("custom:晨光") == (
+        "DUMMY_DECLARED",
+        "https://declared.invalid/v1",
+    )
