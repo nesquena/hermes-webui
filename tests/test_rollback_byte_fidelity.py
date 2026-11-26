@@ -178,3 +178,28 @@ def test_edited_file_is_reported_under_its_exact_name(monkeypatch, tmp_path, lab
     assert diff["total_changes"] == 1, f"{label}: {diff}"
     assert os.fsencode(diff["files_changed"][0]["file"]) == raw_name, label
 
+
+
+def test_undecodable_name_does_not_abort_the_listing(monkeypatch, tmp_path):
+    """A name the host cannot decode must degrade, not fail the whole snapshot.
+
+    Windows documents `os.fsdecode` as using the **strict** handler under `mbcs`,
+    so a 0xE9 byte raises `UnicodeDecodeError`. If that escaped
+    `_checkpoint_entry_modes_for()` it would take every other file's diff and
+    restore with it. Simulated here by forcing the strict path.
+    """
+    import os as _os
+
+    real_fsdecode = _os.fsdecode
+    bad_name = b"caf\xe9.txt"
+
+    def strict_fsdecode(path):
+        if isinstance(path, bytes) and path == bad_name:
+            raise UnicodeDecodeError("utf-8", path, 3, 4, "invalid continuation byte")
+        return real_fsdecode(path)
+
+    monkeypatch.setattr(rollback.os, "fsdecode", strict_fsdecode)
+
+    assert rollback._decode_git_path(bad_name) is not None
+    # The good sibling still decodes normally in the same run.
+    assert rollback._decode_git_path(b"plain.txt") == "plain.txt"

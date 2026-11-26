@@ -262,3 +262,44 @@ def test_packed_ref_is_still_listed(monkeypatch, tmp_path):
     diff = rollback.get_checkpoint_diff(str(workspace), heads[0][:12])
     assert diff["total_changes"] == 1, diff
 
+
+
+def test_both_layouts_are_listed_after_upgrade(monkeypatch, tmp_path):
+    """A workspace that predates the shared store keeps its old restore points.
+
+    Upgrade scenario: legacy per-commit checkpoints already exist on disk, then the
+    agent writes its first shared-store snapshot. Listing only the store would hide
+    the older restore points from the panel even though they stay readable by id.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    checkpoint_root = tmp_path / "checkpoints"
+
+    # Legacy layout: one commit repository under <hash12>/<id>/
+    legacy_dir = checkpoint_root / rollback._workspace_hash(str(workspace.resolve())) / "legacyid01"
+    legacy_dir.mkdir(parents=True)
+    subprocess.run(["git", "-C", str(legacy_dir), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(legacy_dir), "config", "user.email", "t@example.com"], check=True)
+    subprocess.run(["git", "-C", str(legacy_dir), "config", "user.name", "T"], check=True)
+    (legacy_dir / "AGENTS.md").write_text("legacy\n")
+    subprocess.run(["git", "-C", str(legacy_dir), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(legacy_dir), "commit", "-q", "-m", "legacy checkpoint"], check=True)
+
+    # Shared store: a newer snapshot for the same workspace.
+    _ref, heads = _init_shared_store(
+        checkpoint_root, workspace.resolve(), [("new checkpoint", {"AGENTS.md": "new\n"})],
+    )
+
+    monkeypatch.setattr(rollback, "_resolve_workspace", lambda arg: str(workspace.resolve()))
+    monkeypatch.setattr(rollback, "_checkpoint_root", lambda: checkpoint_root)
+
+    listed = rollback.list_checkpoints(str(workspace))
+    ids = [c["id"] for c in listed["checkpoints"]]
+
+    assert "legacyid01" in ids, listed
+    assert heads[0] in ids, listed
+    assert len(ids) == 2, listed
+
+    # Both stay readable through their own layout.
+    assert rollback.get_checkpoint_diff(str(workspace), "legacyid01")["total_changes"] >= 0
+    assert rollback.get_checkpoint_diff(str(workspace), heads[0][:12])["total_changes"] >= 0

@@ -251,16 +251,27 @@ def _read_checkpoint_text(git: str, ckpt_dir: Path, modes: dict[str, int], rel_p
 
 
 def _decode_git_path(raw: bytes) -> str:
-    """Decode a git pathname losslessly.
+    """Decode a git pathname, losslessly where the platform allows it.
 
     Git pathnames are bytes, not text: a repository can track a name that is not
-    valid UTF-8 (git only forbids NUL and '/'). Decoding with plain UTF-8 would
-    replace those bytes with U+FFFD, so the decoded name could no longer be given
-    back to git to read the blob. `os.fsdecode` uses `surrogateescape`, the
-    reversible 1:1 mapping the stdlib uses for pathnames, so re-encoding the
-    returned str with `os.fsencode` yields the original bytes.
+    valid UTF-8 (git only forbids NUL and '/'). On POSIX `os.fsdecode` uses
+    `surrogateescape`, the reversible 1:1 mapping the stdlib uses for pathnames,
+    so `os.fsencode` gives the original bytes back.
+
+    Windows is different: `os.fsdecode` is documented to use the **strict** error
+    handler when the filesystem encoding is `mbcs`, so a name holding 0xE9 (or any
+    non-UTF-8 byte) raises `UnicodeDecodeError`. Letting that escape would fail the
+    whole tree listing and take every other file's diff and restore with it, so a
+    name that cannot be represented is decoded with `surrogateescape` explicitly —
+    it stays inspectable and reports as unrepresentable rather than aborting the
+    snapshot. Such a path cannot be opened on that host, which is the honest
+    outcome: the file is listed, and reading its blob fails per-file.
     """
-    return os.fsdecode(raw)
+    try:
+        return os.fsdecode(raw)
+    except UnicodeDecodeError:
+        logger.debug("Checkpoint pathname is not representable here: %r", raw)
+        return raw.decode("utf-8", errors="surrogateescape")
 
 
 def _rev_path_spec(commit_id: str, rel_path: str) -> bytes:
@@ -412,17 +423,52 @@ def list_checkpoints(workspace: str) -> dict[str, Any]:
     resolved = _resolve_workspace(workspace)
     root = _checkpoint_root()
 
-    checkpoints = _list_shared_store_checkpoints(resolved, root)
-    if checkpoints is None:
-        checkpoints, ckpt_dir = _list_legacy_checkpoints(resolved, root)
-    else:
-        ckpt_dir = root / "store"
+    # BOTH layouts are read and the results merged. A workspace that predates the
+    # shared store keeps its old restore points on disk after the upgrade; listing
+    # only the new store once its first snapshot exists would silently hide them
+    # from the panel even though they are still fully readable by id.
+    shared = _list_shared_store_checkpoints(resolved, root)
+    legacy, legacy_dir = _list_legacy_checkpoints(resolved, root)
 
+    if shared is None:
+        # No shared-store ref: the legacy result is the whole answer.
+        return {
+            "checkpoints": legacy,
+            "workspace": resolved,
+            "checkpoint_dir": str(legacy_dir),
+        }
+
+    merged = _merge_checkpoint_lists(shared, legacy)
     return {
-        "checkpoints": checkpoints,
+        "checkpoints": merged,
         "workspace": resolved,
-        "checkpoint_dir": str(ckpt_dir),
+        # The store is the live layout; the legacy dir is reported only when it
+        # is the sole source.
+        "checkpoint_dir": str(root / "store"),
     }
+
+
+def _merge_checkpoint_lists(
+    shared: list[dict[str, Any]], legacy: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Combine both layouts into one newest-first list, shared store winning ties.
+
+    A commit cannot legitimately exist in both layouts, but the same *id* can be
+    produced by a v1 archive and a store ref for the same tree; keeping the shared
+    entry makes the row reflect the live store's path so restore and diff resolve
+    through the layout that owns it.
+    """
+    by_id: dict[str, dict[str, Any]] = {}
+    for entry in legacy:
+        by_id[entry["id"]] = entry
+    for entry in shared:
+        by_id[entry["id"]] = entry
+
+    def _sort_key(entry: dict[str, Any]) -> str:
+        # ISO-8601 sorts lexicographically; an empty date sorts last.
+        return entry.get("date") or ""
+
+    return sorted(by_id.values(), key=_sort_key, reverse=True)
 
 
 def _list_shared_store_checkpoints(resolved: str, root: Path) -> list[dict[str, Any]] | None:
