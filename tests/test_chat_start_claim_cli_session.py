@@ -121,7 +121,9 @@ def test_chat_start_no_longer_bare_404_on_keyerror():
     """The exact bug: POST /api/chat/start 404'd on missing sidecar."""
     src = ROUTES_PY.read_text(encoding="utf-8")
     body = _route_handler_block(src, "_handle_chat_start")
-    # Locate the KeyError arm specifically (the original 3-line bug).
+    # Locate the KeyError arm specifically (the original 3-line bug): the one guarding the session load, not an
+    # earlier ``except KeyError`` in the handler (the owner read before the load).
+    body = body[body.index("_get_or_materialize_session("):]
     m = re.search(
         r"except\s+KeyError:\s*\n(.*?)(?=\n\s*diag\.stage\(\"validate_profile\"\))",
         body,

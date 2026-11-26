@@ -1595,7 +1595,7 @@
   .session-search-clear:hover,.session-search-clear:focus-visible{background:var(--hover);color:var(--text);opacity:1;}
   .session-search-clear:focus-visible{outline:2px solid var(--accent);outline-offset:1px;}
   /* Inline session title edit */
-  .session-title-input{flex:1;background:var(--surface);border:1px solid var(--accent);border-radius:6px;color:var(--text);padding:3px 8px;font-size:13px;outline:none;min-width:0;box-shadow:0 0 0 2px var(--accent-bg-strong);font-family:inherit;}
+  .session-title-input{flex:1;background:var(--surface);border:1px solid var(--accent);border-radius:6px;color:var(--text);padding:3px 8px;font-size:13px;outline:none;min-width:0;box-shadow:0 0 0 2px var(--accent-bg-strong);font-family:inherit;-webkit-touch-callout:default;user-select:text;-webkit-user-select:text;}
   /* padding-right was 86px to reserve space for the absolute-positioned
      timestamp + action button (which appears on hover). Now that .session-time
      lives in the flex flow of .session-title-row, the timestamp sits at the
@@ -1757,7 +1757,7 @@
   .session-actions-trigger:hover{background:var(--hover-bg);color:var(--text);}
   .session-actions-trigger.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
   .session-actions-trigger svg{display:block;}
-  .session-action-menu{display:block;position:fixed;left:0;top:0;right:auto;bottom:auto;min-width:220px;max-width:min(280px,calc(100vw - 16px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:999;overflow:hidden;max-height:calc(100vh - 16px);overflow-y:auto;transform-origin:top right;will-change:opacity,transform;}
+  .session-action-menu{display:block;position:fixed;left:0;top:0;right:auto;bottom:auto;min-width:220px;max-width:min(280px,calc(100vw - 16px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:999;overflow:hidden;max-height:calc(100vh - 16px);max-height:calc(100dvh - 16px);overflow-y:auto;transform-origin:top right;will-change:opacity,transform;}
   .session-action-menu.open-animated{animation:session-menu-in .45s cubic-bezier(.2,.8,.2,1);}
   .session-action-menu.open{display:block;}
   .session-action-opt{width:100%;background:none;border:none;text-align:left;font:inherit;color:var(--text);flex-direction:row!important;gap:0!important;padding:0!important;}
@@ -2966,6 +2966,9 @@
   .composer-mobile-context-action.ctx-high .composer-mobile-config-value{color:var(--error);}
   .composer-mobile-context-action.ctx-high .composer-mobile-context-compress{border-color:var(--error);color:var(--error);}
   .composer-right{display:flex;gap:8px;align-items:center;flex-shrink:0;}
+  .composer-chat-read-only{font-size:12px;line-height:1.5;color:var(--muted);padding:0 16px 8px;overflow-wrap:anywhere;}
+  .composer-chat-read-only[hidden]{display:none;}
+  .composer-chat-read-only a{color:var(--accent-text);text-decoration:underline;}
   .composer-status{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px;}
   /* Context usage indicator */
   .ctx-indicator-wrap{position:relative;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;}
@@ -3318,6 +3321,16 @@
   .composer-footer.cf-burger .composer-mobile-config-action{flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
   .composer-footer.cf-burger .composer-mobile-context-action{flex:1 0 100%;}
   .composer-footer.cf-burger .ctx-indicator-wrap{display:none!important;}
+  /* #9101: a ⚡-only YOLO pill: the hide setting while YOLO is on (it can't be
+     hidden then), and every pill at the narrowest stage. Its hit area grows to
+     44px tall with an inset pseudo-element; a wider box would cost the
+     mobile-config button its room. */
+  .yolo-pill.yolo-pill-compact .yolo-pill-label,
+  .composer-footer.cf-burger .yolo-pill-label{display:none;}
+  .yolo-pill.yolo-pill-compact,
+  .composer-footer.cf-burger .yolo-pill{position:relative;}
+  .yolo-pill.yolo-pill-compact::after,
+  .composer-footer.cf-burger .yolo-pill::after{content:'';position:absolute;left:0;right:0;top:50%;height:44px;transform:translateY(-50%);}
 
   /* Show session-toolsets chip ONLY when the composer-footer container is wide
      enough to comfortably accommodate it (workspace+model+reasoning+profile+
@@ -3369,6 +3382,16 @@
     .app-titlebar-inner{flex:1 1 auto;}
     .app-titlebar-title{max-width:72vw;}
     .app-titlebar-sub{font-size:9px;padding:1px 5px;}
+    /* Give the conversation title its own row when a source badge is present. */
+    .app-titlebar-inner:has(.topbar-source-badge){display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:0 6px;}
+    .app-titlebar-inner:has(.topbar-source-badge) .app-titlebar-title{flex:0 1 auto;min-width:0;max-width:calc(100% - 22px);}
+    .app-titlebar-inner:has(.topbar-source-badge)::after{content:'';flex:0 0 100%;order:1;height:0;}
+    .app-titlebar-inner:has(.topbar-source-badge) .app-titlebar-sub{order:2;flex:0 1 auto;display:flex;justify-content:center;align-items:center;gap:4px;min-width:0;max-width:100%;box-sizing:border-box;}
+    .app-titlebar-sub .topbar-source-badge{display:block;flex:0 1 auto;min-width:0;margin-left:0;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;}
+    .app-titlebar:has(.topbar-source-badge) .app-titlebar-spacer{display:none;}
+    /* Keep the optional profile control from crowding the conversation title. */
+    .app-titlebar:has(.topbar-source-badge) .app-titlebar-profile{width:44px;height:44px;padding:0;justify-content:center;}
+    .app-titlebar:has(.topbar-source-badge) .app-titlebar-profile-label{display:none;}
     .app-titlebar-title.long-pressing{opacity:.6;transition:opacity .1s;}
     .system-health-panel.insights-card{gap:10px;padding:12px;}
     .system-health-head{align-items:flex-start;}
@@ -3661,6 +3684,25 @@
 .model-opt-id{display:block;font-size:10px;color:var(--muted);line-height:1.3;opacity:.72;word-break:break-word;}
 .model-provider-hint{margin:2px 14px 6px;padding:7px 9px;border:1px solid var(--border2);border-radius:7px;background:color-mix(in srgb,var(--surface) 90%,var(--warning));color:var(--muted);font-size:11px;line-height:1.35;}
 .model-opt-provider{display:inline-flex;align-items:center;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:600;letter-spacing:.03em;color:var(--muted);background:rgba(255,255,255,.05);border:1px solid var(--border2);margin-left:auto;white-space:nowrap;flex-shrink:0;}
+/* #9074: on Configured rows a long custom provider name ellipsizes instead of
+   wrapping the row onto a second line on narrow phones. A zero basis keeps the
+   pill from forcing a wrap; it grows into the line's free space up to its own
+   width, and margin-left:auto still right-aligns it. */
+.model-opt-provider--configured{display:block;flex:1 1 0;min-width:8em;max-width:max-content;overflow:hidden;text-overflow:ellipsis;}
+/* The pill is a Configured row's only visible provider, and plain --muted fell
+   to 2.5:1 (Nous dark) and 3.5:1 (Catppuccin light). Mixed toward --text it stays
+   >=4.5:1 on plain, hover, highlighted and active rows in every skin, light and dark. */
+.model-opt-provider--configured{color:color-mix(in srgb,var(--muted) 40%,var(--text));}
+/* A short provider name (<=14 characters, class set in ui.js) never shrinks to a
+   stub like "Ope…": it keeps its width and wraps whole. Longer names shrink to
+   the 8em floor above, then wrap. */
+.model-opt-provider--configured.model-opt-provider--fit{flex:0 0 auto;min-width:0;}
+/* #9074: the dark-theme chip colours measured ~1.1:1 on the light dropdown.
+   Mixed from the theme tokens, they stay >=4.5:1 on plain, hover and active rows
+   in every light skin (the tightest are Catppuccin's active row and neon-paint). */
+:root:not(.dark) .model-opt-badge--primary{color:color-mix(in srgb,var(--info) 40%,var(--text));}
+:root:not(.dark) .model-opt-badge--fallback{color:color-mix(in srgb,var(--warning) 30%,var(--text));}
+:root:not(.dark) .model-opt-badge--selected{color:color-mix(in srgb,var(--blue) 40%,var(--text));}
 /* "Show N more" group expander — deliberately distinct from a real model row:
    no model-id line, indented, muted italic label + a subtle + affordance, so it
    reads as an action that expands the list rather than a selectable model. */
@@ -6527,8 +6569,48 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 .msg-row[data-role="user"] .msg-body code { color: var(--user-bubble-text); background: rgba(0,0,0,.1); }
 .msg-row[data-role="user"] .msg-body a { color: var(--user-bubble-text); text-decoration: underline; }
 .msg-row[data-role="user"] .msg-files { padding-left: 0; margin-left: 0; justify-content: flex-end; }
-.msg-row[data-role="user"][data-editing="1"] .msg-edit-area { background: var(--user-bubble-bg); border-color: var(--user-bubble-border); color: var(--user-bubble-text); box-shadow: 0 0 0 3px var(--focus-ring); }
+.msg-row[data-role="user"][data-editing="1"] .msg-edit-area { background: var(--user-bubble-bg); border-color: var(--user-bubble-border); color: var(--user-bubble-text); caret-color: var(--user-bubble-text); box-shadow: 0 0 0 3px var(--focus-ring); }
 .msg-row[data-role="user"][data-editing="1"] .msg-edit-area::placeholder { color: var(--user-bubble-placeholder); }
+/* hwc:css-selection — Inline-Edit is a textarea. A ~20% black/white tint
+   sits on the bubble fill (slate accent, translucent dark fills) and the
+   selection disappears. Invert the bubble colors instead. Dark-mode fills
+   are often translucent, so the selected text uses the opaque page background.
+   ::selection and ::-moz-selection must be separate rules: grouping them makes
+   Chromium drop the whole rule, so the faint page ::selection wins. */
+.msg-row[data-role="user"][data-editing="1"] .msg-edit-area::selection {
+  background: var(--user-bubble-text);
+  background-color: var(--user-bubble-text);
+  color: var(--user-bubble-bg);
+}
+.msg-row[data-role="user"][data-editing="1"] .msg-edit-area::-moz-selection {
+  background: var(--user-bubble-text);
+  background-color: var(--user-bubble-text);
+  color: var(--user-bubble-bg);
+}
+:root.dark .msg-row[data-role="user"][data-editing="1"] .msg-edit-area::selection {
+  background: var(--user-bubble-text);
+  background-color: var(--user-bubble-text);
+  color: var(--bg);
+}
+:root.dark .msg-row[data-role="user"][data-editing="1"] .msg-edit-area::-moz-selection {
+  background: var(--user-bubble-text);
+  background-color: var(--user-bubble-text);
+  color: var(--bg);
+}
+/* Geist Contrast light paints the bubble with the blue accent and sets
+   --user-bubble-text to #111. Inverting those tokens is #0070f3 on #111,
+   under 4.5:1. Use this skin's opaque black/white pair (--strong / --bg).
+   ::selection and ::-moz-selection stay in separate rules. */
+:root[data-skin="geist-contrast"]:not(.dark) .msg-row[data-role="user"][data-editing="1"] .msg-edit-area::selection {
+  background: var(--strong);
+  background-color: var(--strong);
+  color: var(--bg);
+}
+:root[data-skin="geist-contrast"]:not(.dark) .msg-row[data-role="user"][data-editing="1"] .msg-edit-area::-moz-selection {
+  background: var(--strong);
+  background-color: var(--strong);
+  color: var(--bg);
+}
 
 /* Turn boundary: right alignment already separates user turns — keep only vertical spacing */
 .msg-row + .msg-row[data-role="user"] {
@@ -6595,13 +6677,49 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
   transform: translateY(-1px);
   outline: none;
 }
+/* Landing cue for every jump to a message (search hit, jump-to-question, outline): the row tint the outline
+   panel used, held briefly and faded, plus the ring on the bubble. One idiom for every jump path. */
+.msg-question-highlight {
+  animation: message-landing-tint 1.6s ease-out;
+}
 .msg-question-highlight .msg-body {
   animation: question-highlight-pulse 1.6s ease-out;
 }
+/* Own tokens for the landing cue, derived from each skin's --accent so the tint and ring always share one hue, at
+   strengths that read in both themes: tint about 1.4:1 against the page, ring about 3:1 or more (the hover-grade
+   --accent-bg-strong was 1.17:1 in light, and --focus-ring is undefined in several skins). Fallbacks first. */
+:root { --message-landing-tint: var(--accent-bg-strong); --message-landing-ring: var(--focus-ring); }
+@supports (color: color-mix(in srgb, red 50%, transparent)) {
+  :root {
+    --message-landing-tint: color-mix(in srgb, var(--accent) 30%, transparent);
+    --message-landing-ring: var(--accent);
+  }
+  :root.dark {
+    --message-landing-tint: color-mix(in srgb, var(--accent) 16%, transparent);
+    --message-landing-ring: color-mix(in srgb, var(--accent) 70%, transparent);
+  }
+}
+/* A jump lands an assistant segment at the top edge; leave room for the ring. */
+#messages [data-msg-idx] { scroll-margin-top: 12px; }
+@keyframes message-landing-tint {
+  0%, 30% { background-color: var(--message-landing-tint); }
+  100% { background-color: transparent; }
+}
 @keyframes question-highlight-pulse {
-  0% { box-shadow: 0 0 0 0 var(--focus-ring); }
-  35% { box-shadow: 0 0 0 5px var(--focus-ring); }
+  0% { box-shadow: 0 0 0 0 var(--message-landing-ring); }
+  35% { box-shadow: 0 0 0 5px var(--message-landing-ring); }
   100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); }
+}
+/* Reduced motion: keep the "you landed here" ring, without the pulse, for as long as the class is set. */
+@media (prefers-reduced-motion: reduce) {
+  .msg-question-highlight {
+    animation: none;
+    background-color: var(--message-landing-tint);
+  }
+  .msg-question-highlight .msg-body {
+    animation: none;
+    box-shadow: 0 0 0 3px var(--message-landing-ring);
+  }
 }
 @media (max-width: 600px) {
   .msg-question-jump-btn {
@@ -7469,6 +7587,11 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-task-preview-body{font-size:12px;color:var(--muted);line-height:1.45;margin-bottom:6px;}
 .kanban-status-actions{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px;}
 .kanban-status-actions .btn{font-size:11px;padding:4px 8px;}
+/* UX44-F1 touch target: the shared detail status buttons (incl. the Review
+   handoff button) measured 33px tall on phone/tablet, below the 44px touch
+   minimum. Scoped to pointer:coarse per the repo's existing touch precedents
+   so desktop (fine pointer) rendering is unchanged. */
+@media (pointer:coarse){.kanban-status-actions .btn{min-height:44px;}}
 /* Generic styled buttons used throughout the Kanban panel. The Kanban PR
    stack standardised on `.btn` / `.btn.secondary` class names but never
    shipped the matching CSS, so without these rules buttons fall back to

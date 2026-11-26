@@ -61,6 +61,14 @@ requires_per_thread_helpers = pytest.mark.skipif(
 def _write_profile(home: Path, label: str) -> None:
     cron_dir = home / "cron"
     (cron_dir / "output" / JOB_ID).mkdir(parents=True, exist_ok=True)
+    if label != "default":
+        # Named homes must carry an identity marker: the cross-profile read
+        # guard (is_live_profile_home_for_reads) requires
+        # named_profile_is_live(), and a marker-less home is indistinguishable
+        # from a delete shell. The default home is not under profiles/ and
+        # needs no marker. This is fixture data, not a guard weakening — every
+        # assertion below still exercises the production liveness guard.
+        (home / "config.yaml").write_text(f"model: {label}-model\n", encoding="utf-8")
     job = {
         "id": JOB_ID,
         "name": f"{label}-job",
@@ -285,6 +293,12 @@ GET_READERS = [
 def test_cron_readers_answer_promptly_with_own_profile_while_job_holds_lock(
     world, monkeypatch, holder_kind, reader_profile
 ):
+    # #9058: the first delivery-options request in a process loads the Agent's platform
+    # adapters (about 1-2 s cold). Pay that one-time cost before timing, without the lock
+    # held, so the deadline below still measures only what this test is for: readers
+    # never wait on the running job's lock.
+    warm = _finish(*_request("GET", "/api/crons/delivery-options", reader_profile, deadline=HOLD_MAX_S))
+    assert warm["status"] == 200, warm
     results = []
     with HOLDERS[holder_kind](world, monkeypatch, world["alpha"]) as holder:
         for path, check in GET_READERS:
