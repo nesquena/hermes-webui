@@ -23691,6 +23691,20 @@ function renderMessages(options){
     // join below misses (id mismatch, recovery-rebuilt turn), use this so the
     // terminal output / diff body still renders instead of vanishing (#4927).
     const persistedSnippetByTid={};
+    // #7653 greptile P1 (11-25): a reloaded transcript's ordinary
+    // ``tool_calls`` / ``tool_use`` cards are rebuilt WITHOUT an occurrence of
+    // their own, but the saved summary's failure entries are now scoped by
+    // ``"<owner>#<occ>"`` — so the scoped check in ``copyLiveToolMetadata``
+    // rejected even a single failed call (``_rowOcc`` null) and the card
+    // reverted to "Completed". Pair the rebuilt row with the occurrence its
+    // persisted journal row names: index the journal by ``<tid>@<owner>`` in
+    // order, and hand the k-th rebuilt row of a coordinate the k-th journal
+    // occurrence. Journal order == transcript order (the server derives both
+    // from the same message history), so the singleton failure pairs exactly
+    // and a reused id's multiple occurrences stay ordered. Old journal entries
+    // without an occurrence are skipped: they build no scopes, and a row that
+    // cannot be paired keeps today's fail-closed behaviour.
+    const persistedOccByCoord=new Map();
     try{
       const persisted=(S.session&&Array.isArray(S.session.tool_calls))?S.session.tool_calls:[];
       persisted.forEach(tc=>{
@@ -23698,6 +23712,14 @@ function renderMessages(options){
         const ptid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
         const psnip=tc.snippet||tc.result||tc.output||tc.preview||'';
         if(ptid&&psnip&&!persistedSnippetByTid[ptid]) persistedSnippetByTid[ptid]=String(psnip);
+        if(!ptid) return;
+        const pRawOcc=tc.occurrence;
+        if(pRawOcc==null||pRawOcc===''||!Number.isFinite(Number(pRawOcc))) return;
+        const pRawOwner=tc.assistant_msg_idx;
+        const powner=(pRawOwner!=null&&pRawOwner!==''&&Number.isFinite(Number(pRawOwner)))?Number(pRawOwner):null;
+        const key=String(ptid)+'@'+String(powner);
+        if(!persistedOccByCoord.has(key)) persistedOccByCoord.set(key,[]);
+        persistedOccByCoord.get(key).push(Number(pRawOcc));
       });
     }catch(e){}
     S.messages.forEach((m,rawIdx)=>{
@@ -23899,6 +23921,22 @@ function renderMessages(options){
       }
       return next;
     };
+    // #7653 greptile P1 (11-25): occurrence pairing for REBUILT ordinary
+    // cards. ``persistedOccByCoord`` (built above) indexes the journal rows by
+    // ``<tid>@<owner>``; this hands the k-th rebuilt card of a coordinate the
+    // k-th journal occurrence, so the scoped ``copyLiveToolMetadata`` check can
+    // prove ownership instead of failing closed on ``_rowOcc == null``.
+    const _journalOccCursors=new Map();
+    const _takeJournalOccurrence=(tid,owner)=>{
+      if(!tid) return null;
+      const key=String(tid)+'@'+String(owner);
+      const q=persistedOccByCoord.get(key);
+      if(!q||!q.length) return null;
+      const idx=_journalOccCursors.get(key)||0;
+      if(idx>=q.length) return null;
+      _journalOccCursors.set(key,idx+1);
+      return q[idx];
+    };
     fallbackToolSources.forEach(({m,rawIdx})=>{
       const assistantToolAnchorIdx=_assistantToolAnchorIdxForMessage(S.messages,rawIdx);
       // OpenAI format: top-level tool_calls field on the assistant message
@@ -23912,6 +23950,11 @@ function renderMessages(options){
         const patchSnippet=_cliPatchSnippetFromArgs(name,args);
         const resultSnippet=resultsByTid[tid]||persistedSnippetByTid[tid]||'';
         let argsSnap=_toolArgsSnapshot(args);
+        // #7653 greptile P1 (11-25): the rebuilt ordinary card carries the
+        // journal occurrence for the same (tid, owner) coordinate, so the
+        // scoped is_error check below can match instead of failing closed on
+        // a null ``_rowOcc`` (saved failure reverted to "Completed" on reload).
+        const _occ=_takeJournalOccurrence(tid,assistantToolAnchorIdx);
         _fallbackCandidates.push({
           next:{
             name,
@@ -23919,6 +23962,7 @@ function renderMessages(options){
             is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
             tid,
             assistant_msg_idx:assistantToolAnchorIdx,
+            ...(_occ===null?{}:{occurrence:_occ}),
             args:argsSnap,
             done:true,
           },
@@ -23975,6 +24019,11 @@ function renderMessages(options){
           const patchSnippet=_cliPatchSnippetFromArgs(name,args);
           const resultSnippet=resultsByTid[tid]||persistedSnippetByTid[tid]||'';
           const argsSnap=_toolArgsSnapshot(args);
+          // #7653 greptile P1 (11-25): same pairing as the OpenAI branch —
+          // without the journal occurrence the scoped verdict check rejected
+          // this rebuilt card (``_rowOcc`` null) and a saved failure showed
+          // "Completed" after reload.
+          const _occ=_takeJournalOccurrence(tid,assistantToolAnchorIdx);
           _fallbackCandidates.push({
             next:{
               name,
@@ -23982,6 +24031,7 @@ function renderMessages(options){
               is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
               tid,
               assistant_msg_idx:assistantToolAnchorIdx,
+              ...(_occ===null?{}:{occurrence:_occ}),
               args:argsSnap,
               done:true,
             },
