@@ -176,18 +176,24 @@ function _composerOwnerStateHasPayload(snapshot){
 }
 function _evictComposerOwnerStates(){
   while(_composerOwnerStateByKey.size>_COMPOSER_OWNER_STATE_LIMIT){
-    // Payload-free snapshots are cheap: they only mirror what the server already
-    // persists. Evict the oldest of those first so a long-lived tab cannot push
-    // an unsaved read-only draft out of the map by opening enough conversations.
+    const keys=[..._composerOwnerStateByKey.keys()];
+    // An unfinished producer (for example dictation that started before New
+    // Chat and resolves after it) still looks up its owner's snapshot. Keep the
+    // newest window intact so ordinary churn cannot make an empty source look
+    // disposable the moment it is saved.
+    const evictable=Math.max(0,keys.length-_COMPOSER_OWNER_STATE_LIMIT);
     let victim=null;
     let payloadStates=0;
-    for(const [key,snapshot] of _composerOwnerStateByKey){
+    for(let index=0;index<keys.length;index+=1){
+      const snapshot=_composerOwnerStateByKey.get(keys[index]);
       if(_composerOwnerStateHasPayload(snapshot))payloadStates+=1;
-      else if(victim===null)victim=key;
+      else if(index<evictable)victim=keys[index];
     }
     if(victim===null){
+      // Every older snapshot holds unsent input. Those may be the only copy of
+      // a read-only session's draft, so they get a larger budget of their own.
       if(payloadStates<=_COMPOSER_OWNER_PAYLOAD_LIMIT)return;
-      victim=_composerOwnerStateByKey.keys().next().value;
+      victim=keys[0];
     }
     _composerOwnerStateByKey.delete(victim);
   }
