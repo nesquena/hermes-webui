@@ -607,3 +607,12 @@ def test_package_python_without_agent_stays_fail_closed(import_bootstrap, clean_
     mock_install.assert_not_called()
     mock_builder.assert_not_called()
     mock_execv.assert_not_called()
+
+
+@pytest.mark.parametrize("label, expected", [("", False), ("0", False), ("com.example.webui", True)])
+def test_orphaned_ctl_foreground_needs_launchd_label(import_bootstrap, monkeypatch, label, expected):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(os, "getppid", lambda: 1)
+    monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--foreground"])
+    monkeypatch.setenv("XPC_SERVICE_NAME", label)
+    assert import_bootstrap._launchd_job() is expected

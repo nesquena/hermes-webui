@@ -820,9 +820,8 @@ def _already_serving_scheme(host: str, port: int) -> str:
 
 
 def _launchd_job() -> bool:
-    return sys.platform == "darwin" and (
-        _is_real_supervisor_value("XPC_SERVICE_NAME", os.getenv("XPC_SERVICE_NAME", ""))
-        or (os.getppid() == 1 and "--foreground" in sys.argv)
+    return sys.platform == "darwin" and _is_real_supervisor_value(
+        "XPC_SERVICE_NAME", os.getenv("XPC_SERVICE_NAME", "")
     )
 
 
