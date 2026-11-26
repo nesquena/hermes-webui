@@ -1071,6 +1071,300 @@ def get_hermes_home_for_profile(name: str) -> Path:
     return _resolve_profile_home_for_name(name)
 
 
+# Mirrors of the modern marker/tombstone rule, applied ONLY when no Agent is
+# importable at all (a WebUI-only deployment): there is no installed producer
+# to match, so an identity-marked and non-tombstoned named home is admitted and
+# everything else is denied as the fail-closed proxy. An installed core that
+# merely predates the helpers is NOT governed by this mirror — those cores
+# decide named-profile existence by directory existence, and
+# _named_profile_is_live_without_helper applies that rule instead.
+_PROFILE_IDENTITY_MARKERS = ('config.yaml', '.env', 'SOUL.md', 'profile.yaml', 'auth.json', 'state.db')
+_DELETED_PROFILES_DIRNAME = '.deleted'
+
+
+def _named_profile_home_shape(path) -> Path | None:
+    """Return the ``<root>/profiles/<id>`` component of *path*, using path shape only.
+
+    Import-independent fallback used when the installed Agent's classifier
+    (``hermes_constants.named_profile_home``) is unavailable, and as the
+    fail-closed proxy when that classifier raises. It preserves the same
+    ``.hermes`` stop boundary the classifier uses: a default home that merely
+    lives under a coincidental ``profiles/`` ancestor (for example
+    ``<root>/profiles/operator/.hermes``) is NOT called a named home, and only
+    the deepest matching component is authoritative.
+
+    It is deliberately looser than ``hermes_constants.named_profile_home`` in
+    provenance (it cannot prove the ``profiles`` parent is a real Hermes
+    root), so on Agent-absent deployments a custom home such as
+    ``<root>/profiles/project/custom-root`` may still be over-restrictively
+    treated as named and denied — the safe direction for a ghost shell.
+    """
+    try:
+        current = Path(path).expanduser()
+    except Exception:
+        return None
+    for candidate in (current, *current.parents):
+        # Default-home boundary: a `.hermes` component ends the walk, exactly
+        # like the installed classifier, so an unrelated `profiles/` ancestor
+        # above it is never treated as a profiles root.
+        if candidate.name == ".hermes":
+            return None
+        if candidate.parent.name == "profiles" and not candidate.name.startswith("."):
+            if _PROFILE_ID_RE.fullmatch(candidate.name):
+                return candidate
+    return None
+
+
+def _named_home_under_resolved_profiles_root(path: Path) -> Path | None:
+    """Return the logical ``<root>/profiles/<id>`` home for a path under the RESOLVED profiles root.
+
+    ``get_hermes_home_for_profile()`` resolves the final path, so when
+    ``profiles`` itself is a symlink the home arrives as ``<resolved>/<id>`` —
+    the ``profiles`` component is gone and neither the shape grammar nor the
+    installed classifier can see it. The resolved root still identifies the
+    home, and the LOGICAL path keeps the identity the liveness checks need (the
+    ``.deleted`` tombstone lives beside ``profiles/<id>``, reachable through
+    the symlink). Only the first component under the root is a profile id;
+    deeper components are inside the home, not a second home.
+    """
+    try:
+        resolved_root = _profiles_root()
+        resolved = Path(path).resolve(strict=False)
+        if resolved == resolved_root or resolved_root not in resolved.parents:
+            return None
+        name = resolved.relative_to(resolved_root).parts[0]
+        if not _PROFILE_ID_RE.fullmatch(name):
+            return None
+    except Exception:
+        return None
+    return _DEFAULT_HERMES_HOME / "profiles" / name
+
+
+def _is_configured_default_home(path) -> bool:
+    """Whether *path* is this process's configured default (root) Hermes home.
+
+    ``_DEFAULT_HERMES_HOME`` is resolved at import from ``HERMES_BASE_HOME`` /
+    ``HERMES_HOME`` by the same rule the Agent's ``get_default_hermes_root()``
+    applies, so the two agree on every layout either side accepts — including a
+    custom root that lives *under* a ``profiles/`` ancestor.
+    """
+    try:
+        default_home = Path(_DEFAULT_HERMES_HOME).expanduser()
+        candidate = Path(path).expanduser()
+        if candidate == default_home:
+            return True
+        return candidate.resolve(strict=False) == default_home.resolve(strict=False)
+    except Exception:
+        return False
+
+
+def _logical_named_profile_home(owner_profile, path) -> Path | None:
+    """Return the logical ``<root>/profiles/<owner_profile>`` home for *path*.
+
+    A profile directory may itself be a symlink (``profiles/worker`` ->
+    ``profiles/storage/worker-home``). Both the Agent and WebUI list it, but
+    ``get_hermes_home_for_profile()`` returns the RESOLVED path, whose own
+    ``profiles`` ancestor is a different — often marker-less — profile. Checking
+    the resolved path therefore validates the wrong home's identity/tombstone
+    and the live profile's jobs vanish from Tasks.
+
+    The route passes the LOGICAL name, so the guard can check that home's
+    identity and tombstone while the resolved path stays authoritative for
+    containment and cron I/O. Returns ``None`` when *owner_profile* does not
+    name a distinct named profile (root alias, invalid id) or when *path* is not
+    that home's resolved form, so the caller falls back to path-only
+    classification instead of trusting a mismatched name.
+    """
+    name = str(owner_profile or '').strip()
+    if not name or not _PROFILE_ID_RE.fullmatch(name):
+        return None
+    try:
+        if _is_root_profile(name):
+            return None
+        logical = _DEFAULT_HERMES_HOME / 'profiles' / name
+        if logical.resolve(strict=False) != Path(path).expanduser().resolve(strict=False):
+            return None
+    except Exception:
+        return None
+    return logical
+
+
+def _named_profile_home_for_reads(path, owner_profile: str | None = None) -> Path | None:
+    """Classify *path* as a named profile home; the caller checks its liveness.
+
+    Returns the canonical ``<root>/profiles/<id>`` home, or ``None`` for a
+    provably non-named (default/custom) home.
+
+    Classification order:
+
+    1. The configured default home is admitted outright, before any ancestor
+       classifier runs. A legal custom ``HERMES_HOME`` such as
+       ``<root>/.hermes/profiles/storage/custom-root`` is the default root for
+       both the Agent and WebUI, yet every ancestor classifier maps it to the
+       marker-less ``storage`` profile — which silently dropped the default
+       profile's own jobs. Isolated-profile handling is untouched: the pinned
+       startup home is a named home, not this root.
+    2. The LOGICAL *owner_profile* the route resolved the home from wins over
+       path shape: a symlinked profile dir resolves into another profile's
+       home, and only the logical home's identity/tombstone describes the row
+       (see :func:`_logical_named_profile_home`).
+    3. A path under the RESOLVED profiles root is owned by that root's logical
+       ``<root>/profiles/<id>`` home, and that confirmed mapping comes next.
+       When ``profiles`` is a symlink whose target itself sits under another
+       ``profiles`` root, the resolved path the readers pass carries a second
+       ``profiles`` ancestor — every ancestor classifier then answers with that
+       (possibly live) ancestor instead of the requested child, so the guard
+       would validate the wrong home. The logical child keeps the
+       identity/tombstone checks meaningful through the symlink.
+    4. Outside that root the installed Agent's ``named_profile_home`` is
+       authoritative: it stops at a ``.hermes`` component and proves the
+       ``profiles`` parent is a real Hermes root, so a legitimate
+       default/custom home that merely sits under a coincidental ``profiles/``
+       ancestor is not a named home.
+    5. When the classifier is unavailable (Agent-absent deployment) or raises,
+       the import-independent shape grammar decides, with the same ``.hermes``
+       stop boundary — a path that still *looks* named is denied rather than
+       admitted while classification cannot be confirmed.
+    """
+    try:
+        current = Path(path).expanduser()
+    except Exception:
+        return None
+
+    # The configured default home is never a named profile, whatever ancestors
+    # it happens to live under.
+    if _is_configured_default_home(current):
+        return None
+
+    # The logical owner_profile names the row; the resolved path only proves it.
+    logical_home = _logical_named_profile_home(owner_profile, current)
+    if logical_home is not None:
+        return logical_home
+
+    # Confirmed configured-root ownership outranks every ancestor classifier:
+    # the resolved root maps the path back to its logical home, which is the
+    # home whose identity/tombstone must be checked.
+    resolved_home = _named_home_under_resolved_profiles_root(current)
+    if resolved_home is not None:
+        return resolved_home
+
+    try:
+        from hermes_constants import named_profile_home
+    except Exception:
+        named_profile_home = None
+    if named_profile_home is None:
+        return _named_profile_home_shape(current)
+    try:
+        return named_profile_home(current)
+    except Exception:
+        # Classifier failed: fall back to the shape grammar (fail closed).
+        return _named_profile_home_shape(current)
+
+
+def _named_profile_is_live_without_helper(home) -> bool:
+    """Apply the installed core's own liveness rule when ``named_profile_is_live`` is absent.
+
+    Agent cores that predate the helper still import ``hermes_constants`` and
+    still serve ``cron.jobs``, so a missing helper must not read as "not live":
+    denying there fired the deny branch for every live named profile on every
+    ``/api/crons`` call and blanked Tasks on those deployments.
+
+    The rule applied is the one the *installed producer itself* uses, decided by
+    the marker helpers it exports:
+
+    * both ``named_profile_has_identity`` and ``named_profile_is_deleted`` —
+      that core's own identity/tombstone rule (its marker set stays
+      authoritative);
+    * only one of them — check the half that core checks, and nothing more;
+    * neither one, but ``hermes_constants`` imports — a pre-marker core
+      (the ``e5b4cf7bea`` shape): its ``profile_exists`` is plain directory
+      existence and it has no tombstone concept, so a live directory must
+      stay readable rather than be judged by a rule that core never applied;
+    * ``hermes_constants`` itself is unimportable (no Agent at all) — mirror
+      the modern rule as a fail-closed proxy: an identity marker must be
+      present and no tombstone may exist, or deny.
+
+    A raising check still denies, exactly like the helper path.
+    """
+    try:
+        home = Path(home)
+        if not home.is_dir():
+            return False
+        try:
+            import hermes_constants as installed
+        except Exception:
+            installed = None
+        if installed is not None:
+            named_profile_has_identity = getattr(installed, 'named_profile_has_identity', None)
+            named_profile_is_deleted = getattr(installed, 'named_profile_is_deleted', None)
+            if named_profile_has_identity is None and named_profile_is_deleted is None:
+                # Pre-marker core: directory existence is its own profile rule.
+                return True
+            if named_profile_has_identity is not None and not bool(named_profile_has_identity(home)):
+                return False
+            if named_profile_is_deleted is not None and bool(named_profile_is_deleted(home)):
+                return False
+            return True
+        if not any(
+            (home / marker).is_file() or (home / marker).is_symlink()
+            for marker in _PROFILE_IDENTITY_MARKERS
+        ):
+            return False
+        return not (home.parent / _DELETED_PROFILES_DIRNAME / home.name).exists()
+    except Exception:
+        return False
+
+
+def is_live_profile_home_for_reads(home, owner_profile: str | None = None) -> bool:
+    """Whether a cross-profile reader may touch *home*.
+
+    A named profile home must still be live — identity marker present and no
+    delete tombstone — or reading it would call ``ensure_dirs()`` and create
+    ``cron/`` + ``cron/output/`` inside a ghost shell. The default/custom homes
+    are not under ``profiles/`` and stay readable.
+
+    Classification first admits the configured default home, then honours the
+    logical *owner_profile* the route resolved *home* from (a symlinked profile
+    dir resolves into another profile's home, so only the logical home's
+    identity/tombstone describes the row), then the configured RESOLVED
+    profiles root (the logical home owned by that root, see
+    :func:`_named_profile_home_for_reads`), and finally falls back to the
+    installed Agent's ``named_profile_home(actual_home)`` classifier, which
+    preserves the ``.hermes`` boundary and profiles-root provenance; named homes
+    are then liveness-checked on their canonical home. The import-independent
+    fallback keeps Agent-absent deployments working: provably non-named homes
+    are admitted, uncertain named homes are denied.
+
+    Fails CLOSED for named homes: when the liveness check raises, a named home
+    is treated as NOT readable. AGENTS.md requires identity checks to deny
+    access when safety cannot be confirmed — returning ``True`` there let a
+    stale profile name reach ``list_jobs()`` on any helper failure, which is
+    exactly the ghost-shell write this predicate exists to prevent. A helper
+    that is merely MISSING (older Agent cores) is not a failure: those cores
+    serve cron jobs with their own liveness rule, which is applied instead.
+    """
+    named = _named_profile_home_for_reads(home, owner_profile=owner_profile)
+    if named is None:
+        # Provably not under a profiles/ root: the default/custom home is readable.
+        return True
+    try:
+        from hermes_constants import named_profile_is_live
+    except Exception:
+        # Older Agent cores never shipped the helper but still load and serve
+        # cron jobs, so their own liveness rule decides — denying here would
+        # blank Tasks for every named profile on those deployments.
+        return _named_profile_is_live_without_helper(named)
+    try:
+        return bool(named_profile_is_live(named))
+    except Exception as exc:
+        logger.warning(
+            "profile liveness check failed for %s (%s) — denying cross-profile read",
+            named,
+            exc,
+        )
+        return False
+
+
 _TERMINAL_ENV_MAPPINGS = {
     'backend': 'TERMINAL_ENV',
     'env_type': 'TERMINAL_ENV',
@@ -1321,8 +1615,10 @@ def load_profile_config(home, *, env: Optional[dict] = None, config_path=None) -
     config_path = Path(config_path or Path(home) / 'config.yaml').expanduser()
     try:
         raw = yaml.safe_load(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
-    except Exception:
-        logger.debug("Failed to load profile config from %s", config_path, exc_info=True)
+    except Exception as exc:
+        # #9322: no traceback/snippet — the parser's message quotes the bad line,
+        # which may hold a value the operator does not want in a log file.
+        logger.debug("Failed to load profile config %s: %s", config_path, type(exc).__name__)
         return {}
     if not isinstance(raw, dict) or not raw:
         return {}
@@ -2868,6 +3164,16 @@ def _build_profile_rows_fast() -> list | None:
         )
     except Exception:
         return None
+    # Optional exports: cores that predate the marker/tombstone helpers list
+    # named profiles by directory existence and would still build correct rows
+    # here. Their absence must degrade the row FILTER, not disable the whole
+    # fast path (a None return drops the listing to the slow alias-scanning
+    # path on every request). When a helper is absent, skip only the check it
+    # would have performed — matching the producer that is actually installed.
+    try:
+        from hermes_cli.profiles import named_profile_has_identity, named_profile_is_deleted
+    except Exception:
+        named_profile_has_identity = named_profile_is_deleted = None
 
     def _row(home: Path, name: str, is_default: bool) -> dict:
         try:
@@ -2903,12 +3209,40 @@ def _build_profile_rows_fast() -> list | None:
 
     profiles_root = _get_profiles_root()
     if profiles_root.is_dir():
-        for entry in sorted(profiles_root.iterdir()):
-            if not entry.is_dir():
+        try:
+            entries = sorted(profiles_root.iterdir())
+        except OSError:
+            # An unreadable profiles root cannot contribute named homes, but it
+            # must not erase the default row above.
+            entries = []
+        for entry in entries:
+            # Per-entry isolation: the native liveness helpers read sibling
+            # paths, notably ``profiles/.deleted``. An unreadable entry — a
+            # directory the operator cannot stat, or an unreadable tombstone
+            # store that makes ``named_profile_is_deleted`` raise — must skip
+            # only THAT profile. Letting the error escape takes down the whole
+            # listing, including the default home that the cron aggregator
+            # needs before it can return any job at all.
+            try:
+                if not entry.is_dir():
+                    continue
+                if not _UPSTREAM_PROFILE_ID_RE.match(entry.name):
+                    continue
+                # Upstream `_iter_named_profile_dirs()` lists a dir as a profile only when it
+                # carries an identity marker and is not tombstoned. This fast path used to
+                # stop at "is a dir + valid id", so a marker-less shell left behind by a
+                # delete (or by a recovery-artifact mkdir) showed up in the dropdown and was
+                # then read by /api/crons. Match upstream here or the two lists disagree.
+                # Each check runs only when the installed core exports it: a pre-marker
+                # core applies neither, and filtering by a rule it does not have would
+                # hide live rows it lists.
+                if named_profile_has_identity is not None and not named_profile_has_identity(entry):
+                    continue
+                if named_profile_is_deleted is not None and named_profile_is_deleted(entry):
+                    continue
+                rows.append(_row(entry, entry.name, False))
+            except OSError:
                 continue
-            if not _UPSTREAM_PROFILE_ID_RE.match(entry.name):
-                continue
-            rows.append(_row(entry, entry.name, False))
 
     return rows
 
