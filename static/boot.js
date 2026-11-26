@@ -3319,12 +3319,25 @@ $('msg').addEventListener('paste',e=>{
     const pasteTs=Date.now();
     const files=imageItems.map((i,idx)=>{
       const blob=i.getAsFile();
+      // A clipboard can advertise an image item whose data never materialized
+      // (delayed-render screenshot tools, cloud clipboards, some browser
+      // implementations). Two shapes occur in practice: `getAsFile()` returns
+      // null, or it returns a zero-length Blob — real browsers do the latter
+      // for a declared image with no payload. `new File([null], ...)` and
+      // `new File([emptyBlob], ...)` both yield a broken attachment whose name
+      // still looks like a screenshot, so skip both rather than fabricate one.
+      // A legitimate image is never zero bytes.
+      if(!blob||blob.size===0)return null;
       const ext=i.type.split('/')[1]||'png';
       const suffix=imageItems.length>1?`-${idx+1}`:'';
       return new File([blob],`screenshot-${pasteTs}${suffix}.${ext}`,{type:i.type});
-    });
-    addFiles(files);
-    setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));
+    }).filter(Boolean);
+    if(files.length){
+      addFiles(files);
+      setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));
+    }else{
+      setStatus(t('image_paste_failed'),'error');
+    }
     return;
   }
   const plainText=e.clipboardData?.getData('text/plain')||'';
