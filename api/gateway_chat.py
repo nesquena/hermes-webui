@@ -2321,11 +2321,11 @@ def _env_value_is_profile_sourced(profiles_mod, key, value) -> bool:
         return False  # an empty value configures nothing
     if key in (getattr(profiles_mod, "_loaded_profile_env_keys", ()) or ()):
         return True
-    launch_env = getattr(profiles_mod, "_INITIAL_HERMES_HOME_DOTENV", None) or {}
-    if str(launch_env.get(key) or "").strip() != value:
-        return False
     launch_home = str(getattr(profiles_mod, "_INITIAL_HERMES_HOME", "") or "").strip()
     try:
+        # The launch home's .env as WebUI, ctl.sh (escapes decoded, inline comment dropped) and the Agent read it.
+        if not profiles_mod._matches_launch_home_env(key, value):
+            return False
         return not _same_profile_home(launch_home, profiles_mod.get_hermes_home_for_profile(""))
     except Exception:
         return True  # fail closed

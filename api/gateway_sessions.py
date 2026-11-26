@@ -144,6 +144,24 @@ def control(run_id, action, **params):
         raise SessionTransportError("Gateway control was not acknowledged. Refresh the conversation before retrying.") from None
 
 
+def active_session_run_id(stream_id):
+    """Deterministic run id of the live relay for this WebUI stream, if any.
+
+    The relay registers under its deterministic id before the first dial and
+    keeps it until ``run()`` finishes, so a Stop can reach a turn whose
+    ``prompt.submit`` has not returned yet — the run id is only published to
+    the WebUI stream registry after the submission (#9227).
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return None
+    with _LOCK:
+        for relay in _CONNECTIONS.values():
+            if relay.stream_id == stream_id:
+                return relay.run_id
+    return None
+
+
 def respond_clarify(session_id, clarify_id, answer):
     """None for local prompts; a remote prompt can never fall back to local settlement."""
     if not str(clarify_id).startswith("gw-session:"):
@@ -175,11 +193,11 @@ def _verified_messaging_owner(home, display_id, owner_id, *, recovering=False):
     """
     db = None
     try:
-        from hermes_state import SessionDB
+        from api.compression_continuation import open_compression_reads
         path = Path(home) / "state.db"
         if not path.is_file():
             return False
-        db = SessionDB(path, read_only=True)
+        db = open_compression_reads(path)
         lineage = db.get_compression_lineage(display_id)
         if not lineage or lineage[0] != owner_id or display_id not in lineage:
             return False
@@ -232,6 +250,16 @@ class SessionRelay:
 
     async def control(self, action, **params):
         if self.client is None or self.receipt is None:
+            # #8905: nothing was submitted, so the Gateway holds no admission
+            # for this turn and there is nothing to interrupt there. A Stop
+            # must still end the turn locally instead of raising "Gateway
+            # session is reconnecting." and leaving the conversation busy.
+            # A turn that WAS submitted keeps the previous contract: its
+            # admission is uncertain, so the caller has to retry once the
+            # relay has reconnected.
+            if action == "stop" and not self.attempted and self.receipt is None:
+                self.cancel.set()
+                return True
             raise SessionTransportError("Gateway session is reconnecting.")
         receipt = await self.status()
         generation = receipt.get("execution_generation")
@@ -372,6 +400,16 @@ class SessionRelay:
         while True:
             attempted_before_connect = self.attempted
             terminal_outcome = False
+            # #9227: register under the deterministic run id BEFORE the first
+            # dial. The WebUI run id is only published after `prompt.submit`
+            # returns, so without this a browser Stop on a not-yet-submitted
+            # turn could not reach the relay and returned 502 without
+            # cancelling; the turn then submitted once the transport
+            # reconnected. `control("stop")` on this registered relay cancels
+            # a never-submitted turn locally and still refuses an uncertain
+            # submission (attempted receipt), which keeps recovery intact.
+            with _LOCK:
+                _CONNECTIONS[self.run_id] = self
             try:
                 async with self.connector() as client:
                     self.client = client
@@ -395,8 +433,6 @@ class SessionRelay:
                     self.attempted = True
                     self.receipt = await client.rpc("prompt.submit", **self.request)
                     self.record(self.run_id, self.request)
-                    with _LOCK:
-                        _CONNECTIONS[self.run_id] = self
                     _publish_gateway_run_id(self.stream_id, self.run_id)
                     if self.epoch is not None:
                         replay = await client.rpc("session.events.since", session_id=self.canonical_session_id,
@@ -459,8 +495,27 @@ class SessionRelay:
             except SessionTransportError:
                 if terminal_outcome or not self.attempted:
                     raise
-            except Exception:
-                pass
+            except Exception as exc:
+                # #8905: a failure BEFORE the first submission means nothing was
+                # ever sent, so there is no uncertain admission to recover. The
+                # generic branch used to swallow it and fall through to the
+                # reconnect loop, so a missing transport socket (e.g. the
+                # `unix` path does not exist) reconnected forever, every <=5s,
+                # and Stop could not end the turn: `control()` raised "Gateway
+                # session is reconnecting." because no client was attached.
+                #
+                # A failure AFTER a submission is a different contract: the
+                # admission is then uncertain, so the existing indefinite
+                # recovery stays (it keeps the input ID and worker ownership).
+                if not self.attempted and self.receipt is None:
+                    if self.cancel.is_set():
+                        # The user stopped the turn before it reached the
+                        # Gateway: end it locally instead of reconnecting.
+                        return None, {}
+                    raise SessionTransportError(
+                        "Gateway session transport is unavailable: "
+                        f"{exc.__class__.__name__}. The turn was not submitted."
+                    ) from None
             finally:
                 self.client = None
                 from api.clarify import resolve_clarify_by_id

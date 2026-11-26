@@ -67,27 +67,37 @@ def test_workspace_update_never_mirrors_into_the_swapped_in_session(store, tmp_p
     """``POST /api/session/update`` with real per-profile state.db files. The own file is swapped
     after the route saved and before the delayed mirror resolves. On master the mirror wrote the
     victim's old workspace (from the copy) into the victim's row in the victim's profile."""
-    hermes_state = pytest.importorskip("hermes_state")
     import api.routes as routes
     import api.state_sync as state_sync
 
-    dbs = {p: tmp_path / f"state-{p}.db" for p in ("default", "work")}
-    monkeypatch.setattr(state_sync, "_get_state_db", lambda profile=None: hermes_state.SessionDB(db_path=dbs[profile]))
+    # One directory per profile, each holding its own state.db: storage-interface Agents open a
+    # profile's state.db only. ``_open_state_db`` is the production opener for either Agent API.
+    dbs = {p: tmp_path / f"home-{p}" / "state.db" for p in ("default", "work")}
+    for path in dbs.values():
+        path.parent.mkdir()
+    monkeypatch.setattr(state_sync, "_get_state_db", lambda profile=None: state_sync._open_state_db(dbs[profile]))
 
     def _db_call(profile, method, *args, **kwargs):
-        db = hermes_state.SessionDB(db_path=dbs[profile])
+        from tests._agent_state_store import open_agent_store
+
+        db = open_agent_store(dbs[profile])
         try:
             return getattr(db, method)(*args, **kwargs)
         finally:
             db.close()
 
+    def _seed(profile, session_id, cwd):
+        """The Agent-created webui row, with the workspace it last recorded."""
+        _db_call(profile, "ensure_session", session_id=session_id, source="webui")
+        _db_call(profile, "update_session_cwd", session_id, cwd)
+
     old_ws, new_ws, victim_old, victim_now = (tmp_path / n for n in ("own-a", "own-b", "victim-a", "victim-b"))
     for d in (old_ws, new_ws, victim_old, victim_now):
         d.mkdir()
     _victim(store, workspace=victim_old)  # the copy carries this stale workspace
-    _db_call("work", "create_session", VICTIM, "webui", cwd=str(victim_now))
+    _seed("work", VICTIM, str(victim_now))
     _own(store, old_ws)
-    _db_call("default", "create_session", OWN, "webui", cwd=str(old_ws))
+    _seed("default", OWN, str(old_ws))
 
     schedule = state_sync.sync_session_cwd_background
 

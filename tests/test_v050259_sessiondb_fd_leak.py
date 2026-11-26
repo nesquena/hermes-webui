@@ -45,12 +45,16 @@ def test_cached_agent_reuse_uses_adopt_helper():
     assert reuse_idx != -1, "cached-agent reuse block missing"
     block = src[reuse_idx : reuse_idx + 2500]
 
-    assert "_adopt_session_db_for_cached_agent" in block, (
-        "cached-agent reuse path must call _adopt_session_db_for_cached_agent "
-        "instead of unconditionally closing agent._session_db. Unconditional "
-        "close breaks background subagents that share the handle by reference."
+    assert "_reuse_cached_agent_session_db(" in block, (
+        "cached-agent reuse path must call _reuse_cached_agent_session_db "
+        "(which adopts via _adopt_session_db_for_cached_agent) instead of "
+        "unconditionally closing agent._session_db. Unconditional close "
+        "breaks background subagents that share the handle by reference."
     )
-    assert "agent._session_db = _session_db" in block, (
+    helper_start = src.index("def _reuse_cached_agent_session_db(")
+    helper = src[helper_start : src.index("\ndef ", helper_start + 1)]
+    assert "_adopt_session_db_for_cached_agent(agent, session_db)" in helper
+    assert "agent._session_db = session_db" in helper, (
         "reuse path must still assign the adopted SessionDB onto the agent"
     )
     # The old unconditional-close pattern must not remain in the reuse block.
@@ -131,14 +135,14 @@ def test_session_db_close_is_idempotent():
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmpd:
-        db_path = Path(tmpd) / "test.db"
+        db_path = Path(tmpd) / "state.db"
         db = SessionDB(db_path=db_path)
-        with db._lock:
-            db._conn.execute("SELECT 1")
+        _is_open, _adopt = _import_adopt_helpers()
+        assert _is_open(db)
         db.close()
-        assert db._conn is None
+        assert not _is_open(db)
         db.close()
-        assert db._conn is None
+        assert not _is_open(db)
         db.close()
 
 
@@ -235,17 +239,14 @@ def test_adopt_handles_missing_existing():
 
 
 def test_cached_agent_reuse_calls_adopt_semantics():
-    """End-to-end mirror of the production reuse block using the real helper."""
-    _is_open, adopt = _import_adopt_helpers()
+    """End-to-end: the production reuse step with the real helpers."""
+    from api.streaming import _reuse_cached_agent_session_db
+
     old_db = _MockSessionDB("old", open_=True)
     new_db = _MockSessionDB("new", open_=True)
     agent = _MockAgent(old_db)
-    _session_db = new_db
 
-    # Mirror production:
-    if _session_db is not None:
-        _session_db = adopt(agent, _session_db)
-        agent._session_db = _session_db
+    assert _reuse_cached_agent_session_db(agent, new_db, {}) is old_db
 
     assert agent._session_db is old_db
     assert old_db.close_calls == 0
