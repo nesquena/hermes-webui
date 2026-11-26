@@ -3970,16 +3970,19 @@ function _consumeNewChatProjectParamFromLocation(){
   const applied=_resolveNewChatProjectIntent(raw);
   if(applied){
     _activeProject=applied;
-    _syncNewChatLinkHref();
+    if(typeof _syncNewChatLinkHref==='function')_syncNewChatLinkHref();
   }
   return applied;
 }
 
 function _setActiveProjectFilter(projectId) {
   const next = projectId === NO_PROJECT_FILTER ? NO_PROJECT_FILTER : (projectId || null);
-  if (_activeProject === next) { _syncNewChatLinkHref(); return; }
+  if (_activeProject === next) {
+    if (typeof _syncNewChatLinkHref === 'function') _syncNewChatLinkHref();
+    return;
+  }
   _activeProject = next;
-  _syncNewChatLinkHref();
+  if (typeof _syncNewChatLinkHref === 'function') _syncNewChatLinkHref();
   renderSessionListFromCache();
   void renderSessionList({deferWhileInteracting:false});
 }
@@ -3989,7 +3992,7 @@ function _setSessionSourceFilter(filter) {
   if (_sessionSourceFilter === next) return;
   _sessionSourceFilter = next;
   _activeProject = null;
-  _syncNewChatLinkHref();
+  if (typeof _syncNewChatLinkHref === 'function') _syncNewChatLinkHref();
   _selectedSessions.clear();
   _sessionSelectMode = false;
   try { localStorage.setItem('hermes-session-source-filter', next); } catch (_e) {}
@@ -14947,7 +14950,7 @@ async function _confirmDeleteProject(proj){
   try {
     await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id})});
     if(_activeProject===proj.project_id) _activeProject=null;
-    _syncNewChatLinkHref();
+    if(typeof _syncNewChatLinkHref==='function')_syncNewChatLinkHref();
     await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
     showToast('Project deleted');
   } catch(e) {
