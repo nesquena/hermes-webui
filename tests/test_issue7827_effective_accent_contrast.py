@@ -40,11 +40,82 @@ def _strip_comments(css: str) -> str:
     return re.sub(r"/\*.*?\*/", "", css, flags=re.S)
 
 
+# The tested viewport — the CI headless Chromium default. Media length features
+# are evaluated against it; every other media feature (hover / pointer /
+# prefers-* / display-mode…) is conservatively skipped, never blindly descended.
+_VIEWPORT_WIDTH = 1280
+_VIEWPORT_HEIGHT = 720
+
+
+def _media_branch_applies(branch: str) -> bool | None:
+    """Whether one comma-separated @media branch holds at the tested viewport.
+
+    Returns True (certainly applies), False (certainly not), or None
+    (uncertain — contains a feature this stylesheet-only oracle cannot decide,
+    e.g. ``hover:hover``, ``pointer:coarse``, ``prefers-reduced-motion``). An
+    uncertain branch is treated as NOT applying: descending every inactive
+    media branch would not establish general CSS correctness, so the oracle
+    only follows branches it can prove active at the tested viewport.
+    """
+    seen_feature = False
+    for feature in branch.split("and"):
+        feature = feature.strip().strip("()").strip()
+        if not feature:
+            continue
+        seen_feature = True
+        # Bare media types: screen/all apply in the tested (headless desktop)
+        # environment; print never does. `not`/`only` prefixes are undecidable.
+        if feature in ("screen", "all"):
+            continue
+        if feature == "print":
+            return False
+        if re.match(r"^(not|only)\b", feature):
+            return None
+        m = re.match(r"^(min|max)-(width|height)\s*:\s*([0-9.]+)(?:px)?$", feature)
+        if m:
+            op, prop, value = m.group(1), m.group(2), float(m.group(3))
+            viewport = _VIEWPORT_WIDTH if prop == "width" else _VIEWPORT_HEIGHT
+            if op == "min" and viewport < value:
+                return False
+            if op == "max" and viewport > value:
+                return False
+            continue
+        return None
+    return True if seen_feature else None
+
+
+def _media_applies(sel: str) -> bool:
+    """True when an ``@media`` rule applies at the tested viewport.
+
+    A comma-separated media list is an OR: if any branch certainly applies,
+    the block applies. Otherwise (all branches certainly-inactive or
+    uncertain) the block is skipped — the oracle never descends a branch it
+    cannot prove active. ``@supports`` / ``@keyframes`` / ``@font-face`` etc.
+    are not ``@media`` and return False.
+    """
+    if not re.match(r"@media\b", sel):
+        return False
+    cond = sel[len("@media"):].strip()
+    if not cond:
+        return True
+    for branch in cond.split(","):
+        if _media_branch_applies(branch) is True:
+            return True
+    return False
+
+
 def _css_rules(css: str):
-    """Yield (selector, body) for every leaf rule (media blocks unwrapped).
+    """Yield (selector, body) for every leaf rule that applies at the tested
+    viewport, unwrapping applicable @media blocks.
 
     Braces are balanced-scanned so a rule inside ``@media`` still yields its
-    own (selector, body) pair; at-rules themselves are skipped.
+    own (selector, body) pair. A comma-separated selector list is split: each
+    selector in the list carries its OWN specificity and only the individual
+    matching selector participates in the cascade — the browser never merges
+    a list's specificity, so the oracle must not either. A nested ``@media``
+    block is descended only when its condition holds at the tested viewport
+    (1280×720, the CI headless default); inapplicable or undecidable branches
+    are skipped exactly as the browser skips them.
     """
     css = _strip_comments(css)
     rules = []
@@ -64,8 +135,17 @@ def _css_rules(css: str):
                 d -= 1
             j += 1
         body = css[opener + 1:j - 1]
-        if not sel.startswith("@") and sel:
-            rules.append((sel, body))
+        if sel.startswith("@"):
+            # At-rule: recurse only into an @media block that applies at the
+            # tested viewport. Other at-rules (@supports/@keyframes/…) do not
+            # participate in the plain cascade and are skipped.
+            if _media_applies(sel):
+                rules.extend(_css_rules(body))
+        elif sel:
+            for single in sel.split(","):
+                single = single.strip()
+                if single:
+                    rules.append((single, body))
         pos = j
     return rules
 
@@ -272,3 +352,79 @@ def test_every_dark_skin_send_btn_resolves_a_foreground():
         if not fg:
             missing.append(skin)
     assert not missing, f"skins with no resolved send-btn foreground: {missing}"
+
+
+# ── Neutral-oracle fidelity controls ─────────────────────────────────────────
+# A rule appended AFTER the real stylesheet wins on specificity + source order
+# in the browser, so the oracle must report the appended value. The mono
+# palette makes the failure visible: white on #CCCCCC is ~1.2:1.
+
+def test_resolver_catches_a_mono_white_override_on_the_settings_button():
+    """Negative control 1: `:root.dark[data-skin="mono"] #mainSettings
+    .settings-btn{color:#ffffff}` (specificity 1-4-0) must beat the generic
+    `:root.dark …` group in the browser.
+
+    The group is written as a COMMA-SEPARATED selector list. A parser that
+    treats the whole group as one selector sums its specificity (2 ids / many
+    classes) and keeps reporting the old dark foreground — the exact fidelity
+    hole this control pins. Individual selectors in a list each carry their
+    own specificity; only the one that matches participates.
+    """
+    injected = (
+        ':root.dark[data-skin="mono"] #mainSettings .settings-btn'
+        "{color:#ffffff;}"
+    )
+    modified = _strip_comments(CSS) + "\n" + injected
+    fg, bg = _effective_fg_bg(modified, "mono", "#mainSettings .settings-btn")
+    assert fg == "#ffffff", (
+        "resolver must honor the appended white override (the individual "
+        f"matching selector's specificity), got fg={fg!r} bg={bg!r}")
+    assert bg and bg.startswith("#"), f"background must resolve: {bg!r}"
+    assert _contrast(fg, bg) < 3.0, (
+        "white on the mono accent fill must measure below 3.0:1 — if it does "
+        f"not, the resolver is not reading the override (got {fg} on {bg})")
+
+
+def test_resolver_descends_an_applicable_nested_media_rule():
+    """Negative control 2: an `!important` white override inside an APPLICABLE
+    `@media(min-width:1px)` block must be visible to the oracle at the tested
+    viewport.
+
+    A parser that skips every nested `@media` body keeps the old dark
+    foreground, while Chromium (viewport width 1280px) paints white. Media
+    applicability must be evaluated at the tested viewport — not blindly
+    descended (see the inapplicable-branch control below).
+    """
+    injected = (
+        '@media(min-width:1px){:root.dark[data-skin="mono"] '
+        "#mainSettings .settings-btn{color:#ffffff!important;}}"
+    )
+    modified = _strip_comments(CSS) + "\n" + injected
+    fg, bg = _effective_fg_bg(modified, "mono", "#mainSettings .settings-btn")
+    assert fg == "#ffffff", (
+        "resolver must descend an applicable @media block at the tested "
+        f"viewport, got fg={fg!r} bg={bg!r}")
+    assert bg and bg.startswith("#"), f"background must resolve: {bg!r}"
+    assert _contrast(fg, bg) < 3.0, (
+        f"white on the mono accent fill must measure below 3.0:1, got {fg} on {bg}")
+
+
+def test_resolver_ignores_an_inapplicable_media_branch():
+    """Guard: a rule inside `@media(max-width:1px)` does NOT apply at the
+    1280px test viewport, so it must not change the resolved foreground.
+
+    Descending every media branch regardless of applicability would also be
+    wrong — this control keeps the viewport evaluation honest.
+    """
+    injected = (
+        '@media(max-width:1px){:root.dark[data-skin="mono"] '
+        "#mainSettings .settings-btn{color:#ffffff!important;}}"
+    )
+    modified = _strip_comments(CSS) + "\n" + injected
+    fg, bg = _effective_fg_bg(modified, "mono", "#mainSettings .settings-btn")
+    baseline_fg, _ = _effective_fg_bg(CSS, "mono", "#mainSettings .settings-btn")
+    assert fg == baseline_fg, (
+        "an inapplicable media branch must not change the resolved foreground; "
+        f"expected the unmodified baseline {baseline_fg!r}, got {fg!r} on {bg!r}")
+    assert fg != "#ffffff", "the inapplicable branch's white must not win"
+    assert bg and bg.startswith("#"), f"background must resolve: {bg!r}"
