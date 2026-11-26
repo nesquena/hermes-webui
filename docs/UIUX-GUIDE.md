@@ -169,6 +169,35 @@ When adding a control, consider where users will find it on both wide desktop an
 mobile. If a setting or quota/control surface does not fit in the composer, route
 it through the appropriate Control Center panel instead of squeezing the footer.
 
+### Inline follow-up suggestion buttons
+
+When a reply ends by offering a real choice (a yes/no question, or 2-4
+alternatives), the model appends one fenced ```suggestions``` block: a JSON array
+of 1-6 short labels, at most 200 characters each, in the user's language. The
+WebUI hides that block - in the live stream and in restored history alike - and
+renders the labels as buttons directly below the reply that offered them
+(`static/suggestions.js`).
+
+- Only the newest assistant reply keeps live buttons. As soon as a later message
+  exists the group renders disabled (`.inline-suggestions-stale`), and every
+  group is disabled while a turn is running, so a click can never answer a
+  question that is already settled.
+- The first label is the primary button and carries the `Ctrl+Enter`
+  (`⌘+Enter` on macOS) hint. The chord answers the newest reply only while the
+  composer is empty; with text in it, the chord sends the typed message.
+- A click sends the label as the user's message. An existing draft survives: its
+  text comes back after the send, and its staged attachments are detached for the
+  suggestion send and restored together with that text - an attachment staged for
+  a draft is never uploaded with a suggestion.
+- An invalid block (bad JSON, wrong shape, empty or oversized labels) fails safe:
+  no buttons, raw block visible as ordinary content. A fence inside a user
+  message is never turned into buttons.
+- Group copy lives in the `en` locale (`suggestions_group_label`) and rides the
+  existing fallback.
+- `HERMES_WEBUI_SUGGESTIONS=0` (`false`/`no`/`off`/`disabled`) opts out
+  process-wide: the server drops the prompt line that asks for the block and the
+  client renders no buttons, so the raw block just stays visible.
+
 ### Composer sizing
 
 The composer grows with its content up to a 200px cap. Where the browser supports
