@@ -4595,15 +4595,10 @@ def _provider_name_ambiguity_in(source: dict, route: str, builtin: str, explicit
         # The Agent skips a keyed record whose ``enabled`` is false in both of its views
         # (``_match_new_style_provider`` and ``providers_dict_to_custom_providers``), so a
         # disabled one claims nothing. Legacy ``custom_providers`` rows stay counted below:
-        # the Agent's legacy view still selects a row the user switched off. A templated
-        # flag is judged as the Agent expands it only while a profile secret scope is bound
-        # (``current_secret_scope()`` is not None, :func:`_agent_expanded_text`); with none
-        # bound or no expander it is unknown and keeps the record claiming (fail closed).
-        flag = record.get("enabled", True)
-        if _agent_expands_env_ref(flag):
-            expanded = _agent_expanded_text(flag)
-            flag = flag if expanded is None else expanded
-        if not _raw_provider_record_enabled({"enabled": flag}):
+        # the Agent's legacy view still selects a row the user switched off. The flag is
+        # read through :func:`_agent_provider_record_enabled` — the one Agent-compatible
+        # expansion rule shared with the sibling audit.
+        if not _agent_provider_record_enabled(record):
             continue
         # The Agent's identities for a keyed record: its ``name`` (or key) and its key.
         claimed_by = _claiming_value((key_text,), (record.get("name"),), names)
@@ -4684,6 +4679,28 @@ def _raw_provider_record_enabled(record: object) -> bool:
     return bool(flag)
 
 
+def _agent_provider_record_enabled(record: object) -> bool:
+    """Whether the installed Agent's resolver sees ``record`` as enabled.
+
+    Applies the same owning-profile, Agent-compatible expansion as the built-in
+    ambiguity guard (:func:`_provider_name_ambiguity_in`): an ``enabled`` flag the
+    Agent env-expands (``${VAR}`` / ``${env:VAR}``, inner whitespace included) is
+    judged by the Agent's own expansion while a profile secret scope is bound
+    (:func:`_agent_expanded_text`), so a sibling disabled that way is skipped here
+    too. With no expansion available the flag stays unknown and the record keeps
+    claiming (fail closed) — the reading the built-in guard has always used.
+
+    Non-templated flags (bool, quoted string, plain words) are untouched.
+    """
+    if not isinstance(record, dict):
+        return False
+    flag = record.get("enabled", True)
+    if _agent_expands_env_ref(flag):
+        expanded = _agent_expanded_text(flag)
+        flag = flag if expanded is None else expanded
+    return _raw_provider_record_enabled({"enabled": flag})
+
+
 # ``_entry_url``'s precedence in hermes_cli.runtime_provider_custom.
 _RAW_PROVIDER_URL_FIELDS = ("api", "url", "base_url")
 
@@ -4753,7 +4770,7 @@ def _unique_raw_provider_record(providers_cfg: object, pid: str, slug: str) -> t
             continue
         if not isinstance(record, dict) or not record:
             continue
-        if not _raw_provider_record_enabled(record):
+        if not _agent_provider_record_enabled(record):
             continue
         if not _custom_record_names_identity(record.get("name") or key, key, pid, slug):
             continue
@@ -4831,7 +4848,13 @@ def _raise_on_native_alias_collision(
             continue  # built-in spelling: #8690's guard owns that collision
         if not isinstance(record, dict) or not record:
             continue
-        if not _raw_provider_record_enabled(record):
+        # The Agent skips a keyed record whose ``enabled`` reads false after its
+        # own env expansion (``${VAR}`` / ``${env:VAR}``, inner whitespace
+        # included), so a sibling disabled that way claims nothing here either —
+        # judging the literal flag instead would refuse a valid exact-key route
+        # for a sibling the actual Agent never sees (#9255 gate). Non-templated
+        # flags keep their plain reading.
+        if not _agent_provider_record_enabled(record):
             continue
         normalized = _normalized_raw_provider_record(record, key_text)
         # The claimant must NAME the identity itself: only a record whose own
@@ -4878,7 +4901,7 @@ def _native_custom_provider_record(providers_cfg: object, pid: str, slug: str) -
     disabled = any(
         _is_native_custom_provider_key(key)
         and isinstance(candidate, dict) and bool(candidate)
-        and not _raw_provider_record_enabled(candidate)
+        and not _agent_provider_record_enabled(candidate)
         and _custom_record_names_identity(candidate.get("name") or key, key, pid, slug)
         for key, candidate in providers_cfg.items()
     )
@@ -4892,7 +4915,7 @@ def _native_custom_provider_record(providers_cfg: object, pid: str, slug: str) -
         (key, _normalized_raw_provider_record(candidate, key))
         for key, candidate in providers_cfg.items()
         if _is_native_custom_provider_key(key) and isinstance(candidate, dict) and candidate
-        and _raw_provider_record_enabled(candidate) and _custom_provider_slug_key(key) == slug
+        and _agent_provider_record_enabled(candidate) and _custom_provider_slug_key(key) == slug
     ]
     if len(metadata) == 1:
         return metadata[0][1], False, metadata[0][0]
