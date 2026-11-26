@@ -508,6 +508,52 @@ def test_owner_state_churn_keeps_browser_only_drafts():
     assert result["newest"] is True
 
 
+def _run_owner_state_recency_harness() -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+
+    script = textwrap.dedent(
+        f"""
+        {_composer_authority_helpers()}
+        for(let index=0;index<160;index+=1){{
+          _rememberComposerOwnerState(`draft-${{index}}`,'default',{{
+            text:`draft ${{index}}`,files:[],revision:1,
+          }},0);
+        }}
+        // The New Chat source may be empty, but a dictation that started before
+        // the handoff still looks its owner up after the handoff settles.
+        _rememberComposerOwnerState('handoff-source','default',{{
+          text:'',files:[],revision:0,
+        }},1);
+        for(let index=0;index<4;index+=1){{
+          _rememberComposerOwnerState(`after-${{index}}`,'default',{{
+            text:'',files:[],revision:0,
+          }},0);
+        }}
+        const source=_composerRememberedOwnerSnapshot('handoff-source','default');
+        const oldDraft=_composerRememberedOwnerSnapshot('draft-0','default');
+        process.stdout.write(JSON.stringify({{
+          sourceFound:!!source,
+          sourceText:source?source.text:null,
+          oldDraftStillThere:!!oldDraft,
+        }}));
+        """
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+def test_owner_state_churn_keeps_empty_source_for_late_producers():
+    result = _run_owner_state_recency_harness()
+
+    assert result["sourceFound"] is True
+    assert result["sourceText"] == ""
+    # The unsent drafts that pushed the map over the limit still stay put.
+    assert result["oldDraftStillThere"] is True
+
+
 def _run_new_session_harness(
     *,
     fail_create: bool,
