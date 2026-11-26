@@ -109,10 +109,18 @@ def test_yolo_answers_are_ordered_by_the_request_that_produced_them():
     # approval card's projection.
     cmd = _function_body(_read("commands.js"), "cmdYolo")
     pill = _function_body(_read("commands.js"), "disableYoloFromPill")
-    assert "const reqGen=(typeof _nextYoloReqGen==='function')?_nextYoloReqGen():null;" in cmd
+    # The command captures it once, when the write is SENT, in a binding both
+    # the success path and the catch can see: allocating a fresh one in catch
+    # made a late 409 of an old process look newer than the requests sent
+    # after it (#9101 review round 10).
+    assert "let reqGen=null;" in cmd
+    assert "reqGen=(typeof _nextYoloReqGen==='function')?_nextYoloReqGen():null;" in cmd
     assert "const reqGen=(typeof _nextYoloReqGen==='function')?_nextYoloReqGen():null;" in pill
-    assert "reqGen:reqGen," in cmd
-    assert "reqGen:reqGen," in pill
+    # The catch reuses the send-time generation instead of taking a new one.
+    assert cmd.count("reqGen:reqGen,") == 2
+    assert pill.count("reqGen:reqGen,") == 2
+    assert "_nextYoloReqGen():null,\n      });" not in cmd
+    assert "_nextYoloReqGen():null,\n      }));" not in pill
     # The card takes its generation when its request is SENT, not when its
     # answer arrives, and hands it to the projection.
     respond = _function_body(src, "respondApproval")

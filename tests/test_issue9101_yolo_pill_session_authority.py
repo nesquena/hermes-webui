@@ -124,6 +124,11 @@ REVISION_SCENARIOS = [
     # an older WRITE answer must still confirm the server's state — the write
     # settled, so the flag may have moved on since the answer was computed.
     "r24_rejected_older_write_answer_still_confirms_the_server_state",
+    # Review round 10 (Greptile P1 "A delayed /yolo 409 hides the ON
+    # indicator"): a delayed 409 of a disable sent during the FIRST sync used
+    # to allocate a new generation in catch, so it looked NEWER than the
+    # requests sent after the restart and replaced the live process's ON.
+    "r25_first_sync_late_conflict_never_hides_the_current_on",
 ]
 
 # Orderings that need more than the client can see. The revision-ordering

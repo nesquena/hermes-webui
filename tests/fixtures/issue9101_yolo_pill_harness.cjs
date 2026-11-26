@@ -124,6 +124,11 @@ function createTab(server, name, overrides = null, extraSrc = []) {
     calls.push({ tab: name, method, path: p, body });
     const answer = server.handle(method, p, body);
     if (server.shouldHold && server.shouldHold(name, method, p)) {
+      // A held rejection (a 409, a failed relay) must not surface as an
+      // unhandled rejection while its delivery is deferred: the handler only
+      // keeps the promise from crashing the driver; release() still delivers
+      // the rejection to the caller.
+      if (answer && typeof answer.catch === 'function') answer.catch(() => {});
       return new Promise(resolve => held.push({ tab: name, method, path: p, answer, release: () => resolve(answer) }));
     }
     return answer;
@@ -1378,6 +1383,83 @@ const scenarios = {
     check(afterLate.rev === server.state('B').yolo_revision && afterLate.pillVisible === true,
       'the view did not reach the server\'s current revision after the rejected write answer', out);
     check(synced(tab1, server, 'B'), 'the pill does not match the server', out);
+    return out;
+  },
+
+  // (r25) review round 10 (Greptile P1 "A delayed /yolo 409 hides the ON
+  // indicator"): the tab starts WITHOUT a seeded YOLO view (its install read
+  // never lands, so it has not confirmed the OLD run). /yolo reads ON from
+  // the OLD process and sends its conditional disable. Another write moves
+  // the flag (OFF, revision 2), so the disable is answered 409 yolo_changed
+  // carrying that state; its delivery is held. The server then restarts and a
+  // later GET confirms the NEW process is ON. The old 409 lands last: the
+  // catch used to allocate a FRESH request generation, which made the old
+  // answer look newer than the requests sent after it, so it was applied —
+  // the view went back to the dead process's OFF and that run became
+  // "confirmed". The NEW process was then a run this tab had confirmed, so
+  // both the automatic confirmation and later live reads of the CURRENT
+  // process were rejected. The pill stayed hidden while the server was ON.
+  //
+  // Expected: the generation captured when the write is SENT is reused on
+  // BOTH paths, so the late 409 is a leftover of an older request: the live
+  // epoch stays, the pill shows ON, and a later live read is still applied.
+  async r25_first_sync_late_conflict_never_hides_the_current_on() {
+    const server = createServer({ B: {} });
+    server.yolo.B = true; server.counter = 1; server.recorded.B = { rev: 1, enabled: true };
+    const tab = createTab(server, 'tab1');
+    const fetchB = () => vm.runInContext('_fetchYoloState("B")', tab.ctx);
+    // The install read is held and never delivered: the tab starts without a
+    // confirmed YOLO view, so it has never confirmed the OLD run.
+    server.shouldHold = yoloGet('B');
+    await tab.loadSession('B'); await tick();
+    const installRead = tab.held.shift();
+    check(!!installRead && installRead.answer && installRead.answer.yolo_enabled === true,
+      'precondition: the install read (ON) is held and never delivered', tab.calls);
+    // /yolo's own status read is answered ON (revision 1) and held, so another
+    // write can move the flag before the conditional disable is sent.
+    const cmd = tab.cmdYolo(); await tick();
+    const statusRead = tab.held.shift();
+    check(!!statusRead && statusRead.answer && statusRead.answer.yolo_enabled === true,
+      'precondition: the /yolo status read (ON) is held', tab.calls);
+    // Another client disables it (revision 2) before the toggle is computed.
+    server.yolo.B = false; server.snapshot('B');
+    check(server.state('B').yolo_revision === 2,
+      'precondition: another write moved the flag (revision 2)', server.state('B'));
+    // Deliver the status read; the conditional disable is then answered with
+    // the 409 yolo_changed and its delivery is held.
+    server.shouldHold = (name, method, p) => name === 'tab1' && method === 'POST' && p === '/api/session/yolo';
+    statusRead.release(); await tick();
+    const conflict = tab.held.shift();
+    check(!!conflict && conflict.method === 'POST',
+      'precondition: the conditional disable\'s 409 answer is held', tab.calls);
+    // The server restarts; the NEW process is ON.
+    server.restart(); server.yolo.B = true;
+    server.shouldHold = yoloGet('B');
+    const fresh = fetchB(); await tick();
+    const newRead = tab.held.shift();
+    check(!!newRead && newRead.answer.yolo_epoch === server.epoch && newRead.answer.yolo_enabled === true,
+      'precondition: the new process answered ON', tab.calls);
+    server.shouldHold = null;
+    newRead.release(); await fresh; await tick(20);
+    const afterNew = tab.state();
+    check(afterNew.epoch === server.epoch && afterNew.pillVisible === true,
+      'precondition: the current process\'s answer is shown', afterNew);
+    // Now the OLD process's delayed 409 lands. It must not replace the view.
+    conflict.release(); await cmd; await tick(40);
+    const afterConflict = tab.state();
+    const out = { afterNew, afterConflict, server: server.state('B') };
+    check(afterConflict.epoch === server.epoch && afterConflict.pillVisible === true
+      && afterConflict.rev === afterNew.rev,
+      'the delayed 409 replaced the current process\'s ON with the dead process\'s OFF', out);
+    // ...and a later live read of the CURRENT process must still be applied.
+    server.yolo.B = false; server.snapshot('B');
+    await fetchB(); await tick(20);
+    const afterLater = tab.state();
+    out.afterLater = afterLater;
+    check(afterLater.epoch === server.epoch && afterLater.pillVisible === false
+      && afterLater.rev === server.state('B').yolo_revision,
+      'a later live read of the current process was rejected after the delayed 409', out);
+    check(synced(tab, server, 'B'), 'the pill does not match the server', out);
     return out;
   },
 

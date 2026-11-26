@@ -2595,6 +2595,12 @@ async function cmdYolo(){
     S.session&&S.session.session_id===sid&&_loadSessionGeneration===generation
   );
   let approvalOwner=null;
+  // The request's generation is captured once, when the write is SENT, and
+  // reused by BOTH paths — success and the late 409/error projection.
+  // Allocating a fresh one in catch made an older answer look newer than the
+  // requests sent after it, so a late old-process 409 could replace the newer
+  // server's ON with its own OFF and block later reads (#9101 round 10).
+  let reqGen=null;
   try{
     // Check current state first to toggle.
     const status=await api('/api/session/yolo?session_id='+encodeURIComponent(sid));
@@ -2628,7 +2634,7 @@ async function cmdYolo(){
     // The request's generation is taken when the write is SENT: it orders
     // this answer against the others, so a late answer of an older request
     // cannot replace what a newer one confirmed (#9101 review round 9).
-    const reqGen=(typeof _nextYoloReqGen==='function')?_nextYoloReqGen():null;
+    reqGen=(typeof _nextYoloReqGen==='function')?_nextYoloReqGen():null;
     const result=await api('/api/session/yolo',{
       method:'POST',
       body:JSON.stringify({session_id:sid,enabled:enable,expected_revision:expectedRevision}),
@@ -2657,7 +2663,7 @@ async function cmdYolo(){
         gen:generation,
         rev:typeof errorPayload.yolo_revision==='number'?errorPayload.yolo_revision:null,
         epoch:typeof errorPayload.yolo_epoch==='string'?errorPayload.yolo_epoch:null,
-        reqGen:(typeof _nextYoloReqGen==='function')?_nextYoloReqGen():null,
+        reqGen:reqGen,
       });
     }
     showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||e.message));
@@ -2711,7 +2717,7 @@ async function disableYoloFromPill(){
         gen:generation,
         rev:typeof errorPayload.yolo_revision==='number'?errorPayload.yolo_revision:null,
         epoch:typeof errorPayload.yolo_epoch==='string'?errorPayload.yolo_epoch:null,
-        reqGen:(typeof _nextYoloReqGen==='function')?_nextYoloReqGen():null,
+        reqGen:reqGen,
       }));
     if(!applied)_updateYoloPill();
     showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||(e&&e.message)||''));
