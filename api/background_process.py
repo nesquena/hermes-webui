@@ -2680,6 +2680,20 @@ def _start_server_side_wakeup_turn(
     """
 
     def _runner() -> None:
+        # Compression rotation retarget: this wakeup (and every re-queue,
+        # discard, and busy-check below) is keyed by the session id that was
+        # live when the process completed. If that session has since been
+        # archived as a pre-compression snapshot, follow the durable lineage
+        # to the live continuation NOW — otherwise a 409 re-defer would park
+        # the prompt under the sealed parent's key, which the continuation's
+        # teardown drain never reads.
+        nonlocal session_id
+        try:
+            from api.routes import resolve_wakeup_session_id
+
+            session_id = resolve_wakeup_session_id(session_id)
+        except Exception:
+            pass
         try:
             from api.routes import start_session_turn
 

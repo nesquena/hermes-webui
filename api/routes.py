@@ -14759,6 +14759,26 @@ def _pre_compression_continuation_session_id(session) -> str | None:
     return _resolve_from_rows(rows)
 
 
+def resolve_wakeup_session_id(session_id: str) -> str:
+    """Follow durable compression lineage for a wakeup-keyed session id.
+
+    Deferred wakeups are keyed by the session id that was live when the
+    background event was recorded. If that session has since been archived by
+    context compression, the turn AND the retry-queue key must follow the live
+    continuation: a prompt re-deferred under the sealed parent's key waits on
+    a drain the continuation's teardown never performs. Returns the original
+    id when there is no archived-snapshot lineage to follow.
+    """
+    try:
+        session = get_session(session_id)
+    except KeyError:
+        return session_id
+    continuation_sid = _pre_compression_continuation_session_id(session)
+    if continuation_sid and continuation_sid != session_id:
+        return continuation_sid
+    return session_id
+
+
 def _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, request_profile) -> bool:
     """Confirm one bounded compression edge from current on-disk metadata."""
     snapshot_meta = _persisted_session_meta_prefix(snapshot_sid)
@@ -31781,18 +31801,36 @@ def start_session_turn(
         try:
             _continuation_session = get_session(_continuation_sid)
         except KeyError:
-            _continuation_session = None
-        if _continuation_session is not None and not getattr(
-            _continuation_session, "_sidecar_names_other_session", None
-        ):
-            logger.info(
-                "start_session_turn: %s is an archived compression snapshot; "
-                "retargeting server-side turn to continuation %s",
+            # The lineage names a continuation that cannot be loaded. The
+            # parent is a sealed snapshot — starting a turn on it would
+            # resurrect archived history and re-trigger the ownership
+            # collision this retarget exists to prevent. Fail closed; the
+            # wakeup callers' 404 branch clears the queued state.
+            logger.warning(
+                "start_session_turn: %s names continuation %s that cannot "
+                "load; refusing to start on the sealed parent",
                 session_id,
                 _continuation_sid,
             )
-            session_id = _continuation_sid
-            s = _continuation_session
+            return {"error": "Session not found", "_status": 404}
+        if getattr(_continuation_session, "_sidecar_names_other_session", None):
+            # #8852: the continuation's own sidecar is corrupt — same
+            # fail-closed rule; neither sealed row is a safe write target.
+            logger.warning(
+                "start_session_turn: continuation %s of %s has a mismatched "
+                "sidecar; refusing to start",
+                _continuation_sid,
+                session_id,
+            )
+            return {"error": "Session not found", "_status": 404}
+        logger.info(
+            "start_session_turn: %s is an archived compression snapshot; "
+            "retargeting server-side turn to continuation %s",
+            session_id,
+            _continuation_sid,
+        )
+        session_id = _continuation_sid
+        s = _continuation_session
 
     try:
         workspace = _resolve_chat_workspace_with_recovery(s, None)
