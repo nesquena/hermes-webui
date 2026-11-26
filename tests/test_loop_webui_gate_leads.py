@@ -404,3 +404,90 @@ def test_replacement_loop_racing_compression_carry_is_rejected_and_retired(tmp_p
     loops.run_due_loops()
     assert started == []
     assert _loop(agent, loops, "c1").status == "cleared" and _loop(agent, loops).status == "cleared"
+
+
+def _gateway_turn(monkeypatch, tmp_path, s, stream_id, prompt, started_at, display):
+    """Settle one turn through the real native-Gateway path; `display` is the Gateway's whole transcript."""
+    import asyncio
+    import sys
+    import threading
+    from contextlib import asynccontextmanager
+    from types import ModuleType
+    from api import gateway_chat, gateway_sessions
+    from api.config import STREAMS, STREAMS_LOCK, create_stream_channel
+    protocol = ModuleType("hermes_cli.gateway_client")
+    protocol.GatewayRPCError = type("GatewayRPCError", (Exception,), {})
+    monkeypatch.setitem(sys.modules, "hermes_cli.gateway_client", protocol)
+    monkeypatch.setattr(gateway_sessions, "config_for_session", lambda _: {"webui_gateway_session_transport": "local"})
+    monkeypatch.setattr(gateway_chat, "_gateway_reasoning_effort_for_request", lambda *a, **k: None)
+
+    class Client:
+        events = asyncio.Queue()
+
+        async def rpc(self, method, **params):
+            if method == "session.resume":
+                return {"session_id": s.session_id, "display_messages": display}
+            return {"admission_id": stream_id, "status": "terminal", "outcome": "completed",
+                    "result": {"final_response": display[-1]["text"]}}
+
+    @asynccontextmanager
+    async def connect(home):
+        yield Client()
+
+    monkeypatch.setattr(gateway_sessions, "connect_local", connect)
+    s.active_stream_id, s.pending_user_message, s.pending_started_at = stream_id, prompt, started_at
+    s.pending_attachments, s.pending_user_source = [], "webui"
+    s.save()
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = create_stream_channel()
+    worker = threading.Thread(target=gateway_chat._run_gateway_chat_streaming,
+                              args=(s.session_id, prompt, s.model, str(tmp_path), stream_id, []))
+    worker.start()
+    worker.join(20)
+    with STREAMS_LOCK:
+        STREAMS.pop(stream_id, None)
+    assert not worker.is_alive() and s.active_stream_id is None
+
+
+@requires_agent_modules
+@pytest.mark.parametrize("cmd,reply,status", [
+    ("5m check", "all green\nLOOP_COMPLETE", "done"),
+    ("5m check --until the deploy is live", "the deploy is live", "done"),
+])
+def test_later_gateway_turn_keeps_the_wakeup_identity(tmp_path, monkeypatch, cmd, reply, status):
+    """Another Gateway turn settling before the scheduler judges the wakeup must not hide its outcome."""
+    from collections import OrderedDict
+    from hermes_cli import goals
+    from api import models
+    sessions = tmp_path / "gw-sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", sessions)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", sessions / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
+    s = models.new_session()
+    s.model = "m"
+    judged = []
+    monkeypatch.setattr(goals, "judge_goal", lambda cond, text, *a, **k: (judged.append(text), (
+        "done" if text == "the deploy is live" else "continue", "met", False, None, False))[1])
+    agent, loops, started = _setup(tmp_path, monkeypatch, s, cmd="", due=False,
+                                   get_session=lambda sid, **kw: s)
+    assert "Loop" in loops.run_loop_command(s.session_id, cmd), "loop not started"
+    with loops._home(None):
+        _due(agent, s.session_id)
+    loops.run_due_loops()
+    s.source_tag = "desktop"  # route the settlements through the native Gateway session transport
+    wake = s.messages[-1]
+    s.messages.pop()  # the Gateway path re-materializes the pending prompt itself
+    wake_rows = [{"role": "user", "text": wake["content"], "row_id": 7, "timestamp": 1700000000.5},
+                 {"role": "assistant", "text": reply, "row_id": 8, "timestamp": 1700000001.0}]
+    _gateway_turn(monkeypatch, tmp_path, s, "stream1", wake["content"], wake["timestamp"], wake_rows)
+    _gateway_turn(monkeypatch, tmp_path, s, "stream-user", "and another thing", 2000.0, wake_rows + [
+        {"role": "user", "text": "and another thing", "row_id": 9, "timestamp": 1700000002.5},
+        {"role": "assistant", "text": "sure", "row_id": 10, "timestamp": 1700000003.0}])
+    loops.run_due_loops()
+    with loops._home(None):
+        _due(agent, s.session_id)
+    loops.run_due_loops()
+    assert _loop(agent, loops, s.session_id).status == status and len(started) == 1
+    assert judged == ([reply] if "--until" in cmd else [])
