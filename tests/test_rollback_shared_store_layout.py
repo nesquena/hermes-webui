@@ -303,3 +303,10 @@ def test_both_layouts_are_listed_after_upgrade(monkeypatch, tmp_path):
     # Both stay readable through their own layout.
     assert rollback.get_checkpoint_diff(str(workspace), "legacyid01")["total_changes"] >= 0
     assert rollback.get_checkpoint_diff(str(workspace), heads[0][:12])["total_changes"] >= 0
+
+
+def test_merge_orders_by_instant_across_daylight_saving_change():
+    older = {"id": "older", "date": "2026-11-01T01:50:00-04:00"}
+    newer = {"id": "newer", "date": "2026-11-01T01:10:00-05:00"}
+    unknown = {"id": "unknown", "date": "invalid"}
+    assert rollback._merge_checkpoint_lists([older, unknown], [newer]) == [newer, older, unknown]

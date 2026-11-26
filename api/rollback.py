@@ -251,22 +251,7 @@ def _read_checkpoint_text(git: str, ckpt_dir: Path, modes: dict[str, int], rel_p
 
 
 def _decode_git_path(raw: bytes) -> str:
-    """Decode a git pathname, losslessly where the platform allows it.
-
-    Git pathnames are bytes, not text: a repository can track a name that is not
-    valid UTF-8 (git only forbids NUL and '/'). On POSIX `os.fsdecode` uses
-    `surrogateescape`, the reversible 1:1 mapping the stdlib uses for pathnames,
-    so `os.fsencode` gives the original bytes back.
-
-    Windows is different: `os.fsdecode` is documented to use the **strict** error
-    handler when the filesystem encoding is `mbcs`, so a name holding 0xE9 (or any
-    non-UTF-8 byte) raises `UnicodeDecodeError`. Letting that escape would fail the
-    whole tree listing and take every other file's diff and restore with it, so a
-    name that cannot be represented is decoded with `surrogateescape` explicitly —
-    it stays inspectable and reports as unrepresentable rather than aborting the
-    snapshot. Such a path cannot be opened on that host, which is the honest
-    outcome: the file is listed, and reading its blob fails per-file.
-    """
+    """Preserve undecodable bytes for display; shared-store reads use blob IDs."""
     try:
         return os.fsdecode(raw)
     except UnicodeDecodeError:
@@ -274,24 +259,14 @@ def _decode_git_path(raw: bytes) -> str:
         return raw.decode("utf-8", errors="surrogateescape")
 
 
-def _rev_path_spec(commit_id: str, rel_path: str) -> bytes:
-    """Build the ``<rev>:<path>`` argument as BYTES.
-
-    Passing the spec as text would let Python's filesystem encoding round-trip
-    the surrogate-escaped name, which is lossy on a non-UTF-8 locale; handing
-    git the exact bytes avoids depending on the locale at all.
-    """
-    return commit_id.encode() + b":" + os.fsencode(rel_path)
-
-
 def _read_checkpoint_blob_for(
-    git: str, ckpt: "_CheckpointRef", rel_path: str,
+    git: str, ckpt: "_CheckpointRef", rel_path: str, object_id: str | None,
 ) -> bytes | None:
     """``_read_checkpoint_blob`` for a resolved checkpoint in either layout."""
     if ckpt.git_dir is None:
         return _read_checkpoint_blob(git, ckpt.path, rel_path)
     result = subprocess.run(
-        _git_cmd(git, ckpt, "cat-file", "blob", _rev_path_spec(ckpt.id, rel_path)),
+        _git_cmd(git, ckpt, "cat-file", "blob", object_id),
         capture_output=True, timeout=10,
         creationflags=windows_hide_flags(),
     )
@@ -300,14 +275,14 @@ def _read_checkpoint_blob_for(
     return result.stdout
 
 
-def _checkpoint_entry_modes_for(git: str, ckpt: "_CheckpointRef") -> dict[str, int]:
+def _checkpoint_entries(git: str, ckpt: "_CheckpointRef") -> dict[str, tuple[int, str | None]]:
     """``_checkpoint_entry_modes`` for a resolved checkpoint in either layout.
 
     The legacy repository keeps its index in the per-commit work tree; the shared
     store has one index per project, so the commit is read from the tree instead.
     """
     if ckpt.git_dir is None:
-        return _checkpoint_entry_modes(git, ckpt.path)
+        return {path: (mode, None) for path, mode in _checkpoint_entry_modes(git, ckpt.path).items()}
 
     result = subprocess.run(
         _git_cmd(git, ckpt, "ls-tree", "-r", "-z", ckpt.id),
@@ -317,11 +292,7 @@ def _checkpoint_entry_modes_for(git: str, ckpt: "_CheckpointRef") -> dict[str, i
     if result.returncode != 0:
         raise ValueError("Failed to list checkpoint files")
 
-    modes: dict[str, int] = {}
-    # Read the tree as BYTES: a tracked filename may not be valid UTF-8, and
-    # decoding it with `text=True` would replace those bytes with U+FFFD, so the
-    # path could no longer be fed back to git. `surrogateescape` round-trips the
-    # exact bytes, which is what the rest of this module assumes a rel_path is.
+    entries = {}
     for entry in result.stdout.split(b"\0"):
         if not entry.strip():
             continue
@@ -331,30 +302,10 @@ def _checkpoint_entry_modes_for(git: str, ckpt: "_CheckpointRef") -> dict[str, i
             continue
         rel_path = _decode_git_path(raw_rel_path)
         try:
-            modes[rel_path] = int(parts[0], 8)
+            entries[rel_path] = (int(parts[0], 8), parts[2].decode("ascii"))
         except ValueError:
             continue
-    return modes
-
-
-def _read_checkpoint_text_for(
-    git: str, ckpt: "_CheckpointRef", modes: dict[str, int], rel_path: str,
-) -> str | None:
-    """``_read_checkpoint_text`` for a resolved checkpoint in either layout."""
-    if not _checkpoint_entry_is_regular(modes, rel_path):
-        return None
-    if ckpt.git_dir is None:
-        blob = _read_checkpoint_blob(git, ckpt.path, rel_path)
-    else:
-        result = subprocess.run(
-            _git_cmd(git, ckpt, "cat-file", "blob", _rev_path_spec(ckpt.id, rel_path)),
-            capture_output=True, timeout=10,
-            creationflags=windows_hide_flags(),
-        )
-        blob = result.stdout if result.returncode == 0 else None
-    if blob is None:
-        return None
-    return blob.decode(errors="replace")
+    return entries
 
 
 def _read_workspace_text(workspace_root: Path, rel_path: str) -> str | None:
@@ -464,9 +415,11 @@ def _merge_checkpoint_lists(
     for entry in shared:
         by_id[entry["id"]] = entry
 
-    def _sort_key(entry: dict[str, Any]) -> str:
-        # ISO-8601 sorts lexicographically; an empty date sorts last.
-        return entry.get("date") or ""
+    def _sort_key(entry: dict[str, Any]) -> float:
+        try:
+            return datetime.fromisoformat(entry["date"]).timestamp()
+        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+            return float("-inf")
 
     return sorted(by_id.values(), key=_sort_key, reverse=True)
 
@@ -653,21 +606,23 @@ def get_checkpoint_diff(workspace: str, checkpoint: str) -> dict[str, Any]:
     git = _find_git()
 
     try:
-        entry_modes = _checkpoint_entry_modes_for(git, ckpt)
+        entries = _checkpoint_entries(git, ckpt)
     except ValueError as e:
         raise ValueError("Failed to list checkpoint files") from e
 
-    ckpt_files = list(entry_modes)
     files_changed = []
     diff_lines = []
 
-    for rel_path in ckpt_files:
+    for rel_path, (mode, object_id) in entries.items():
         # Read checkpoint version from the git object database, not via the
         # checkout path. This prevents tracked symlinks in the checkpoint from
         # redirecting diff reads to arbitrary host files.
-        ckpt_content = _read_checkpoint_text_for(git, ckpt, entry_modes, rel_path)
-        if ckpt_content is None:
+        if not stat.S_ISREG(mode):
             continue
+        blob = _read_checkpoint_blob_for(git, ckpt, rel_path, object_id)
+        if blob is None:
+            continue
+        ckpt_content = blob.decode(errors="replace")
 
         # Read workspace version (if exists)
         ws_content = _read_workspace_text(Path(resolved), rel_path)
@@ -741,24 +696,23 @@ def restore_checkpoint(workspace: str, checkpoint: str) -> dict[str, Any]:
     git = _find_git()
 
     try:
-        entry_modes = _checkpoint_entry_modes_for(git, ckpt)
+        entries = _checkpoint_entries(git, ckpt)
     except ValueError as e:
         raise ValueError("Failed to list checkpoint files") from e
 
-    ckpt_files = list(entry_modes)
     restored = []
     errors = []
 
-    for rel_path in ckpt_files:
-        mode = entry_modes.get(rel_path)
-        if mode is None or not stat.S_ISREG(mode):
-            continue
-
-        content = _read_checkpoint_blob_for(git, ckpt, rel_path)
-        if content is None:
+    for rel_path, (mode, object_id) in entries.items():
+        if not stat.S_ISREG(mode):
             continue
 
         try:
+            if os.name == "nt" and any(0xDC80 <= ord(c) <= 0xDCFF for c in rel_path):
+                raise ValueError("Checkpoint filename cannot be represented on Windows")
+            content = _read_checkpoint_blob_for(git, ckpt, rel_path, object_id)
+            if content is None:
+                raise ValueError("Could not read checkpoint blob")
             _restore_checkpoint_file(workspace_root, rel_path, content, mode)
             restored.append(rel_path)
         except (OSError, ValueError) as e:
