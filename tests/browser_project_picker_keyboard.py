@@ -2198,6 +2198,68 @@ def _check_long_list_rename_keeps_focus_visible(page, seed):
     return failures
 
 
+def _check_long_list_rename_leaves_hidden_row_unscrolled(page, seed):
+    """A re-sort never scrolls the picker to a focused row the user had
+    scrolled out of view (#6577): only a row that was visible stays visible.
+
+    Opens on LONG_PROJECTS_LAST (bottom), scrolls the picker to the top so that
+    focused row is hidden, renames another project, and asserts the picker's
+    scrollTop and the focused node are unchanged."""
+    failures = []
+    problem = _open_single_picker(page, seed["alpha"])
+    if problem:
+        return [f"  [hidden row] {problem}"]
+    hidden = page.evaluate(
+        """async () => {
+          const picker = document.querySelector('.project-picker:not(.batch-project-picker)');
+          picker.scrollTop = 0;
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          window.__hiddenRow = document.activeElement;
+          const rows = Array.from(picker.querySelectorAll('.project-picker-item[data-project-id]'))
+            .filter(row => row.getAttribute('data-project-id') && row !== window.__hiddenRow);
+          return {scrollTop: picker.scrollTop, other: rows.length ? rows[0].textContent.trim() : null};
+        }"""
+    )
+    state = page.evaluate(ROW_IN_BOX_JS)
+    if state.get("problem") or state["text"] != LONG_PROJECTS_LAST or state["inside"] or hidden["scrollTop"] != 0 or not hidden["other"]:
+        page.keyboard.press("Escape")
+        return [f"  [hidden row] could not scroll the focused {LONG_PROJECTS_LAST!r} row out of view: {state} {hidden}"]
+    renamed = hidden["other"] + " (renamed)"
+    after = page.evaluate(
+        """async ({from, to}) => {
+          const p = _allProjects.find(p => p.name === from);
+          await api('/api/projects/rename', {method: 'POST', body: JSON.stringify({project_id: p.project_id, name: to})});
+          await renderSessionList({deferWhileInteracting: false, keepProjectPicker: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const picker = document.querySelector('.project-picker:not(.batch-project-picker)');
+          return {
+            open: !!picker,
+            scrollTop: picker ? picker.scrollTop : null,
+            sameNode: document.activeElement === window.__hiddenRow,
+            renamedShown: !!picker && Array.from(picker.querySelectorAll('.project-picker-item'))
+              .some(row => row.textContent.trim() === to),
+          };
+        }""",
+        {"from": hidden["other"], "to": renamed},
+    )
+    if not after["open"] or not after["renamedShown"]:
+        failures.append(f"  [hidden row] the open picker did not refresh to show {renamed!r}: {after}")
+    elif after["scrollTop"] != 0:
+        failures.append(f"  [hidden row] the re-sort scrolled the picker to a row the user had scrolled away from: scrollTop 0 -> {after['scrollTop']}")
+    elif not after["sameNode"]:
+        failures.append("  [hidden row] the focused row lost focus")
+    page.keyboard.press("Escape")
+    page.evaluate(
+        """async ({from, to}) => {
+          const p = _allProjects.find(p => p.name === from);
+          if (p) await api('/api/projects/rename', {method: 'POST', body: JSON.stringify({project_id: p.project_id, name: to})});
+          await renderSessionList({deferWhileInteracting: false});
+        }""",
+        {"from": renamed, "to": hidden["other"]},
+    )
+    return failures
+
+
 FOCUSED_ROW_ON_SCREEN_JS = """() => {
   const row = document.activeElement;
   const picker = document.querySelector('.batch-project-picker');
@@ -3083,6 +3145,10 @@ def main():
                 failures.extend(found)
                 if not found:
                     print("OK  rename re-sort — an open picker re-sorts and keeps the renamed, focused row visible")
+                found = _check_long_list_rename_leaves_hidden_row_unscrolled(page, seed)
+                failures.extend(found)
+                if not found:
+                    print("OK  hidden row — a re-sort leaves a focused row the user scrolled away from unscrolled")
                 found = _check_batch_long_list(page, seed)
                 failures.extend(found)
                 if not found:

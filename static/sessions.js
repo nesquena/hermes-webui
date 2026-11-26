@@ -13135,8 +13135,10 @@ function _showProjectPicker(session, anchorEl){
     // Preserve a visible keyboard target when renamed rows change its position.
     const focusedRect=ownedFocus?active.getBoundingClientRect():null;
     const pickerTop=ownedFocus?picker.getBoundingClientRect().top+picker.clientTop:0;
+    // 1px tolerance: rows have fractional heights while scrollTop is whole
+    // pixels, so a row aligned to an edge can sit a fraction outside it.
     const keepFocusedVisible=!!(focusedRect&&picker.clientHeight>0
-      &&focusedRect.top>=pickerTop&&focusedRect.bottom<=pickerTop+picker.clientHeight);
+      &&focusedRect.top>=pickerTop-1&&focusedRect.bottom<=pickerTop+picker.clientHeight+1);
     const focusedId=ownedFocus&&typeof active.getAttribute==='function'
       ? active.getAttribute('data-project-id')
       : null;
