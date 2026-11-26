@@ -336,6 +336,12 @@
 
 ### Changed
 
+- **Download a file from the workspace tree's context menu, and PDFs no longer look like a download button (#7810, @CharlesMcquade).**
+  - The file context menu has a **Download** action for files, next to the existing Download Folder for directories. External symlinks shown for display only, and read-only escape rows, don't offer it.
+  - PDF rows show the document glyph instead of the download arrow that used to open a preview. Every row keeps its usual click: preview, or whole-row download for binary formats.
+  - The menu is measured after it opens: near the bottom edge it moves up so every action stays on screen, and on very short screens it scrolls.
+  - On touch screens every row in the workspace file and root context menus is a full 44px target.
+
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Internal
