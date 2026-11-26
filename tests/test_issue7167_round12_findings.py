@@ -322,10 +322,16 @@ def test_legacy_core_repeated_prompt_foreign_token_row_keeps_both_boundaries(
     )
 
 
-def test_current_turn_core_row_still_reused_tokenless(hermes_home):
-    """Positive control (unstamped current turn): an identity-less core row
-    with NO comparable timestamp or token is still reused when this stream's
-    journaled output follows it — the 2026-11-18 gate finding-2 behaviour.
+def test_identity_less_core_row_does_not_suppress_a_stamped_current_turn(hermes_home):
+    """Gate 2026-11-25 blocker 1 contract: when the pending turn carries a
+    positive start time and the core row carries NO identity, text equality is
+    not ownership. The current user turn must be materialized beside the
+    historical same-text row, and the historical row must not receive the
+    current turn's metadata.
+
+    This supersedes the previous reuse expectation: text plus a journal-text
+    overlap could not tell an older same-text turn from an unstamped current
+    one, and the reuse path lost the current prompt outright.
     """
     sid = "r12_core_current_tokenless"
     _write_new_stream_journal(sid)
@@ -333,9 +339,9 @@ def test_current_turn_core_row_still_reused_tokenless(hermes_home):
     synced = _core_synced_session(sid, drop_timestamp=True)
     assert models._core_transcript_holds_pending_turn(
         synced, STREAM_ID, models._normalize_journal_recovery_text(PROMPT)
-    ) is True, (
-        "an identity-less core row matching the prompt with this stream's "
-        "journaled output after it is still the current turn"
+    ) is False, (
+        "a pending turn with a positive start time and an identity-less core "
+        "row must not be suppressed on text equality alone"
     )
 
     session = _make_pending_session(sid)
@@ -349,10 +355,16 @@ def test_current_turn_core_row_still_reused_tokenless(hermes_home):
         session, core_path, stream_id_for_recheck=STREAM_ID
     ) is True
     user_rows = [m for m in session.messages if m.get("role") == "user"]
-    assert len(user_rows) == 1, (
-        "the unstamped current turn must be reused, not duplicated, got "
-        f"{len(user_rows)} user rows"
+    assert len(user_rows) == 2, (
+        "the distinct current turn must be retained beside the historical row, "
+        f"got {len(user_rows)} user rows"
     )
+    old_row, current_row = user_rows
+    assert not old_row.get("attachments"), (
+        "the historical same-text row must not receive the current turn's metadata"
+    )
+    assert current_row.get("attachments") == [ATTACHMENT]
+    assert current_row.get("_active_turn_token") == CURRENT_TOKEN
 
 
 def test_current_turn_core_row_still_reused_stamped(hermes_home):

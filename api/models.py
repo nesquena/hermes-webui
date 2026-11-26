@@ -4119,6 +4119,7 @@ def _find_journal_tool_match(
     max_assistant_idx: int | None = None,
     consumed_indexes: set[int] | None = None,
     event_id: str | None = None,
+    authorize_core_owner: bool = False,
 ) -> int | None:
     """Return the index of the ONE existing card this journal event consumes.
 
@@ -4273,7 +4274,14 @@ def _find_journal_tool_match(
                     ),
                     None,
                 )
-                if owner_user is None or not _message_owns_current_turn(owner_user, session):
+                if owner_user is None or not (
+                    _message_owns_current_turn(owner_user, session)
+                    or (
+                        authorize_core_owner
+                        and isinstance(owner_user, dict)
+                        and owner_user.get('_from_core_transcript') is True
+                    )
+                ):
                     continue
         elif pending_text:
             # No authoritative token but pending metadata exists: the owning
@@ -4457,6 +4465,53 @@ def _core_row_conflicts_with_pending_turn(row, session) -> bool:
     )
 
 
+def _core_row_affirmatively_owns_pending_turn(row, session) -> bool:
+    """True only when the core user row carries POSITIVE current-turn identity.
+
+    Positive evidence is a matching active-turn token or an exactly matching
+    positive finite timestamp. When the pending turn itself carries a positive
+    finite start time, text equality plus a journal-text overlap cannot tell an
+    older same-text turn from an unstamped current turn — suppressing the
+    pending boundary on that evidence lost the current user turn and moved its
+    metadata onto the historical row (gate certification 2026-11-25, blocker 1).
+
+    Legacy shapes whose pending turn has no positive finite time (zero, None or
+    non-finite) keep the historical reuse contract: there is no comparable
+    identity to require, and failing closed there re-introduced the duplicate
+    prompt the 2026-11-24 review asked to remove.
+    """
+    if not isinstance(row, dict):
+        return False
+    current_token = _current_turn_token(session)
+    row_token = row.get('_active_turn_token')
+    if current_token and row_token:
+        return str(row_token) == str(current_token)
+    row_ts = _message_timestamp(row)
+    pending_raw = getattr(session, 'pending_started_at', None)
+    try:
+        pending_ts = None if pending_raw is None else float(pending_raw)
+    except (TypeError, ValueError):
+        pending_ts = None
+    pending_has_time = (
+        pending_ts is not None
+        and math.isfinite(pending_ts)
+        and pending_ts > 0
+    )
+    if not pending_has_time:
+        # Legacy shape: no positive pending time to compare against, so keep
+        # the historical reuse behaviour instead of duplicating the prompt.
+        return True
+    if (
+        row_ts is not None
+        and math.isfinite(row_ts)
+        and row_ts > 0
+    ):
+        return row_ts == pending_ts
+    # The pending turn HAS a positive start time and the core row has none:
+    # identity is unproven, so the pending boundary must be preserved.
+    return False
+
+
 def _core_transcript_holds_pending_turn(session, stream_id: str | None, pending_text: str) -> bool:
     """True when the just-synced core transcript already contains this turn.
 
@@ -4497,6 +4552,14 @@ def _core_transcript_holds_pending_turn(session, stream_id: str | None, pending_
         # Reject explicit conflicting owner/token/timestamp evidence BEFORE
         # the text/tail match can suppress the pending user turn or let the
         # caller backfill the pending metadata onto this older row.
+        return False
+    if not _core_row_affirmatively_owns_pending_turn(user_row, session):
+        # Text equality plus a journal-text overlap cannot tell an older
+        # same-text turn from an unstamped current turn. Suppressing the
+        # pending boundary on that evidence lost the current user turn and
+        # moved its attachments/token onto the historical row (gate
+        # certification 2026-11-25, blocker 1). Without positive identity the
+        # pending boundary is preserved and the caller appends.
         return False
     if _normalize_journal_recovery_text(user_row.get('content')) != pending_text:
         return False
@@ -5536,6 +5599,7 @@ def _append_journaled_partial_output(
                     max_assistant_idx=dedupe_max_index,
                     consumed_indexes=consumed_tool_card_indexes,
                     event_id=_event_id,
+                    authorize_core_owner=authorize_core_rows,
                 )
                 if _tools_dedupe
                 else None
@@ -5684,7 +5748,23 @@ def _append_journaled_partial_output(
                     # calls (#7167 review 2026-11-19).
                     matched_idx, matched_tool = args_scoped[-1]
                 elif not (isinstance(completion_args, dict) and completion_args):
-                    for idx, call in _candidates:
+                    # No id and no arguments. Three contracts must hold at once:
+                    # * an already-done card is consumed first and never
+                    #   retargeted onto the next unfinished card (round 10);
+                    # * a freshly materialized card is preferred over a reused
+                    #   one, so the journal's start order still decides which
+                    #   command owns an id-less result (round 9);
+                    # * within one class the NEWEST start wins, matching the
+                    #   legacy producer's newest-first live settlement (gate
+                    #   certification 2026-11-25, blocker 2).
+                    def _idless_fallback_rank(item):
+                        pos, call = item
+                        return (
+                            0 if call.get('done') else 1,
+                            0 if call.get('_journal_synthetic_tid') else 1,
+                            -pos,
+                        )
+                    for idx, call in sorted(_candidates, key=_idless_fallback_rank):
                         if not name or call.get('name') == name:
                             matched_idx, matched_tool = idx, call
                             break
@@ -7402,6 +7482,13 @@ def _apply_core_sync_or_error_marker(
                     # there is a genuine duplicate. Ordinary callers keep the
                     # stricter default.
                     authorize_core_rows=True,
+                    # The core rows sit BEFORE the pending prompt this branch
+                    # may have just appended, so the default current-turn
+                    # window (nearest preceding user row) would hide them and
+                    # append a second copy of the same visible output. When the
+                    # whole transcript is core-synced, dedupe over all of it;
+                    # `authorize_core_rows` still restricts reuse to core rows.
+                    dedupe_min_index=0,
                 )
             )
             _pending_started_at = session.pending_started_at
