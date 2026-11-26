@@ -46,6 +46,17 @@ def _resolve(config_data):
         ({"checkpoints": []}, False),
         ({"checkpoints": {"enabled": "yes"}}, True),  # truthy string
         ({"checkpoints": {"enabled": 0}}, False),
+        # Quoted / rendered strings: only the project's truthy spellings are on.
+        # `bool("false")` is True, which would switch checkpointing ON for a
+        # user who wrote the opposite.
+        ({"checkpoints": {"enabled": "false"}}, False),
+        ({"checkpoints": {"enabled": "off"}}, False),
+        ({"checkpoints": {"enabled": "0"}}, False),
+        ({"checkpoints": {"enabled": "no"}}, False),
+        ({"checkpoints": {"enabled": "true"}}, True),
+        ({"checkpoints": {"enabled": "on"}}, True),
+        # Unrecognised value stays off, so a typo cannot start writing snapshots.
+        ({"checkpoints": {"enabled": "maybe"}}, False),
         # Not a dict at all.
         ("nope", False),
         (42, False),
@@ -82,14 +93,14 @@ def test_one_resolved_value_feeds_both_constructor_and_signature():
     ):
         resolved = _resolve_checkpoints_enabled(config_data)
 
-        # The constructor argument: exactly the resolved value, not a re-parse.
-        ctor_arg = resolved
-        # The signature: same value, passed through unchanged.
-        signature = _compute_agent_cache_signature(**base, checkpoints_enabled=ctor_arg)
+        # Both consumers take the ONE resolved value. Asserting
+        # `ctor_arg = resolved` here would be circular; the production body is
+        # pinned separately by test_production_resolves_the_flag_once.
+        signature = _compute_agent_cache_signature(**base, checkpoints_enabled=resolved)
 
         # A signature built from the opposite value must differ, proving the
         # signature actually tracks this flag rather than ignoring it.
-        opposite = _compute_agent_cache_signature(**base, checkpoints_enabled=not ctor_arg)
+        opposite = _compute_agent_cache_signature(**base, checkpoints_enabled=not resolved)
         assert signature != opposite, (
             f"signature ignores the checkpoint flag for {config_data!r}"
         )

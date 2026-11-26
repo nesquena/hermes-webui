@@ -1929,12 +1929,42 @@ def _resolve_checkpoints_enabled(config_data: Optional[dict] = None) -> bool:
     malformed section stays False, so a profile that never opted in is
     unaffected, and the legacy ``checkpoints: true`` scalar form still works.
     """
-    cp_cfg = (config_data or {}).get("checkpoints", {}) if isinstance(config_data, dict) else {}
+    if not isinstance(config_data, dict):
+        return False
+    cp_cfg = config_data.get("checkpoints", {})
     if isinstance(cp_cfg, bool):
+        # Legacy ``checkpoints: true`` scalar form.
         return cp_cfg
     if not isinstance(cp_cfg, dict):
         return False
-    return bool(cp_cfg.get("enabled", False))
+    return _checkpoint_flag_value(cp_cfg.get("enabled"))
+
+
+# The project's shared truthy string set (utils.is_truthy_value in the agent):
+# these spellings mean on; everything else is off. Kept local because this module
+# must not import the agent package at request time.
+_CHECKPOINT_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _checkpoint_flag_value(value) -> bool:
+    """Coerce a checkpoint ``enabled`` value to bool, unknown → off.
+
+    YAML already gives real booleans for `enabled: true`, but a hand-written or
+    template-rendered config can carry a quoted string. Plain ``bool("false")``
+    is True, which would switch checkpointing ON for someone who wrote
+    ``enabled: "false"`` — the opposite of intent. Only the project's truthy
+    spellings count as on; anything unrecognised stays off so a typo cannot
+    silently start writing snapshots.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in _CHECKPOINT_TRUTHY
+    if isinstance(value, (int, float)):
+        return value == 1
+    return False
 
 
 def _load_webui_prefill_context(
@@ -16358,7 +16388,13 @@ def _run_agent_streaming(
             # actually runs under.
             from api.config import get_config_for_profile_home as _get_config_for_home
             try:
-                _cfg = _get_config_for_home(_profile_home)
+                # isolate_config_override=True: this streaming worker IS one of the
+                # "Gateway workers" the helper's contract names. With the default
+                # (False) a session whose named profile matches the process-active
+                # one inherits HERMES_CONFIG_PATH when that override points outside
+                # the profile home, so one profile's checkpoints.enabled (and every
+                # other setting here) could come from an unrelated file.
+                _cfg = _get_config_for_home(_profile_home, isolate_config_override=True)
             except Exception:
                 from api.config import get_config as _get_config
                 _cfg = _get_config()
