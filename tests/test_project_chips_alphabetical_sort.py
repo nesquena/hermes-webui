@@ -162,6 +162,31 @@ def test_projects_sorted_by_name_ordering_and_immutability():
     assert out["sortedDefaultParamNames"] == expected_order
 
 
+def test_projects_sorted_by_name_orders_numbers_by_value():
+    """Numbers in names sort by value (natural order), so numbered projects
+    such as sprints or "1 - Inbox" prefixes keep the order the user meant."""
+    src = _read_sessions_js()
+    sort_helper = extract_function(src, "_projectsSortedByName")
+    input_projects = [
+        {"project_id": "p-s100", "name": "Sprint 100"},
+        {"project_id": "p-s40", "name": "Sprint 40"},
+        {"project_id": "p-s9", "name": "Sprint 9"},
+        {"project_id": "p-s41", "name": "sprint 41"},
+        {"project_id": "p-10", "name": "10 - Archive"},
+        {"project_id": "p-2", "name": "2 - Active"},
+        {"project_id": "p-1", "name": "1 - Inbox"},
+    ]
+    script = f"""
+    {sort_helper}
+    console.log(JSON.stringify({{names: _projectsSortedByName({json.dumps(input_projects)}).map(p => p.name)}}));
+    """
+    out = _run_node(script)
+    assert out["names"] == [
+        "1 - Inbox", "2 - Active", "10 - Archive",
+        "Sprint 9", "Sprint 40", "sprint 41", "Sprint 100",
+    ], out
+
+
 def test_projects_sorted_by_name_tie_break_and_base_sensitivity():
     """Verify tie-break order when names differ only by case.
 

@@ -5726,8 +5726,10 @@ const _selectedSessions = new Set();  // selected session IDs
 let _allProjects = [];  // cached project list
 
 function _projectsSortedByName(projects=_allProjects){
+  // Natural order: "Sprint 9" before "Sprint 40", "2 - Active" before "10 - Archive"
+  // (same collation as chat-table sorting).
   return [...(projects||[])].sort((a,b)=>
-    String(a?.name||"").localeCompare(String(b?.name||""), undefined, {sensitivity:"base"}) ||
+    String(a?.name||"").localeCompare(String(b?.name||""), undefined, {sensitivity:"base",numeric:true}) ||
     String(a?.project_id||"").localeCompare(String(b?.project_id||""))
   );
 }
