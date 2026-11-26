@@ -109,6 +109,16 @@ def test_a_plain_file_entry_is_still_skipped(tmp_path):
 
 _ROOT_USER = hasattr(os, "geteuid") and os.geteuid() == 0
 
+# The mode-bit tests below rely on POSIX permission semantics: 0o300 must make
+# the directory searchable but NOT listable, so ``iterdir()`` is denied. On
+# native Windows ``os.chmod`` only toggles the read-only attribute, so listing
+# still succeeds and the tree is never "unverifiable" — the assertion would
+# fail for a platform reason, not because the guard is broken. Skip there.
+# The root check stays: root bypasses the mode bits everywhere, so CI running
+# as root would see a listable tree as well.
+_POSIX_PERMISSION_BITS = os.name == "posix"
+_PERMISSION_BITS_UNUSABLE = _ROOT_USER or not _POSIX_PERMISSION_BITS
+
 
 def _unlistable_tree(base: Path, *, sibling: str = "sibling") -> Path:
     """``<base>/profiles`` mode 0o300 with a live marker in a named sibling.
@@ -127,7 +137,10 @@ def _unlistable_tree(base: Path, *, sibling: str = "sibling") -> Path:
     return profiles
 
 
-@pytest.mark.skipif(_ROOT_USER, reason="root ignores the mode bits under test")
+@pytest.mark.skipif(
+    _PERMISSION_BITS_UNUSABLE,
+    reason="0o300 permission bits are POSIX-only (and root ignores them)",
+)
 def test_a_searchable_but_unlistable_profile_tree_is_named_not_invented(tmp_path):
     """The tree itself must not stand in for the homes it hides: its own
     marker is absent, and that absent read authorised the restart."""
@@ -141,7 +154,10 @@ def test_a_searchable_but_unlistable_profile_tree_is_named_not_invented(tmp_path
         os.chmod(profiles, 0o700)
 
 
-@pytest.mark.skipif(_ROOT_USER, reason="root ignores the mode bits under test")
+@pytest.mark.skipif(
+    _PERMISSION_BITS_UNUSABLE,
+    reason="0o300 permission bits are POSIX-only (and root ignores them)",
+)
 def test_a_searchable_but_unlistable_profile_tree_reads_unknown(tmp_path, monkeypatch):
     base = tmp_path / "base"
     base.mkdir()

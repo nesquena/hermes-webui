@@ -39,6 +39,17 @@ _HAS_FCNTL = importlib.util.find_spec("fcntl") is not None
 # everywhere without changing what the mock models.
 _DEADLOCK_ERRNO = getattr(errno, "EDEADLOCK", errno.EACCES)
 
+# The unlistable-profile-tree tests below rely on POSIX permission semantics:
+# 0o300 must make the directory searchable but NOT listable, so ``iterdir()``
+# is denied. On native Windows ``os.chmod`` only toggles the read-only
+# attribute, so listing still succeeds and the tree is never "unverifiable" —
+# the assertion would fail for a platform reason, not because the guard is
+# broken. Skip there. The root check stays: root bypasses the mode bits
+# everywhere, so CI running as root would see a listable tree as well.
+_ROOT_USER = hasattr(os, "geteuid") and os.geteuid() == 0
+_POSIX_PERMISSION_BITS = os.name == "posix"
+_PERMISSION_BITS_UNUSABLE = _ROOT_USER or not _POSIX_PERMISSION_BITS
+
 # The real-boundary regressions below reuse the shared staging fixture that
 # already exercises the SHIPPED revision guard — a real Git checkout, a real
 # marker directory and a captured (never started) scheduler thread — instead
@@ -1001,8 +1012,8 @@ def _hide_profile_tree(env, *, sibling="sibling"):
 
 
 @pytest.mark.skipif(
-    hasattr(os, "geteuid") and os.geteuid() == 0,
-    reason="root ignores the mode bits under test",
+    _PERMISSION_BITS_UNUSABLE,
+    reason="0o300 permission bits are POSIX-only (and root ignores them)",
 )
 def test_real_unlistable_profile_tree_refuses_at_admission(real_restart_env):
     """A profiles tree that is searchable but not listable reads ``unknown``
@@ -1023,8 +1034,8 @@ def test_real_unlistable_profile_tree_refuses_at_admission(real_restart_env):
 
 
 @pytest.mark.skipif(
-    hasattr(os, "geteuid") and os.geteuid() == 0,
-    reason="root ignores the mode bits under test",
+    _PERMISSION_BITS_UNUSABLE,
+    reason="0o300 permission bits are POSIX-only (and root ignores them)",
 )
 def test_real_unlistable_profile_tree_refuses_under_the_lock(real_restart_env):
     """The tree becomes unlistable between admission and the under-lock
@@ -1048,8 +1059,8 @@ def test_real_unlistable_profile_tree_refuses_under_the_lock(real_restart_env):
 
 
 @pytest.mark.skipif(
-    hasattr(os, "geteuid") and os.geteuid() == 0,
-    reason="root ignores the mode bits under test",
+    _PERMISSION_BITS_UNUSABLE,
+    reason="0o300 permission bits are POSIX-only (and root ignores them)",
 )
 def test_real_worker_aborts_when_the_profile_tree_becomes_unlistable(real_restart_env):
     """The delayed worker re-reads the transaction: a tree made unlistable
