@@ -157,6 +157,15 @@ def _last_source_draft(page, sid: str = DRAFT_SID) -> dict:
     return bodies[-1]
 
 
+def _wait_for_source_drafts(page, count: int, sid: str = DRAFT_SID) -> None:
+    page.wait_for_function(
+        """({ sid, count }) => window.__apiLog.filter(
+          call => call.kind === 'draft' && call.sid === sid && call.body
+        ).length >= count""",
+        arg={"sid": sid, "count": count},
+    )
+
+
 def test_unchanged_restored_continuation_keeps_its_token(composer_page):
     page, errors = composer_page
     _open_session_a(page)
@@ -275,4 +284,89 @@ def test_flushed_token_survives_reload_and_still_reaches_chat_start(composer_pag
     assert starts[0]["message"] == A_TEXT, starts[0]
 
     page.evaluate("() => window.__sendDone")
+    assert errors == [], errors
+
+
+def _arm_source_audio_producer(page) -> None:
+    """A raw-audio producer that belongs to session A and outlives the New Chat click."""
+    page.evaluate(
+        "() => { window.__audioHandle = _newComposerProducerHandle('raw-audio'); }"
+    )
+
+
+def _finish_late_audio(page) -> None:
+    buffered = page.evaluate(
+        "() => _composerAddFiles(['/tmp/audio-from-a.m4a'], null, window.__audioHandle)"
+    )
+    # Held by the transition: the file must not leak into the visible pane.
+    assert buffered is False, buffered
+
+
+def test_cleanup_save_after_a_late_file_keeps_the_token(composer_page):
+    page, errors = composer_page
+    _open_session_a(page)
+    _arm_source_audio_producer(page)
+
+    _start_new_chat(page)
+    _wait_for_source_drafts(page, 1)
+    _finish_late_audio(page)
+    _settle_new_chat(page)
+
+    # The hand-off flush saved the token; audio settling during the New Chat
+    # request makes A dirty again, so cleanup rewrites the same draft. That
+    # second save must keep the token while the text is unchanged — an empty
+    # fourth argument here is what dropped the goal loop on return.
+    _wait_for_source_drafts(page, 2)
+    bodies = _source_draft_bodies(page)
+    cleanup = bodies[-1]
+    assert cleanup["text"] == A_TEXT, cleanup
+    assert cleanup["files"] == ["/tmp/audio-from-a.m4a"], cleanup
+    assert cleanup["goal_continuation_id"] == CONT_TOKEN, cleanup
+    assert errors == [], errors
+
+
+def test_abort_cleanup_after_a_late_file_keeps_the_token(composer_page):
+    page, errors = composer_page
+    _open_session_a(page)
+    _arm_source_audio_producer(page)
+
+    _start_new_chat(page)
+    _wait_for_source_drafts(page, 1)
+    _finish_late_audio(page)
+    page.evaluate(
+        """() => {
+          const request = window.__pendingRequest('new');
+          request.settled = true;
+          request.reject(new Error('network down'));
+        }"""
+    )
+    page.evaluate("() => window.__done")
+
+    _wait_for_source_drafts(page, 2)
+    cleanup = _last_source_draft(page)
+    assert cleanup["text"] == A_TEXT, cleanup
+    assert cleanup["files"] == ["/tmp/audio-from-a.m4a"], cleanup
+    assert cleanup["goal_continuation_id"] == CONT_TOKEN, cleanup
+    assert page.evaluate("() => document.getElementById('msg').value") == A_TEXT
+    assert errors == [], errors
+
+
+def test_edited_text_during_the_transition_still_drops_the_token(composer_page):
+    page, errors = composer_page
+    _open_session_a(page)
+    _arm_source_audio_producer(page)
+
+    _start_new_chat(page)
+    _wait_for_source_drafts(page, 1)
+    # A late producer that rewrites the departing text makes the saved words no
+    # longer the continuation's words, so the cleanup save must not carry it.
+    page.evaluate(
+        "() => _composerAppendText(' and more', null, window.__audioHandle)"
+    )
+    _settle_new_chat(page)
+
+    _wait_for_source_drafts(page, 2)
+    cleanup = _last_source_draft(page)
+    assert cleanup["text"] == A_TEXT + " and more", cleanup
+    assert cleanup["goal_continuation_id"] == "", cleanup
     assert errors == [], errors

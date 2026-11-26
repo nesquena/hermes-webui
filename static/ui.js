@@ -267,10 +267,24 @@ function _composerControlSetDisabledReason(control,reason,active){
 function _beginComposerOwnershipTransition(sourceSid,sourceProfile,options={}){
   const profile=String(sourceProfile||'default').trim()||'default';
   const input=$('msg');
+  // A restored goal-continuation binding belongs to the departing draft: the
+  // token is only valid for the exact text it was stored with and the session
+  // it was restored for. Capture it here, because a producer that settles while
+  // the transition is pending (raw audio finishing after New Chat) can make the
+  // cleanup save rewrite this draft after the token-bearing flush.
+  const restoredBinding=(typeof _peekRestoredGoalContinuationDraft==='function')
+    ? _peekRestoredGoalContinuationDraft()
+    : null;
+  const restoredOwner=String((restoredBinding&&restoredBinding.ownerSid)||'').trim();
+  const sourceContinuation=(restoredBinding&&restoredBinding.id
+    &&(!restoredOwner||restoredOwner===String(sourceSid||'')))
+    ? {id:restoredBinding.id,text:String(restoredBinding.text||'').trim()}
+    : null;
   const token={
     generation:++_composerOwnershipGeneration,
     sourceSid:sourceSid||null,
     sourceProfile:profile,
+    sourceContinuation,
     persistSourceDraft:options.persistSourceDraft!==false,
     destinationSid:null,
     destinationProfile:profile,
@@ -464,13 +478,23 @@ function _composerRemoveFile(file,ownerSid,producerToken,ownerProfile){
   S.pendingFiles=(Array.isArray(S.pendingFiles)?S.pendingFiles:[]).filter(item=>item!==file);
   return true;
 }
+function _composerTransitionContinuationId(token,text){
+  const binding=token&&token.sourceContinuation;
+  if(!binding||!binding.id)return '';
+  // The token rides with the exact text it was stored with (#7855 rounds 7/10);
+  // an edited or emptied draft dies with it instead of attaching to a later send.
+  const saved=String(text==null?'':text).trim();
+  return saved&&saved===binding.text?binding.id:'';
+}
 function _persistComposerTransitionSource(token){
   const state=token&&token.sourceState;
   if(!token||!token.sourceSid||!state||!state.dirty||token.persistSourceDraft===false)return;
   if(typeof _saveComposerDraftNow==='function'){
     try{
       Promise.resolve(_saveComposerDraftNow(
-        token.sourceSid,state.text,[...state.files],'',{ownerProfile:token.sourceProfile}
+        token.sourceSid,state.text,[...state.files],
+        _composerTransitionContinuationId(token,state.text),
+        {ownerProfile:token.sourceProfile}
       )).catch(()=>{});
     }catch(_){}
   }
@@ -481,7 +505,9 @@ function _persistComposerTransitionAbort(token){
   if(typeof _saveComposerDraftNow==='function'){
     try{
       Promise.resolve(_saveComposerDraftNow(
-        token.sourceSid,state.text,[...state.files],'',{ownerProfile:token.sourceProfile}
+        token.sourceSid,state.text,[...state.files],
+        _composerTransitionContinuationId(token,state.text),
+        {ownerProfile:token.sourceProfile}
       )).catch(()=>{});
     }catch(_){}
   }
