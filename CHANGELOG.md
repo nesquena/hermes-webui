@@ -53,6 +53,12 @@
 
 ### Fixed
 
+- **Cancelling a long session no longer risks freezing the page in Safari and WKWebView (#6669, @webtecnica, for #6653).** Cancelling a long session could block the page in a synchronous `scrollHeight` layout. Two things changed:
+  - The cancel path no longer reads the transcript's layout synchronously to decide whether to keep following it. It now uses a layout-free "follow intent" state, set from real user input: wheel, keys, touch and the scrollbar.
+  - The keyboard counts as the user's only when the transcript or the page body has focus. A focused widget elsewhere, such as the file tree, keeps its own arrow keys while the pointer hovers the transcript.
+
+  Scrolling back down to the captured tail resumes following. A key or wheel step that can't move a short transcript no longer stops following.
+
 - **A flaky provider-probe test now passes reliably under load (#9360).** `tests/test_issue7481_probe_dedup.py` ran the bounded model-list rebuild on the real clock with real probe threads. On a busy test host, a late probe thread could run out its time slice and the endpoint was probed twice. The module now uses the fake clock and inline probes that the sibling fairness test already uses. The assertions are unchanged. This is a test-only change.
 
 - **The server now caps glibc malloc arenas at startup (#9359, part of #9052).** On Linux with glibc, a long-running threaded WebUI server could build up many per-thread malloc arenas that never shrink. The server now applies a cap of 2 arenas with `mallopt` before the Agent or any `api` module loads. It does not export `MALLOC_ARENA_MAX`, so programs the server launches keep glibc's default. A `MALLOC_ARENA_MAX` or `GLIBC_TUNABLES` set in the launch environment still takes precedence. The new `HERMES_WEBUI_MALLOC_ARENA_MAX` setting changes the cap; `0`, `off` or `false` turn it off. On musl, macOS and Windows it does nothing. In a 48-thread load test, arena heaps dropped from 52 to 1 at the same throughput. Native code that allocates from many threads at once can be slower with two arenas; raise the cap or turn it off for that workload. The new module ships in the wheel and the Nix package.
