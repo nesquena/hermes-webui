@@ -6413,6 +6413,14 @@ async function _deleteSelectedSessionsBatch(){
     danger:true
   });
   if(!ok)return;
+  // #7898 review (2026-11-26T21:10:16Z): same early ownership snapshot as the
+  // single-delete path. A sidebar selection made while the batch POSTs are in
+  // flight advances the load generation; taking the snapshot afterwards would
+  // mistake that navigation for the delete continuation's own and replace it.
+  const startNewChatAfterDelete=typeof window!=='undefined'&&window._newChatOnSessionDelete===true;
+  const deleteNewChatOwner=(startNewChatAfterDelete&&S.session&&ids.includes(S.session.session_id))
+    ?_deleteNewChatOwnerSnapshot()
+    :null;
   const modelPickAtDelete=typeof _readComposerModelPick==='function'
     ? _readComposerModelPick()
     : null;
@@ -6433,8 +6441,6 @@ async function _deleteSelectedSessionsBatch(){
   let newChatAfterDeleteResult=null;
   if(S.session&&deletedIds.includes(S.session.session_id)){
     const deletedWorkspace=S.session.workspace||null;
-    const startNewChatAfterDelete=typeof window!=='undefined'&&window._newChatOnSessionDelete===true;
-    const deleteNewChatOwner=startNewChatAfterDelete?_deleteNewChatOwnerSnapshot():null;
     // #7898 review: same dropped-selection leak as the single-delete path —
     // S.session is null before either replacement runs, so loadSession() cannot
     // tell that the user left the deleted conversation.
@@ -12855,6 +12861,15 @@ async function deleteSession(sid, beforeDelete=null){
     danger:true
   });
   if(!ok)return false;
+  // #7898 review (2026-11-26T21:10:16Z): snapshot the delete continuation's
+  // ownership BEFORE the delete request settles. Selecting another conversation
+  // while that request is pending advances the load generation while S.session
+  // still points at the deleted one, so a snapshot taken afterwards would claim
+  // that navigation as its own and replace it with a new chat.
+  const _startNewChatAfterDelete=typeof window!=='undefined'&&window._newChatOnSessionDelete===true;
+  const _deleteNewChatOwner=(_startNewChatAfterDelete&&S.session&&S.session.session_id===sid)
+    ?_deleteNewChatOwnerSnapshot()
+    :null;
   const modelPickAtDelete=typeof _readComposerModelPick==='function'
     ? _readComposerModelPick()
     : null;
@@ -12899,8 +12914,6 @@ async function deleteSession(sid, beforeDelete=null){
     // Keep the deleted conversation's workspace so the opt-in new chat below
     // stays where the user was working.
     const _deletedWorkspace=(S.session&&S.session.workspace)||(session&&session.workspace)||null;
-    const _startNewChatAfterDelete=typeof window!=='undefined'&&window._newChatOnSessionDelete===true;
-    const _deleteNewChatOwner=_startNewChatAfterDelete?_deleteNewChatOwnerSnapshot():null;
     // #7898 review: both branches below replace the conversation without
     // loadSession() seeing an outgoing session (S.session is null by then), so
     // its pending-selection clear never runs. Drop the deleted conversation's

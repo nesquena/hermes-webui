@@ -48,7 +48,7 @@ globalThis.$ = () => null;
 globalThis.t = key => key;
 
 globalThis.S = {
-  session: scenario.startsWith('project-default-b-')
+  session: (scenario.startsWith('project-default-b-') || scenario.startsWith('sidebar-select-during-delete'))
     ? {session_id:'deleted-A', workspace:'/ws/A', profile:'default'}
     : null,
   messages: [],
@@ -117,9 +117,15 @@ globalThis._updateBatchActionBar = () => {};
 
 let releaseCreate = null;
 let releaseDraft = null;
+let releaseDelete = null;
 const createWorkspaces = [];
 globalThis.api = async (url, options = {}) => {
-  if (url === '/api/session/delete') return {};
+  if (url === '/api/session/delete') {
+    if (scenario.startsWith('sidebar-select-during-delete')) {
+      return await new Promise(resolve => { releaseDelete = () => resolve({}); });
+    }
+    return {};
+  }
   if (url.startsWith('/api/session?')) {
     if (scenario === 'draft-load-failure') return {session:{
       session_id:'remembered', message_count:0, title:'New Chat', profile:'default',
@@ -208,6 +214,25 @@ eval(extract('_deleteSelectedSessionsBatch'));
     window._newChatOnSessionDelete = true;
     _selectedSessions.add('deleted-A');
     pending = _deleteSelectedSessionsBatch();
+  } else if (scenario.startsWith('sidebar-select-during-delete')) {
+    window._newChatOnSessionDelete = true;
+    if (scenario === 'sidebar-select-during-delete-batch') {
+      _selectedSessions.add('deleted-A');
+      pending = _deleteSelectedSessionsBatch();
+    } else {
+      pending = deleteSession('deleted-A');
+    }
+    // Wait until the delete POST is actually in flight, then select another
+    // conversation. Its metadata has not arrived yet, so S.session still points
+    // at the deleted one while the loader generation has already moved on.
+    while (!releaseDelete) await new Promise(resolve => setTimeout(resolve, 0));
+    const bGeneration = ++_loadSessionGeneration;
+    releaseDelete();
+    for (let i = 0; i < 50 && !releaseCreate; i++) await new Promise(resolve => setTimeout(resolve, 0));
+    if (releaseCreate) releaseCreate();
+    await pending;
+    // A load owns the pane only if nothing replaced it in the meantime.
+    if (_loadSessionGeneration === bGeneration) S.session = {session_id:'B', workspace:'/ws/B'};
   } else {
     const owner = _deleteNewChatOwnerSnapshot();
     pending = _startNewChatAfterDeletingCurrentSession('/ws/A', owner);
@@ -414,3 +439,19 @@ def test_explicit_new_chat_wins_while_delete_draft_lookup_is_pending(driver, sce
     assert result["activeSid"] == "created-B"
     assert result["profileWorkspace"] is None
     assert result["superseded"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize(
+    "scenario",
+    ["sidebar-select-during-delete-single", "sidebar-select-during-delete-batch"],
+)
+def test_sidebar_selection_during_pending_delete_is_not_replaced(driver, scenario):
+    """Greptile P1 (2026-11-26T21:10:16Z): selecting another conversation while
+    the delete request is in flight must not be claimed by the delete
+    continuation. The ownership snapshot has to be taken before the request
+    settles, otherwise the replacement chat invalidates the pending load."""
+    result = _run(driver, scenario)
+    assert result["createWorkspaces"] == []
+    assert result["activeSid"] == "B"
+
