@@ -89,6 +89,34 @@ def test_gate_20261125_current_user_turn_retained_beside_historical_row(hermes_h
     assert current.get("attachments") == [{"name": "shot.png", "path": "/tmp/shot.png"}]
     assert current.get("_active_turn_token") == f"{stream_id}:{500.5:.17g}"
 
+    # Persisted WebUI loader readback: the same boundary must survive the real
+    # save path and a cold Session.load(), not just the in-memory repair pass
+    # (gate certification 2026-11-25: "including a persisted WebUI loader
+    # readback").
+    session.save()
+    models.SESSIONS.pop(sid, None)
+    loaded = Session.load(sid)
+    assert loaded is not None
+    loaded_users = [
+        m for m in loaded.messages if isinstance(m, dict) and m.get("role") == "user"
+    ]
+    assert len(loaded_users) == 2, (
+        "the persisted loader readback must keep the distinct current user turn "
+        f"beside the historical row, got "
+        f"{[(u.get('timestamp'), u.get('content')) for u in loaded_users]}"
+    )
+    loaded_historical, loaded_current = loaded_users
+    assert not loaded_historical.get("attachments"), (
+        "the persisted historical row must not carry the current turn's attachments"
+    )
+    assert not loaded_historical.get("_active_turn_token"), (
+        "the persisted historical row must not carry the current turn's token"
+    )
+    assert loaded_current.get("attachments") == [
+        {"name": "shot.png", "path": "/tmp/shot.png"}
+    ]
+    assert loaded_current.get("_active_turn_token") == f"{stream_id}:{500.5:.17g}"
+
 
 def test_gate_20261125_idless_completion_matches_newest_first_settlement(hermes_home):
     sid = "gate_20261125_completion_order"
@@ -126,3 +154,25 @@ def test_gate_20261125_idless_completion_matches_newest_first_settlement(hermes_
         f"start B must receive B's result under newest-first settlement, got {cards}"
     )
     assert all(done for _preview, done in cards), cards
+
+    # Persisted WebUI loader readback: the association must survive the real
+    # save path and a cold Session.load(), including the card anchors that the
+    # saved sidecar rebuilds from.
+    session.save()
+    models.SESSIONS.pop(sid, None)
+    loaded = Session.load(sid)
+    assert loaded is not None
+    loaded_cards = [
+        (c.get("preview") or c.get("snippet"), c.get("done"))
+        for c in (loaded.tool_calls or [])
+    ]
+    assert len(loaded_cards) == 2, loaded_cards
+    assert loaded_cards[0][0] == "result A", (
+        "the persisted loader readback must keep A's result on start A, got "
+        f"{loaded_cards}"
+    )
+    assert loaded_cards[1][0] == "result B", (
+        "the persisted loader readback must keep B's result on start B, got "
+        f"{loaded_cards}"
+    )
+    assert all(done for _preview, done in loaded_cards), loaded_cards
