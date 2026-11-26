@@ -8,15 +8,18 @@ import errno
 import os
 import platform
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import time
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 import venv
 import webbrowser
+from functools import lru_cache
 from pathlib import Path
 
 from api import startup as _startup
@@ -143,18 +146,58 @@ def discover_agent_dir() -> Path | None:
     return _LAST_DISCOVERY.agent_dir
 
 
+class RuntimeConfigurationError(RuntimeError):
+    """A failed preflight that needs operator intervention."""
+
+
+def _uses_pm(agent_dir: Path | None) -> bool:
+    return agent_dir is not None and (agent_dir / "pm/environments.py").is_file()
+
+
+@lru_cache(maxsize=1)
+def _managed_python(agent_dir: Path) -> str | None:
+    # The PM owns the generation mapping. Reading its committed tool selection
+    # does not import hermes_bootstrap or trigger an update/repair.
+    if not _uses_pm(agent_dir):
+        return None
+    script = (
+        "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
+        "from hermes_cli._launchers import resolve_store_python; "
+        "print(resolve_store_python(Path(sys.argv[1])) or '')"
+    )
+    reader = sys.executable
+    if sys.version_info < (3, 11):
+        # macOS /usr/bin/python3 can bootstrap discovery but cannot import
+        # current Hermes PM. Use an installed Python for the metadata read.
+        for candidate in ("python3.14", "python3.13", "python3.12", "python3.11",
+                          str(agent_dir / "venv/bin/python"), str(REPO_ROOT / ".venv/bin/python")):
+            reader = shutil.which(candidate)
+            if reader:
+                break
+        if not reader:
+            return None
+    try:
+        result = subprocess.run(
+            [reader, "-I", "-c", script, str(agent_dir)],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    path = Path(result.stdout.strip())
+    return str(path) if result.returncode == 0 and path.is_absolute() and path.is_file() else None
+
+
 def discover_launcher_python(agent_dir: Path | None) -> str:
-    if (
-        agent_dir is not None
-        and _LAST_DISCOVERY is not None
-        and _LAST_DISCOVERY.agent_dir == agent_dir
-        and _LAST_DISCOVERY.python_exe
-    ):
-        return _LAST_DISCOVERY.python_exe
     env_python = os.getenv("HERMES_WEBUI_PYTHON")
     if env_python:
         return env_python
     if agent_dir:
+        managed = _managed_python(agent_dir)
+        if managed:
+            return managed
+        if (_LAST_DISCOVERY is not None and _LAST_DISCOVERY.agent_dir == agent_dir
+                and _LAST_DISCOVERY.python_exe):
+            return _LAST_DISCOVERY.python_exe
         for rel in ("venv/bin/python", "venv/Scripts/python.exe", ".venv/bin/python", ".venv/Scripts/python.exe"):
             candidate = agent_dir / rel
             if candidate.exists():
@@ -169,28 +212,33 @@ def discover_launcher_python(agent_dir: Path | None) -> str:
 def _python_can_run_webui_and_agent(python_exe: str, agent_dir: Path | None = None) -> bool:
     # Agent first: it may relaunch into its managed runtime, which ships ruamel.yaml only.
     script = (
+        "import sys\n"
+        "if sys.version_info < (3, 11): sys.exit('WebUI requires Python 3.11 or newer')\n"
         "from run_agent import AIAgent\n"
         "try:\n    import yaml\nexcept ImportError:\n    import ruamel.yaml\n"
     )
     env = os.environ.copy()
+    options = []
     if agent_dir:
-        # PREPEND agent_dir to PYTHONPATH so an `agent_dir/run_agent.py` wins
-        # over any stale `run_agent` package in system site-packages (sys.path
-        # order: script-dir → PYTHONPATH entries → site-packages). The
-        # "if PYTHONPATH unset" branch avoids a leading os.pathsep, which
-        # CPython would interpret as "current directory" — a footgun.
-        env["PYTHONPATH"] = (
-            str(agent_dir)
-            if not env.get("PYTHONPATH")
-            else f"{agent_dir}{os.pathsep}{env['PYTHONPATH']}"
+        script = f"import sys; sys.path.insert(0, {str(agent_dir.resolve())!r})\n" + script
+        if _managed_python(agent_dir):
+            options.append("-I")
+    # A readiness check must never complete a pending Hermes dependency update.
+    env["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
+    script += "from cryptography.hazmat.primitives import hashes\nprint('WEBUI_RUNTIME_READY')\n"
+    try:
+        check = subprocess.run(
+            [python_exe, *options, "-c", script], capture_output=True, text=True, env=env,
+            timeout=30, cwd=agent_dir or REPO_ROOT,
         )
-    check = subprocess.run(
-        [python_exe, "-c", script],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    return check.returncode == 0
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        warn(f"Cannot probe {python_exe}: {type(exc).__name__}")
+        return False
+    ready = check.returncode == 0 and "WEBUI_RUNTIME_READY" in check.stdout.splitlines()
+    if not ready:
+        errors = check.stderr.strip().splitlines()
+        warn(f"{python_exe}: {errors[-1][:300] if errors else 'runtime check did not complete'}")
+    return ready
 
 
 def ensure_python_has_webui_deps(python_exe: str, agent_dir: Path | None = None) -> str:
@@ -202,30 +250,33 @@ def ensure_python_has_webui_deps(python_exe: str, agent_dir: Path | None = None)
     with "AIAgent not available". Prefer the agent venv when it is usable, and
     validate the final interpreter before starting the server.
     """
-    if _python_can_run_webui_and_agent(python_exe, agent_dir):
-        return python_exe
+    candidates = [python_exe]
+    if not os.getenv("HERMES_WEBUI_PYTHON") and not (agent_dir and _managed_python(agent_dir)):
+        for root in (agent_dir, REPO_ROOT):
+            if root is None:
+                continue
+            dirs = ("venv", ".venv") if root == agent_dir else (".venv",)
+            for directory in dirs:
+                for rel in ("bin/python", "Scripts/python.exe"):
+                    candidate = root / directory / rel
+                    if candidate.is_file():
+                        candidates.append(str(candidate))
+    for candidate in dict.fromkeys(candidates):
+        resolved = shutil.which(candidate)
+        executable = os.path.abspath(resolved) if resolved else candidate
+        if _python_can_run_webui_and_agent(executable, agent_dir):
+            return executable
+    raise RuntimeConfigurationError(
+        "Python environment cannot import both WebUI dependencies and Hermes Agent. "
+        "Check HERMES_WEBUI_PYTHON and HERMES_WEBUI_AGENT_DIR. "
+        "For managed Hermes run 'hermes pm repair'; for local WebUI dependencies "
+        "run 'python3 bootstrap.py --setup' once."
+    )
 
-    agent_candidates: list[Path] = []
-    if agent_dir:
-        for rel in (
-            "venv/bin/python",
-            "venv/Scripts/python.exe",
-            ".venv/bin/python",
-            ".venv/Scripts/python.exe",
-        ):
-            agent_candidates.append(agent_dir / rel)
-        for candidate in agent_candidates:
-            if str(candidate) != python_exe and candidate.exists():
-                if _python_can_run_webui_and_agent(str(candidate), agent_dir):
-                    return str(candidate)
 
-    if (os.getenv("HERMES_WEBUI_DISABLE_LOCAL_VENV") or "").strip().lower() in {"1", "true", "yes", "on"}:
-        raise RuntimeError(
-            "Python environment cannot import both WebUI dependencies and Hermes Agent, "
-            "and local .venv creation is disabled for this packaged launch. Set "
-            "HERMES_WEBUI_PYTHON to an interpreter with Hermes Agent dependencies."
-        )
-
+def install_webui_deps() -> None:
+    if _truthy(os.getenv("HERMES_WEBUI_DISABLE_LOCAL_VENV")):
+        raise RuntimeConfigurationError("local .venv creation is disabled; check HERMES_WEBUI_PYTHON")
     venv_dir = REPO_ROOT / ".venv"
     venv_python = venv_dir / (
         "Scripts/python.exe" if platform.system() == "Windows" else "bin/python"
@@ -245,10 +296,6 @@ def ensure_python_has_webui_deps(python_exe: str, agent_dir: Path | None = None)
 
     info("Installing WebUI dependencies into local virtualenv")
     subprocess.run(
-        [str(venv_python), "-m", "pip", "install", "--quiet", "--upgrade", "pip"],
-        check=True,
-    )
-    subprocess.run(
         [
             str(venv_python),
             "-m",
@@ -259,13 +306,6 @@ def ensure_python_has_webui_deps(python_exe: str, agent_dir: Path | None = None)
             str(REPO_ROOT / "requirements.txt"),
         ],
         check=True,
-    )
-    if _python_can_run_webui_and_agent(str(venv_python), agent_dir):
-        return str(venv_python)
-    raise RuntimeError(
-        "Python environment cannot import both WebUI dependencies and Hermes Agent. "
-        "Set HERMES_WEBUI_PYTHON to the Hermes Agent venv Python or install the "
-        "WebUI requirements into that environment."
     )
 
 
@@ -455,6 +495,7 @@ def open_browser(url: str) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Bootstrap Hermes Web UI onboarding.")
     parser.add_argument("port", nargs="?", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--setup", action="store_true", help="Install missing prerequisites once and exit.")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument(
         "--no-browser",
@@ -778,12 +819,75 @@ def _already_serving_scheme(host: str, port: int) -> str:
     return ""
 
 
+def _launchd_job() -> bool:
+    return sys.platform == "darwin" and (
+        _is_real_supervisor_value("XPC_SERVICE_NAME", os.getenv("XPC_SERVICE_NAME", ""))
+        or (os.getppid() == 1 and "--foreground" in sys.argv)
+    )
+
+
+def _limit_launchd_starts(state_dir: Path, port: int) -> None:
+    # execv preserves PID but loses bootstrap's memory. Remember at most three
+    # starts per port, so a server that crashes just after preflight is bounded.
+    history = state_dir / f".bootstrap-launchd-{port}.starts"
+    now = int(time.time())
+    try:
+        stamps = [int(line) for line in history.read_text().splitlines()[-3:]]
+    except FileNotFoundError:
+        stamps = []
+    except (ValueError, OSError) as exc:
+        raise RuntimeConfigurationError(f"Cannot read launch history {history}: {exc}") from exc
+    recent = [stamp for stamp in stamps if 0 <= now - stamp < 300]
+    if len(recent) >= 3:
+        raise RuntimeConfigurationError(
+            "Three WebUI launches in five minutes. Check the server log, correct "
+            "the startup failure, then restart the job after the five-minute window."
+        )
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=state_dir, delete=False) as stream:
+            stream.writelines(f"{stamp}\n" for stamp in [*recent, now])
+        os.replace(stream.name, history)
+    except OSError as exc:
+        raise RuntimeConfigurationError(f"Cannot record launch history in {state_dir}: {exc}") from exc
+
+
 def main() -> int:
     global _LAST_DISCOVERY
     args = parse_args()
+    _managed_python.cache_clear()
     ensure_supported_platform()
 
     _LAST_DISCOVERY = None
+    if args.setup:
+        if args.foreground or _detect_supervisor():
+            raise RuntimeConfigurationError("Run --setup interactively, outside your supervisor.")
+        agent_dir = discover_agent_dir()
+        if not agent_dir and not hermes_command_exists() and not args.skip_agent_install:
+            install_hermes_agent()
+            agent_dir = discover_agent_dir()
+        if not agent_dir:
+            raise RuntimeConfigurationError("Hermes Agent was not found. Check HERMES_WEBUI_AGENT_DIR.")
+        managed = _uses_pm(agent_dir)
+        if _truthy(os.getenv("HERMES_WEBUI_AUTO_INSTALL")) and not managed:
+            # Preserve the legacy install trust checks and target the selected
+            # Agent interpreter, which may differ from bootstrap's Python.
+            subprocess.run([
+                discover_launcher_python(agent_dir), "-c",
+                "from api.startup import auto_install_agent_deps; "
+                "from pathlib import Path; import sys; "
+                "sys.exit(0 if auto_install_agent_deps(Path(sys.argv[1])) else 1)",
+                str(agent_dir),
+            ], cwd=REPO_ROOT, check=True)
+        try:
+            ensure_python_has_webui_deps(discover_launcher_python(agent_dir), agent_dir)
+        except RuntimeConfigurationError:
+            if managed or os.getenv("HERMES_WEBUI_PYTHON"):
+                raise
+            install_webui_deps()
+            ensure_python_has_webui_deps(discover_launcher_python(agent_dir), agent_dir)
+        info("Runtime ready. Start WebUI with ./start.sh")
+        return 0
+
     # Preflight: fail fast on an occupied port before installing the agent,
     # setting up dependencies, creating state, or launching the server.
     try:
@@ -817,12 +921,10 @@ def main() -> int:
 
     agent_dir = discover_agent_dir()
     if not agent_dir and not hermes_command_exists():
-        if args.skip_agent_install:
-            raise RuntimeError(
-                "Hermes Agent was not found and auto-install was disabled."
-            )
-        install_hermes_agent()
-        agent_dir = discover_agent_dir()
+        raise RuntimeConfigurationError(
+            "Hermes Agent was not found. Set HERMES_WEBUI_AGENT_DIR or run "
+            "'python3 bootstrap.py --setup' once."
+        )
 
     python_exe = ensure_python_has_webui_deps(
         discover_launcher_python(agent_dir),
@@ -833,6 +935,8 @@ def main() -> int:
         or Path(os.getenv("HERMES_HOME") or (Path.home() / ".hermes")) / "webui"
     ).expanduser()
     state_dir.mkdir(parents=True, exist_ok=True)
+    if _launchd_job():
+        _limit_launchd_starts(state_dir, args.port)
 
     # Mutate os.environ so child (or post-execv) inherits the resolved values.
     os.environ["HERMES_WEBUI_HOST"] = args.host
@@ -840,11 +944,15 @@ def main() -> int:
     os.environ.setdefault("HERMES_WEBUI_STATE_DIR", str(state_dir))
     os.environ["HERMES_WEBUI_PYTHON"] = python_exe
     if agent_dir:
+        if _uses_pm(agent_dir):
+            os.environ["_HERMES_WEBUI_PREFLIGHT_COMPLETE"] = "1"
         os.environ["HERMES_WEBUI_AGENT_DIR"] = str(agent_dir)
 
     # Let operators move fallback relative writes out of a read-only agent dir.
     server_cwd = os.environ.get("HERMES_WEBUI_SERVER_CWD", "").strip() or str(agent_dir or REPO_ROOT)
-    server_path = str(REPO_ROOT / "server.py")
+    server_args = [str(REPO_ROOT / "server.py")]
+    if agent_dir and _managed_python(agent_dir):
+        server_args.insert(0, "-I")
     # Scheme the server will advertise (HTTPS when TLS cert+key are configured).
     scheme = "https" if _tls_probe_enabled() else "http"
 
@@ -902,7 +1010,7 @@ def main() -> int:
             _win_log = _win_log_path.open("ab")
             try:
                 subprocess.Popen(
-                    [_exe, str(server_path)],
+                    [_exe, *server_args],
                     cwd=str(server_cwd),
                     env=os.environ.copy(),
                     creationflags=_flags,
@@ -914,7 +1022,7 @@ def main() -> int:
             finally:
                 _win_log.close()
             sys.exit(0)
-        os.execv(python_exe, [python_exe, server_path])
+        os.execv(python_exe, [python_exe, *server_args])
         # Unreachable — execv either replaces the process or raises.
         raise RuntimeError("os.execv returned unexpectedly")
 
@@ -925,7 +1033,7 @@ def main() -> int:
     info(f"Starting Hermes Web UI on {scheme}://{_url_host(args.host)}:{args.port}")
     with log_path.open("ab") as log_file:
         proc = subprocess.Popen(
-            [python_exe, server_path],
+            [python_exe, *server_args],
             cwd=server_cwd,
             env=os.environ.copy(),
             stdout=log_file,
@@ -957,5 +1065,12 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"[bootstrap] ERROR: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+        print(f"[bootstrap] ERROR: {exc}", file=sys.stderr, flush=True)
+        if _launchd_job():
+            # KeepAlive=true restarts even a successful exit. Sleep without
+            # polling or touching disk until the operator restarts the job.
+            print("[bootstrap] Startup suspended. Fix the configuration and restart the job.",
+                  file=sys.stderr, flush=True)
+            while True:
+                signal.pause()
+        raise SystemExit(78 if isinstance(exc, RuntimeConfigurationError) else 1)

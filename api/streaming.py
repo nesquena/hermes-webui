@@ -1448,11 +1448,7 @@ AIAgent = get_ai_agent_class()
 def _get_ai_agent():
     """Return AIAgent class, retrying the import if the initial attempt failed.
 
-    auto_install_agent_deps() in server.py may install missing packages after
-    this module is first imported (common in Docker with a volume-mounted agent).
-    Re-attempting the import here picks up the newly installed packages without
-    requiring a server restart. The shared runtime guard also refuses to reuse
-    cached Agent modules after the source checkout changes.
+    The runtime guard also checks whether the Agent checkout changed.
     """
     global AIAgent
     ensure_agent_runtime_current()

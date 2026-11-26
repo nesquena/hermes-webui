@@ -447,9 +447,11 @@ def test_partial_agent_install_reaches_installer(monkeypatch, tmp_path, explicit
         bootstrap,
         "parse_args",
         lambda: SimpleNamespace(
-            host="127.0.0.1", port=8765, skip_agent_install=False,
+            host="127.0.0.1", port=8765, skip_agent_install=False, setup=True, foreground=False,
         ),
     )
+
+    monkeypatch.setattr(bootstrap, "_detect_supervisor", lambda: None)
 
     class InstallerReached(Exception):
         pass

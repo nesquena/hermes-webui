@@ -5,6 +5,8 @@ that need the default Hermes home can import them without triggering config's
 larger startup side effects.
 """
 
+from __future__ import annotations
+
 import errno
 import os
 import secrets

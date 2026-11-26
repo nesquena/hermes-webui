@@ -103,7 +103,20 @@ _webui_root = os.path.dirname(os.path.abspath(__file__))
 if _webui_root not in sys.path:
     sys.path.insert(0, _webui_root)
 from managed_agent_startup import activate_managed_agent
-activate_managed_agent()
+if os.environ.pop("_HERMES_WEBUI_PREFLIGHT_COMPLETE", ""):
+    # Bootstrap selected and tested this interpreter. Suppress PM repair
+    # during activation, then restore the Agent's on-demand tool policy.
+    _lazy_installs = os.environ.get("HERMES_DISABLE_LAZY_INSTALLS")
+    os.environ["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
+    try:
+        activate_managed_agent()
+    finally:
+        if _lazy_installs is None:
+            os.environ.pop("HERMES_DISABLE_LAZY_INSTALLS", None)
+        else:
+            os.environ["HERMES_DISABLE_LAZY_INSTALLS"] = _lazy_installs
+else:
+    activate_managed_agent()
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +135,7 @@ from api.helpers import (
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers, fold_api_path
 from api.run_drain import RunAdmissionClosed, ShutdownDrain, send_admission_closed
-from api.startup import auto_install_agent_deps, fix_credential_permissions
+from api.startup import fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
 
@@ -630,16 +643,7 @@ def main() -> None:
         print(f'[!!] Warning: Hermes agent found but missing modules: {missing}', flush=True)
         for mod, err in errors.items():
             print(f'     {mod}: {err}', flush=True)
-        print('     Attempting to install missing dependencies from agent requirements.txt...', flush=True)
-        auto_install_agent_deps(expected_agent_dir=_AGENT_DIR)
-        ok, missing, errors = verify_hermes_imports()
-        if not ok:
-            print(f'[!!] Still missing after install attempt: {missing}', flush=True)
-            for mod, err in errors.items():
-                print(f'     {mod}: {err}', flush=True)
-            print('     Agent features may not work correctly.', flush=True)
-        else:
-            print('[ok] Agent dependencies installed successfully.', flush=True)
+        print("     Repair the Agent environment and restart WebUI. For managed Hermes, run 'hermes pm repair'.", flush=True)
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
