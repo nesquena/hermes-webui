@@ -11858,11 +11858,27 @@ def _cli_read_owner_profile(sid: str, read_profile=None):
 
 
 def _cli_session_messages_in_active_profile(sid: str) -> list:
-    """Read recoverable messages from the active profile, or fail closed (#9104)."""
+    """Read recoverable messages from the active profile's state.db, or fail closed (#9104).
+
+    A missing listing row can only prove active-profile ownership when the
+    transcript itself lives in that profile's state.db. Read the request
+    profile's database explicitly instead of relying on a reader whose default
+    may be process state — and refuse global external transcripts outright:
+    Claude Code's ``~/.claude/projects`` files belong to no Hermes profile, so
+    finding one there says nothing about ownership. Those rows stay
+    profile-agnostic for detail load (``_is_profile_agnostic_foreign_session``)
+    and are not shareable, which is master's behaviour.
+    """
     if not sid or not is_safe_session_id(sid):
         return []
+    if str(sid).startswith(f"{CLAUDE_CODE_SOURCE}_"):
+        return []
     try:
-        return get_cli_session_messages(sid) or []
+        return get_state_db_session_messages(
+            sid,
+            stitch_continuations=True,
+            profile=_get_active_profile_name(),
+        ) or []
     except Exception:
         logger.debug("cli session active-profile message lookup failed", exc_info=True)
         return []
@@ -11872,8 +11888,10 @@ def _session_visible_with_cli_owner_fallback(sid, session_profile, handler) -> t
     """Return visibility and any messages read to establish active-profile ownership.
 
     An explicit foreign owner still fails the gate. For a missing listing
-    owner, keep the transcript read from the active profile for the caller
-    so synthesis does not have to load and decode the same history twice.
+    owner, ownership is proven only by a transcript read from the REQUEST
+    profile's own state.db; global external transcripts (Claude Code) fail
+    closed. The transcript read here is kept for the caller so synthesis does
+    not have to load and decode the same history twice.
     """
     if _session_visible_to_active_profile(session_profile, handler):
         return True, None
@@ -18221,8 +18239,8 @@ def _handle_session_get(handler, parsed) -> bool:
             # truly-missing session under a non-default active profile would
             # otherwise emit a useless 409 with profile=null and skip the
             # frontend self-heal + spin the SSE reconnect against a dead sid.
-            # #9104: the ownership fallback in the gate above already looked
-            # for the messages in the active profile's state.db, so reaching
+            # #9104: the ownership fallback in the gate above only claims a
+            # transcript read from the active profile's state.db, so reaching
             # here means the session is not there either — still 404.
             return bad(handler, "Session not found", 404)
         if cli_messages is None:

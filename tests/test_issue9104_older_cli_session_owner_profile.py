@@ -103,6 +103,7 @@ def _detail_load(monkeypatch, sid, *, active_profile, cli_meta, messages, claim=
     with patch("api.routes.get_session", side_effect=KeyError(sid)), \
          patch("api.routes._get_active_profile_name", return_value=active_profile), \
          patch("api.routes._lookup_cli_session_metadata", return_value=cli_meta), \
+         patch("api.routes.get_state_db_session_messages", return_value=messages), \
          patch("api.routes.get_cli_session_messages", return_value=messages), \
          patch("api.routes._claim_or_synthesize_cli_session", side_effect=fake_claim):
         assert routes.handle_get(handler, parsed) is True
@@ -115,6 +116,7 @@ def _share_pair(sid, *, active_profile, cli_meta, messages):
     with patch("api.routes.get_session", side_effect=KeyError(sid)), \
          patch("api.routes._get_active_profile_name", return_value=active_profile), \
          patch("api.routes._lookup_cli_session_metadata", return_value=cli_meta), \
+         patch("api.routes.get_state_db_session_messages", return_value=messages), \
          patch("api.routes.get_cli_session_messages", return_value=messages), \
          patch(
              "api.routes._claim_or_synthesize_cli_session",
@@ -198,7 +200,7 @@ def test_unreadable_state_db_fails_closed(monkeypatch):
     with patch("api.routes.get_session", side_effect=KeyError(OLD_SID)), \
          patch("api.routes._get_active_profile_name", return_value="feng-family"), \
          patch("api.routes._lookup_cli_session_metadata", return_value={}), \
-         patch("api.routes.get_cli_session_messages", side_effect=exploding_messages), \
+         patch("api.routes.get_state_db_session_messages", side_effect=exploding_messages), \
          patch(
              "api.routes._claim_or_synthesize_cli_session",
              side_effect=lambda *_a, **_kw: claim_calls.__setitem__("n", claim_calls["n"] + 1),
@@ -328,6 +330,7 @@ def test_older_cli_session_decodes_transcript_once(surface, monkeypatch):
     monkeypatch.setattr(routes, "get_session", MagicMock(side_effect=KeyError(OLD_SID)))
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "test-profile")
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes, "get_state_db_session_messages", read_messages)
     monkeypatch.setattr(routes, "get_cli_session_messages", read_messages)
     monkeypatch.setattr(routes, "_session_index_marks_was_webui", lambda _sid: False)
     monkeypatch.setattr(routes, "_session_deleted_tombstone_marks_was_webui", lambda _sid: False)
