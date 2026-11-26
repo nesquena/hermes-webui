@@ -817,6 +817,64 @@ def test_owner_config_env_reference_uses_the_owner_env(
     assert captured_route_j["payload"]["code"] == "server_draining"
 
 
+def test_ambient_cached_owner_config_is_owner_bound(
+    monkeypatch, tmp_path, captured, captured_route_j
+):
+    """#9024 review round 14: the ambient cached path binds to the owner too.
+
+    ``get_config()`` expands its document under the process env when the cache
+    is (re)loaded. When the owning profile IS the ambient profile, another
+    profile's mirrored ``CHAT_MODE`` (or the request thread's) could still
+    decide ``webui_chat_backend: ${CHAT_MODE}``. The ambient resolution now
+    re-expands the raw document under the owner's binding, in both directions.
+    """
+    import api.config as api_config
+
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda _sid: "owner")
+    drain = {"error": "server draining", "code": "server_draining", "_status": 503}
+    monkeypatch.setattr(routes, "run_admission_closed_response", lambda: dict(drain))
+    calls = {"model_boundary": 0}
+
+    def _no_model(*_args, **_kwargs):
+        calls["model_boundary"] += 1
+        raise AssertionError("ambient owner-config reference reached the model boundary")
+
+    monkeypatch.setattr(routes, "_llm_git_commit_message", _no_model)
+    root = tmp_path / "root-home"
+    root.mkdir()
+    (root / ".env").write_text("CHAT_MODE=gateway\n", encoding="utf-8")
+    (root / "config.yaml").write_text(
+        "webui_chat_backend: ${CHAT_MODE}\n", encoding="utf-8"
+    )
+    # An external override owned by root, with root as the ambient profile:
+    # _profile_home_config_source must answer _AMBIENT_CONFIG for this home.
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(root / "config.yaml"))
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _name: root)
+    profiles._CHAT_BACKEND_ENV_CACHE.clear()
+    unreadable = api_config._cfg_unreadable
+    try:
+        assert api_config._profile_home_config_source(
+            root, isolate_config_override=True
+        ) is api_config._AMBIENT_CONFIG, "fixture setup: not the ambient path"
+
+        # A) the requesting profile's env says "legacy"; the OWNER's says "gateway".
+        monkeypatch.setenv("CHAT_MODE", "legacy")
+        routes._handle_git_commit_message(object(), {"session_id": "s1"})
+        assert captured["status"] == 409, captured
+        assert captured["payload"]["code"] == "gateway_mode_unsupported"
+        assert calls["model_boundary"] == 0
+
+        # B) the owner's .env says "legacy"; the requesting env says "gateway".
+        (root / ".env").write_text("CHAT_MODE=legacy\n", encoding="utf-8")
+        monkeypatch.setenv("CHAT_MODE", "gateway")
+        routes._handle_btw(object(), {"session_id": "s1", "question": "why?"})
+        assert captured_route_j["status"] == 503
+        assert captured_route_j["payload"]["code"] == "server_draining"
+    finally:
+        api_config._cfg_unreadable = unreadable
+
+
 def _two_writer_homes(monkeypatch, tmp_path, *, first_env, second_env):
     """Homes for two distinct profile writers with different .env values."""
     homes = {}

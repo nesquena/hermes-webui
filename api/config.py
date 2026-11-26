@@ -1029,6 +1029,7 @@ def _profile_home_config_source(
 
 def get_config_for_profile_home(
     profile_home: "Path | str | None", *, isolate_config_override: bool = False,
+    bind_env_to_profile: bool = False,
 ) -> dict:
     """Return the config dict for an explicit profile home directory.
 
@@ -1059,24 +1060,82 @@ def get_config_for_profile_home(
     isolated: a nonexistent home returns ``{}`` and an existing home without a
     ``config.yaml`` yields defaults — neither ever falls back to the ambient
     config (profiles-are-islands).
+
+    ``bind_env_to_profile`` resolves the returned config's ``${VAR}``
+    references under the profile's OWN env binding (``api.profiles
+    .profile_env_binding``) instead of the caller's thread/process env (#9024
+    review round 14). That covers both resolution paths: the direct file read
+    expands the raw document under the binding, and the ambient shortcut
+    re-reads the ambient document under the binding while still honouring an
+    in-memory ``cfg`` override. An ambient document that cannot be read or
+    parsed keeps the fail-closed ``UnreadableProfileConfig`` marker.
     """
     source = _profile_home_config_source(
         profile_home, isolate_config_override=isolate_config_override
     )
     if source is _AMBIENT_CONFIG:
+        if bind_env_to_profile and profile_home:
+            return _ambient_config_bound_to_profile(profile_home)
         return get_config()
     if source is None:
         return {}
     # Read the profile file directly and apply documented defaults locally so the
     # returned dict matches ambient get_config() shape (including built-in
     # personalities) without mutating any global cache state.
-    profile_cfg = _load_yaml_config_file(source)
-    if isinstance(profile_cfg, UnreadableProfileConfig):
-        # #8971 / #9024 round 5: an unreadable config is not a valid {}
-        # — carry the failure status to the caller's admission decision.
-        return profile_cfg
+    if bind_env_to_profile and profile_home:
+        raw = _load_yaml_config_file_raw(source, _copy=False)
+        if isinstance(raw, UnreadableProfileConfig):
+            return raw
+        from api.profiles import expand_profile_config
+
+        profile_cfg = expand_profile_config(profile_home, raw) if raw else {}
+        if not isinstance(profile_cfg, dict):
+            # A non-dict expansion is unverifiable ownership, never a local {}.
+            return UnreadableProfileConfig()
+    else:
+        profile_cfg = _load_yaml_config_file(source)
+        if isinstance(profile_cfg, UnreadableProfileConfig):
+            # #8971 / #9024 round 5: an unreadable config is not a valid {}
+            # — carry the failure status to the caller's admission decision.
+            return profile_cfg
     _apply_config_defaults(profile_cfg)
     return profile_cfg
+
+
+def _ambient_config_bound_to_profile(profile_home) -> dict:
+    """The ambient config with ``${VAR}`` resolved under *profile_home*'s env.
+
+    ``get_config()`` expands its document under the process env when the cache
+    is (re)loaded, which belongs to whichever profile is active — or whatever a
+    streaming turn / background worker mirrors there while it runs. When the
+    owning profile IS the ambient profile (root, or the process-active named
+    profile), that is still another writer's env at the wrong moment, so the
+    admission read re-expands the raw document under the owner's binding.
+
+    An in-memory ``cfg`` override is authoritative and already holds concrete
+    values, so it is returned as-is, as is a valid empty document (the ambient
+    cache already carries the defaults).
+    """
+    ambient = get_config()
+    if isinstance(ambient, UnreadableProfileConfig):
+        return ambient
+    try:
+        if cfg is not _cfg_cache:
+            return ambient
+    except NameError:
+        pass
+    raw = _load_yaml_config_file_raw(_get_config_path(), _copy=False)
+    if isinstance(raw, UnreadableProfileConfig):
+        return raw
+    if not raw:
+        return ambient
+    from api.profiles import expand_profile_config
+
+    cfg_bound = expand_profile_config(profile_home, raw)
+    if not isinstance(cfg_bound, dict):
+        return UnreadableProfileConfig()
+    _apply_config_defaults(cfg_bound)
+    return cfg_bound
 
 
 def isolated_profile_config_path(profile_home: "Path | str | None") -> "Path | None":

@@ -410,6 +410,11 @@ _ALLOWED = {
     ("routes.py", "_handle_mcp_server_update"): _WRITER,
     ("config.py", "_load_yaml_config_file_raw"): _LOADER,
     ("config.py", "_load_yaml_config_file"): _LOADER + " (expands under the caller's scope)",
+    # #9024 review round 14: the owner-bound profile-config read
+    # (bind_env_to_profile) expands the raw document through
+    # api.profiles.expand_profile_config under the owning profile's binding.
+    ("config.py", "get_config_for_profile_home"): "value reader: expands via expand_profile_config when bind_env_to_profile",
+    ("config.py", "_ambient_config_bound_to_profile"): "value reader: expands via expand_profile_config under the owner's binding",
     ("config.py", "_refresh_config_cache"): _LOADER + " (expands under the pinned process env)",
     ("routes.py", "_read_profile_config_cached"): _LOADER + " (raw parse cache)",
     ("yaml_compat.py", "safe_load"): _LOADER,

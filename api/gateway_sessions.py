@@ -57,19 +57,23 @@ def config_for_profile(profile):
     before this resolver existed (Runs API opt-in included). Root still never reads a
     named profile's file. Named profiles keep the resolver the worker used before.
 
-    ``${VAR}`` references expand under the OWNING profile's env binding
-    (#9024 review round 13): the ambient process env belongs to whichever
-    profile is active (or whatever a streaming turn/worker mirrors), so an
-    owner config reading ``webui_chat_backend: ${CHAT_MODE}`` must not be
-    resolved with the requesting profile's ``CHAT_MODE``. The ambient-config
-    shortcut still returns the process-expanded cache — that profile's own env.
+    ``${VAR}`` references expand under the OWNING profile's env binding, through
+    BOTH resolution paths (#9024 review rounds 13-14): the ambient process env
+    belongs to whichever profile is active (or whatever a streaming turn/worker
+    mirrors), so an owner config reading ``webui_chat_backend: ${CHAT_MODE}``
+    must not be resolved with the requesting profile's ``CHAT_MODE`` — not on
+    the direct profile-file read and not on the ambient cached read when the
+    owner IS the active profile. An unreadable owner document stays the
+    fail-closed marker on both paths, so unverifiable ownership never
+    authorizes local model work.
     """
     from api.config import get_config_for_profile_home
-    from api.profiles import get_hermes_home_for_profile, profile_config_env_binding
+    from api.profiles import get_hermes_home_for_profile
     home = get_hermes_home_for_profile(profile)
     is_root = Path(home).resolve() == Path(get_hermes_home_for_profile("default")).resolve()
-    with profile_config_env_binding(home):
-        return get_config_for_profile_home(home, isolate_config_override=is_root)
+    return get_config_for_profile_home(
+        home, isolate_config_override=is_root, bind_env_to_profile=True,
+    )
 
 
 def config_for_session(session):
