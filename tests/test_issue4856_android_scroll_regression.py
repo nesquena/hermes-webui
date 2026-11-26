@@ -561,6 +561,7 @@ const _captureMessageScrollInputTail = () => { captured += 1; };
 const _cancelBottomSettle = () => {};
 const body = { tagName:'BODY', inMessages:false, isContentEditable:false, parentElement:null, closest(){ return null; } };
 const inside = { tagName:'DIV', inMessages:true, isContentEditable:false, parentElement:el, closest(){ return null; } };
+document.body = body; // faithful browser identity; production unchanged
 const env = Function('el','document','performance','_isTranscriptScrollTarget','_captureMessageScrollInputTail', `let _lastMessageKeyScrollIntentMs=-Infinity; ${region}
 return {handler:document._handler, setActive:(n)=>{document.activeElement=n;}};`)(el, document, performance, _isTranscriptScrollTarget, _captureMessageScrollInputTail);
 // Focus on <body>, pointer hovering the transcript: capture MUST still fire.
