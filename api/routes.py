@@ -14882,6 +14882,8 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     enable_session_yolo,
     disable_session_yolo,
     is_protected_approval,
+    is_classified_approval,
+    may_auto_answer_approval,
     is_session_yolo_enabled,
     _approval_sse_subscribers,
     _approval_sse_subscribe,
@@ -35051,6 +35053,11 @@ _GATEWAY_PROTECTED_APPROVAL_PENDING = (
     "A protected approval (an MCP elicitation or a publish action) is still "
     "pending; answer it explicitly before enabling YOLO."
 )
+_GATEWAY_UNCLASSIFIED_APPROVAL_PENDING = (
+    "A pending approval carries no pattern key and no surface, so YOLO cannot "
+    "tell whether it is a command approval or a consent prompt; answer it "
+    "explicitly before enabling YOLO."
+)
 _GATEWAY_APPROVAL_RELAY_IN_PROGRESS = (
     "Another approval response for this Gateway run is already in progress. "
     "Wait for it to finish, then retry if the card is still visible."
@@ -35463,9 +35470,10 @@ def _enable_session_yolo_and_release_pending(
                 # YOLO handoff can land between the snapshot above and this relay,
                 # and must refuse the whole enable instead of being relayed or
                 # left for a later YOLO answer (#9108).
-                if _has_pending_protected_approval(sid):
+                _yolo_block = _pending_yolo_answer_block(sid)
+                if _yolo_block:
                     payload, status = _protected_approval_enable_refusal(
-                        sid, choice, yolo_transition
+                        sid, choice, yolo_transition, reason=_yolo_block
                     )
                     yolo_transition = None
                     return payload, status
@@ -35488,9 +35496,10 @@ def _enable_session_yolo_and_release_pending(
                     }, relay_status
                 relayed += 1
 
-            if _has_pending_protected_approval(sid):
+            _yolo_block = _pending_yolo_answer_block(sid)
+            if _yolo_block:
                 payload, status = _protected_approval_enable_refusal(
-                    sid, choice, yolo_transition
+                    sid, choice, yolo_transition, reason=_yolo_block
                 )
                 yolo_transition = None
                 return payload, status
@@ -35554,40 +35563,64 @@ def _session_has_pending_approval(sid: str) -> bool:
         return bool(gw_queue)
 
 
-def _has_pending_protected_approval(sid: str) -> bool:
-    """True when any parked approval (run mirror or local waiter) is protected.
+def _pending_yolo_answer_block(sid: str) -> str | None:
+    """Why session YOLO may not answer a parked approval: "protected" or "unclassified".
+
+    YOLO may answer only a CLASSIFIED, non-consent approval
+    (``may_auto_answer_approval``). A consent prompt is refused because YOLO
+    never covers consent; a prompt that carries no pattern key and no surface
+    is refused because nothing in the payload proves it is not one — relaying
+    ``once`` to it could release the very consent the user meant to keep
+    (#9251).
 
     Scans both storages directly — the live gateway queue and the polling
-    projection every mirror (run-backed or not) is published into — so the
-    YOLO enable/release path sees the same consent prompts either settle path
-    protects, re-read at each relay so a mirror published without the YOLO
-    handoff cannot slip past an earlier snapshot (#9108).
+    projection every mirror (run-backed or not) is published into — re-read at
+    each relay so a mirror published without the YOLO handoff cannot slip past
+    an earlier snapshot (#9108).
     """
     with _lock:
+        candidates: list = []
         for entry in _gateway_queues.get(sid) or []:
-            if is_protected_approval(getattr(entry, "data", None) or {}):
-                return True
+            data = getattr(entry, "data", None) or {}
+            if isinstance(data, dict):
+                candidates.append(data)
         queue = _pending.get(sid)
         entries = queue if isinstance(queue, list) else [queue] if queue else []
-        return any(is_protected_approval(entry) for entry in entries if isinstance(entry, dict))
+        candidates.extend(entry for entry in entries if isinstance(entry, dict))
+    for approval in candidates:
+        if may_auto_answer_approval(approval):
+            continue
+        return "protected" if is_protected_approval(approval) else "unclassified"
+    return None
 
 
 def _protected_approval_enable_refusal(
     sid: str,
     choice: str,
     yolo_transition,
+    *,
+    reason: str = "protected",
 ) -> tuple[dict, int]:
-    """Roll a pending YOLO enable back and refuse while a protected approval is parked.
+    """Roll a pending YOLO enable back and refuse while a prompt needs an explicit answer.
 
-    The enable commits nothing: the transition token is retired unsuccessful, so
-    the shared session flag stays untouched and no parked approval is answered.
+    ``reason`` is "protected" (a consent prompt YOLO never covers) or
+    "unclassified" (no pattern key and no surface, so it cannot be proven
+    ordinary). The enable commits nothing: the transition token is retired
+    unsuccessful, so the shared session flag stays untouched and no parked
+    approval is answered.
     """
     finish_session_yolo_transition(sid, yolo_transition, succeeded=False)
+    if reason == "unclassified":
+        code = "gateway_unclassified_approval_pending"
+        error = _GATEWAY_UNCLASSIFIED_APPROVAL_PENDING
+    else:
+        code = "gateway_protected_approval_pending"
+        error = _GATEWAY_PROTECTED_APPROVAL_PENDING
     return _gateway_approval_failure(
         sid,
         choice,
-        code="gateway_protected_approval_pending",
-        error=_GATEWAY_PROTECTED_APPROVAL_PENDING,
+        code=code,
+        error=error,
         status=409,
         enable_yolo=True,
     )

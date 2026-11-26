@@ -165,7 +165,10 @@ def test_explicit_enable_still_answers_parked_approvals(harness):
     from tools.approval import _ApprovalEntry
 
     sid = "webui-9101-rev-parked"
-    approvals = [{"approval_id": "ap-1", "command": "first"}, {"approval_id": "ap-2", "command": "second"}]
+    approvals = [
+        {"approval_id": "ap-1", "command": "first", "pattern_key": "command", "pattern_keys": ["command"]},
+        {"approval_id": "ap-2", "command": "second", "pattern_key": "command", "pattern_keys": ["command"]},
+    ]
     entries = [_ApprovalEntry(dict(a)) for a in approvals]
     with routes._lock:
         routes._pending[sid] = [dict(a) for a in approvals]

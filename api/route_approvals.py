@@ -1518,7 +1518,7 @@ def settle_gateway_pending_local_notification(
     """
     with gateway_yolo_handoff(session_key):
         run_id = str((approval or {}).get("run_id") or "").strip()
-        if not run_id and not is_protected_approval(approval) and is_session_yolo_enabled(session_key):
+        if not run_id and may_auto_answer_approval(approval) and is_session_yolo_enabled(session_key):
             _resolved, head, total = resolve_gateway_pending_local_all(
                 session_key,
                 "once",

@@ -87,6 +87,13 @@ COMMON = {
     "pattern_keys": ["recursive delete"],
 }
 
+# #9251: the Gateway's ``pending_controls`` projection carries no pattern key
+# and no surface — the payload states nothing about which kind of gate it is.
+UNCLASSIFIED = {
+    "command": "Approve the pending request",
+    "description": "pending_controls projection without a marker",
+}
+
 PROTECTED = [
     ELICITATION,
     PUBLISH_SURFACE,
@@ -967,3 +974,85 @@ def test_the_same_generation_keeps_the_consent_markers(
         "the same prompt must stay protected on the projection path; "
         f"remote answers: {runner_spy!r}"
     )
+
+
+# ── #9251: an UNCLASSIFIED prompt must refuse the enable too ───────────────
+
+
+def test_enabling_yolo_refuses_while_an_unclassified_approval_is_pending(sid, yolo_state):
+    """A prompt with no pattern key and no surface cannot be classified, so YOLO
+    must not pre-answer it — the whole enable is refused (#9251)."""
+    entry = _park(sid, UNCLASSIFIED)
+    route_approvals.submit_gateway_pending_mirror(sid, dict(entry.data))
+
+    payload, status = routes._enable_session_yolo_and_release_pending(sid, choice="once")
+
+    assert status == 409
+    assert payload["ok"] is False
+    assert payload["code"] == "gateway_unclassified_approval_pending"
+    assert payload["error"]
+    assert not entry.event.is_set()
+    assert entry.result is None
+    assert sid not in yolo_state["enabled"], "the enable must not commit"
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [(COMMON, None), (ELICITATION, "protected"), (UNCLASSIFIED, "unclassified")],
+    ids=["common", "protected", "unclassified"],
+)
+def test_pending_yolo_answer_block_names_the_reason(sid, data, expected):
+    """The enable guard answers the same question the settle path does: may YOLO
+    auto-answer this, and if not, why (#9251)."""
+    _park(sid, data)
+    assert routes._pending_yolo_answer_block(sid) is expected
+
+
+def test_enabling_yolo_refuses_when_an_unclassified_run_mirror_arrives_mid_relay(
+    sid, yolo_state, monkeypatch, runner_spy
+):
+    """An unclassified run mirror published between the enable snapshot and the
+    first relay must refuse the whole enable, exactly like a protected one."""
+    ordinary_run = _run_approval(COMMON, run_id="run-9251-ordinary")
+    route_approvals.submit_gateway_pending_mirror(sid, dict(ordinary_run))
+    original_snapshot = routes.gateway_pending_mirrors
+    late = _run_approval(UNCLASSIFIED, run_id="run-9251-late")
+    state = {"published": False}
+
+    def snapshot_publishing_late_unclassified(session_id):
+        mirrors = original_snapshot(session_id)
+        if not state["published"]:
+            state["published"] = True
+            route_approvals.submit_gateway_pending_mirror(session_id, dict(late))
+        return mirrors
+
+    monkeypatch.setattr(routes, "gateway_pending_mirrors", snapshot_publishing_late_unclassified)
+
+    payload, status = routes._enable_session_yolo_and_release_pending(sid, choice="once")
+
+    assert status == 409
+    assert payload["ok"] is False
+    assert payload["code"] == "gateway_unclassified_approval_pending"
+    assert runner_spy == [], "no approval may be relayed once an unclassified one is seen"
+    assert sid not in yolo_state["enabled"]
+    remaining = route_approvals.gateway_pending_mirrors(sid)
+    assert any(not route_approvals.is_classified_approval(row) for row in remaining), (
+        "the late unclassified mirror must stay parked"
+    )
+
+
+def test_local_settle_publishes_unclassified_approval_as_a_card(sid, yolo_state):
+    """The settle path already refuses to answer an unclassified prompt; the
+    enable guard must not be the only place that knows (#9251)."""
+    yolo_state["enabled"].add(sid)
+    entry = _park(sid, UNCLASSIFIED)
+
+    auto_resolved, head, total = route_approvals.settle_gateway_pending_local_notification(
+        sid, dict(entry.data)
+    )
+
+    assert auto_resolved is False
+    assert head is not None
+    assert total >= 1
+    assert not entry.event.is_set()
+    assert entry.result is None
