@@ -12214,9 +12214,9 @@ function _stripAttachedFilesMarkerForDisplay(text){
   return String(text||'').replace(/\n\n\[Attached files: [^\]]+\]$/,'').trim();
 }
 
-function setStatus(t){
+function setStatus(t,type){
   if(!t)return;
-  showToast(t, 4000);
+  showToast(t, 4000, type);
 }
 
 let _composerStatusTimer=null;
