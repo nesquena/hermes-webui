@@ -2822,7 +2822,7 @@
   .msg-body pre:has(> code.suggestions-validated){display:none!important;}
   .msg-body .pre-header:has(+ pre > code.suggestions-validated){display:none!important;}
   .inline-suggestions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px;padding-left:30px;max-width:680px;}
-  .inline-suggestion-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:8px;font-size:13px;font-family:inherit;cursor:pointer;transition:background .15s,border-color .15s,color .15s,opacity .15s;}
+  .inline-suggestion-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:var(--radius-md);font-size:13px;font-family:inherit;cursor:pointer;transition:background .15s,border-color .15s,color .15s,opacity .15s;}
   .inline-suggestion-btn.primary{background:var(--accent-bg);border:1px solid var(--accent-bg-strong);color:var(--accent-text);font-weight:600;}
   .inline-suggestion-btn.primary:hover:not(:disabled){background:var(--accent-bg-strong);}
   .inline-suggestion-btn.secondary{background:var(--surface);border:1px solid var(--border);color:var(--text);}
@@ -2832,7 +2832,7 @@
   .inline-suggestion-btn:focus-visible{outline:none;box-shadow:0 0 0 2px var(--focus-ring);}
   /* Alte Antworten sind keine gültige Antwort mehr — der Tastatur-Hinweis dort lügt. */
   .inline-suggestions-stale .inline-suggestion-kbd{display:none;}
-  .inline-suggestion-kbd{display:inline-flex;align-items:center;justify-content:center;padding:1px 5px;border-radius:4px;font-size:10px;font-family:inherit;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);color:inherit;opacity:.75;line-height:1.4;}
+  .inline-suggestion-kbd{display:inline-flex;align-items:center;justify-content:center;padding:1px 5px;border-radius:var(--radius-sm);font-size:10px;font-family:inherit;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);color:inherit;opacity:.75;line-height:1.4;}
   @media (hover:none) and (pointer:coarse){
     .inline-suggestion-kbd{display:none;}
   }
