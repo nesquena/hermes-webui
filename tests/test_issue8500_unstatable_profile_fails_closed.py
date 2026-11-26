@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import errno
 import os
+import time
 from pathlib import Path
+
+import pytest
 
 from api import agent_runtime
 
@@ -102,3 +105,58 @@ def test_a_plain_file_entry_is_still_skipped(tmp_path):
     homes = agent_runtime._legacy_profile_homes(base)
 
     assert homes == ()
+
+
+_ROOT_USER = hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def _unlistable_tree(base: Path, *, sibling: str = "sibling") -> Path:
+    """``<base>/profiles`` mode 0o300 with a live marker in a named sibling.
+
+    0o300 is searchable but not readable: the names cannot be listed, yet
+    ``profiles/<sibling>/.hermes-update-in-progress`` is still reachable by
+    name — the shape that used to read as "no update".
+    """
+    profiles = base / "profiles"
+    home = profiles / sibling
+    home.mkdir(parents=True, exist_ok=True)
+    (home / ".hermes-update-in-progress").write_text(
+        f"{os.getpid()}\n{time.time()}\n", encoding="utf-8"
+    )
+    os.chmod(profiles, 0o300)
+    return profiles
+
+
+@pytest.mark.skipif(_ROOT_USER, reason="root ignores the mode bits under test")
+def test_a_searchable_but_unlistable_profile_tree_is_named_not_invented(tmp_path):
+    """The tree itself must not stand in for the homes it hides: its own
+    marker is absent, and that absent read authorised the restart."""
+    base = tmp_path / "base"
+    base.mkdir()
+    profiles = _unlistable_tree(base)
+    try:
+        with pytest.raises(agent_runtime._ProfileTreeUnverifiable):
+            agent_runtime._legacy_profile_homes(base)
+    finally:
+        os.chmod(profiles, 0o700)
+
+
+@pytest.mark.skipif(_ROOT_USER, reason="root ignores the mode bits under test")
+def test_a_searchable_but_unlistable_profile_tree_reads_unknown(tmp_path, monkeypatch):
+    base = tmp_path / "base"
+    base.mkdir()
+    profiles = _unlistable_tree(base)
+    monkeypatch.setattr(agent_runtime, "_base_marker_home", lambda: base)
+    try:
+        assert agent_runtime._agent_update_transaction_state() == "unknown"
+    finally:
+        os.chmod(profiles, 0o700)
+
+
+def test_a_regular_file_at_profiles_reads_unknown(tmp_path, monkeypatch):
+    """Control: a non-directory tree cannot be enumerated either."""
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "profiles").write_text("not a tree", encoding="utf-8")
+    monkeypatch.setattr(agent_runtime, "_base_marker_home", lambda: base)
+    assert agent_runtime._agent_update_transaction_state() == "unknown"

@@ -981,6 +981,113 @@ def test_real_sibling_profile_without_marker_still_allows_restart(real_restart_e
     assert len(env.destructive.execv) == 1
 
 
+def _hide_profile_tree(env, *, sibling="sibling"):
+    """Make ``<root>/profiles`` searchable but not listable (0o300).
+
+    A live marker is written into a NAMED sibling BEFORE the mode change:
+    exactly the shape that hid a live legacy update — the tree's own marker
+    is absent, so the old code read "no update" while the sibling's was live.
+    Returns the profiles path so the caller can restore its mode.
+    """
+    root = env.checkout.home
+    profiles = root / "profiles"
+    home = profiles / sibling
+    home.mkdir(parents=True, exist_ok=True)
+    (home / ".hermes-update-in-progress").write_text(
+        f"{os.getpid()}\n{time.time()}\n", encoding="utf-8"
+    )
+    os.chmod(profiles, 0o300)
+    return profiles
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores the mode bits under test",
+)
+def test_real_unlistable_profile_tree_refuses_at_admission(real_restart_env):
+    """A profiles tree that is searchable but not listable reads ``unknown``
+    at admission: its names are the only way to reach a sibling's live
+    marker, so the tree itself must not stand in as an "absent" home."""
+    env = real_restart_env
+    root, _profile_home = _relaunch_under_profile(env)
+    profiles = _hide_profile_tree(env)
+    try:
+        result = env.updates.restart_stale_runtime()
+    finally:
+        os.chmod(profiles, 0o700)
+    assert result.get("ok") is not True
+    assert result["type"] == "agent_runtime_stale"
+    assert result["agent_update_state"] == "unknown"
+    assert result["restart_scheduled"] is False
+    assert env.destructive_total() == 0
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores the mode bits under test",
+)
+def test_real_unlistable_profile_tree_refuses_under_the_lock(real_restart_env):
+    """The tree becomes unlistable between admission and the under-lock
+    re-check: the guard must refuse, schedule nothing and release the lock."""
+    env = real_restart_env
+    root, _profile_home = _relaunch_under_profile(env)
+    profiles = root / "profiles"
+
+    try:
+        env.hook.on_acquire = lambda: _hide_profile_tree(env)
+        result = env.updates.restart_stale_runtime()
+    finally:
+        env.hook.on_acquire = None
+        os.chmod(profiles, 0o700)
+    assert result.get("ok") is not True
+    assert result["type"] == "agent_runtime_stale"
+    assert result["agent_update_state"] == "unknown"
+    assert result["restart_scheduled"] is False
+    assert env.destructive_total() == 0
+    assert env.lock.locked() is False, "the lock must be released on refusal"
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores the mode bits under test",
+)
+def test_real_worker_aborts_when_the_profile_tree_becomes_unlistable(real_restart_env):
+    """The delayed worker re-reads the transaction: a tree made unlistable
+    after scheduling was accepted aborts before any destructive call."""
+    env = real_restart_env
+    root, _profile_home = _relaunch_under_profile(env)
+    result = env.updates.restart_stale_runtime()
+    assert result["ok"] is True
+    assert result["restart_scheduled"] is True
+    assert len(env.checkout.workers) == 1, "the real delayed worker must be captured"
+    profiles = _hide_profile_tree(env)
+    try:
+        env.checkout.workers[0]()
+    finally:
+        os.chmod(profiles, 0o700)
+    assert env.destructive_total() == 0, (
+        "an unlistable profile tree must abort before any destructive call"
+    )
+    assert any("aborted" in w for w in env.logs.warnings)
+
+
+def test_real_listable_profile_tree_with_an_idle_sibling_still_allows_restart(
+    real_restart_env,
+):
+    """Control: an explicitly listable 0o700 tree with an idle sibling (no
+    marker) must not block recovery."""
+    env = real_restart_env
+    root, _profile_home = _relaunch_under_profile(env)
+    (root / "profiles" / "idle-sibling").mkdir(parents=True, exist_ok=True)
+    os.chmod(root / "profiles", 0o700)
+    result = env.updates.restart_stale_runtime()
+    assert result["ok"] is True
+    assert result["restart_scheduled"] is True
+    assert len(env.checkout.workers) == 1
+    env.checkout.workers[0]()
+    assert len(env.destructive.execv) == 1
+
+
 def test_agent_update_marker_homes_cover_every_supported_profile(monkeypatch, tmp_path):
     """The diagnostic enumerates every supported legacy marker home: the
     profile-tree root, the captured profile home and each sibling named
@@ -1001,19 +1108,17 @@ def test_agent_update_marker_homes_cover_every_supported_profile(monkeypatch, tm
         "every supported legacy marker home must be enumerated"
     )
 
-    # A profiles tree that exists but cannot be listed fails closed: the
-    # tree itself stays a home, so its marker read classifies ``unknown``
-    # (a regular file where the tree belongs is the un-listable shape).
+    # A profiles tree that exists but cannot be listed is NAMED, never turned
+    # into a home of its own: its own marker is absent, and that absent read
+    # used to authorise the restart while a sibling marker was live (#8500).
     import shutil
 
     shutil.rmtree(root / "profiles")
     (root / "profiles").write_text("", encoding="utf-8")
 
-    closed_homes = agent_runtime._agent_update_marker_homes()
+    with pytest.raises(agent_runtime._ProfileTreeUnverifiable):
+        agent_runtime._agent_update_marker_homes()
 
-    assert root / "profiles" in set(closed_homes), (
-        "an un-listable profiles tree must fail closed"
-    )
     assert agent_runtime._agent_update_transaction_state() == "unknown", (
         "an un-listable profiles tree must never read as a safe absent marker"
     )

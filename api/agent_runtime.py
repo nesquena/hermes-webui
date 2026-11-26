@@ -465,9 +465,9 @@ def _agent_update_marker_homes() -> tuple[Path, ...]:
     shared state for the installed Agent, so every supported legacy
     profile home is enumerated as well: a sibling's live update refuses
     the recovery restart exactly like a root or own-profile marker.  A
-    profiles tree that cannot be listed fails closed — the tree itself
-    stays a home, so its marker read classifies ``unknown`` instead of
-    silently skipping the sibling homes.
+    profiles tree that cannot be listed raises ``_ProfileTreeUnverifiable``
+    — the caller maps it to ``unknown`` instead of silently skipping the
+    sibling homes.
     """
     base = _base_marker_home()
     homes: list[Path] = []
@@ -486,6 +486,17 @@ def _agent_update_marker_homes() -> tuple[Path, ...]:
     return tuple(homes)
 
 
+class _ProfileTreeUnverifiable(Exception):
+    """``<base>/profiles`` exists but its names cannot be enumerated.
+
+    Listing it fails (mode 0o300: searchable but not readable) while a live
+    sibling marker is still reachable BY NAME. Naming the failure keeps the
+    caller from inventing ``<base>/profiles`` itself as a home whose own
+    marker is absent — that read as "no update" and authorised the
+    destructive stale-runtime restart (#8500).
+    """
+
+
 def _legacy_profile_homes(base: Path) -> tuple[Path, ...]:
     """Return every named profile home under the profile tree at *base*.
 
@@ -493,18 +504,21 @@ def _legacy_profile_homes(base: Path) -> tuple[Path, ...]:
     any active named profile, and a pre-v2 Agent update writes its marker
     at that home.  Enumerate every directory under ``<base>/profiles`` so a
     sibling profile's live legacy update is never invisible to recovery
-    admission.  A profiles tree that exists but cannot be listed (or is not
-    a directory) is returned as-is: the marker read under it then fails
-    closed to ``unknown`` — an unverifiable sibling home is never proof
-    that no update is live.
+    admission.
+
+    Raises ``_ProfileTreeUnverifiable`` when the tree exists but cannot be
+    LISTED (or is not a directory): the names are the only way to reach a
+    sibling home, so an unverifiable tree must read ``unknown`` downstream,
+    never as an absent marker.  A missing tree is ``()``: there is nothing
+    it can hide.
     """
     profiles_dir = base / "profiles"
     try:
         entries = sorted(profiles_dir.iterdir(), key=lambda entry: entry.name)
     except FileNotFoundError:
         return ()
-    except OSError:
-        return (profiles_dir,)
+    except OSError as exc:
+        raise _ProfileTreeUnverifiable(str(profiles_dir)) from exc
     homes: list[Path] = []
     for entry in entries:
         try:
@@ -706,9 +720,17 @@ def _agent_update_transaction_state() -> str:
     checkout reads ``held``/``unknown`` (both refused) instead of
     ``stale``/``unverified``.
     """
+    try:
+        homes = _agent_update_marker_homes()
+    except _ProfileTreeUnverifiable:
+        # A tree whose names cannot be listed hides every sibling home
+        # (mode 0o300: searchable, not readable). Its own marker is absent,
+        # so trusting it would authorise a restart while a live sibling
+        # marker sits one known name away — unverifiable, i.e. refused.
+        return "unknown"
     live_states = [
         _read_live_agent_update(home / _AGENT_UPDATE_MARKER)
-        for home in _agent_update_marker_homes()
+        for home in homes
     ]
     for state in _MARKER_STATE_PRECEDENCE:
         if state in live_states:
