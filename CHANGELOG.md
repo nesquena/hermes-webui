@@ -53,6 +53,8 @@
 
 ### Fixed
 
+- **Pasting an image whose data never arrived no longer adds a broken attachment (#9194, @chhxbchhxb).** Some screenshot tools and clipboards advertise an image without delivering its data. Pasting one used to add an empty `screenshot-….png` chip that could be sent, and to show a false "Image pasted" message. WebUI now skips image items with no data. If nothing readable was pasted, it shows an error: "Could not read the pasted image — take the screenshot again and re-paste." The message is translated in all 15 locales. If it keeps happening, retake the screenshot, or save the image and attach the saved file with the attachment button instead.
+
 - **The profile picker and Tasks list only the named profile homes the Agent considers live (#8897, @chhxbchhxb).** A deleted (tombstoned) or marker-less home under `profiles/` still showed up in the profile dropdown. Opening Tasks then created `cron/` folders inside it. The picker now applies the Agent's own liveness checks, as far as the installed Agent provides them, and the Tasks job list skips homes that aren't live. The default home and custom `HERMES_HOME` roots stay readable.
 
 - **The opt-in native Gateway session transport no longer reconnects forever when its socket is missing, and Stop reaches a turn in every phase (#8905, #9227, @chhxbchhxb).** With `webui_gateway_session_transport: unix` and a socket path that doesn't exist, a turn kept reconnecting every few seconds and Stop couldn't end it. A failure before the first submission now ends the turn after one attempt. Stop now reaches a turn that hasn't been submitted yet, and one whose submission acknowledgement is still pending. Failures after a submission keep the existing reconnect-and-resume behaviour.
