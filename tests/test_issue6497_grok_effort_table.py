@@ -136,8 +136,8 @@ def test_stored_none_becomes_provider_default_where_xai_rejects_it(model, lane):
 
 
 def test_grok_43_keeps_the_real_off_switch():
-    """The 4.3 prefix is the one Grok id whose wire accepts 'none'."""
-    assert cfg.coerce_reasoning_effort_for_model("none", "grok-4.3", provider_id="xai") == "none"
+    """Grok 4.3 route on the Agent wire accepts only low, medium, high, so 'none' coerces to ''."""
+    assert cfg.coerce_reasoning_effort_for_model("none", "grok-4.3", provider_id="xai") == ""
 
 
 @pytest.mark.parametrize("model,lane,expected", [

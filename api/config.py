@@ -6064,9 +6064,8 @@ def _strip_provider_hint_for_reasoning(model_id: str, provider: str | None = Non
 
     When the resolved *provider* is known (e.g. ``"custom:agg"``), strip the
     exact ``@{provider}:`` prefix first so both segments are removed in one
-    pass. Falls back to the generic first-colon split when no provider is
-    given or it doesn't match — preserving prior behavior for plain
-    ``@provider:model`` hints.
+    pass. Falls back to ``_parse_provider_qualified_model_id`` or generic
+    first-colon split when no provider is given or it doesn't match.
     """
     model = str(model_id or "").strip()
     if not model.startswith("@"):
@@ -6075,6 +6074,9 @@ def _strip_provider_hint_for_reasoning(model_id: str, provider: str | None = Non
         exact_prefix = f"@{provider}:".lower()
         if model.lower().startswith(exact_prefix):
             return model[len(exact_prefix) :]
+    parsed = _parse_provider_qualified_model_id(model)
+    if parsed is not None:
+        return parsed[0]
     if ":" in model:
         return model.split(":", 1)[1]
     return model
@@ -6147,14 +6149,32 @@ def _normalize_grok_model_id(model_id: str | None) -> str:
     return tail
 
 
-def _grok_reasoning_profile(model_id: str | None) -> dict | None:
+def _grok_model_identity(model_id: str | None, provider_id: str | None = None) -> str:
+    """Extract and normalize the Grok model identity from a model id or route hint.
+
+    Strips provider routing hints and vendor paths before checking whether the
+    actual model is in the Grok family. Returns the normalized Grok model string,
+    or empty string if model_id is not a Grok model.
+    """
+    if not model_id:
+        return ""
+    bare = _strip_provider_hint_for_reasoning(str(model_id), provider_id).strip().lower().rsplit("/", 1)[-1]
+    norm = _normalize_grok_model_id(bare)
+    if not norm:
+        return ""
+    if bare.startswith("grok") or norm == bare or bare.endswith(norm):
+        return norm
+    return ""
+
+
+def _grok_reasoning_profile(model_id: str | None, provider_id: str | None = None) -> dict | None:
     """Single source of truth for the Grok reasoning surface.
 
     Consults the installed Agent (agent.model_metadata.grok_supports_reasoning_effort
     and is_grok_46_family) when available, falling back to the mirrored allowlist
     and effort ladder. Returns None when the id gets no reasoning dial.
     """
-    norm = _normalize_grok_model_id(model_id)
+    norm = _grok_model_identity(model_id, provider_id)
     if not norm:
         return None
 
@@ -6174,8 +6194,16 @@ def _grok_reasoning_profile(model_id: str | None) -> dict | None:
     if not supports:
         return None
 
-    efforts = list(_XAI_GROK46_EFFORTS) if is_46 else list(_XAI_LEGACY_EFFORTS)
-    can_disable = not (norm.startswith("grok-4.5") or is_46)
+    xai_vocab = None
+    try:
+        from agent.reasoning_effort import XAI_GROK46_EFFORTS, XAI_LEGACY_EFFORTS
+
+        xai_vocab = XAI_GROK46_EFFORTS if is_46 else XAI_LEGACY_EFFORTS
+        efforts = list(xai_vocab)
+    except (ImportError, AttributeError):
+        efforts = list(_XAI_GROK46_EFFORTS) if is_46 else list(_XAI_LEGACY_EFFORTS)
+
+    can_disable = "none" in (xai_vocab if xai_vocab is not None else efforts)
     return {
         "supports": True,
         "max_effort": "xhigh" if is_46 else "high",
@@ -6449,7 +6477,7 @@ def _filter_reasoning_efforts_for_provider(
     ]
     normalized = list(dict.fromkeys(normalized))
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
-    bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
+    bare = _strip_provider_hint_for_reasoning(model_id, provider_id).lower().rsplit("/", 1)[-1]
     # OpenAI-family lanes cap pre-GPT-5.6 GPT-5 models at xhigh and o-series at
     # high. GPT-5.6's alias and Sol/Terra/Luna variants natively accept max.
     if provider in _OPENAI_FAMILY_REASONING_PROVIDERS:
@@ -6476,8 +6504,9 @@ def _filter_reasoning_efforts_for_provider(
     # Grok reasoning capability and effort ceiling follow the model id alone
     # across every lane (xai, xai-oauth, custom:proxy). Unknown Grok models
     # get no dial ([]), 4.6 gets low..xhigh, and legacy gets low..high.
-    if _normalize_grok_model_id(bare):
-        grok_profile = _grok_reasoning_profile(bare)
+    grok_id = _grok_model_identity(model_id, provider_id)
+    if grok_id:
+        grok_profile = _grok_reasoning_profile(grok_id)
         if grok_profile is None:
             return []
         return [eff for eff in normalized if eff in grok_profile["supported_efforts"]]
@@ -6553,7 +6582,7 @@ def _is_pre_adaptive_anthropic(bare_model: str) -> bool:
 
 def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
     """Fallback when hermes_cli is unavailable."""
-    model = _strip_provider_hint_for_reasoning(model_id).lower()
+    model = _strip_provider_hint_for_reasoning(model_id, provider_id).lower()
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
     if not model or provider in {"cursor-acp", "copilot-acp"}:
         return []
@@ -6600,7 +6629,7 @@ def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] 
     caller should continue to compatibility fallbacks. A concrete list (including
     ``[]``) is authoritative.
     """
-    model = _strip_provider_hint_for_reasoning(model_id)
+    model = _strip_provider_hint_for_reasoning(model_id, provider_id)
     provider = str(provider_id or "").strip().lower()
     if not model or not provider:
         return None
@@ -6837,7 +6866,7 @@ def resolve_model_reasoning_efforts(
         [e for e in raw if e != "none"], str(model_id or ""), str(provider_id or "")
     )
     if had_none:
-        grok_prof = _grok_reasoning_profile(model_id)
+        grok_prof = _grok_reasoning_profile(model_id, provider_id)
         if grok_prof is not None and not grok_prof.get("can_disable", True):
             return filtered
         # Keep 'none' in its original leading position if it was there.
@@ -7008,15 +7037,28 @@ def coerce_reasoning_effort_for_model(
     # grok-4.5* and 4.6 family reject "none" and coerce to "";
     # grok-4.3 accepts "none"; other levels clamp to nearest weaker supported level,
     # or weakest supported level when below the floor.
-    if _normalize_grok_model_id(model_id):
-        grok_profile = _grok_reasoning_profile(model_id)
+    grok_id = _grok_model_identity(model_id, provider_id)
+    if grok_id:
+        grok_profile = _grok_reasoning_profile(grok_id)
         if grok_profile is None:
             return ""
         if raw == "none":
             return "" if grok_profile.get("can_disable") is False else "none"
         if raw not in VALID_REASONING_EFFORTS:
             return ""
-        supported = grok_profile["supported_efforts"]
+        grok_efforts = grok_profile["supported_efforts"]
+        resolved = resolve_model_reasoning_efforts(
+            model_id,
+            provider_id=provider_id,
+            base_url=base_url,
+        )
+        resolved_efforts = [eff for eff in resolved if eff != "none"]
+        if resolved_efforts:
+            supported = [eff for eff in grok_efforts if eff in resolved_efforts]
+            if not supported:
+                supported = resolved_efforts
+        else:
+            supported = grok_efforts
         if raw in supported:
             return raw
         ladder = list(VALID_REASONING_EFFORTS)
@@ -7229,7 +7271,7 @@ def get_reasoning_status(
     # the toggle, so the flag has to be narrowed here — it is what hides the
     # "None" option in the composer, and a model that cannot disable reasoning
     # must not advertise a disable control. (#6437 review)
-    grok_profile = _grok_reasoning_profile(resolve_model)
+    grok_profile = _grok_reasoning_profile(resolve_model, resolve_provider)
     grok_can_disable = (
         bool(grok_profile["can_disable"]) if grok_profile is not None else True
     )
