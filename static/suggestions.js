@@ -84,14 +84,36 @@
     // Der Chat, dem der Draft gehört — send() und das Warten auf /api/chat/start
     // können dauern, und der Nutzer kann in der Zwischenzeit den Chat wechseln.
     const ownerSid=_currentSid();
+    // Die gestagten Anhänge gehören zum Entwurf, NICHT zur Vorschlags-Antwort:
+    // send() lädt S.pendingFiles hoch und leert den Tray. Blieben sie während
+    // des Klicks gestagt, gingen die Dateien des Entwurfs mit dem Vorschlag raus
+    // und fehlten anschließend im wiederhergestellten Entwurf. Also vor dem
+    // Senden abkoppeln und zusammen mit dem Text zurücklegen.
+    let parkedFiles=null;
+    if(draftFiles.length&&typeof S!=='undefined'&&S&&Array.isArray(S.pendingFiles)){
+      parkedFiles=draftFiles;
+      S.pendingFiles=[];
+      if(typeof window.renderTray==='function'){ try{ window.renderTray(); }catch(_){} }
+    }
     msg.value=label;
     try{
       const fn=window.send;
       if(typeof fn==='function') await fn();
     }finally{
+      const _sameChat=_currentSid()===ownerSid;
+      const _untouched=!msg.value.trim()||msg.value===label;
+      // Nur wenn wir auch den Text zurücklegen (gleicher Chat, niemand hat
+      // getippt) kommen die Anhänge mit zurück; sonst gehören sie dem Entwurf,
+      // der serverseitig gespeichert wird bzw. verworfen wurde.
+      if(parkedFiles&&_sameChat&&_untouched&&typeof S!=='undefined'&&S&&Array.isArray(S.pendingFiles)){
+        const _now=S.pendingFiles.slice();
+        for(let i=0;i<parkedFiles.length;i++){
+          if(_now.indexOf(parkedFiles[i])<0) _now.push(parkedFiles[i]);
+        }
+        S.pendingFiles=_now;
+        if(typeof window.renderTray==='function'){ try{ window.renderTray(); }catch(_){} }
+      }
       if(draft){
-        const _sameChat=_currentSid()===ownerSid;
-        const _untouched=!msg.value.trim()||msg.value===label;
         // send() hat den Server-Draft dieses Chats geleert (text:"") - der Text
         // muss also neu hinterlegt werden, aber nie über einen neueren Entwurf:
         // nur wenn wir ihn auch wieder ins Feld legen (niemand hat getippt).
@@ -178,11 +200,20 @@
     _sendSuggestionLabel(label).catch(()=>{});
   }
 
+  // Nutzer-sichtbarer Name der Gruppe: über die Locale (en trägt den Text, alle
+  // anderen Sprachen fallen darauf zurück) statt fest im Markup.
+  function _groupAriaLabel(){
+    let label='';
+    try{ if(typeof t==='function') label=t('suggestions_group_label'); }catch(_){ label=''; }
+    if(!label||label==='suggestions_group_label') label='Suggested replies';
+    return label;
+  }
+
   function _buildGroup(items){
     const group=document.createElement('div');
     group.className='inline-suggestions';
     group.setAttribute('role','group');
-    group.setAttribute('aria-label','Suggested replies');
+    group.setAttribute('aria-label',_groupAriaLabel());
     const mac=_isMac();
     items.forEach((label,i)=>{
       const btn=document.createElement('button');
