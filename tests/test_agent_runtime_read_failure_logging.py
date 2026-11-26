@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -28,8 +30,6 @@ LOGGER_NAME = "api.agent_runtime"
 
 def _completed(*, returncode=0, stdout="", stderr=""):
     """Build a CompletedProcess shaped like the ones subprocess.run returns."""
-    import subprocess
-
     return subprocess.CompletedProcess(
         args=["git"], returncode=returncode, stdout=stdout, stderr=stderr
     )
@@ -60,7 +60,19 @@ def _patch_run(monkeypatch, mapping, *, default=None):
 
 
 def _messages(caplog) -> list[str]:
-    return [record.getMessage() for record in caplog.records]
+    """Return the messages this module's logger emitted.
+
+    Scoped to ``LOGGER_NAME`` on purpose: ``caplog`` captures every logger in
+    the session, so an unrelated warning could otherwise satisfy a loose
+    assertion and let the branch under test be deleted without turning the
+    test red. That is exactly how a timeout assertion came to accept the
+    unrelated "run_agent has no __file__" warning.
+    """
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == LOGGER_NAME
+    ]
 
 
 def _agent_tree(tmp_path):
@@ -186,17 +198,113 @@ def test_missing_agent_dir_is_logged(caplog):
     assert any("no Agent source directory" in m for m in messages), messages
 
 
-def test_budget_exhaustion_is_logged(monkeypatch, caplog):
-    """A zero budget cannot even start the read; the timeout reason is recorded."""
+def test_budget_exhaustion_is_logged(monkeypatch, tmp_path, caplog):
+    """A zero budget cannot even start the read; the timeout reason is recorded.
+
+    The ``module_path`` argument is load-bearing. Without it the reader falls
+    back to the loaded ``run_agent`` module, which is absent in a unit test
+    session: it then logs "the loaded run_agent module has no __file__" and
+    returns *before* the timeout is ever reached. A loose assertion on the
+    shared "agent revision unreadable" prefix would still pass on that
+    unrelated warning, so the timeout branch could be deleted without turning
+    this test red. Passing an explicit module path forces the real timeout
+    path, and the assertion below pins that one exact message.
+    """
     from api import agent_runtime
 
     monkeypatch.setattr(agent_runtime, "_GIT_REVISION_TIMEOUT_SECONDS", 0)
+
+    agent_dir = tmp_path / "agent"
+    module_path = agent_dir / "run_agent.py"
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        assert agent_runtime._read_agent_revision(
+            agent_dir, module_path=module_path
+        ) is None
+
+    # Exactly one warning, and it is the timeout one — not the missing-__file__
+    # warning that an omitted module_path would have produced.
+    expected = (
+        "agent revision unreadable: a Git read failed in "
+        f"{agent_dir}: {subprocess.TimeoutExpired('git', 0)}"
+    )
+    assert _messages(caplog) == [expected], _messages(caplog)
+
+
+def test_missing_run_agent_module_is_logged(monkeypatch, caplog):
+    """The no-``__file__`` fallback names itself, so it cannot stand in for another reason."""
+    from api import agent_runtime
+
+    monkeypatch.setitem(sys.modules, "run_agent", None)
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         assert agent_runtime._read_agent_revision(Path("/nonexistent-agent")) is None
 
     messages = _messages(caplog)
-    assert any("agent revision unreadable" in m for m in messages), messages
+    assert messages == [
+        "agent revision unreadable: the loaded run_agent module has no __file__"
+    ], messages
+
+
+def test_expired_budget_after_successful_reads_is_logged(
+    monkeypatch, tmp_path, caplog
+):
+    """The post-read budget check names itself too.
+
+    This is the *other* timeout warning: every Git call succeeded, but the
+    total budget had run out by the time HEAD came back. It lives on a
+    different branch from the exception handler above, so it needs its own
+    pin — with the same exact-match rule, so no unrelated warning can stand in
+    for it.
+    """
+    import time as real_time
+    import types
+
+    from api import agent_runtime
+
+    agent_dir, module_path = _agent_tree(tmp_path)
+
+    # Every Git call succeeds, but the clock advances past the deadline during
+    # the last one, so the post-read budget check is what fires — not the
+    # TimeoutExpired handler, which would fire if the budget ran out *before*
+    # a call started.
+    clock = {"now": 100.0}
+    monkeypatch.setattr(
+        agent_runtime,
+        "time",
+        types.SimpleNamespace(monotonic=lambda: clock["now"], time=real_time.time),
+    )
+    monkeypatch.setattr(agent_runtime, "_GIT_REVISION_TIMEOUT_SECONDS", 10)
+
+    # Budget is 10s: the first two calls fit inside it, the third one starts
+    # with 2s left and finishes 5s later — so the read succeeded but the
+    # total budget is gone.
+    delays = [4.0, 4.0, 5.0]
+    calls = {"n": 0}
+
+    def _run(argv, **_kwargs):
+        delay = delays[calls["n"]]
+        calls["n"] += 1
+        clock["now"] += delay
+        joined = " ".join(str(part) for part in argv)
+        if "rev-parse --show-toplevel" in joined:
+            return _completed(stdout=f"{agent_dir}\n")
+        if "ls-files" in joined:
+            return _completed(stdout="run_agent.py\n")
+        return _completed(stdout="d" * 40 + "\n")
+
+    monkeypatch.setattr(agent_runtime.subprocess, "run", _run)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        assert agent_runtime._read_agent_revision(
+            agent_dir, module_path=module_path
+        ) is None
+
+    assert calls["n"] == 3, calls["n"]
+    assert _messages(caplog) == [
+        "agent revision unreadable: the 10s Git read budget expired before the "
+        f"HEAD read completed in {agent_dir}"
+    ], _messages(caplog)
 
 
 def test_admission_separates_unreadable_from_changed(monkeypatch, tmp_path, caplog):
