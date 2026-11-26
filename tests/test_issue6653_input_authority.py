@@ -91,6 +91,7 @@ _PRELUDE = r"""
 // exercises the bodies, not the declarations) ----
 let T = { now: 1000 };
 const performance = { now: () => T.now };
+let _scrollRaf = 0;
 let FRESH = false;      // _freshProgrammaticScrollActive() answer
 let HOVER = true;       // el.matches(':hover')
 let _messageFollowIntentCache = true;
@@ -154,7 +155,7 @@ function _recentMessageKeyScrollIntent() { return performance.now() - _lastMessa
 function _recentNonMessageScrollIntent() { return performance.now() - _lastNonMessageScrollIntentMs < 350; }
 function _recentMessageRenderArtifactWindow() { return false; }
 function _freshProgrammaticScrollActive() { return FRESH; }
-function requestAnimationFrame(cb) { cb(); return 1; }
+function requestAnimationFrame(cb) { return 1; } // Deferred as in the browser; these cases inspect synchronous input only.
 function cancelAnimationFrame() {}
 function scrollToBottom() {}
 """
@@ -293,6 +294,43 @@ def test_scrollbar_drag_down_keeps_follow_intent():
         "out({cache:_messageFollowIntentCache});\n"
     )
     assert m["cache"] is True, "a downward scrollbar drag must not cancel follow-intent"
+
+
+def test_scrollbar_drag_back_to_the_tail_rearms_follow_intent_while_the_latch_is_fresh():
+    """The reverse of the drag-up case: a live token's follow write keeps the
+    programmatic latch fresh while the reader drags up and then back to the
+    tail. The return must reach the listener's tail reconciliation (its rAF),
+    or the cache stays false and auto-follow is silently off for the rest of
+    the stream."""
+    m = _run(
+        "const _rafQueue = [];\n"
+        "requestAnimationFrame = (cb) => { _rafQueue.push(cb); return _rafQueue.length; };\n"
+        "// neighbours the listener's rAF reconciliation calls\n"
+        "globalThis.window = { _autoScrollFollow: true };\n"
+        "Object.assign(globalThis, { _messagesTruncated: false, _newMessageCueVisible: false,\n"
+        "  _isSessionEndlessScrollEnabled: () => false, _loadOlderMessages() {},\n"
+        "  _scheduleDeferredOlderMessagesLoad() {}, _syncScrollToBottomCue() {},\n"
+        "  _updateSessionStartJumpButton() {} });\n"
+        "_programmaticScroll = true; _programmaticScrollSetAt = performance.now();\n"
+        "FRESH = true;                    // a token's follow write keeps the latch fresh\n"
+        "_scrollbarDragActive = true;\n"
+        "_scrollbarDragBaselineScrollTop = 4200;\n"
+        "el.scrollTop = 4100;             // thumb dragged up 100px\n"
+        "_onScroll();\n"
+        "const afterUp = _messageFollowIntentCache;\n"
+        "T.now += 16; _rafQueue.splice(0).forEach((cb) => cb());\n"
+        "// a real drag back emits a scroll event per step\n"
+        "el.scrollTop = 4150; _onScroll(); T.now += 16; _rafQueue.splice(0).forEach((cb) => cb());\n"
+        "el.scrollTop = 4200;             // thumb back at the tail\n"
+        "_onScroll();\n"
+        "T.now += 16; _rafQueue.splice(0).forEach((cb) => cb());\n"
+        "out({afterUp, cache:_messageFollowIntentCache, pinned:_scrollPinned, unpinned:_messageUserUnpinned});\n"
+    )
+    assert m["afterUp"] is False, "the upward drag must still invalidate the cache (#6653)"
+    assert m["cache"] is True and m["pinned"] is True and m["unpinned"] is False, (
+        "dragging the scrollbar back to the tail while the programmatic latch is fresh "
+        f"must re-arm following (#6653): {m}"
+    )
 
 
 def test_programmatic_scroll_never_invalidates_follow_intent():

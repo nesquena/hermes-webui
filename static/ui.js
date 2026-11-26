@@ -9510,7 +9510,7 @@ if(typeof window!=='undefined'){
       return;
 
     }
-    if(_freshProgrammaticScrollActive()) return;
+    if(_freshProgrammaticScrollActive()&&!_scrollbarDragActive) return;
     _scheduleMessageVirtualizedRender();
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
