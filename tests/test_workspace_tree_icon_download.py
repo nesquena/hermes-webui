@@ -78,6 +78,21 @@ def _context_menu_fn() -> str:
     src = _read(UI_JS_PATH)
     start = src.index("function _showFileContextMenu(e, item){")
     end = src.index("async function _inlineRenameFileItem(item){", start)
+    # The menu clamps itself through the shared helper; run the real one.
+    return _clamp_menu_fn() + "\n" + src[start:end]
+
+
+def _clamp_menu_fn() -> str:
+    src = _read(UI_JS_PATH)
+    start = src.index("function _clampContextMenuToViewport(menu){")
+    end = src.index("function _showWorkspaceRootContextMenu(e){", start)
+    return src[start:end]
+
+
+def _root_menu_fn() -> str:
+    src = _read(UI_JS_PATH)
+    start = src.index("function _showWorkspaceRootContextMenu(e){")
+    end = src.index("// Track expanded directories for tree view", start)
     return src[start:end]
 
 
@@ -600,3 +615,68 @@ class TestMenuClampsToViewport:
         assert out["style"]["top"] == "8px", out["style"]
         assert out["style"]["maxHeight"] == "1064px", out["style"]
         assert out["style"]["overflowY"] == "auto", out["style"]
+
+
+def _root_menu_vm(menu_rect: dict, vw: int, vh: int, client: tuple) -> dict:
+    """Execute the real _showWorkspaceRootContextMenu() (and the shared clamp it
+    calls) against a modeled DOM whose menu has the injected rendered bounds."""
+    payload = {"fnSource": _clamp_menu_fn() + "\n" + _root_menu_fn(), "menuRect": menu_rect,
+               "vw": vw, "vh": vh, "cx": client[0], "cy": client[1]}
+    js = (
+        "const params = " + json.dumps(payload) + ";\n"
+        + r"""
+let menus = [];
+let created = 0;
+const document = {
+  body: { appendChild(el) { menus.push(el); } },
+  querySelectorAll() { return []; },
+  createElement(tag) {
+    const el = {
+      tagName: tag.toUpperCase(), className: '', style: {}, children: [],
+      __rect: created++ === 0 ? params.menuRect : { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 },
+      getBoundingClientRect() { return this.__rect; },
+      appendChild(c) { this.children.push(c); },
+      remove() {},
+    };
+    return el;
+  },
+  addEventListener() {}, removeEventListener() {},
+};
+const window = { innerWidth: params.vw, innerHeight: params.vh };
+const t = (key) => key;
+const _workspaceContextMenuItem = (label, fn) => ({ textContent: label, _action: fn });
+const setTimeout = () => {};
+const runner = new Function('document', 'window', 't', '_workspaceContextMenuItem', 'setTimeout', 'event',
+  params.fnSource + '\n_showWorkspaceRootContextMenu(event);');
+runner(document, window, t, _workspaceContextMenuItem, setTimeout, { clientX: params.cx, clientY: params.cy });
+const menu = menus[0];
+if (!menu) throw new Error('no root menu appended');
+console.log(JSON.stringify({ top: menu.style.top || '', left: menu.style.left || '',
+  maxHeight: menu.style.maxHeight || '', overflowY: menu.style.overflowY || '' }));
+"""
+    )
+    r = subprocess.run([str(NODE), "-e", js], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        raise RuntimeError(f"node failed: {r.stderr}")
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+class TestRootMenuClampsToViewport:
+    """#7810 release gate: on touch screens the 44px rows make the workspace
+    root menu taller (about 250px), and the root menu had no measured clamp,
+    so on a short landscape phone its last action (Copy file path) sat off
+    screen. It must share the file menu's clamp."""
+
+    def test_root_menu_taller_than_viewport_pins_and_scrolls(self):
+        # 480x215 viewport, 250px menu opened at y=150: the pre-append guess
+        # puts the top at 70, so the bottom (320) is far below 215.
+        out = _root_menu_vm({"top": 70, "left": 100, "right": 270, "bottom": 320, "width": 170, "height": 250},
+                            480, 215, (100, 150))
+        assert out["top"] == "8px" and out["maxHeight"] == "199px" and out["overflowY"] == "auto", (
+            f"root menu taller than the viewport must pin to the edge and scroll; got {out}")
+
+    def test_root_menu_near_lower_edge_moves_up(self):
+        out = _root_menu_vm({"top": 700, "left": 100, "right": 270, "bottom": 950, "width": 170, "height": 250},
+                            1366, 768, (100, 700))
+        assert out["top"] == "510px" and out["maxHeight"] == "", (
+            f"root menu must clamp its measured bottom inside the viewport (768-8-250=510); got {out}")

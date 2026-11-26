@@ -385,6 +385,51 @@ def _probe_fine_pointer_rows_compact(page):
     print(f"  [desktop] fine pointer: no touch min-height on {len(m['rows'])} menu rows: OK")
 
 
+def _probe_root_menu_short_touch(browser, base, sid):
+    """The workspace root menu shares the file menu's clamp: on a short
+    landscape phone its 44px rows don't fit, so it pins to the edge and
+    scrolls, and its last action stays reachable."""
+    ctx = browser.new_context(viewport={"width": 480, "height": 215}, device_scale_factor=3,
+                              is_mobile=True, has_touch=True)
+    try:
+        page = ctx.new_page()
+        page.goto(base, wait_until="domcontentloaded")
+        for _ in range(150):
+            try:
+                if page.evaluate("(typeof S!=='undefined') && S._bootReady===true && typeof loadSession==='function'"):
+                    break
+            except Exception:
+                pass
+            page.wait_for_timeout(200)
+        else:
+            raise AssertionError("root: page never reached boot-ready")
+        page.evaluate("async (sid) => loadSession(sid)", sid)
+        page.wait_for_timeout(800)
+        r = page.evaluate("""() => {
+          document.querySelectorAll('.file-ctx-menu').forEach(el => el.remove());
+          _showWorkspaceRootContextMenu({clientX: 100, clientY: 150});
+          const m = document.querySelector('.workspace-root-ctx-menu');
+          if (!m) return {error: 'no root menu'};
+          const rows = Array.from(m.children).filter(e => e.tagName === 'DIV');
+          const last = rows[rows.length - 1];
+          last.scrollIntoView({block: 'nearest'});
+          const mr = m.getBoundingClientRect(), lr = last.getBoundingClientRect();
+          const hit = document.elementFromPoint(lr.left + lr.width / 2, lr.top + lr.height / 2);
+          return {top: mr.top, bottom: mr.bottom, vh: innerHeight, last: last.textContent.trim(),
+                  lastH: lr.height, lastHit: hit === last || last.contains(hit),
+                  scrolls: m.scrollHeight > m.clientHeight + 1};
+        }""")
+        assert "error" not in r, r
+        assert r["top"] >= 0 and r["bottom"] <= r["vh"] and r["lastHit"] and r["lastH"] >= 44, (
+            f"root: on a 480x215 touch screen the root menu must stay inside the viewport "
+            f"and its last action ({r.get('last')}) must be reachable; got {r}")
+        page.evaluate("() => document.querySelectorAll('.file-ctx-menu').forEach(el => el.remove())")
+        print(f"  [root] 480x215 touch: root menu inside viewport ({r['top']:.0f}-{r['bottom']:.0f} / "
+              f"vh {r['vh']}), scrolls={r['scrolls']}, last action '{r['last']}' reachable: OK")
+    finally:
+        ctx.close()
+
+
 def _probe_menu_scroll_fallback(page, label):
     """When the menu is taller than the viewport it must clamp to the edge and
     scroll, not overflow: maxHeight + overflowY, with Delete reachable."""
@@ -526,6 +571,7 @@ def main():
             _probe_menu_scroll_fallback(page, "tiny")
             _probe_fine_pointer_rows_compact(page)
             _probe_touch_menu_targets(browser, base, sid)
+            _probe_root_menu_short_touch(browser, base, sid)
             browser.close()
         print("PASS: workspace download placement (context menu) + row geometry hold at both widths")
         return 0

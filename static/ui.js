@@ -27102,6 +27102,32 @@ function _workspaceJoinTargetPath(targetDir, name){
   return (!targetDir||targetDir==='.') ? cleanName : `${targetDir}/${cleanName}`;
 }
 
+// Clamp an appended workspace context menu (file or root) to its ACTUAL
+// rendered bounds. The pre-append estimate can't know the real menu size (it
+// varies with the item set: directories add Download Folder, files add
+// Download, read-only/external-link menus shrink, and touch rows are 44px), so
+// a pointer near an edge could leave the last rows (e.g. Delete) off screen.
+// Measure after insertion and correct; when the menu is taller than the
+// viewport itself, pin it to the edge and let it scroll rather than overflow.
+function _clampContextMenuToViewport(menu){
+  const vw=window.innerWidth,vh=window.innerHeight;
+  const mrect=menu.getBoundingClientRect();
+  const edge=8;
+  if(mrect.bottom>vh-edge||mrect.top<edge){
+    const maxH=vh-edge*2;
+    if(mrect.height>maxH){
+      menu.style.top=edge+'px';
+      menu.style.maxHeight=maxH+'px';
+      menu.style.overflowY='auto';
+    }else{
+      menu.style.top=Math.max(edge,Math.min(mrect.top,vh-edge-mrect.height))+'px';
+    }
+  }
+  if(mrect.right>vw-edge||mrect.left<edge){
+    menu.style.left=Math.max(edge,Math.min(mrect.left,vw-edge-mrect.width))+'px';
+  }
+}
+
 function _showWorkspaceRootContextMenu(e){
   document.querySelectorAll('.file-ctx-menu').forEach(el=>el.remove());
   const menu=document.createElement('div');
@@ -27146,6 +27172,7 @@ function _showWorkspaceRootContextMenu(e){
   }));
 
   document.body.appendChild(menu);
+  _clampContextMenuToViewport(menu);
   const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
   setTimeout(()=>document.addEventListener('click',dismiss),0);
 }
@@ -27882,28 +27909,7 @@ function _showFileContextMenu(e, item){
   }
 
   document.body.appendChild(menu);
-  // Clamp to the ACTUAL rendered bounds. The pre-append estimate above cannot
-  // know the real menu size (it varies with the item set: directories add
-  // Download Folder, files add Download, read-only/external-link menus
-  // shrink), so a pointer near the lower edge left the last rows — e.g.
-  // Delete — below the fold. Measure after insertion and correct; when the
-  // menu is taller than the viewport itself, pin it to the edge and let it
-  // scroll rather than overflow.
-  const mrect=menu.getBoundingClientRect();
-  const edge=8;
-  if(mrect.bottom>vh-edge||mrect.top<edge){
-    const maxH=vh-edge*2;
-    if(mrect.height>maxH){
-      menu.style.top=edge+'px';
-      menu.style.maxHeight=maxH+'px';
-      menu.style.overflowY='auto';
-    }else{
-      menu.style.top=Math.max(edge,Math.min(mrect.top,vh-edge-mrect.height))+'px';
-    }
-  }
-  if(mrect.right>vw-edge||mrect.left<edge){
-    menu.style.left=Math.max(edge,Math.min(mrect.left,vw-edge-mrect.width))+'px';
-  }
+  _clampContextMenuToViewport(menu);
   const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
   setTimeout(()=>document.addEventListener('click',dismiss),0);
 }
