@@ -250,6 +250,29 @@ def _read_checkpoint_text(git: str, ckpt_dir: Path, modes: dict[str, int], rel_p
     return blob.decode(errors="replace")
 
 
+def _decode_git_path(raw: bytes) -> str:
+    """Decode a git pathname losslessly.
+
+    Git pathnames are bytes, not text: a repository can track a name that is not
+    valid UTF-8 (git only forbids NUL and '/'). Decoding with plain UTF-8 would
+    replace those bytes with U+FFFD, so the decoded name could no longer be given
+    back to git to read the blob. `os.fsdecode` uses `surrogateescape`, the
+    reversible 1:1 mapping the stdlib uses for pathnames, so re-encoding the
+    returned str with `os.fsencode` yields the original bytes.
+    """
+    return os.fsdecode(raw)
+
+
+def _rev_path_spec(commit_id: str, rel_path: str) -> bytes:
+    """Build the ``<rev>:<path>`` argument as BYTES.
+
+    Passing the spec as text would let Python's filesystem encoding round-trip
+    the surrogate-escaped name, which is lossy on a non-UTF-8 locale; handing
+    git the exact bytes avoids depending on the locale at all.
+    """
+    return commit_id.encode() + b":" + os.fsencode(rel_path)
+
+
 def _read_checkpoint_blob_for(
     git: str, ckpt: "_CheckpointRef", rel_path: str,
 ) -> bytes | None:
@@ -257,7 +280,7 @@ def _read_checkpoint_blob_for(
     if ckpt.git_dir is None:
         return _read_checkpoint_blob(git, ckpt.path, rel_path)
     result = subprocess.run(
-        _git_cmd(git, ckpt, "cat-file", "blob", f"{ckpt.id}:{rel_path}"),
+        _git_cmd(git, ckpt, "cat-file", "blob", _rev_path_spec(ckpt.id, rel_path)),
         capture_output=True, timeout=10,
         creationflags=windows_hide_flags(),
     )
@@ -277,20 +300,25 @@ def _checkpoint_entry_modes_for(git: str, ckpt: "_CheckpointRef") -> dict[str, i
 
     result = subprocess.run(
         _git_cmd(git, ckpt, "ls-tree", "-r", "-z", ckpt.id),
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, timeout=10,
         creationflags=windows_hide_flags(),
     )
     if result.returncode != 0:
         raise ValueError("Failed to list checkpoint files")
 
     modes: dict[str, int] = {}
-    for entry in result.stdout.split("\0"):
+    # Read the tree as BYTES: a tracked filename may not be valid UTF-8, and
+    # decoding it with `text=True` would replace those bytes with U+FFFD, so the
+    # path could no longer be fed back to git. `surrogateescape` round-trips the
+    # exact bytes, which is what the rest of this module assumes a rel_path is.
+    for entry in result.stdout.split(b"\0"):
         if not entry.strip():
             continue
-        meta, _sep, rel_path = entry.partition("\t")
+        meta, _sep, raw_rel_path = entry.partition(b"\t")
         parts = meta.split()
-        if len(parts) < 3 or not rel_path:
+        if len(parts) < 3 or not raw_rel_path:
             continue
+        rel_path = _decode_git_path(raw_rel_path)
         try:
             modes[rel_path] = int(parts[0], 8)
         except ValueError:
@@ -308,7 +336,7 @@ def _read_checkpoint_text_for(
         blob = _read_checkpoint_blob(git, ckpt.path, rel_path)
     else:
         result = subprocess.run(
-            _git_cmd(git, ckpt, "cat-file", "blob", f"{ckpt.id}:{rel_path}"),
+            _git_cmd(git, ckpt, "cat-file", "blob", _rev_path_spec(ckpt.id, rel_path)),
             capture_output=True, timeout=10,
             creationflags=windows_hide_flags(),
         )
