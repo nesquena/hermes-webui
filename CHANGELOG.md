@@ -53,11 +53,11 @@
 
 ### Fixed
 
-- **Cancelling a long session no longer risks freezing the page in Safari and WKWebView (#6669, @webtecnica, for #6653).** Cancelling a long session could block the page in a synchronous `scrollHeight` layout. Two things changed:
-  - The cancel path no longer reads the transcript's layout synchronously to decide whether to keep following it. It now uses a layout-free "follow intent" state, set from real user input: wheel, keys, touch and the scrollbar.
+- **Cancelling a session no longer reads the transcript's layout to decide whether to keep following it (#6669, @webtecnica, for #6653).** This targets the reported page freeze in Safari and WKWebView when cancelling a long session. Two things changed:
+  - The decision now uses a layout-free "follow intent" state, set from real user input: wheel, keys, touch and the scrollbar.
   - The keyboard counts as the user's only when the transcript or the page body has focus. A focused widget elsewhere, such as the file tree, keeps its own arrow keys while the pointer hovers the transcript.
 
-  Scrolling back down to the captured tail resumes following. A key or wheel step that can't move a short transcript no longer stops following.
+  Scrolling back down to the captured tail resumes following, including dragging the scrollbar back while a reply streams. A key or wheel step that can't move a short transcript no longer stops following. With Auto-follow off, cancelling leaves the reader where they are.
 
 - **A flaky provider-probe test now passes reliably under load (#9360).** `tests/test_issue7481_probe_dedup.py` ran the bounded model-list rebuild on the real clock with real probe threads. On a busy test host, a late probe thread could run out its time slice and the endpoint was probed twice. The module now uses the fake clock and inline probes that the sibling fairness test already uses. The assertions are unchanged. This is a test-only change.
 
