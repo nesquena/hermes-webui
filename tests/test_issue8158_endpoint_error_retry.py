@@ -408,6 +408,74 @@ def test_failed_reprobe_respects_retry_ttl(monkeypatch):
         assert _wait_until(_retry_inflight_empty)
 
 
+def test_retry_admission_rechecks_deadline_recorded_while_sampling(monkeypatch):
+    """A retry deadline recorded after sampling still suppresses admission.
+
+    Reader B samples the provider as due, then pauses at the provider-entry
+    snapshot boundary. While B is paused, reader A's probe fails and records
+    a retry deadline still in the future. When B resumes after A's inflight
+    marker has cleared, B must not admit a duplicate probe inside the retry
+    TTL window.
+    """
+    requested = []
+
+    def fake_urlopen(req, timeout=None):
+        requested.append(getattr(req, "full_url", str(req))
+        )
+        raise urllib.error.URLError("still down")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with _CatalogState():
+        _seed_errored_catalog()
+        b_sampling = threading.Event()
+        release_b = threading.Event()
+        real_snapshot = config._custom_provider_entry_snapshot
+        b_thread = None
+
+        def snapshot_gate(provider_id):
+            if threading.current_thread() is b_thread:
+                b_sampling.set()
+                assert release_b.wait(timeout=10)
+            return real_snapshot(provider_id)
+
+        monkeypatch.setattr(
+            config, "_custom_provider_entry_snapshot", snapshot_gate
+        )
+
+        def reader_b():
+            config._maybe_schedule_models_endpoint_error_retries(
+                copy.deepcopy(config._available_models_cache)
+            )
+
+        b_thread = threading.Thread(target=reader_b)
+        b_thread.start()
+        assert b_sampling.wait(timeout=5)
+
+        # Reader A admits while B is paused; its probe fails and records a
+        # retry deadline still in the future.
+        config._maybe_schedule_models_endpoint_error_retries(
+            copy.deepcopy(config._available_models_cache)
+        )
+        assert _wait_until(
+            lambda: _retry_inflight_empty()
+            and any(
+                deadline > time.monotonic()
+                for deadline in config._models_endpoint_error_retry_next.values()
+            )
+        )
+
+        release_b.set()
+        b_thread.join(timeout=5)
+        assert not b_thread.is_alive()
+
+        # B must not have admitted a duplicate probe inside the retry TTL.
+        assert _wait_until(_retry_inflight_empty)
+        assert [u for u in requested if "broken.example" in u] == [
+            "https://broken.example/v1/models"
+        ]
+
+
 def _install_provider_model_ids(monkeypatch, fn):
     hermes_cli = types.ModuleType("hermes_cli")
     hermes_cli.__path__ = []
@@ -438,7 +506,11 @@ def _run_live_models(monkeypatch, *, fail, during_request=None):
         ],
     }
     monkeypatch.setattr(config, "get_config", lambda: config_data)
-    monkeypatch.setattr(config, "cfg", config_data)
+    # cfg restoration is owned solely by the enclosing _CatalogState guard.
+    # monkeypatch.setattr here would capture the seeded synthetic cfg inside
+    # the guard and reinstate it at teardown — after the guard already
+    # restored the real cfg — leaking it into neighboring tests.
+    config.cfg = config_data
     _install_provider_model_ids(monkeypatch, lambda provider: [])
 
     def fake_urlopen(req, timeout=None):

@@ -10900,13 +10900,22 @@ def _maybe_schedule_models_endpoint_error_retries(catalog, *, profile=None) -> N
     with _available_models_cache_lock:
         if generation != _models_rebuild_seq:
             return
+        # Recheck the retry deadline against fresh time at admission: a probe
+        # that failed while entries were being snapshot recorded a future
+        # deadline the sampling above could not see, and admitting now would
+        # start a duplicate probe inside the suppression window.
+        admission_now = time.monotonic()
         for provider_id in due:
             key = (resolved_profile, provider_id)
-            if key in _models_endpoint_error_retry_inflight or entries[provider_id] is None:
+            if (
+                key in _models_endpoint_error_retry_inflight
+                or entries[provider_id] is None
+                or _models_endpoint_error_retry_next.get(key, 0.0) > admission_now
+            ):
                 continue
             _models_endpoint_error_retry_inflight.add(key)
             _models_endpoint_error_retry_next[key] = (
-                now + _MODELS_ENDPOINT_ERROR_RETRY_TTL
+                admission_now + _MODELS_ENDPOINT_ERROR_RETRY_TTL
             )
             try:
                 threading.Thread(
