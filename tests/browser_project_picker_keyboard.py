@@ -2091,6 +2091,9 @@ ROW_IN_BOX_JS = """() => {
     text: row.textContent.trim(),
     inside: rect.top >= top - 0.5 && rect.bottom <= bottom + 0.5,
     scrolls: picker.scrollHeight > picker.clientHeight + 1,
+    // Where the row's bottom would sit with the picker scrolled to the top:
+    // past clientHeight means opening had to reveal it.
+    belowFoldAtZero: rect.bottom - top + picker.scrollTop > picker.clientHeight + 0.5,
   };
 }"""
 
@@ -2106,8 +2109,14 @@ def _check_long_list(page, seed):
         return [f"  [long list] {opened['problem']}"]
     if not opened["scrolls"]:
         failures.append("  [long list] the picker does not scroll inside itself")
-    if opened["text"] != LONG_PROJECTS[-1]:
+    if opened["text"] != LONG_PROJECTS_LAST:
         failures.append(f"  [long list] focus opened on {opened['text']!r}, expected the current project")
+    if not opened["belowFoldAtZero"]:
+        # Otherwise the current row is visible without any scrolling and the
+        # "inside" check below would pass even if opening never revealed it.
+        failures.append(
+            f"  [long list] the current project {opened['text']!r} is above the picker's fold: the fixture does not test the reveal"
+        )
     if not opened["inside"]:
         failures.append(f"  [long list] on open the focused row {opened['text']!r} is outside the picker's box")
     for key, want in (("End", "+ New project"), ("Home", "No project"), ("ArrowUp", "+ New project")):
@@ -2970,25 +2979,33 @@ def main():
                 failures.extend(f"  [⋮ menu keys, short window] pageerror: {err}" for err in errors)
                 ctx.close()
 
-            ctx, page, errors = _new_page(browser, viewport={"width": 1440, "height": 420})
+            # The rows are sorted with the browser's default collation, which
+            # differs by locale (ja and zh put "Архив переписки" last), so the
+            # context pins the locale LONG_PROJECTS_LAST was measured under.
+            ctx, page, errors = _new_page(browser, viewport={"width": 1440, "height": 420}, locale="en-US")
             if page is None:
                 failures.append(f"  [long list] {errors}")
             else:
-                # The conversation goes into the last of them, so its current
-                # project starts below the picker's fold.
+                # The conversation goes into the project the picker lists last,
+                # so its current project starts below the picker's fold. That is
+                # the presentation-last project, not the last one created: the
+                # alphabetical order lists the last-created one mid-list, where
+                # it is visible on open and the reveal would go untested.
                 page.evaluate(
-                    """async ({names, sid}) => {
+                    """async ({names, target, sid}) => {
                       const post = (path, body) => fetch(path, {
                         method: 'POST', headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify(body),
                       }).then(response => response.json());
-                      let last = null;
-                      for (const name of names)
-                        last = (await post('/api/projects/create', {name, color: '#f5c542'})).project.project_id;
-                      await post('/api/session/move', {session_id: sid, project_id: last});
+                      let into = null;
+                      for (const name of names) {
+                        const id = (await post('/api/projects/create', {name, color: '#f5c542'})).project.project_id;
+                        if (name === target) into = id;
+                      }
+                      await post('/api/session/move', {session_id: sid, project_id: into});
                       await renderSessionList();
                     }""",
-                    {"names": LONG_PROJECTS, "sid": seed["alpha"]},
+                    {"names": LONG_PROJECTS, "target": LONG_PROJECTS_LAST, "sid": seed["alpha"]},
                 )
                 found = _check_long_list(page, seed)
                 failures.extend(found)
