@@ -1778,7 +1778,10 @@ def _custom_provider_entries(
     native = source.get("providers")
     if not isinstance(native, dict):
         return entries
-    seen = {_custom_provider_slug_from_name(entry.get("name")) for entry in entries}
+    seen = {
+        _custom_provider_slug_from_name(_str_field(entry, "name"))
+        for entry in entries
+    }
     index = _native_identity_index(native)
     for key in native:
         if not _is_native_custom_provider_key(key):
@@ -2319,7 +2322,7 @@ def _named_custom_provider_slug_for_base_url(
         entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_base_url != target:
             continue
-        slug = _custom_provider_slug_from_name(entry.get("name")) or "custom"
+        slug = _custom_provider_slug_from_name(_str_field(entry, "name")) or "custom"
         if not fallback:
             fallback = slug
         if model_id and _custom_provider_entry_owns_model(entry, model_id):
@@ -3341,14 +3344,14 @@ def _get_provider_base_url(provider_id):
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
     prov_cfg = _get_provider_cfg(provider_id)
-    explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
+    explicit = _str_field(prov_cfg, "base_url").rstrip("/")
     if explicit:
         return explicit
     model_cfg = cfg.get("model", {}) or {}
     if isinstance(model_cfg, dict):
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
         if model_provider == str(provider_id).strip().lower():
-            model_base = (model_cfg.get("base_url") or "").strip().rstrip("/")
+            model_base = _str_field(model_cfg, "base_url").rstrip("/")
             if model_base:
                 return model_base
     return None
@@ -3575,7 +3578,14 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     config_base_url = None
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
-        config_base_url = model_cfg.get("base_url")
+        _raw_config_base_url = model_cfg.get("base_url")
+        # A non-string endpoint is ABSENT (#9328), never an int/float
+        # travelling back to callers that build a URL from it.
+        config_base_url = (
+            _raw_config_base_url
+            if isinstance(_raw_config_base_url, str) or _raw_config_base_url is None
+            else None
+        )
         config_provider = _resolve_configured_provider_id(
             model_cfg.get("provider"),
             cfg,
@@ -3798,7 +3808,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             if _skip_custom_providers and _canonicalise_provider_id(slug) != _active_slug:
                 continue
             if target in _configured_model_ids(pdef.get('models')):
-                p_base_url = str(pdef.get('base_url') or '').strip()
+                p_base_url = _str_field(pdef, 'base_url')
                 return model_id, slug, p_base_url or None
 
     # @provider:model format — explicit provider hint from the dropdown.
