@@ -402,7 +402,43 @@ def test_sealed_parent_with_unconfirmable_tip_refuses_retryably(
     assert resp == {
         "error": "compression_continuation_unconfirmed",
         "_status": 409,
+        "retryable": True,
     }
+    assert started == []
+
+
+def test_unconfirmed_refusal_is_transient_for_the_delegation_budget(
+    _stub_routes, monkeypatch, tmp_path
+):
+    """Greptile P1 on #9380 (round 5): the delegation caller must refund.
+
+    ``_start_async_delegation_wakeup_turn`` classifies refusals through
+    ``_wakeup_refusal_is_transient`` and only refunds the bounded
+    delivery-attempt budget when it says transient. The classifier has no
+    idea of this error string — it trusts the payload's own ``retryable``
+    flag — so the route's real refusal must carry it. Red on the pre-fix
+    refusal: the same call without the flag classifies terminal and a
+    temporary continuation read could terminally drop a completed
+    delegation while its session is still alive.
+    """
+    _seal_state_for(_ChurnReader(churn=True), monkeypatch, tmp_path)
+
+    routes_mod, started = _stub_routes
+    parent = _FakeSession("sealedparent", snap=True, profile="default", updated=100.0)
+    sessions = {parent.session_id: parent}
+    routes_mod.get_session = lambda sid: sessions[sid]
+    routes_mod.SESSIONS = collections.OrderedDict(sessions)
+
+    import api.background_process as bp_mod
+
+    resp = routes_mod.start_session_turn(
+        "sealedparent", "delegation result", source="delegation_wakeup"
+    )
+    assert resp is not None and resp.get("_status") == 409
+    assert bp_mod._wakeup_refusal_is_transient(resp, 409) is True, (
+        "the unconfirmed refusal must classify transient so the delegation "
+        "delivery attempt is refunded, not consumed"
+    )
     assert started == []
 
 

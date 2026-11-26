@@ -31810,9 +31810,18 @@ def start_session_turn(
                 "could not be confirmed on this read; refusing retryably",
                 session_id,
             )
+            # ``retryable: True`` is part of this refusal's contract, not
+            # decoration (#9380 review, greptile P1 round 5): the async
+            # delegation wakeup classifies refusals through
+            # ``_wakeup_refusal_is_transient`` and only refunds the bounded
+            # delivery-attempt budget for transient ones. Without the flag a
+            # temporary continuation-read failure would consume attempts and
+            # could terminally drop an already-completed delegation while its
+            # session is still alive.
             return {
                 "error": "compression_continuation_unconfirmed",
                 "_status": 409,
+                "retryable": True,
             }
         logger.warning(
             "start_session_turn: %s is durably sealed with a confirmed-closed "
