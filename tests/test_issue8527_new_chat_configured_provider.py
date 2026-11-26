@@ -1229,6 +1229,17 @@ const ctx = {
       let body = null;
       try { body = JSON.parse((opts && opts.body) || 'null'); } catch (_) { body = null; }
       newSessionBodies.push(body);
+      // maintainer follow-up (2026-11-23): an EXACT create-index may be made
+      // to fail with the real api() error shape the server sends for a 400 —
+      // e.g. the untrusted-workspace rejection. The real api() throws for a
+      // non-ok status (workspace.js), so newSession observes a rejection and
+      // the replacing session is never adopted; its explicit-pick marker must
+      // survive for the retry that follows.
+      if (scenario.failCreateAt === newSessionBodies.length) {
+        const err = new Error('untrusted workspace');
+        err.status = 400;
+        return Promise.reject(err);
+      }
       // Every creation adopts a DISTINCT session id, exactly as the server
       // mints a new one per POST. A single fixed id would conflate "the
       // session this New Chat replaces" with "the session it just adopted" —
@@ -1694,12 +1705,30 @@ if (scenario.schedule === 'delayedOldCatalog') {
       return state;
     })
     // (1) First creation: accepted, and it adopts a DISTINCT session id.
-    .then((state) => context.newSession(false, scenario.newSessionOptions || {}).then(() => ({
-      ...state,
-      afterFirstCreate: snapshot(),
-      afterFirstCreateEvidence: evidence(),
-      adoptedSessionId: (S.session && S.session.session_id) || null,
-    })))
+    // 'failCreateAt' (exact /api/session/new POST index, 1-based across the
+    // whole run — the canonical switch's auto-created session is POST 1 there)
+    // makes this one reject exactly like the server's 400s, and the schedule
+    // records the state that must survive for the retry: the pick evidence of
+    // the session being replaced. When the failure was not requested, a
+    // rejection is a real error and must surface.
+    .then((state) => {
+      const first = context.newSession(false, scenario.newSessionOptions || {});
+      return first.then(() => ({
+        ...state,
+        afterFirstCreate: snapshot(),
+        afterFirstCreateEvidence: evidence(),
+        adoptedSessionId: (S.session && S.session.session_id) || null,
+      })).catch((err) => {
+        if (!scenario.failCreateAt) throw err;
+        return {
+          ...state,
+          firstCreateFailed: true,
+          firstCreateError: String((err && err.message) || err),
+          afterFailedCreate: snapshot(),
+          afterFailedCreateEvidence: evidence(),
+        };
+      });
+    })
     // Another tab rewriting the SHARED persisted pair BETWEEN the two
     // creations, through the production writer so the stored shape is the
     // real one. The second creation's authority must stay on this tab's own
@@ -1731,11 +1760,15 @@ if (scenario.schedule === 'delayedOldCatalog') {
         sessionStorageAfterPick: state.sessionStorageAfterPick || null,
         afterRepickRefresh: state.afterRepickRefresh || null,
         afterRepickRefreshEvidence: state.afterRepickRefreshEvidence || null,
-        afterFirstCreate: state.afterFirstCreate,
-        afterFirstCreateEvidence: state.afterFirstCreateEvidence,
-        adoptedSessionId: state.adoptedSessionId,
-        afterSecondCreate: state.afterSecondCreate,
-        afterSecondCreateEvidence: state.afterSecondCreateEvidence,
+        firstCreateFailed: state.firstCreateFailed || false,
+        firstCreateError: state.firstCreateError || null,
+        afterFailedCreate: state.afterFailedCreate || null,
+        afterFailedCreateEvidence: state.afterFailedCreateEvidence || null,
+        afterFirstCreate: state.afterFirstCreate || null,
+        afterFirstCreateEvidence: state.afterFirstCreateEvidence || null,
+        adoptedSessionId: state.adoptedSessionId || null,
+        afterSecondCreate: state.afterSecondCreate || null,
+        afterSecondCreateEvidence: state.afterSecondCreateEvidence || null,
       }));
     })
     .catch((err) => {
@@ -3704,4 +3737,142 @@ def test_re_established_authority_is_scoped_to_the_adopted_session():
     assert ("hermes-webui-explicit-picker-pick:" + adopted[-2]) not in result["sessionStorage"], (
         "the replaced session's marker must stay cleared; got "
         f"{sorted(result['sessionStorage'])!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Maintainer follow-up (2026-11-23): a FAILED New Chat must not lose the pick
+# for the retry. The reproduce:
+#
+#   1. switch to a profile with no default model, pick gpt-5.4-mini on
+#      custom:review-route (the reset gate stays armed)
+#   2. New Chat -> newSession cleared the replaced session's marker BEFORE
+#      the POST, then /api/session/new fails (the "untrusted workspace" 400)
+#   3. nothing restored the pick -> every retry went out NEITHER model NOR
+#      model_provider
+#
+# Fix: the replaced session's marker is cleared only AFTER the create
+# succeeds, next to where the new session is adopted — so a failed create
+# leaves the marker intact and the retry reads the pick back through the
+# same marker arm.
+# ---------------------------------------------------------------------------
+
+def _failed_create_scenario(flow, pick, **extra):
+    """Two successive New Chats where the FIRST manual creation fails with a
+    server 400 (the canonical switch's own auto-created session — POST 1 in
+    that flow — must still succeed, so the failing POST is the first MANUAL
+    one)."""
+    fail_at = 2 if flow == "switch" else 1
+    return _two_create_scenario(
+        flow, pick,
+        failCreateAt=fail_at,
+        **extra,
+    )
+
+
+def _assert_failed_create_retry(result, flow, pick, pair, label, marker_value=None):
+    assert result["ok"], result.get("error")
+    assert result["firstCreateFailed"], (
+        f"[{label}] the scheduled first create must have failed; error was "
+        f"{result.get('firstCreateError')!r}"
+    )
+
+    # The failed create must leave the replaced session's pick evidence
+    # INTACT: the retry's authority is the very marker the premature clear
+    # used to destroy. The marker stores the picker's RAW value (a qualified
+    # custom pick keeps its "@provider:model" qualification), so the expected
+    # marker value is the raw one.
+    after_failed = result["afterFailedCreateEvidence"]
+    assert after_failed["explicitPick"] == {
+        "value": marker_value if marker_value is not None else pick["value"],
+        "model_provider": pick.get("provider"),
+    }, (
+        f"[{label}] after the failed create the replaced session's marker "
+        f"must survive for the retry; got {after_failed['explicitPick']!r}"
+    )
+    assert result["afterFailedCreate"]["guard"], (
+        f"[{label}] the reset gate must stay armed through the failed create"
+    )
+
+    bodies = result["newSessionBodies"]
+    if flow == "switch":
+        # The canonical switch auto-creates POST 1 (model-less); the FAILED
+        # manual create is POST 2; the retry is the last one.
+        assert len(bodies) == 3, (
+            f"[{label}] expected auto + failed + retry POSTs; got {len(bodies)}"
+        )
+        first = bodies[0]
+        assert first.get("model") in (None, ""), (
+            f"[{label}] the switch's own auto-created session must stay "
+            f"model-less; got {first.get('model')!r}"
+        )
+    else:
+        assert len(bodies) == 2, (
+            f"[{label}] expected failed + retry POSTs; got {len(bodies)}"
+        )
+    failed_body, retry_body = bodies[-2], bodies[-1]
+
+    # The failed request itself carried the pick (reqBody is built before the
+    # POST) — the loss was the retry's, caused by the premature clear.
+    assert failed_body.get("model") == pair["model"], (
+        f"[{label}] the failed create must still have sent the pick's model; "
+        f"got {failed_body.get('model')!r}"
+    )
+    assert failed_body.get("model_provider") == pair["model_provider"], (
+        f"[{label}] the failed create must still have sent the pick's "
+        f"provider; got {failed_body.get('model_provider')!r}"
+    )
+
+    # THE fix: the RETRY must carry the pick again.
+    assert retry_body.get("model") == pair["model"], (
+        f"[{label}] the retry after a failed create must keep the pick's "
+        f"model; got {retry_body.get('model')!r} — the premature marker "
+        "clear destroyed the only authority the retry had"
+    )
+    assert retry_body.get("model_provider") == pair["model_provider"], (
+        f"[{label}] the retry after a failed create must keep the pick's "
+        f"provider; got {retry_body.get('model_provider')!r}"
+    )
+
+    # Only the SUCCESSFUL create adopts a session; the failure adopted none.
+    adopted = result["adoptedSessionIds"]
+    expected = 2 if flow == "switch" else 1
+    assert len(adopted) == expected and len(set(adopted)) == len(adopted), (
+        f"[{label}] only the successful creates may adopt distinct session "
+        f"ids; got {adopted!r}"
+    )
+
+    # The successful retry clears the replaced session's marker and
+    # re-establishes the authority under the adopted session's id — the
+    # survived pick travels with the session that consumed it.
+    replaced_sid = ("dest-sid" if flow == "loadSwitch" else adopted[0])
+    assert ("hermes-webui-explicit-picker-pick:" + replaced_sid) not in result["sessionStorage"], (
+        f"[{label}] after the successful retry the replaced session's marker "
+        f"must be cleared; got {sorted(result['sessionStorage'])!r}"
+    )
+    assert ("hermes-webui-explicit-picker-pick:" + adopted[-1]) in result["sessionStorage"], (
+        f"[{label}] the retry must re-establish the authority under the "
+        f"adopted session; got {sorted(result['sessionStorage'])!r}"
+    )
+
+
+@pytest.mark.parametrize("flow", ["switch", "loadSwitch"])
+def test_failed_new_chat_retry_keeps_the_accepted_qualified_pick(flow):
+    """A FAILED create must not destroy the pick the retry needs (qualified)."""
+    result = _run_refresh_driver(_failed_create_scenario(flow, _QUALIFIED_CUSTOM_PICK))
+    _assert_failed_create_retry(
+        result, flow, _QUALIFIED_CUSTOM_PICK, _QUALIFIED_CUSTOM_PAIR,
+        f"{flow}/qualified/retry",
+        marker_value=_QUALIFIED_CUSTOM_VALUE,
+    )
+
+
+@pytest.mark.parametrize("flow", ["switch", "loadSwitch"])
+def test_failed_new_chat_retry_keeps_the_accepted_bare_pick(flow):
+    """Same lifecycle for a pick with NO provider of its own (bare)."""
+    result = _run_refresh_driver(_failed_create_scenario(flow, _CUSTOM_PICK))
+    _assert_failed_create_retry(
+        result, flow, _CUSTOM_PICK,
+        {"model": _CUSTOM_PICK["value"], "model_provider": None},
+        f"{flow}/bare/retry",
     )

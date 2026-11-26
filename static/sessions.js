@@ -2605,26 +2605,35 @@ async function newSession(flash, options={}){
         ||null;
     }
     // #7865: New Chat replaces S.session without going through loadSession(),
-    // so drop the previous session's explicit-picker evidence here (placed
+    // so the replaced session's explicit-picker evidence is dropped here —
+    // but ONLY on the success path, next to where the new session is adopted
+    // (#8576 maintainer follow-up 2026-11-23). A failed create (e.g. the
+    // server's "untrusted workspace" 400) must leave the replaced session's
+    // marker intact: with the reset gate still armed, that marker is the ONLY
+    // evidence the retry can read, so clearing it before the POST destroyed
+    // the pick's model AND provider for every subsequent attempt. Capture the
+    // replaced session's id BEFORE the POST: after the adopt below S.session
+    // names the session this request created, not the one it replaced. (Placed
     // AFTER the provider fallback assignment on purpose — see the note in
     // _pickerExplicitPickKey about not disturbing the newSession source-shape
-    // window). The marker must never authorize a provider override for a
-    // different (new) session.
-    if(S.session&&S.session.session_id&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(S.session.session_id);
+    // window.)
+    const _replacedSessionId=(S.session&&S.session.session_id)||null;
     if(options&&typeof options.pickerClaimEpoch==='number') newSessionClaim=options.pickerClaimEpoch;
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
+    if(_replacedSessionId&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(_replacedSessionId);
     // #8576 maintainer follow-up (2026-11-19): the accepted current-profile
     // choice must outlive the session it was made on. The marker of the session
-    // this request REPLACED was cleared above (before the POST), so a SECOND
-    // successive New Chat used to find no choice evidence for the session it
-    // was replacing: with the reset gate still armed — an empty catalogue never
-    // releases it — the picker and the SHARED persisted pair both stay
-    // quarantined, and the second POST went out with NEITHER model NOR
-    // model_provider.
+    // this request REPLACED is cleared together with the adopt above (success
+    // path only), so a SECOND successive New Chat reads the re-established
+    // marker of the session the FIRST creation adopted — never the replaced
+    // session's cleared one. With the reset gate still armed — an empty
+    // catalogue never releases it — the picker and the SHARED persisted pair
+    // both stay quarantined, and a creation with no pick at all still goes out
+    // with NEITHER model NOR model_provider.
     //
     // Re-establish the marker for the session this SUCCESSFUL creation just
     // adopted, carrying the pair the marker itself authorized. The next create
