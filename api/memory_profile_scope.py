@@ -1179,6 +1179,11 @@ def _claim_for_profile(
         )
         return False
     with _instance_owners_lock:
+        # #9061: a manager that died while this lock was busy could only queue
+        # its removal — the GC callback never waits for the lock. Drain that
+        # queue before judging ownership, or the stale entry keeps refusing the
+        # next profile even though every manager that held the instance is gone.
+        _drain_pending_instance_forgets_locked()
         entry = _instance_owners.get(pid)
         owner = entry[1] if entry is not None and entry[0]() is provider else None
         if owner is None or owner == key:

@@ -273,6 +273,45 @@ def test_the_cross_profile_refusal_still_works_for_a_slots_provider(scope, monke
     assert scope._instance_owners[id(provider)][1] == scope.profile_home_key("home-alpha")
 
 
+def test_a_queued_forget_is_drained_before_the_next_claim(scope, monkeypatch):
+    """A manager that died while the table lock was busy only queued its removal.
+
+    The GC callback never waits for the lock (it can fire inside a logging
+    handler's lock), so the removal lands in ``_pending_instance_forgets`` and
+    is applied by the next locked table operation. If the claim does not drain
+    that queue first, the stale entry keeps the instance bound to the old
+    profile and refuses the next one even though every manager that held it
+    is gone. Kept below the pruning threshold so ``_prune_dead_owners`` cannot
+    mask the queue.
+    """
+    mod = _install_stand_in(monkeypatch)
+    assert scope.install_shared_provider_instance_guard() is True
+
+    provider = _SlotsProvider()
+    manager = _Manager()
+    assert mod.claim_instance(provider, "home-alpha", manager=manager) is True
+    pid = id(provider)
+    assert pid in scope._instance_owners
+
+    # The manager dies while this thread holds the table lock: the callback
+    # takes the busy path and queues the removal.
+    assert scope._instance_owners_lock.acquire(blocking=False) is True
+    try:
+        del manager
+        gc.collect()
+        assert len(scope._pending_instance_forgets) == 1, (
+            "the GC callback must queue its removal while the lock is busy"
+        )
+    finally:
+        scope._instance_owners_lock.release()
+
+    # The next profile claims the instance; the queued removal must be applied
+    # first, or the stale entry refuses it.
+    next_manager = _Manager()
+    assert mod.claim_instance(provider, "home-beta", manager=next_manager) is True
+    assert scope._instance_owners[pid][1] == scope.profile_home_key("home-beta")
+
+
 # ── item 3: the REAL MemoryManager and a real ``__slots__`` provider ────────
 
 
@@ -317,20 +356,30 @@ def _real_slots_provider_class():
     return _RealSlotsProvider
 
 
-def test_a_real_manager_with_a_slots_provider_releases_the_entry(scope, monkeypatch, tmp_path):
-    """Item 3: the REAL ``MemoryManager`` path, with a provider that has no weak
-    reference support.
+def test_a_real_manager_registers_initializes_and_releases_through_the_guard(
+    scope, monkeypatch, tmp_path
+):
+    """Item 3, the whole Agent path: ``add_provider`` + ``initialize_all``.
 
-    The manager is the instance's lifetime: the Agent releases its claim with
-    the last manager, and the guard's entry must go with it.
+    The earlier shape replaced ``agent.memory_manager`` and called the claim
+    directly, so it still passed when the real ``add_provider`` and
+    ``initialize_all`` were made to raise instead. This one registers the
+    provider with the real manager, lets ``initialize_all`` drive the claim
+    through the guard, then proves the entry dies with the last manager and
+    the instance transfers to another profile.
     """
     MemoryManager = _real_manager_class()
     if MemoryManager is None:
         pytest.skip("the Hermes Agent (agent.memory_manager) is not importable here")
+
+    mm = sys.modules.get("agent.memory_manager")
+    if mm is None or not callable(getattr(mm, "claim_instance", None)):
+        pytest.skip("this Hermes Agent has no memory_manager.claim_instance seam")
+
     Provider = _real_slots_provider_class()
 
-    mod = _install_stand_in(monkeypatch)
     assert scope.install_shared_provider_instance_guard() is True
+    assert getattr(mm.claim_instance, scope._GUARD_MARK, False) is True
 
     provider = Provider()
     with pytest.raises(TypeError):
@@ -338,52 +387,24 @@ def test_a_real_manager_with_a_slots_provider_releases_the_entry(scope, monkeypa
 
     manager = MemoryManager()
     home = str(tmp_path / "alpha")
+    manager.add_provider(provider)
+    manager.initialize_all("session-1", hermes_home=home)
 
-    # The Agent's own call shape (agent c9de60702c0d): manager= is passed.
-    assert mod.claim_instance(provider, home, manager=manager) is True
     pid = id(provider)
-    assert pid in scope._instance_owners
-
-    del manager
-    gc.collect()
-
-    assert pid not in scope._instance_owners, (
-        "the guard entry outlived the real MemoryManager that held the instance"
+    assert provider.bound_home == home, (
+        "initialize_all never reached the provider: the test would pass without "
+        "exercising the manager lifecycle"
     )
-
-
-def test_a_real_manager_initialize_all_claims_through_the_guard(scope, monkeypatch, tmp_path):
-    """Item 3, the whole path: the real manager's ``initialize_all`` claims the
-    instance through the guard, with the manager as the lifetime signal."""
-    MemoryManager = _real_manager_class()
-    if MemoryManager is None:
-        pytest.skip("the Hermes Agent (agent.memory_manager) is not importable here")
-    Provider = _real_slots_provider_class()
-
-    try:
-        from agent.memory_caller_scope import claim_instance as real_claim  # noqa: PLC0415
-    except Exception:
-        real_claim = None
-
-    if real_claim is None:
-        pytest.skip("the Hermes Agent (agent.memory_caller_scope) is not importable here")
-
-    # The guard wraps the Agent's real claim, exactly as production does.
-    mod = types.ModuleType("agent.memory_manager")
-    mod.claim_instance = real_claim
-    monkeypatch.setitem(sys.modules, "agent.memory_manager", mod)
-    assert scope.install_shared_provider_instance_guard() is True
-    assert mod.claim_instance is not real_claim
-
-    provider = Provider()
-    manager = MemoryManager()
-    home = str(tmp_path / "alpha")
-
-    assert mod.claim_instance(provider, home, manager=manager) is True
-    pid = id(provider)
     assert pid in scope._instance_owners
     assert scope._instance_owners[pid][1] == scope.profile_home_key(home)
 
     del manager
     gc.collect()
-    assert pid not in scope._instance_owners
+    assert pid not in scope._instance_owners, (
+        "the guard entry outlived the real MemoryManager that held the instance"
+    )
+
+    next_manager = _Manager()
+    beta = str(tmp_path / "beta")
+    assert mm.claim_instance(provider, beta, manager=next_manager) is True
+    assert scope._instance_owners[pid][1] == scope.profile_home_key(beta)
