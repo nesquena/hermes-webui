@@ -145,7 +145,7 @@ def test_os_environ_only_value_past_mallopt_int_is_not_overridden(value, info_lo
     assert _warning_lines(info_log) == []
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "abc", "08", "4 ", _HUGE_DIGITS])
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "08", _HUGE_DIGITS])
 def test_invalid_os_environ_only_value_is_ignored_with_a_warning(value, info_log):
     applied, libc = _apply({"MALLOC_ARENA_MAX": value}, launch_environ={})
     assert applied is True
@@ -188,9 +188,9 @@ _INVALID_LAUNCH_SETTINGS = [
 @pytest.mark.parametrize(("shown_name", "var", "template"), _INVALID_LAUNCH_SETTINGS)
 @pytest.mark.parametrize(
     "value",
-    # 08: not octal, so glibc rejects it; "4 "/"4\t": glibc rejects anything after
-    # the number; 2**64: does not fit glibc's 64-bit parse (#9382 review).
-    ["0", "abc", "-3", "00", "0x0", "0x", "2.5", "4 4", "08", "09", "4 ", "4\t", "+", "0x4g",
+    # No glibc version applies a cap for these (#9382 review): 08/09 read as
+    # octal 0, -3 wraps to no cap, 2**64 does not fit glibc's 64-bit parse.
+    ["0", "abc", "-3", "00", "0x0", "0x", "08", "09", "+", "-", ".5",
      "18446744073709551616", "1" + "0" * 30],
 )
 def test_invalid_launch_value_is_ignored_and_the_default_applies(shown_name, var, template, value, info_log):
@@ -203,6 +203,95 @@ def test_invalid_launch_value_is_ignored_and_the_default_applies(shown_name, var
     ]
     assert _info_lines(info_log) == ["malloc arena cap applied: M_ARENA_MAX=2 (default)"]
     assert not any("do-not-log-me" in r.getMessage() or "tcache" in r.getMessage() for r in info_log.records)
+
+
+@pytest.mark.parametrize(("shown_name", "var", "template"), _INVALID_LAUNCH_SETTINGS)
+@pytest.mark.parametrize("value", ["4 ", "4\t", "2.5", "4 4", "0x4g", "4abc", "010x"])
+def test_number_with_trailing_text_is_left_to_glibc(shown_name, var, template, value, info_log):
+    # glibc before 2.39 applies the leading number and ignores the rest (2.39
+    # and later reject the value), so it may be a cap in force: never override
+    # it, and say what happens rather than claiming glibc applied it.
+    env = {var: template.format(value), ENV_KNOB: "3"}
+    applied, libc = _apply(env, launch_environ={var: env[var]})
+    assert (applied, libc.calls) == (False, [])
+    assert _warning_lines(info_log) == []
+    assert _info_lines(info_log) == [
+        f"malloc arena cap not applied: operator set {shown_name}={value!r} at launch; left to glibc, "
+        "which applies the leading number before 2.39 and ignores the value from 2.39"
+    ]
+
+
+class VersionedLibc(FakeLibc):
+    """A fake glibc that reports its version, as gnu_get_libc_version does."""
+
+    def __init__(self, version: bytes) -> None:
+        super().__init__()
+        self._version = version
+
+    def gnu_get_libc_version(self) -> bytes:
+        return self._version
+
+
+@pytest.mark.parametrize(("shown_name", "var", "template"), _INVALID_LAUNCH_SETTINGS)
+@pytest.mark.parametrize("version", [b"2.39", b"2.40", b"3.0"])
+@pytest.mark.parametrize("value", ["4 ", "2.5", "0x4g"])
+def test_trailing_text_is_invalid_where_glibc_rejects_it(shown_name, var, template, version, value, info_log):
+    # glibc 2.39 added the end-of-value check: the whole value is ignored, so the
+    # process would run uncapped (#9382 review, elf/dl-tunables.c at 2.39).
+    env = {var: template.format(value)}
+    applied, libc = _apply(env, launch_environ=dict(env), libc=VersionedLibc(version))
+    assert (applied, libc.calls) == (True, [(M_ARENA_MAX, 2)])
+    assert _warning_lines(info_log) == [
+        f"malloc arena cap: ignoring invalid {shown_name}={value!r} "
+        "(glibc 2.39 and later reject text after the number)"
+    ]
+
+
+@pytest.mark.parametrize("version", [b"2.35", b"2.38", b"2.17", b"weird", b""])
+def test_trailing_text_is_left_to_older_or_unknown_glibc(version, info_log):
+    # 2.26-2.38 apply the leading number and ignore the rest: a cap of 4 may be
+    # in force, so it must not be overridden.
+    env = {"MALLOC_ARENA_MAX": "4 "}
+    applied, libc = _apply(env, launch_environ=dict(env), libc=VersionedLibc(version))
+    assert (applied, libc.calls) == (False, [])
+    assert _warning_lines(info_log) == []
+    (line,) = _info_lines(info_log)
+    assert "operator set MALLOC_ARENA_MAX='4 ' at launch; left to glibc" in line
+
+
+@pytest.mark.parametrize(
+    ("version", "in_force"),
+    [(b"2.39", "MALLOC_ARENA_MAX='5'"), (b"2.35", "GLIBC_TUNABLES glibc.malloc.arena_max='4 '")],
+)
+def test_trailing_text_tunable_precedence_follows_the_glibc_version(version, in_force, info_log):
+    env = {"GLIBC_TUNABLES": "glibc.malloc.arena_max=4 ", "MALLOC_ARENA_MAX": "5"}
+    applied, libc = _apply(env, launch_environ=dict(env), libc=VersionedLibc(version))
+    assert (applied, libc.calls) == (False, [])
+    (line,) = _info_lines(info_log)
+    assert f"operator set {in_force} at launch" in line
+
+
+def test_in_process_trailing_text_follows_the_glibc_version():
+    env = {"MALLOC_ARENA_MAX": "4 "}
+    applied, libc = _apply(env, launch_environ={}, libc=VersionedLibc(b"2.39"))
+    assert (applied, libc.calls) == (True, [(M_ARENA_MAX, 2)])
+    applied, libc = _apply(env, launch_environ={}, libc=VersionedLibc(b"2.35"))
+    assert (applied, libc.calls) == (True, [(M_ARENA_MAX, 4)])
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(b"2.39", (2, 39)), (b"2.35", (2, 35)), (b"2.40.9000", (2, 40)), (b"x", None), (b"", None)],
+)
+def test_glibc_version_parse(raw, expected):
+    assert memory_limits._glibc_version(VersionedLibc(raw)) == expected
+    assert memory_limits._glibc_version(FakeLibc()) is None
+
+
+@pytest.mark.parametrize(("value", "cap"), [("4 ", 4), ("2.5", 2), ("0x4g", 4)])
+def test_os_environ_only_number_with_trailing_text_is_applied_as_its_number(value, cap):
+    applied, libc = _apply({"MALLOC_ARENA_MAX": value}, launch_environ={})
+    assert (applied, libc.calls) == (True, [(M_ARENA_MAX, cap)])
 
 
 @pytest.mark.parametrize(("shown_name", "var", "template"), _INVALID_LAUNCH_SETTINGS)
@@ -527,6 +616,13 @@ def _is_glibc() -> bool:
         return False
 
 
+def _glibc_at_least(major: int, minor: int) -> bool:
+    if not _is_glibc():
+        return False
+    version = memory_limits._glibc_version(ctypes.CDLL(None))
+    return version is not None and version >= (major, minor)
+
+
 def _clean_env(**extra: str) -> dict[str, str]:
     env = {
         k: v
@@ -642,10 +738,11 @@ def test_real_invalid_launch_value_warns_once_and_caps(tmp_path, launch_env, sho
     "launch_env",
     [
         pytest.param({"MALLOC_ARENA_MAX": "08"}, id="08-not-octal"),
-        pytest.param({"MALLOC_ARENA_MAX": "4 "}, id="trailing-blank"),
         pytest.param({"GLIBC_TUNABLES": "glibc.malloc.arena_max=08"}, id="tunable-08"),
         pytest.param({"GLIBC_TUNABLES": "glibc.malloc.arena_max=-3", "MALLOC_ARENA_MAX": "4"},
                      id="negative-tunable-shadows-alias"),
+        pytest.param({"MALLOC_ARENA_MAX": "4 "}, id="trailing-blank-glibc-2.39+",
+                     marks=pytest.mark.skipif(not _glibc_at_least(2, 39), reason="glibc < 2.39 applies 4")),
     ],
 )
 def test_real_glibc_rejected_value_still_ends_capped(tmp_path, launch_env):
@@ -694,3 +791,23 @@ def test_real_glibc_rejected_value_still_ends_capped(tmp_path, launch_env):
     assert 1 <= arenas <= 2, result.stdout
     warnings = [line for line in result.stderr.splitlines() if line.startswith("[memory] WARNING")]
     assert len(warnings) == 1, result.stderr
+
+
+@pytest.mark.skipif(not _is_glibc(), reason="Linux glibc only")
+def test_real_trailing_text_value_follows_the_host_glibc(tmp_path):
+    script = f"""
+        import sys
+        sys.path.insert(0, {str(REPO_ROOT)!r})
+        import startup_memory_limits as m
+        print("applied=%s" % m.apply_startup_arena_cap())
+    """
+    result = _run_python(script, _clean_env(MALLOC_ARENA_MAX="4 "), tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    version = memory_limits._glibc_version(ctypes.CDLL(None))
+    if version is not None and version >= (2, 39):  # glibc ignored the value: the server caps
+        assert "applied=True" in result.stdout
+        assert "(glibc 2.39 and later reject text after the number)" in result.stderr
+    else:  # glibc applied 4: left alone
+        assert "applied=False" in result.stdout
+        assert "operator set MALLOC_ARENA_MAX='4 ' at launch; left to glibc" in result.stderr
+        assert "[memory] WARNING" not in result.stderr
