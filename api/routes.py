@@ -2435,6 +2435,7 @@ def _cron_jobs_cross_profile(active_profile: str) -> tuple[list[dict], list[dict
     from api.profiles import (
         cron_store_scope_for_home,
         get_hermes_home_for_profile,
+        is_live_profile_home_for_reads,
         list_profiles_api,
     )
 
@@ -2473,6 +2474,16 @@ def _cron_jobs_cross_profile(active_profile: str) -> tuple[list[dict], list[dict
     seen_homes: set[str] = set()
     for owner_profile in names:
         home = Path(get_hermes_home_for_profile(owner_profile))
+        # A stale client cookie or an outdated fast-path row can still name a profile
+        # whose home was deleted. Reading its cron jobs would call ensure_dirs() and
+        # mkdir `cron/` + `cron/output/` inside the ghost, making a tombstoned shell
+        # look alive. Skip any named home that is not live; the default/custom homes
+        # (not under profiles/) are unaffected. `owner_profile` is the LOGICAL name:
+        # a profile dir that is itself a symlink resolves into another profile's home,
+        # so the resolved path alone would validate the wrong home's identity and
+        # tombstone (the resolved path still drives containment and cron I/O).
+        if not is_live_profile_home_for_reads(home, owner_profile=owner_profile):
+            continue
         home_key = _home_key(home)
         if home_key in seen_homes:
             continue
@@ -19360,20 +19371,43 @@ def handle_get(handler, parsed) -> bool:
                 wait_for_gateway_run_id,
             )
 
-            structured_gateway, run_id = wait_for_gateway_run_id(stream_id, GATEWAY_RUN_ID_WAIT_TIMEOUT)
-            if not run_id and structured_gateway:
+            # #9227: a native session relay registers under its deterministic
+            # id BEFORE the first submission, so a Stop on a turn that has not
+            # reached the Gateway can cancel it locally instead of waiting for
+            # a run id that cannot exist yet. `stop_gateway_run` on that id
+            # resolves to `SessionRelay.control("stop")`: a never-submitted
+            # turn cancels locally and returns True; an attempted-but-uncertain
+            # submission raises, which stop_gateway_run reports as False, so
+            # the existing retry contract (502, recovery kept) is preserved.
+            from api.gateway_sessions import active_session_run_id
+
+            structured_gateway = False
+            early_run_id = active_session_run_id(stream_id)
+            run_id = early_run_id
+            stopped = bool(early_run_id) and stop_gateway_run(early_run_id)
+            early_stop_refused = bool(early_run_id) and not stopped
+            if early_stop_refused:
+                # #9227 gate: the early registration also reaches a relay whose
+                # submission was attempted but not yet acknowledged. That is an
+                # uncertain admission, not an unsent turn, so a handler-level
+                # 502 here would drop the interrupt a published run id still
+                # allows. Keep the bounded published-run-ID wait and retry Stop
+                # against the acknowledged owner; only a wait that expires
+                # without one keeps the existing retry/recovery response.
+                run_id = None
+            if not stopped:
+                structured_gateway, run_id = wait_for_gateway_run_id(stream_id, GATEWAY_RUN_ID_WAIT_TIMEOUT)
+                stopped = bool(run_id) and stop_gateway_run(run_id)
+            if not stopped and (structured_gateway or early_stop_refused):
                 gateway_stop_blocked = True
-            if run_id:
-                if stop_gateway_run(run_id):
-                    owner_sid = stream_owner_session_id(stream_id)
-                    if owner_sid:
-                        settle_gateway_pending_run(
-                            owner_sid,
-                            run_id,
-                            reason="Gateway run was cancelled before approval resolution",
-                        )
-                else:
-                    gateway_stop_blocked = True
+            if stopped and run_id:
+                owner_sid = stream_owner_session_id(stream_id)
+                if owner_sid:
+                    settle_gateway_pending_run(
+                        owner_sid,
+                        run_id,
+                        reason="Gateway run was cancelled before approval resolution",
+                    )
         except Exception:
             logger.debug("Failed to stop gateway run during chat cancellation", exc_info=True)
             gateway_stop_blocked = True
