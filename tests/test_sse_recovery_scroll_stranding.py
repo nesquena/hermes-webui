@@ -255,7 +255,7 @@ def test_follow_intent_cache_is_fed_by_the_input_tail_ownership():
         "a programmatic scroll can never invalidate follow-intent (#6653)"
     )
     jump_guard = lc.find(_compact("if(_messageJumpScrollOwner){"))
-    prog_return = lc.find(_compact("if(_freshProgrammaticScrollActive())return;"))
+    prog_return = lc.find(_compact("if(_freshProgrammaticScrollActive()&&!_scrollbarDragActive)return;"))
     assert jump_guard != -1 and prog_return != -1 and invalidate < jump_guard < prog_return, (
         "the drag invalidation must run BEFORE the jump-owner and "
         "programmatic-scroll early-returns in the scroll listener (#6653)"
@@ -323,8 +323,9 @@ def test_cancel_before_scroll_raf_does_not_follow_stale_pin():
         "follow-intent expressions (#6653)"
     )
 
-    def run(follow_cache: bool, unpinned: bool) -> int:
+    def run(follow_cache: bool, unpinned: bool, auto_follow: str = "true") -> int:
         harness = textwrap.dedent(f"""
+            const window = {{ _autoScrollFollow: {auto_follow} }};
             let _messageFollowIntentCache = {str(follow_cache).lower()};
             let _scrollPinned = true;   // stale: the scroll rAF has not run yet
             let _messageUserUnpinned = {str(unpinned).lower()};
@@ -352,3 +353,11 @@ def test_cancel_before_scroll_raf_does_not_follow_stale_pin():
     assert run(follow_cache=True, unpinned=False) == 1
     # Sticky-unpin guard stays authoritative: cache armed but reader unpinned -> no follow.
     assert run(follow_cache=True, unpinned=True) == 0
+    # Auto-follow OFF: the transcript grew below the reader without following, so
+    # an armed cache does not mean "at the tail" and cancel must not scroll.
+    assert run(follow_cache=True, unpinned=False, auto_follow="false") == 0, (
+        "with Auto-follow off, cancel must not pull the reader to the bottom; "
+        "the intent cache only stands in for the tail while Auto-follow is on"
+    )
+    # An unset flag is the default (on), as in the settings loader.
+    assert run(follow_cache=True, unpinned=False, auto_follow="undefined") == 1
