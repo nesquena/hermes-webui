@@ -109,7 +109,7 @@ _REGISTRY_PAYLOAD = [
 ]
 
 
-def _run_send(command: str, script_body: str = "await send();", *, commands_api_error: bool = False, drop_dispatch_helper: bool = False, registry_override: list | None = None) -> dict:
+def _run_send(command: str, script_body: str = "await send();", *, commands_api_error: bool = False, drop_dispatch_helper: bool = False, registry_override: list | None = None, session_null: bool = False, new_session_body: str = "") -> dict:
     """Run the REAL send() from messages.js in a VM with the real COMMANDS
     table, a synthetic /api/commands registry, and instrumented api() that
     records every call path so the test can tell WHICH branch ran.
@@ -118,13 +118,22 @@ def _run_send(command: str, script_body: str = "await send();", *, commands_api_
     transient metadata failure). ``drop_dispatch_helper`` removes the real
     _isWebuiDispatchableAgentCommand helper from the shared realm so send()
     exercises the fallback non-dispatchability check. ``registry_override``
-    replaces the synthetic registry payload for one run.
+    replaces the synthetic registry payload for one run. ``session_null``
+    starts the run on the blank page (no open chat), and ``new_session_body``
+    is the body of the stubbed newSession() the send path awaits.
     """
     helper_drop_line = (
         'vm.runInContext("_isWebuiDispatchableAgentCommand = undefined;", ctx);'
         if drop_dispatch_helper
         else ""
     )
+    new_session_line = (
+        'vm.runInContext("newSession = async () => { %s };", ctx);' % new_session_body
+        if new_session_body
+        else ""
+    )
+    session_expr = "null" if session_null else "{ session_id: 'sid-1', title: 'New Chat' }"
+
     script = textwrap.dedent(
         f"""
         const vm = require('vm');
@@ -151,7 +160,7 @@ def _run_send(command: str, script_body: str = "await send();", *, commands_api_
           t: key => key,
           S: {{
             busy: false,
-            session: {{ session_id: 'sid-1', title: 'New Chat' }},
+            session: {session_expr},
             pendingFiles: [], messages: [], activeProfile: 'default',
             activeStreamId: null, toolCalls: [],
           }},
@@ -200,6 +209,7 @@ def _run_send(command: str, script_body: str = "await send();", *, commands_api_
         vm.runInContext({json.dumps(COMMANDS_JS)}, ctx);
         vm.runInContext({json.dumps(MESSAGES_JS)}, ctx);
         {helper_drop_line}
+        {new_session_line}
         (async () => {{
           const result = await vm.runInContext(`(async () => {{
             {script_body}
@@ -508,6 +518,64 @@ def test_registry_unavailable_fails_closed_for_a_non_dispatchable_command():
         f"/agents with the registry down must fail closed. Got: {result}"
     )
     assert "/api/chat/start" not in result.get("apiCalls", [])
+
+
+def test_non_dispatchable_command_stops_when_its_create_was_superseded():
+    """#9334 (Greptile P1): a command submitted from the blank page must not
+    append its echo and explainer to the chat the user picks while the create
+    is still in flight. newSession() reports that as status:'superseded'."""
+    result = _run_send(
+        "/agents",
+        "await send(); return {};",
+        registry_override=[{"name": "agents", "category": "Session", "cli_only": False}],
+        session_null=True,
+        new_session_body=(
+            "S.session={session_id:'sidebar-selected'};"
+            "return {status:'superseded',session:null};"
+        ),
+    )
+    assert result["messages"] == [], (
+        f"a superseded command wrote into the selected chat: {result['messages']!r}"
+    )
+    assert result["remainingInput"] == "/agents", (
+        "the abandoned command must leave the composer for the user to re-send"
+    )
+
+
+def test_non_dispatchable_command_answers_in_the_session_it_created():
+    """Control: an uncontested create still gets the command echo + explainer."""
+    result = _run_send(
+        "/agents",
+        "await send(); return {};",
+        registry_override=[{"name": "agents", "category": "Session", "cli_only": False}],
+        session_null=True,
+        new_session_body=(
+            "S.session={session_id:'created-owner'};"
+            "return {status:'committed',session:{session_id:'created-owner'}};"
+        ),
+    )
+    assert [message["role"] for message in result["messages"]] == ["user", "assistant"]
+    assert result["remainingInput"] == ""
+
+
+def test_unavailable_metadata_stops_when_its_create_was_superseded():
+    """#9334 (Greptile P1): the fail-closed metadata lane has the same race --
+    it must not explain the command inside whichever chat replaced the create."""
+    result = _run_send(
+        "/agents",
+        "await send(); return {};",
+        commands_api_error=True,
+        registry_override=[{"name": "agents", "category": "Session", "cli_only": False}],
+        session_null=True,
+        new_session_body=(
+            "S.session={session_id:'sidebar-selected'};"
+            "return {status:'superseded',session:null};"
+        ),
+    )
+    assert result["messages"] == [], (
+        f"a superseded fail-closed answer wrote into the selected chat: {result['messages']!r}"
+    )
+    assert result["remainingInput"] == "/agents"
 
 
 def test_available_registry_still_fails_closed_for_an_unknown_command():

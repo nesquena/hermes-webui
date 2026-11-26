@@ -1983,7 +1983,10 @@ async function send(){
           ? !_isWebuiDispatchableAgentCommand(_agentCmd)
           : _fallbackNonDispatchableAgentCommandCheck(_agentCmd)
       )){
-        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});_slashOwner.sid=S.session&&S.session.session_id||null;}
+        if(!S.session){
+          if(!(await _ensureSessionForComposerAction({pickerClaimEpoch:_sendProjectPickerClaim}))) return;
+          _slashOwner.sid=S.session&&S.session.session_id||null;
+        }
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd,_parsedCmd.args),_ts:Date.now()/1000});
         renderMessages();
@@ -2109,7 +2112,7 @@ async function send(){
           ? (await loadSkillCommands()).find(skill => _skillVariants.includes(skill.name))
           : null;
       if(_commandShapedSlashName&&!_bundleCmd&&!_skillCmd&&_registryUnavailable&&_agentCmdName!=='moa'){
-        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+        if(!S.session&&!(await _ensureSessionForComposerAction({pickerClaimEpoch:_sendProjectPickerClaim}))) return;
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:'Command metadata is temporarily unavailable — please try again.',_ts:Date.now()/1000});
         renderMessages();
