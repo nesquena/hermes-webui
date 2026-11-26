@@ -28,6 +28,15 @@ then javascript + css), then drives:
      refuses A's stale snapshot ACCEPTS the stash-published entry under the
      matching grammar, restores it into the transcript DOM, and refuses it once
      the grammar advances.
+  6. the OLD-GRAMMAR MARKED SNAPSHOT fixture (2026-10-12 review / 2026-11-25
+     status reply): A's snapshot is seeded as a deliberate compatibility fixture
+     of the old snapshot schedule — REAL Prism token spans from the small grammar
+     plus a `data-highlighted='1'` block — then the javascript/css grammars load
+     and the shipped condition must refuse it (attributable to the `prismSig`
+     comparison, with the accept variant observed restoring the marked tokens
+     into the DOM). The refusal must keep the marked entry intact (保留原标记),
+     and the rebuild must keep the original tag marks while adding the
+     advanced-grammar keyword/selector/property spans.
 
 Nothing here is a restatement of the production expression: remove the signature
 write, the stash capture/publish `prismSig`, or the restore comparison and a
@@ -155,6 +164,15 @@ const fastPathAccepts = new Function(
   'cached', 'msgCount', 'renderWindowKey', 'renderSignature', 'prismSigNow',
   'return ' + FAST_PATH_SRC.replace(/^if\(/, '(').replace(/\)\s*\{?\s*$/, ')') + ';'
 );
+// The SAME shipped condition with ONLY the grammar clause removed — a negative
+// control. If this variant accepts the old-grammar marked snapshot while the
+// shipped condition refuses it, the refusal is attributable to the prismSig
+// comparison and not to the window/count/signature clauses (identical inputs).
+const GATE_NO_GRAMMAR_SRC = FAST_PATH_SRC.replace('&&cached.prismSig===prismSigNow', '');
+const fastPathAcceptsNoGrammar = new Function(
+  'cached', 'msgCount', 'renderWindowKey', 'renderSignature', 'prismSigNow',
+  'return ' + GATE_NO_GRAMMAR_SRC.replace(/^if\(/, '(').replace(/\)\s*\{?\s*$/, ')') + ';'
+);
 
 // ── The REAL snapshot writer, lifted verbatim out of renderMessages ────────
 // Both statements are sliced out of ui.js rather than restated here: removing
@@ -214,11 +232,19 @@ function tokenCount(html) {
   return m ? m.length : 0;
 }
 
-function fenceToSnapshotHtml(fenceTokensHtml) {
+function fenceToSnapshotHtml(fenceTokensHtml, marked) {
   // The renderer's transcript wrapper around one highlighted fence.
+  // `marked` builds the OLD-SCHEDULE compatibility fixture the 2026-10-12
+  // review requested: a snapshot captured AFTER highlightCode had already
+  // stamped the block (the pre-#7778 schedule). The CURRENT producer snapshots
+  // pre-highlight HTML, so only this deliberate fixture carries
+  // `data-highlighted='1'` plus a real Prism token span from the old grammar.
+  const codeAttrs = marked ? ' data-highlighted="1"' : '';
+  const oldMark = marked ? '<span class="token 7778-old-grammar-mark">f</span>' : '';
   return '<div id="transcript">'
-    + '<pre class="language-html"><code class="language-html">'
+    + '<pre class="language-html"><code class="language-html"' + codeAttrs + '>'
     + fenceTokensHtml
+    + oldMark
     + '</code></pre></div>';
 }
 
@@ -230,13 +256,28 @@ out.sigSmall = sigSmall;
 // no selectors yet, because javascript/css are not loaded. REAL Prism output —
 // the stale snapshot the reviewer's scenario seeds.
 const fenceSmallInner = Prism.highlight(RAW_FENCE, Prism.languages.html, 'html');
-const fenceSmallHtml = fenceToSnapshotHtml(fenceSmallInner);
-out.fenceSmallTokens = tokenCount(fenceSmallHtml);
-out.fenceSmallHasKeyword = /token\s+keyword/.test(fenceSmallHtml);
-out.fenceSmallHasSelector = /token\s+selector/.test(fenceSmallHtml);
+// The OLD-GRAMMAR SNAPSHOT TEST FIXTURE: a snapshot captured under the OLD
+// schedule — AFTER highlightCode had already tokenized AND stamped the block
+// `data-highlighted='1'` (the pre-#7778 snapshot producer did exactly this;
+// the current producer snapshots pre-highlight HTML instead). It carries
+// REAL Prism token spans from the small grammar plus an old-schedule marker,
+// so an observer can prove the refused snapshot is precisely the
+// already-marked old-grammar snapshot the 2026-10-12 review asked to seed.
+const fenceSmallMarkedHtml = fenceToSnapshotHtml(fenceSmallInner, true);
+out.fixture = {
+  hasDataHighlighted: /data-highlighted="1"/.test(fenceSmallMarkedHtml),
+  tokens: tokenCount(fenceSmallMarkedHtml),
+  hasPrintedToken: /<span\b[^>]*\bclass="[^"]*\btoken\b[^"]*"[^>]*>/.test(fenceSmallMarkedHtml),
+  hasOldMark: fenceSmallMarkedHtml.indexOf('7778-old-grammar-mark') >= 0,
+  hasKeyword: /token\s+keyword/.test(fenceSmallMarkedHtml),
+  hasSelector: /token\s+selector/.test(fenceSmallMarkedHtml),
+};
+out.fenceSmallTokens = tokenCount(fenceSmallMarkedHtml);
+out.fenceSmallHasKeyword = /token\s+keyword/.test(fenceSmallMarkedHtml);
+out.fenceSmallHasSelector = /token\s+selector/.test(fenceSmallMarkedHtml);
 
 // A's snapshot is written under the small signature.
-writeSnapshot('A', fenceSmallHtml, 3, 'w1', 'sig-1');
+writeSnapshot('A', fenceSmallMarkedHtml, 3, 'w1', 'sig-1');
 out.snapshotAPrismSig = _sessionHtmlCache.get('A').prismSig;
 out.snapshotAPrismSigMatchesSmall = out.snapshotAPrismSig === sigSmall;
 
@@ -304,6 +345,35 @@ out.stashFastPathRefusedAfterAdvance = !fastPathAccepts(
   stashEntry, stashEntry.msgCount, stashEntry.renderWindowKey, stashEntry.signature, sigLarge
 );
 
+// ── Step 3d: the OLD-GRAMMAR MARKED SNAPSHOT fixture, observed ─────────────
+// 1) The shipped gate must refuse it after the grammar advanced.
+out.oldMarkedSnapshotRefusedAfterAdvance = !fastPathAccepts(
+  cached, cached.msgCount, cached.renderWindowKey, cached.signature, prismSigNow
+);
+// 2) With ONLY the prismSig clause removed the SAME entry is accepted, so the
+// refusal above is attributable to the grammar gate, not to another clause.
+out.oldMarkedSnapshotAcceptedWithoutGrammarClause = fastPathAcceptsNoGrammar(
+  cached, cached.msgCount, cached.renderWindowKey, cached.signature, prismSigNow
+);
+// 3) The fixture is genuinely observable: the accept variant's REAL restore
+// statement puts the old grammar's marked tokens into the transcript DOM —
+// which is exactly the stale state the refusal must prevent.
+{
+  const wouldRestore = makeElement('DIV');
+  wouldRestore.innerHTML = 'PRE-RESTORE';
+  const markerEntry = cached;
+  eval('wouldRestore.innerHTML=markerEntry.html;');
+  out.oldMarkedSnapshotRestoreWouldReachDom =
+    wouldRestore.innerHTML.indexOf('7778-old-grammar-mark') >= 0;
+}
+// 4) 保留原标记: refusing the restore must not destroy the marked snapshot
+// entry — its already-marked Prism tokens stay intact for the rebuild path.
+out.oldMarkedSnapshotEntryPreserved =
+  _sessionHtmlCache.get('A') !== undefined
+  && _sessionHtmlCache.get('A').html === fenceSmallMarkedHtml
+  && _sessionHtmlCache.get('A').html.indexOf('7778-old-grammar-mark') >= 0
+  && _sessionHtmlCache.get('A').html.indexOf('data-highlighted="1"') >= 0;
+
 // ── Step 4: the refused snapshot must lead to a real re-highlight ───────────
 if (!out.fastPathAccepted) {
   // The rebuild path runs Prism over the fence with the full grammar loaded —
@@ -315,6 +385,10 @@ if (!out.fastPathAccepted) {
   out.rebuildHasKeyword = /token\s+keyword/.test(rebuilt);
   out.rebuildHasSelector = /token\s+selector/.test(rebuilt);
   out.rebuildHasProperty = /token\s+property/.test(rebuilt);
+  // The rebuilt fence must KEEP the old grammar's original tag marks while
+  // adding the advanced-grammar keyword/selector/property spans — refusing the
+  // marked snapshot replaces stale tokens, it does not drop the tag tokens.
+  out.rebuildHasTag = /token\s+tag/.test(rebuilt);
 } else {
   out.rebuildRan = false;
 }
@@ -476,6 +550,68 @@ def test_stash_published_entry_hits_the_fast_path_and_restores(driver_path):
         "the stash-published entry was ACCEPTED after the grammar advanced — stale "
         "tokens would be restored"
     )
+
+
+def test_old_grammar_marked_snapshot_is_refused_after_the_grammar_advances(driver_path):
+    """The 2026-10-12 reviewer spec / 2026-11-25 status reply, observed.
+
+    The seeded session-A snapshot is a deliberate compatibility fixture of the
+    OLD snapshot schedule: its fence already carries REAL Prism tokens from the
+    small grammar and the block is stamped ``data-highlighted='1'``. After the
+    javascript/css grammars load, the shipped fast-path condition must refuse
+    it — attributable to the ``prismSig`` comparison alone — and the refusal
+    must leave the marked entry intact (保留原标记) rather than destroying it
+    or restoring its stale tokens into the DOM.
+    """
+    out = _run(driver_path)
+    fixture = out["fixture"]
+    assert fixture["hasDataHighlighted"] is True, (
+        "the fixture block is not data-highlighted='1' — the review explicitly "
+        "called out 'A's seeded snapshot lacks the required data-highlighted "
+        "marker'; without it the snapshot is not an already-marked fixture"
+    )
+    assert fixture["tokens"] > 0 and fixture["hasPrintedToken"] is True, (
+        "the fixture fence carries no Prism-marked token spans"
+    )
+    assert fixture["hasOldMark"] is True, (
+        "the fixture does not carry the old-grammar marker span"
+    )
+    assert fixture["hasKeyword"] is False and fixture["hasSelector"] is False, (
+        "the fixture already carries keyword/selector tokens — it is not an "
+        "OLD-grammar snapshot, so the refusal below would not be discriminating"
+    )
+    assert out["oldMarkedSnapshotRefusedAfterAdvance"] is True, (
+        "the old-grammar already-marked snapshot was ACCEPTED after the grammar "
+        "advanced — its stale tokens would be restored"
+    )
+    assert out["oldMarkedSnapshotAcceptedWithoutGrammarClause"] is True, (
+        "removing only &&cached.prismSig===prismSigNow did not change the gate's "
+        "result — the refusal is not attributable to the grammar gate"
+    )
+    assert out["oldMarkedSnapshotRestoreWouldReachDom"] is True, (
+        "the marked fixture is not observable in the DOM — without the gate the "
+        "old marked tokens would not have been restored, so this test cannot "
+        "prove the refusal protects anything"
+    )
+    assert out["oldMarkedSnapshotEntryPreserved"] is True, (
+        "the refusal destroyed or rewrote the marked snapshot entry — refusing "
+        "the restore must keep the already-marked tokens intact (保留原标记)"
+    )
+
+
+def test_old_grammar_marked_snapshot_rebuild_keeps_tag_marks_and_adds_advanced_tokens(driver_path):
+    """The refused old marked snapshot leads to a real rebuild/highlight: the
+    original tag tokens survive and the advanced-grammar keyword/selector/
+    property spans appear — real Prism output, not literals."""
+    out = _run(driver_path)
+    assert out["rebuildRan"] is True, "the refused old snapshot did not reach the rebuild path"
+    assert out["rebuildHasTag"] is True, (
+        "the rebuild dropped the old grammar's original tag marks — the "
+        "re-tokenized fence no longer carries token tag spans"
+    )
+    assert out["rebuildHasKeyword"] is True, "the rebuild has no javascript keyword spans"
+    assert out["rebuildHasSelector"] is True, "the rebuild has no css selector spans"
+    assert out["rebuildHasProperty"] is True, "the rebuild has no css property spans"
 
 
 def test_readme_does_not_claim_the_cache_survives_a_page_reload():
