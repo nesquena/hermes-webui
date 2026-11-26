@@ -195,6 +195,16 @@ def _voice_mode_block() -> str:
     return BOOT_JS[owner_start:owner_end] + "\n" + BOOT_JS[start:end]
 
 
+def _lock_composer_for_clarify_helper() -> str:
+    # lockComposerForClarify() reads the module-level lock state declared just
+    # above it, so the extracted function needs those bindings too.
+    return (
+        "let _composerLockState=null;\n"
+        "let _compressionPlaceholderSaved=null;\n\n"
+        + _function(UI_JS, "lockComposerForClarify", "\n\nfunction unlockComposerForClarify")
+    )
+
+
 def _review_race_production_helpers() -> str:
     names_and_markers = (
         ("_appendComposerText", "\n\nfunction insertSavedPromptIntoComposer"),
@@ -203,7 +213,8 @@ def _review_race_production_helpers() -> str:
         ("_stashClarifyDraft", "\n\nfunction _resetClarifyCardState("),
     )
     return "\n\n".join(
-        _function(MESSAGES_JS, name, marker) for name, marker in names_and_markers
+        [_function(MESSAGES_JS, name, marker) for name, marker in names_and_markers]
+        + [_lock_composer_for_clarify_helper()]
     )
 
 
@@ -300,6 +311,10 @@ def _run_review_race_harness(schedule: str, source: str = "source draft") -> dic
             afterClarify=msg.value;
             msg.value=`${{afterClarify}} more`;
             _composerRecordNativeText();
+          }}else if(schedule==='clarify-lock-native'){{
+            msg.value=`${{msg.value||''}} typed`;
+            _composerRecordNativeText();
+            lockComposerForClarify('Clarification needed');
           }}else if(schedule==='clarify-empty-native-tail'){{
             msg.value=' beta';
             _composerRecordNativeText();
@@ -2909,6 +2924,56 @@ def test_empty_source_clarify_rescue_keeps_input_typed_for_the_destination():
     assert result["text"] == " beta gamma"
     source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
     assert source_saves[-1]["text"] == "clarify answer"
+
+
+def test_clarify_lock_during_create_keeps_typed_words_out_of_the_source_draft():
+    # While New Chat waits, words typed into the composer belong to the new
+    # chat. A clarification card appearing in that window must not copy them
+    # into the departing chat's saved draft, or returning to it restores words
+    # that were already sent to the new chat.
+    result = _run_review_race_harness("clarify-lock-native")
+
+    assert result["activeSid"] == "new-session"
+    assert result["text"] == " typed"
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves[-1]["text"] == "source draft"
+    assert source_saves[-1]["files"] == ["source.txt"]
+
+
+def test_clarify_lock_skips_an_empty_owned_draft():
+    # An empty departing draft carries nothing to preserve; the lock must not
+    # post an empty draft that could clear a newer server copy.
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+
+    script = textwrap.dedent(
+        f"""
+        {_composer_authority_helpers()}
+        {_lock_composer_for_clarify_helper()}
+
+        const saves=[];
+        const msg={{value:'',placeholder:''}};
+        const S={{
+          session:{{session_id:'old-session',profile:'default'}},
+          pendingFiles:[],activeProfile:'default',
+        }};
+        const $=id=>id==='msg'?msg:null;
+        function updateSendBtn(){{}}
+        function _saveComposerDraftNow(sid,text,files){{
+          saves.push({{sid,text,files:[...(files||[])]}});
+        }}
+
+        _beginComposerOwnershipTransition('old-session','default');
+        msg.value=' typed';
+        _composerRecordNativeText();
+        lockComposerForClarify('Clarification needed');
+        process.stdout.write(JSON.stringify({{saves,text:msg.value}}));
+        """
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert json.loads(proc.stdout) == {"saves": [], "text": " typed"}
 
 
 def test_clarify_rescue_survives_aborted_create_without_duplicating_the_answer():

@@ -300,6 +300,28 @@ function _composerOwnerSnapshot(sid,profile){
     files:[...state.files],profile:tx.sourceProfile,session_id:tx.sourceSid,
   };
 }
+// The draft an immediate "save the current composer" caller must persist. While
+// a handoff owns the visible pane the textarea also carries the words already
+// buffered for the destination (native input stays visible until settle), so
+// saving the raw value would restore those words in the departing chat too.
+// `owned` marks that the visible owner is the transition's source; an empty
+// owned draft has nothing worth posting and must not clear a newer copy.
+function _composerVisibleOwnerDraftForSave(fallbackText,fallbackFiles){
+  const tx=_composerOwnershipTransition;
+  if(!tx||!_composerOwnershipTransitionOwnsVisiblePane()){
+    return {
+      text:String(fallbackText==null?'':fallbackText),
+      files:Array.isArray(fallbackFiles)?[...fallbackFiles]:[],
+      owned:false,
+    };
+  }
+  const state=tx.sourceState||{};
+  return {
+    text:String(state.text==null?'':state.text),
+    files:Array.isArray(state.files)?[...state.files]:[],
+    owned:true,
+  };
+}
 function _composerBlockJoin(current,value){
   const base=String(current||'');
   const addition=String(value||'');
@@ -12442,9 +12464,23 @@ function lockComposerForClarify(placeholderText){
   // so the user's draft is preserved if they switch sessions while a clarify
   // card is active (and survives page refresh / syncs across clients).
   const sid = S && S.session && S.session.session_id;
-  if (sid && typeof _saveComposerDraftNow === 'function') {
-    const saveText = String(input.value || '');
-    const saveFiles = Array.isArray(S && S.pendingFiles) ? [...S.pendingFiles] : [];
+  // While a New Chat handoff owns the composer, the textarea also shows the
+  // words already buffered for the destination chat. Persist the departing
+  // chat's own state instead, or returning to it would restore words that
+  // also went to the new chat.
+  const draft = typeof _composerVisibleOwnerDraftForSave === 'function'
+    ? _composerVisibleOwnerDraftForSave(input.value, S && S.pendingFiles)
+    : {
+        text: String(input.value || ''),
+        files: Array.isArray(S && S.pendingFiles) ? [...S.pendingFiles] : [],
+        owned: false,
+      };
+  // An empty owned draft carries nothing the server does not already have;
+  // posting it could only clear a newer copy.
+  if (sid && typeof _saveComposerDraftNow === 'function'
+      && !(draft.owned && !draft.text && !draft.files.length)) {
+    const saveText = draft.text;
+    const saveFiles = draft.files;
     // #7855: an unchanged restored goal continuation keeps its token in this save. Without it the
     // payload stores goal_continuation_id '' and the continuation sent after a reload is no longer
     // goal-related, which stops the goal loop. Edited text carries no token (round-7 rule).
