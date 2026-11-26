@@ -1070,6 +1070,44 @@ def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = T
     return True
 
 
+def _idempotent_replay_session_authorized(handler, sid) -> bool:
+    """Return whether a stored acceptance may be replayed for ``sid``.
+
+    A replay returns the stored session/stream/turn identity, so it is an
+    authorization-relevant read: the request must prove that the CURRENT
+    session exists and that its durable ownership metadata positively
+    matches the request's profile. Unlike
+    ``_session_id_visible_to_request_profile`` — which fail-opens for an
+    absent/unsafe/unresolvable id because the keyless path owns creation
+    and placeholder-retag semantics — every missing piece of evidence here
+    is a refusal: an absent or unsafe id and unreadable ownership metadata
+    answer 404 ("ownership cannot be established"), a known foreign owner
+    keeps the keyless-parity 409. An idempotency key is not an
+    authorization credential.
+    """
+    if not isinstance(sid, str) or not sid.strip() or not is_safe_session_id(sid):
+        bad(handler, "Session not found", 404)
+        return False
+    try:
+        session_profile = get_session_profile_readonly(sid)
+    except (KeyError, OSError, ValueError, TypeError):
+        bad(handler, "Session not found", 404)
+        return False
+    if not isinstance(session_profile, str) or not session_profile.strip():
+        # No positive ownership evidence (legacy/absent sidecar profile).
+        bad(handler, "Session not found", 404)
+        return False
+    if not _profiles_match(session_profile, _get_active_profile_name()):
+        j(handler, {
+            "error": "Session belongs to a different profile",
+            "code": "session_profile_mismatch",
+            "session_id": sid,
+            "profile": session_profile,
+        }, status=409)
+        return False
+    return True
+
+
 def _stream_id_owner_session_id(stream_id: str | None) -> str | None:
     """Resolve stream owner session_id via active-run registry first, fallback to journal."""
     stream_id = str(stream_id or "").strip()
@@ -29944,7 +29982,12 @@ def _handle_chat_start(handler, body, diag=None):
             # session_profile_mismatch, unreadable ownership metadata
             # answers 404 Session not found — identical to the same request
             # without a key.
-            if not _session_id_visible_to_request_profile(
+            # #7782 gate 2026-11-25: a replay must prove the CURRENT
+            # session exists and that its durable ownership metadata
+            # positively matches the request's profile — a stored key alone
+            # is not authorization. Missing/unreadable evidence answers 404;
+            # a known foreign owner keeps the keyless-parity 409.
+            if not _idempotent_replay_session_authorized(
                 handler, idem_claim_record.session_id
             ):
                 return

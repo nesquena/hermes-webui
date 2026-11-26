@@ -210,6 +210,17 @@ def idem_env(tmp_path, monkeypatch):
     monkeypatch.setattr(routes, "_get_or_materialize_session", lambda *_a, **_k: session)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_a, **_k: True)
+    # Replay authorization reads the session's durable ownership sidecar.
+    # The harness session is an in-memory stub, so stand in a readable
+    # sidecar owned by whichever profile is active — the positive existence
+    # + ownership evidence a real disk session would provide. Tests that
+    # exercise the missing / unreadable / foreign cases override this per
+    # test (or patch the real ``api.models`` function back in).
+    monkeypatch.setattr(
+        routes,
+        "get_session_profile_readonly",
+        lambda _sid: routes._get_active_profile_name(),
+    )
     monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_a, **_k: (None, "test-model", {}))
     monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", lambda *_a, **_k: ("test-model", "test-provider", False))
     monkeypatch.setattr(routes, "get_config", lambda: {})
@@ -646,6 +657,7 @@ def test_invalid_key_returns_400(idem_env):
         "has space in it",        # ASCII space (0x20) is outside 0x21-0x7E
         "x" * 201,                # over the 200-char limit
         "tab\there",              # tab character
+        "pipe|key",               # documented: the namespace separator is not allowed
     ]
     for bad in bad_keys:
         before = len(idem_env.recorder.calls)
@@ -2911,7 +2923,13 @@ def test_keyed_replay_respects_session_profile_visibility(idem_env, monkeypatch,
     monkeypatch.setattr(
         env.routes, "_session_visible_to_active_profile", _real_visible
     )
-
+    # Fixture stubs the ownership reader for the in-memory harness session;
+    # this test drives a REAL sidecar, so put the real reader back.
+    monkeypatch.setattr(
+        env.routes,
+        "get_session_profile_readonly",
+        models_mod.get_session_profile_readonly,
+    )
     # Keyed retry: must NOT replay the recorded acceptance across the
     # profile boundary. Same refusal as the keyless path, zero new turns.
     s2, p2 = env.run_handler(body, key_header=key)
@@ -2971,6 +2989,13 @@ def test_keyed_replay_404_when_session_ownership_unreadable(
 
     monkeypatch.setattr(
         env.routes, "_session_visible_to_active_profile", _real_visible
+    )
+    # Fixture stubs the ownership reader for the in-memory harness session;
+    # this test drives a REAL sidecar, so put the real reader back.
+    monkeypatch.setattr(
+        env.routes,
+        "get_session_profile_readonly",
+        models_mod.get_session_profile_readonly,
     )
 
     s2, p2 = env.run_handler(body, key_header=key)
@@ -3693,16 +3718,21 @@ def test_round13_preappend_boundary_fault_preserves_acknowledged_key(
             raise OSError(5, "simulated EIO on append fsync")
         return real_fsync(fd)
 
-    monkeypatch.setattr(Path, "stat", faulting_stat)
-    monkeypatch.setattr(os, "fstat", faulting_fstat)
-    monkeypatch.setattr(os, "fsync", faulting_fsync)
+    # Scope the fault injection to THIS test: ``monkeypatch.undo()`` on the
+    # shared pytest fixture would also undo the harness stubs (session
+    # ownership reader, profile resolver, ``j``/``bad``), which the replay
+    # assertions below still need.
+    faults = pytest.MonkeyPatch()
+    faults.setattr(Path, "stat", faulting_stat)
+    faults.setattr(os, "fstat", faulting_fstat)
+    faults.setattr(os, "fsync", faulting_fsync)
     try:
         s2, p2 = idem_env.run_handler(
             {"session_id": "idem-session", "message": "hello-L"},
             key_header="round13-L",
         )
     finally:
-        monkeypatch.undo()
+        faults.undo()
 
     assert s2 == 503
     assert p2.get("code") == "idempotency_store_unavailable"

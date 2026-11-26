@@ -410,8 +410,9 @@ def build_storage_key(raw_key: str, profile: str | None = None) -> str:
     The separator (ASCII pipe) is outside the profile-name charset
     enforced by ``api.profiles._PROFILE_ID_RE`` (``[a-z0-9][a-z0-9_-]*``),
     and ``split_storage_key`` partitions on the FIRST separator, so the
-    round-trip is unambiguous for any legal profile/key pair — a raw key
-    may itself contain pipes without aliasing another namespace.
+    round-trip is unambiguous for any legal profile/key pair. Validated
+    raw keys never contain the separator — ``validate_key`` rejects the
+    pipe — so a caller-supplied key cannot alias another namespace.
 
     ``profile`` is normally supplied by the caller (which resolves it
     once); when it is omitted, the active profile is resolved here and
@@ -471,14 +472,16 @@ def validate_key(raw: Any) -> str:
             f"idempotency key too long (>{MAX_KEY_LENGTH} chars)"
         )
     # Printable ASCII only (no whitespace, no control chars). Reject
-    # anything outside 0x21-0x7E. Pipe (0x7C) is excluded implicitly
-    # because it's used by the storage key namespace separator and
-    # must never appear in a caller-supplied key — ``build_storage_key``
-    # depends on this for an unambiguous round-trip.
+    # anything outside 0x21-0x7E. The pipe (0x7C) sits INSIDE that range
+    # but is rejected too: it is the storage-key namespace separator, and
+    # the documented public contract ("a pipe is not allowed") excludes it
+    # — ``build_storage_key`` / ``split_storage_key`` depend on this for an
+    # unambiguous round-trip.
     for ch in key:
-        if ord(ch) < 0x21 or ord(ch) > 0x7E:
+        if ord(ch) < 0x21 or ord(ch) > 0x7E or ch == _NAMESPACE_SEP:
             raise IdempotencyKeyMalformed(
-                "idempotency key must be printable ASCII (0x21-0x7E)"
+                "idempotency key must be printable ASCII (0x21-0x7E) and "
+                "must not contain the pipe character"
             )
     return key
 
@@ -992,6 +995,40 @@ class IdempotencyStore:
                 return
             self._load_locked()
 
+    def _snapshot_state_locked(
+        self,
+    ) -> tuple[
+        list[tuple[str, IdempotencyRecord]],
+        list[tuple[str, str]],
+    ]:
+        """Capture the complete ordered in-memory state; lock must be held.
+
+        Both OrderedDicts are load-bearing: ``_records`` order is the LRU
+        order the capacity sweep uses, and ``_expired_keys`` order is the
+        retained-tombstone bound's oldest-first eviction order. A mutation
+        that fails to become durable must restore BOTH *byte-for-byte* —
+        re-inserting evicted rows one at a time appends them at the tail
+        (changing the LRU order), and it cannot resurrect a tombstone that
+        the mutation's own bound eviction displaced. The pairs are the
+        actual objects, so callers that mutate record FIELDS must restore
+        those fields separately (see ``complete`` / ``reconcile``).
+        """
+        return (list(self._records.items()), list(self._expired_keys.items()))
+
+    def _restore_state_locked(
+        self,
+        snapshot: tuple[
+            list[tuple[str, IdempotencyRecord]],
+            list[tuple[str, str]],
+        ],
+    ) -> None:
+        """Restore a snapshot taken by ``_snapshot_state_locked``; lock held."""
+        records, expired = snapshot
+        self._records.clear()
+        self._records.update(records)
+        self._expired_keys.clear()
+        self._expired_keys.update(expired)
+
     def _evict_expired_locked(self) -> list[tuple[str, IdempotencyRecord]]:
         """Drop records past their TTL; must be called with the lock held.
 
@@ -1433,6 +1470,12 @@ class IdempotencyStore:
         stored_key = build_storage_key(key, profile=profile)
         profile = stored_key.split(_NAMESPACE_SEP, 1)[0]
         with self._lock:
+            # The COMPLETE ordered state before any sweep mutates it. Both
+            # sweeps below change records and tombstones, and their failed
+            # durable write must roll back to exactly this state — record
+            # LRU order included, and retained tombstones the sweep's own
+            # bound eviction displaced.
+            state_before = self._snapshot_state_locked()
             # Expire first so a tombstone is raised before the lookup below.
             # Any tombstone this sweep just minted must reach disk BEFORE we
             # can honour it as a refusal, otherwise a restart between the
@@ -1459,11 +1502,11 @@ class IdempotencyStore:
                 except IdempotencyStoreUnavailable:
                     # Roll the sweep back so memory == disk: the refusal is
                     # not durable, so neither the eviction nor the tombstone
-                    # may survive in memory.
-                    for k, rec in evicted:
-                        self._records[k] = rec
-                    for k, _ in minted:
-                        self._expired_keys.pop(k, None)
+                    # may survive in memory. Restore the WHOLE ordered state
+                    # — a per-row re-insert appends the rows at the tail
+                    # (changing LRU order) and cannot resurrect a retained
+                    # tombstone the bound eviction displaced.
+                    self._restore_state_locked(state_before)
                     raise
                 _tombstones_before.update(k for k, _ in minted)
             existing = self._records.get(stored_key)
@@ -1507,7 +1550,7 @@ class IdempotencyStore:
                 try:
                     cap_evicted = self._evict_to_cap_locked()
                 except IdempotencyStoreUnavailable:
-                    self._records.pop(stored_key, None)
+                    self._restore_state_locked(state_before)
                     raise
                 for ck, crec in cap_evicted:
                     ops.append(
@@ -1523,12 +1566,11 @@ class IdempotencyStore:
                     # that the next process restart would resurrect
                     # from disk (or fail to, depending on whether
                     # the file write raced with the rename).
-                    self._records.pop(stored_key, None)
-                    for ck, crec in cap_evicted:
-                        self._records[ck] = crec
-                    for ck, _ in cap_evicted:
-                        if ck not in _tombstones_before:
-                            self._expired_keys.pop(ck, None)
+                    # Restore the COMPLETE ordered state: the new
+                    # record, every cap-evicted record in its original
+                    # LRU position, and every retained tombstone
+                    # (including one displaced by the tombstone bound).
+                    self._restore_state_locked(state_before)
                     raise
                 self._maybe_compact_locked()
                 return rec
@@ -1781,6 +1823,11 @@ class IdempotencyStore:
             # restores exactly what the durable claim holds (#7782 re-gate
             # review: a hand-built snapshot used to drop those fields,
             # silently wiping them from memory on a failed completion).
+            # Snapshot the complete ordered state so a persist failure can
+            # be rolled back byte-for-byte (record LRU order, every
+            # cap-evicted record, and the retained tombstone map including
+            # any tombstone the sweep's bound displaced).
+            state_before = self._snapshot_state_locked()
             prior = replace(
                 existing,
                 response_payload=dict(existing.response_payload or {}),
@@ -1794,10 +1841,10 @@ class IdempotencyStore:
             existing.completed_at = now
             rec = existing
             self._records.move_to_end(stored_key)
-            _tombstones_before = set(self._expired_keys)
             try:
                 cap_evicted = self._evict_to_cap_locked()
             except IdempotencyStoreUnavailable:
+                self._restore_state_locked(state_before)
                 self._records[stored_key] = prior
                 raise
             # The completion and any cap-eviction tombstones land in ONE
@@ -1814,13 +1861,12 @@ class IdempotencyStore:
             except IdempotencyStoreUnavailable:
                 # Roll back the in-memory mutation to the prior record
                 # byte-for-byte, so a retry sees exactly the claim state
-                # that the durable store can prove.
+                # that the durable store can prove. Restore the whole
+                # ordered state first (the completion moved the record to
+                # the LRU tail and evicted cap rows), then swap the prior
+                # snapshot object into its restored position.
+                self._restore_state_locked(state_before)
                 self._records[stored_key] = prior
-                for ck, crec in cap_evicted:
-                    self._records[ck] = crec
-                for ck, _ in cap_evicted:
-                    if ck not in _tombstones_before:
-                        self._expired_keys.pop(ck, None)
                 raise
             self._maybe_compact_locked()
             return rec
@@ -1866,6 +1912,9 @@ class IdempotencyStore:
                     f"cannot reconcile idempotency key {key!r}: no durable "
                     "claim exists to bind the admitted identity to"
                 )
+            # Snapshot the complete ordered state so a persist failure can
+            # undo BOTH the identity fields and the LRU move to the tail.
+            state_before = self._snapshot_state_locked()
             # Snapshot the prior identity so a persist failure can undo it.
             prior_session, prior_stream, prior_turn = (
                 existing.session_id, existing.stream_id, existing.turn_id,
@@ -1887,6 +1936,9 @@ class IdempotencyStore:
             except IdempotencyStoreUnavailable:
                 # The identity could not be made durable. Roll it back so
                 # memory and disk still agree; the pending guard remains.
+                # Restore the ordered state too: the move_to_end above is
+                # part of the mutation and must not survive a failed write.
+                self._restore_state_locked(state_before)
                 existing.session_id, existing.stream_id, existing.turn_id = (
                     prior_session, prior_stream, prior_turn,
                 )
@@ -1923,16 +1975,17 @@ class IdempotencyStore:
             if existing is None:
                 return
             if existing.status == STATUS_PENDING:
+                state_before = self._snapshot_state_locked()
                 self._records.pop(stored_key, None)
                 try:
                     self._append_wal_locked(
                         [{"op": _WAL_OP_DEL, "key": stored_key}]
                     )
                 except IdempotencyStoreUnavailable:
-                    # The drop is not durable. Restore the pending claim
-                    # so memory and disk still agree, and refuse rather
-                    # than losing the in-flight guard.
-                    self._records[stored_key] = existing
+                    # The drop is not durable. Restore the pending claim in
+                    # its ORIGINAL position so memory and disk still agree,
+                    # and refuse rather than losing the in-flight guard.
+                    self._restore_state_locked(state_before)
                     raise
                 self._maybe_compact_locked()
 
