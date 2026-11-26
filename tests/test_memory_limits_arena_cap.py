@@ -128,7 +128,13 @@ def test_os_environ_only_tunable_is_applied():
 _HUGE_DIGITS = pytest.param("9" * 5000, id="5000-digits")  # past Python's int-string limit
 
 
-@pytest.mark.parametrize("value", ["2147483648", _HUGE_DIGITS])
+def test_os_environ_only_octal_value_is_read_as_glibc_reads_it():
+    # glibc reads a leading 0 as octal: 010 is a cap of 8.
+    applied, libc = _apply({"MALLOC_ARENA_MAX": "010"}, launch_environ={})
+    assert (applied, libc.calls) == (True, [(M_ARENA_MAX, 8)])
+
+
+@pytest.mark.parametrize("value", ["2147483648", "18446744073709551615"])
 def test_os_environ_only_value_past_mallopt_int_is_not_overridden(value, info_log):
     # A positive integer, so the operator asked for (at least) that many arenas.
     applied, libc = _apply({"MALLOC_ARENA_MAX": value}, launch_environ={})
@@ -139,13 +145,13 @@ def test_os_environ_only_value_past_mallopt_int_is_not_overridden(value, info_lo
     assert _warning_lines(info_log) == []
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "abc"])
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "08", "4 ", _HUGE_DIGITS])
 def test_invalid_os_environ_only_value_is_ignored_with_a_warning(value, info_log):
     applied, libc = _apply({"MALLOC_ARENA_MAX": value}, launch_environ={})
     assert applied is True
     assert libc.calls == [(M_ARENA_MAX, 2)]
     assert _warning_lines(info_log) == [
-        f"malloc arena cap: ignoring invalid MALLOC_ARENA_MAX={value!r} (not a positive integer)"
+        f"malloc arena cap: ignoring invalid MALLOC_ARENA_MAX={value[:40]!r} (not a positive integer)"
     ]
 
 
@@ -180,7 +186,13 @@ _INVALID_LAUNCH_SETTINGS = [
 
 
 @pytest.mark.parametrize(("shown_name", "var", "template"), _INVALID_LAUNCH_SETTINGS)
-@pytest.mark.parametrize("value", ["0", "abc", "-3", "00", "0x0", "2.5", "4 4"])
+@pytest.mark.parametrize(
+    "value",
+    # 08: not octal, so glibc rejects it; "4 "/"4\t": glibc rejects anything after
+    # the number; 2**64: does not fit glibc's 64-bit parse (#9382 review).
+    ["0", "abc", "-3", "00", "0x0", "0x", "2.5", "4 4", "08", "09", "4 ", "4\t", "+", "0x4g",
+     "18446744073709551616", "1" + "0" * 30],
+)
 def test_invalid_launch_value_is_ignored_and_the_default_applies(shown_name, var, template, value, info_log):
     env = {var: template.format(value), "SOME_SECRET": "do-not-log-me"}
     applied, libc = _apply(env, launch_environ={var: env[var]})
@@ -204,9 +216,10 @@ def test_empty_launch_value_is_unset_without_a_warning(shown_name, var, template
 
 
 @pytest.mark.parametrize(("shown_name", "var", "template"), _INVALID_LAUNCH_SETTINGS)
-@pytest.mark.parametrize("value", ["4", " 4", "+4", "0x4", "010", "99999999999"])
+@pytest.mark.parametrize("value", ["4", " 4", "\t4", "+4", "0x4", "0X0004", "010", "99999999999"])
 def test_valid_launch_value_still_wins(shown_name, var, template, value, info_log):
-    # Forms glibc itself accepts (measured on glibc 2.39: +4 and 0x4 give 4 arenas).
+    # Forms glibc itself accepts (measured on glibc 2.39: " 4", +4 and 0x4 give 4
+    # arenas, 010 gives 8).
     env = {var: template.format(value), ENV_KNOB: "3"}
     applied, libc = _apply(env, launch_environ={var: env[var]})
     assert applied is False
@@ -575,3 +588,61 @@ def test_real_invalid_launch_value_warns_once_and_caps(tmp_path, launch_env, sho
     assert "applied=True" in result.stdout
     warnings = [line for line in result.stderr.splitlines() if line.startswith("[memory] WARNING")]
     assert warnings == [f"[memory] WARNING malloc arena cap: ignoring invalid {shown} (not a positive integer)"]
+
+
+
+@pytest.mark.skipif(not _is_glibc(), reason="Linux glibc only")
+@pytest.mark.parametrize(
+    "launch_env",
+    [
+        pytest.param({"MALLOC_ARENA_MAX": "08"}, id="08-not-octal"),
+        pytest.param({"MALLOC_ARENA_MAX": "4 "}, id="trailing-blank"),
+        pytest.param({"GLIBC_TUNABLES": "glibc.malloc.arena_max=08"}, id="tunable-08"),
+    ],
+)
+def test_real_glibc_rejected_value_still_ends_capped(tmp_path, launch_env):
+    """Measured, not assumed: glibc sets no cap for these values, so the server
+    must apply its own. Count the arenas real threads end up with."""
+    script = f"""
+        import ctypes, os, sys, tempfile, threading
+        sys.path.insert(0, {str(REPO_ROOT)!r})
+        import startup_memory_limits as m
+        applied = m.apply_startup_arena_cap()
+        libc = ctypes.CDLL(None)
+        libc.malloc.restype = ctypes.c_void_p
+        libc.malloc.argtypes = [ctypes.c_size_t]
+        n = 16
+        barrier = threading.Barrier(n + 1)
+        done = threading.Event()
+        def work():
+            libc.malloc(4096)
+            barrier.wait()
+            done.wait()
+        threads = [threading.Thread(target=work) for _ in range(n)]
+        for t in threads:
+            t.start()
+        barrier.wait()
+        sys.stderr.flush()
+        saved = os.dup(2)
+        with tempfile.TemporaryFile() as fh:
+            os.dup2(fh.fileno(), 2)
+            try:
+                libc.malloc_stats()
+            finally:
+                os.dup2(saved, 2)
+                os.close(saved)
+            fh.seek(0)
+            text = fh.read().decode()
+        done.set()
+        for t in threads:
+            t.join()
+        arenas = sum(1 for line in text.splitlines() if line.startswith("Arena "))
+        print(f"applied={{applied}} arenas={{arenas}}")
+    """
+    result = _run_python(script, _clean_env(**launch_env), tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "applied=True" in result.stdout, result.stdout + result.stderr
+    arenas = int(result.stdout.rsplit("arenas=", 1)[1].split()[0])
+    assert 1 <= arenas <= 2, result.stdout
+    warnings = [line for line in result.stderr.splitlines() if line.startswith("[memory] WARNING")]
+    assert len(warnings) == 1, result.stderr

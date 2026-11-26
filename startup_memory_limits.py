@@ -43,8 +43,12 @@ _M_ARENA_MAX = -8  # glibc <malloc.h> mallopt parameter
 _C_INT_MAX = 2**31 - 1
 _DISABLED = frozenset({"0", "off", "false"})
 _EXEC_ENVIRON = "/proc/self/environ"  # exec-time env block; only the arena keys are read
-# How glibc reads an arena setting: optional "+", then decimal or 0x-hex digits.
-_GLIBC_NUMBER = re.compile(r"\+?(?:0[xX](?P<hex>[0-9a-fA-F]+)|(?P<dec>[0-9]+))")
+# How glibc's tunable parser reads an arena setting once leading spaces and
+# tabs are skipped: optional "+", then 0x hex, a leading-0 octal number or a
+# decimal number, and nothing after it (_dl_strtoul plus the end-of-value check).
+_GLIBC_NUMBER = re.compile(r"\+?(?:0[xX](?P<hex>[0-9a-fA-F]*)|(?P<oct>0[0-7]*)|(?P<dec>[1-9][0-9]*))")
+_GLIBC_DIGITS = {16: 16, 8: 22, 10: 20}  # most significant digits a 64-bit value can have
+_U64_MAX = 2**64 - 1
 _UNSET: Any = object()
 
 
@@ -110,19 +114,30 @@ def _launch_environ() -> dict[str, str] | None:
 
 
 def _arena_number(value: str) -> int | None:
-    """*value* as glibc reads an arena setting, when that is a positive integer.
+    """*value* read exactly as glibc reads an arena setting, when that gives a
+    positive cap; ``None`` when glibc would set no cap from it.
 
-    Surrounding blanks are tolerated, so a value glibc may accept is never
-    overridden. A number too long to convert is far past any cap.
+    glibc skips leading spaces and tabs, takes an optional ``+``, then ``0x``
+    hex digits, a leading-``0`` octal number (``010`` is 8, ``08`` is
+    rejected) or a decimal number, and rejects the value if anything follows
+    (``4 ``) or the number does not fit 64 bits. Zero is below the tunable's
+    minimum. A ``-`` sign wraps to a huge cap, which is no cap, so it counts
+    as invalid here too.
     """
-    match = _GLIBC_NUMBER.fullmatch(value.strip())
+    match = _GLIBC_NUMBER.fullmatch(value.lstrip(" \t"))
     if match is None:
         return None
-    digits, base = (match["hex"], 16) if match["hex"] is not None else (match["dec"], 10)
+    if match["hex"] is not None:
+        digits, base = match["hex"], 16
+    elif match["oct"] is not None:
+        digits, base = match["oct"], 8
+    else:
+        digits, base = match["dec"], 10
     digits = digits.lstrip("0")
-    if not digits:
+    if not digits or len(digits) > _GLIBC_DIGITS[base]:
         return None
-    return int(digits, base) if len(digits) <= 20 else 2**64
+    number = int(digits, base)
+    return number if number <= _U64_MAX else None
 
 
 def _positive_c_int(value: str) -> int | None:
