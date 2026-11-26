@@ -31763,6 +31763,37 @@ def start_session_turn(
         # session this file's body names. The wakeup callers drop a 404.
         return {"error": "Session not found", "_status": 404}
 
+    # Compression-rotation retarget: server-side wakeups (process completion,
+    # deferred-wakeup drains, retry timers, gateway delegation) are keyed by the
+    # session id that was live when the event was recorded. If that session has
+    # since been archived as a pre-compression snapshot, the live chat is its
+    # continuation. Starting the turn on the sealed parent instead lets the
+    # cached agent (already bound to the continuation id) rotate ownership a
+    # second time at turn end; that migration fails closed against the already
+    # published continuation and the whole wakeup turn dies with
+    # "Failed to migrate compressed-session ownership". Retarget to the durable
+    # continuation so the turn runs on the live session from the start.
+    try:
+        _continuation_sid = _pre_compression_continuation_session_id(s)
+    except Exception:
+        _continuation_sid = None
+    if _continuation_sid and _continuation_sid != session_id:
+        try:
+            _continuation_session = get_session(_continuation_sid)
+        except KeyError:
+            _continuation_session = None
+        if _continuation_session is not None and not getattr(
+            _continuation_session, "_sidecar_names_other_session", None
+        ):
+            logger.info(
+                "start_session_turn: %s is an archived compression snapshot; "
+                "retargeting server-side turn to continuation %s",
+                session_id,
+                _continuation_sid,
+            )
+            session_id = _continuation_sid
+            s = _continuation_session
+
     try:
         workspace = _resolve_chat_workspace_with_recovery(s, None)
     except WorkspaceBindingPersistenceError as e:
