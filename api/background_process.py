@@ -2752,9 +2752,16 @@ def _start_server_side_wakeup_turn(
                 # ``claim_deferred_wakeups`` still guarantees exactly-once
                 # delivery, and BG_TASK_COMPLETE_EVENTS_SEEN already deduped
                 # this process_id, so re-recording cannot double-fire.
+                #
+                # Requeue under the admission's FINAL validated target when
+                # the response carries one (#9380 round-4, finding 3): this
+                # caller may have resolved parent -> child-one while admission
+                # resolved further to child-two; parking under child-one
+                # strands the prompt on an intermediate sealed row.
+                _requeue_sid = str((resp or {}).get("session_id") or session_id)
                 if wakeup_prompt:
                     record_deferred_wakeup(
-                        session_id,
+                        _requeue_sid,
                         process_id,
                         wakeup_prompt,
                         consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
@@ -2775,7 +2782,7 @@ def _start_server_side_wakeup_turn(
                     # reschedule, so a persistently unconfirmable tip parks
                     # the prompt instead of looping.
                     from api.routes import _schedule_deferred_wakeup_retry
-                    _schedule_deferred_wakeup_retry(session_id)
+                    _schedule_deferred_wakeup_retry(_requeue_sid)
                 logger.debug(
                     "server-side wakeup raced an active turn for session %s; "
                     "re-deferred for redelivery on next teardown/turn",
@@ -2790,9 +2797,10 @@ def _start_server_side_wakeup_turn(
                 # the "launch-abort retry's own launch failed" case: the prompt
                 # must survive, and it must NOT loop — the retry timer is
                 # one-shot and nothing here reschedules it.
+                # Same admission-target rule as the 409 branch above.
                 if wakeup_prompt:
                     record_deferred_wakeup(
-                        session_id,
+                        str((resp or {}).get("session_id") or session_id),
                         process_id,
                         wakeup_prompt,
                         consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,

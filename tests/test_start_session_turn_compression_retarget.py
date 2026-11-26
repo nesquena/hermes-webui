@@ -480,3 +480,164 @@ def test_unconfirmed_refusal_requeues_prompt_and_schedules_bounded_retry(
     assert scheduled == [], "the retry drain must not reschedule itself"
     with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
         config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+
+
+class _RotatingTipReader:
+    """The tip row itself carries end_reason='compression' — ordinary rotation.
+
+    Reviewer replay on #9380 round 4: the continuation (child-one) was itself
+    compressed into child-two through the real publication API. The tip row is
+    an intermediate node of a LIVE lineage, not a confirmed deletion or an
+    explicit reset. Classifying it terminal let the 404 cleanup empty the
+    current AND previously queued wakeup state.
+    """
+
+    def __init__(self, *, tip_after=None):
+        self._tip_after = tip_after
+        self._tip_calls = 0
+
+    def get_session(self, sid):
+        if sid == "sealedparent":
+            return {"id": sid, "end_reason": "compression", "profile_name": "default"}
+        return {
+            "id": sid,
+            "end_reason": "compression",
+            "profile_name": "default",
+            "source": "tui",
+        }
+
+    def get_compression_tip(self, sid):
+        self._tip_calls += 1
+        if self._tip_after and self._tip_calls > 1:
+            return self._tip_after
+        return "childone"
+
+    def close(self):
+        self._tip_calls = 0
+
+
+def test_continuation_compressed_again_is_never_terminal(tmp_path, monkeypatch):
+    """Ordinary continuation compression must stay retryable, never terminal."""
+    sealed, tip, state = _seal_state_for(_RotatingTipReader(), monkeypatch, tmp_path)
+    assert (sealed, tip, state) == (True, None, "unconfirmed")
+
+    # Tip pointer moved mid-read (child-one -> child-two published between
+    # the first read and the terminal revalidation): still never terminal.
+    sealed, tip, state = _seal_state_for(
+        _RotatingTipReader(tip_after="childtwo"), monkeypatch, tmp_path
+    )
+    assert (sealed, tip, state) == (True, None, "unconfirmed")
+
+
+def test_established_seal_survives_transient_resolver_failure(_stub_routes, monkeypatch):
+    """Round-4 finding 2: admission must carry established sealing authority.
+
+    Reviewer replay: admission read (sealed=True, tip=child-one, state=open),
+    then the optional-id helper re-read durable state and ONLY that second
+    read transiently failed — no continuation — and the recording launch
+    received the sealed parent with status 200. The sealed path now uses the
+    tip established at admission; the legacy helper is never consulted for a
+    parent already proven sealed.
+    """
+    from api import compression_continuation as cc
+
+    routes_mod, started = _stub_routes
+    monkeypatch.setattr(
+        cc, "compression_seal_state", lambda _s: (True, "child0000001", "open")
+    )
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(routes_mod, "_pre_compression_continuation_session_id", _boom)
+
+    resp = routes_mod.start_session_turn(
+        "parent000001", "background process finished", source="process_wakeup"
+    )
+
+    assert resp["_status"] == 200
+    assert started == [("child0000001", "process_wakeup")], (
+        "an established seal must retarget to its tip, never fall through "
+        "to the sealed parent because a later durable read wobbled"
+    )
+
+
+def test_busy_requeue_follows_admission_target_after_late_rotation(
+    _stub_routes, monkeypatch
+):
+    """Round-4 finding 3: requeue under the FINAL admission target.
+
+    Reviewer replay: the caller resolved parent -> child-one, then child-one
+    was compressed into child-two before admission read durable state.
+    Admission attempted child-two and got the ordinary busy 409, but the
+    requeue parked the prompt under child-one — an intermediate sealed row
+    nothing drains again. The response now carries admission's validated
+    identity and the caller requeues (and would retry-timer) under it.
+    """
+    import time
+
+    from api import compression_continuation as cc
+    import api.background_process as bp_mod
+    from api import config as config_mod
+
+    routes_mod, started = _stub_routes
+
+    child2 = _FakeSession("child0000002", parent="child0000001", updated=250.0)
+    sessions = dict(routes_mod.SESSIONS)
+    sessions["child0000002"] = child2
+    routes_mod.get_session = lambda sid: sessions[sid]
+
+    reads = []
+
+    def _rotating_seal_state(_s):
+        reads.append(1)
+        if len(reads) == 1:
+            return True, "child0000001", "open"  # caller's early resolution
+        return True, "child0000002", "open"  # admission sees the newer tip
+
+    monkeypatch.setattr(cc, "compression_seal_state", _rotating_seal_state)
+
+    def _busy_start_run(s, **kwargs):
+        started.append((s.session_id, kwargs.get("source")))
+        return {"_status": 409, "error": "session already has an active stream"}
+
+    monkeypatch.setattr(routes_mod, "_start_run", _busy_start_run)
+
+    scheduled = []
+    monkeypatch.setattr(
+        routes_mod,
+        "_schedule_deferred_wakeup_retry",
+        lambda sid, **kwargs: scheduled.append(sid),
+    )
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+
+    bp_mod._start_server_side_wakeup_turn(
+        "parent000001",
+        "[IMPORTANT: Background process proc-w completed (exit_code=0).]",
+        process_id="proc-w",
+    )
+
+    entries = []
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+            entries = list(
+                config_mod.DEFERRED_PROCESS_WAKEUPS.get("child0000002") or []
+            )
+        if entries:
+            break
+        time.sleep(0.05)
+
+    assert started == [("child0000002", "process_wakeup")]
+    assert entries and entries[0]["wakeup_prompt"].startswith("[IMPORTANT:"), (
+        "the busy prompt must be requeued under admission's final target"
+    )
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("child0000001"), (
+            "nothing may be parked under the intermediate sealed row"
+        )
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("parent000001")
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+    assert scheduled == [], "a busy 409 must not arm the unconfirmed retry timer"

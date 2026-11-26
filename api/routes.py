@@ -31831,10 +31831,19 @@ def start_session_turn(
     # published continuation and the whole wakeup turn dies with
     # "Failed to migrate compressed-session ownership". Retarget to the durable
     # continuation so the turn runs on the live session from the start.
-    try:
-        _continuation_sid = _pre_compression_continuation_session_id(s)
-    except Exception:
-        _continuation_sid = None
+    #
+    # When admission already established durable sealing authority, carry it
+    # through instead of re-deriving it (#9380 round-4, finding 2): a second
+    # durable read can transiently fail and silently fall through to the
+    # sealed row we just proved is not a legal target. The legacy bounded
+    # child hunt stays only for snapshots WITHOUT durable sealing authority.
+    if _sealed_parent:
+        _continuation_sid = _durable_tip
+    else:
+        try:
+            _continuation_sid = _pre_compression_continuation_session_id(s)
+        except Exception:
+            _continuation_sid = None
     if _continuation_sid and _continuation_sid != session_id:
         try:
             _continuation_session = get_session(_continuation_sid)
@@ -32031,7 +32040,17 @@ def start_session_turn(
         # journal closed as start_compensated); report the retryable refusal.
         refusal = dict(exc.payload)
         refusal["_status"] = exc.status
+        refusal["session_id"] = session_id
         return refusal
+
+    # Carry the admission's FINAL validated target into every response
+    # (#9380 round-4, finding 3): the wakeup caller may have resolved the
+    # lineage earlier (parent -> child-one) while admission resolved further
+    # (child-one -> child-two). A busy 409 requeued under the caller's older
+    # id strands the prompt on an intermediate sealed row. The stamped id is
+    # what the caller must requeue and retry under.
+    if isinstance(resp, dict):
+        resp["session_id"] = session_id
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
     # Option Z starts this turn server-side, so NO browser EventSource is

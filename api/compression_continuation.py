@@ -120,22 +120,39 @@ def compression_seal_state(session):
             # No tip row yet. The rotation write may still be landing; a
             # missing tip is not a confirmed deletion.
             return True, None, "unconfirmed"
+
+        def _closed_or_churn():
+            # A terminal classification is only valid while the durable tip
+            # pointer still names the row being classified. If a newer
+            # rotation published a different tip mid-read, the lineage moved
+            # under us: retryable, never terminal (#9380 round-4, finding 1).
+            if db.get_compression_tip(sid) != tip:
+                return True, None, "unconfirmed"
+            return True, None, "closed_confirmed"
+
         child = db.get_session(tip)
         if not child:
             # The durable tip names a row that is gone: confirmed deletion.
-            return True, None, "closed_confirmed"
+            return _closed_or_churn()
         if not _is_local_interactive_persisted_source(child.get("source")):
-            return True, None, "closed_confirmed"
+            return _closed_or_churn()
         for row in (parent, child):
             if row.get("profile_name") not in (None, "", profile):
-                return True, None, "closed_confirmed"
+                return _closed_or_churn()
         # Only the observed automatic idle closure is resumable here. Explicit
         # resets/closures and unknown future reasons must not become redirects.
         reason = child.get("end_reason")
+        if reason == "compression":
+            # The continuation itself was rotated again — ordinary
+            # compression, not an explicit reset or deletion. The durable tip
+            # pointer is about to name the grandchild; revalidate rather than
+            # terminate, so queued wakeups are never cleared for a live
+            # lineage (#9380 round-4, finding 1).
+            return True, None, "unconfirmed"
         if reason not in (None, "", "idle_timeout"):
-            return True, None, "closed_confirmed"
+            return _closed_or_churn()
         if child.get("ended_at") is not None and reason != "idle_timeout":
-            return True, None, "closed_confirmed"
+            return _closed_or_churn()
         if db.get_compression_tip(sid) != tip:
             # The tip changed under us mid-read: a newer rotation is in
             # flight. Retryable, not terminal.
