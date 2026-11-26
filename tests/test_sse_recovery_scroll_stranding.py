@@ -60,7 +60,7 @@ def test_content_grew_keeps_pin_and_resnaps_not_unpin():
     # before the chain reaches any `else{ _scrollPinned=false }` fallthrough.
     after = c[idx:]
     resnap = after.find(_compact("_setMessageScrollToBottom()"))
-    fallthrough = after.find(_compact("}else{_nearBottomCount=0;_scrollPinned=false;}"))
+    fallthrough = after.find(_compact("}else{_nearBottomCount=0;_scrollPinned=false"))
     assert resnap != -1, "content-grew guard must re-snap via _setMessageScrollToBottom()"
     assert fallthrough != -1, "the original unpin fallthrough should still exist for the real scroll-away case"
     assert resnap < fallthrough, (
@@ -161,3 +161,194 @@ def test_sticky_follow_invariant_unpinned_within_1200_is_not_refollowed():
     # Scrolled far away (not near bottom), pinned flag irrelevant → not re-followed.
     assert run(near_bottom=False, unpinned=False) is False
     assert run(near_bottom=False, unpinned=True) is False
+
+
+def test_cancel_handler_avoids_sync_scrollheight_layout():
+    """#6653: the synchronous cancel SSE handler must NOT read #messages.scrollHeight
+    via _isMessagePaneNearBottom inside the EventSource callback.
+
+    On a long transcript (450+ messages) that geometry read forces a full
+    synchronous layout in WKWebView, pegging the WebContent process at 100% CPU
+    and freezing the native macOS app. Cancellation must read the layout-free
+    authoritative follow-intent cache (_messageFollowIntentCache, synchronously
+    invalidated on scroll-away in ui.js) plus the sticky-unpin flag
+    (_messageUserUnpinned) instead of a forced layout or a raw _scrollPinned
+    read (rAF-deferred, stale at cancel time), in both the embedded-snapshot
+    and fallback paths.
+    """
+    src = MESSAGES_JS
+    start = src.index("source.addEventListener('cancel',")
+    end = src.index("for(const _runJournalEventName of", start)
+    block = src[start:end]
+    assert "_isMessagePaneNearBottom" not in block, (
+        "cancel handler must not force a synchronous scrollHeight layout via "
+        "_isMessagePaneNearBottom (#6653)"
+    )
+    assert "_scrollPinned" not in block, (
+        "cancel handler must not read raw _scrollPinned (rAF-deferred, stale at "
+        "cancel time) - use the layout-free _messageFollowIntentCache (#6653)"
+    )
+    assert "_messageFollowIntentCache" in block, (
+        "cancel handler must read the layout-free follow-intent cache "
+        "_messageFollowIntentCache (#6653)"
+    )
+    assert "_messageUserUnpinned" in block, (
+        "cancel handler must keep the sticky-unpin guard _messageUserUnpinned (#6653)"
+    )
+    assert "_wasFollowingAtCancel" in block and "_wasFollowingAtCancelFb" in block, (
+        "both cancel follow-intent guards (embedded-snapshot and fallback) must "
+        "be present in the cancel handler (#6653)"
+    )
+
+
+def test_follow_intent_cache_is_fed_by_the_input_tail_ownership():
+    """#6653 port: the layout-free follow-intent cache must be invalidated in
+    ui.js SYNCHRONOUSLY on scroll-away-up, and the invalidation must ride on the
+    #8070 input-tail ownership - the same `_isTranscriptScrollTarget` gate that
+    mints re-pin authority, and the same `keyDir` the keyboard path already
+    computes - plus the cumulative scrollbar-drag comparison that sits before the
+    scroll listener's guards, because the drag deltas are swallowed by the
+    programmatic latch. A cancel landing between a scroll-away and the next
+    animation frame must never read stale pin state.
+
+    The behavioral half of this contract (wheel/touch, drag, keydown, nested-pane
+    controls) lives in `tests/test_issue6653_input_authority.py`.
+    """
+    c = _compact(UI_JS)
+    assert _compact("let _messageFollowIntentCache=true") in c, (
+        "follow-intent cache declaration missing in ui.js (#6653)"
+    )
+    # Wheel/touch: invalidation inside the very gate that captures the tail, only
+    # for an upward gesture.
+    wheel = c.find(_compact("if(_isTranscriptScrollTarget(target,el,dir)){"))
+    assert wheel != -1, "wheel/touch path must keep the input-tail capture gate (#7494)"
+    wheel_seg = c[wheel : wheel + 260]
+    assert _compact("_captureMessageScrollInputTail(el);") in wheel_seg
+    assert _compact("if(dir<0&&el.scrollTop>0)_messageFollowIntentCache=false;") in wheel_seg, (
+        "an upward wheel/touch gesture the transcript actually scrolls must "
+        "invalidate the follow-intent cache inside the same ownership gate that "
+        "captures the input tail, and only when upward travel is possible — "
+        "ownership alone does not move the transcript (#6653 re-gate)"
+    )
+    # Keydown: same gate, direction from keyDir only.
+    key = c.find(_compact("if(_isTranscriptScrollTarget(keyTarget,el,keyDir)){"))
+    assert key != -1, "keydown path must keep the input-tail capture gate (#7494)"
+    key_seg = c[key : key + 260]
+    assert _compact("if(keyDir<0&&el.scrollTop>0)_messageFollowIntentCache=false;") in key_seg, (
+        "an upward scroll key the transcript actually scrolls must invalidate the "
+        "follow-intent cache inside the same ownership gate, and only when upward "
+        "travel is possible (#6653 re-gate)"
+    )
+    # Scroll listener: the scrollbar-drag invalidation precedes BOTH guards (the
+    # drag is reader input on the transcript surface; a programmatic scroll never
+    # sets _scrollbarDragActive).
+    start = UI_JS.index("el.addEventListener('scroll'")
+    listener = UI_JS[start : start + 1200]
+    lc = _compact(listener)
+    invalidate = lc.find("_messageFollowIntentCache=false")
+    assert invalidate != -1, (
+        "scroll listener must synchronously invalidate the follow-intent cache "
+        "on an upward scrollbar drag (#6653)"
+    )
+    assert _compact("_scrollbarDragActive") in lc[:invalidate], (
+        "the pre-guard invalidation must be gated on an active scrollbar drag — "
+        "a programmatic scroll can never invalidate follow-intent (#6653)"
+    )
+    jump_guard = lc.find(_compact("if(_messageJumpScrollOwner){"))
+    prog_return = lc.find(_compact("if(_freshProgrammaticScrollActive())return;"))
+    assert jump_guard != -1 and prog_return != -1 and invalidate < jump_guard < prog_return, (
+        "the drag invalidation must run BEFORE the jump-owner and "
+        "programmatic-scroll early-returns in the scroll listener (#6653)"
+    )
+
+
+def test_keydown_follow_intent_direction_comes_from_keydir():
+    """Shift+Space is a page-UP scroll-away and must invalidate the follow-intent
+    cache exactly like PageUp/ArrowUp/Home; plain Space (page-down) and PageDown
+    scroll TOWARD the bottom and must NOT invalidate.
+
+    The direction has exactly one source: `keyDir`. A second literal key list in
+    the invalidation statement would drift from the browser's own semantics (and
+    did, in the pre-port branch), so it is forbidden here.
+    """
+    keydir = _compact(
+        "const keyDir=(e.key==='PageUp'||e.key==='ArrowUp'||e.key==='Home'"
+        "||((e.key===' '||e.key==='Spacebar')&&e.shiftKey))?-1:1;"
+    )
+    assert keydir in _compact(UI_JS), (
+        "keyDir must keep encoding the browser's key semantics, including "
+        "Shift+Space as page-up (#6653)"
+    )
+    keydown = UI_JS[UI_JS.index("const _MESSAGE_SCROLL_KEYS=new Set(["):]
+    keydown = keydown[: keydown.index("let _scrollRaf=0")]
+    kc = _compact(keydown)
+    assert kc.count("_messageFollowIntentCache=false") == 1, (
+        "the keydown path must have exactly one follow-intent invalidation, "
+        "derived from keyDir (#6653)"
+    )
+    invalidate = kc.index("_messageFollowIntentCache=false")
+    stmt_start = kc.rindex("if(", 0, invalidate)
+    stmt = kc[stmt_start : invalidate + len("_messageFollowIntentCache=false")]
+    assert _compact("if(keyDir<0&&el.scrollTop>0)") in stmt, (
+        "the keydown invalidation must be gated on keyDir<0 and on real upward "
+        "travel, not on a second literal key list (#6653 re-gate)"
+    )
+    assert "e.key===" not in stmt, (
+        "no divergent key list may live in the invalidation statement — keyDir "
+        "already encodes PageUp/ArrowUp/Home and Shift+Space as up (#6653)"
+    )
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for behavioral test")
+def test_cancel_before_scroll_raf_does_not_follow_stale_pin():
+    """#6653 behavioral: a cancel landing BEFORE the scroll listener's rAF has
+    run must NOT re-follow (call scrollToBottom) a reader who just scrolled up.
+
+    The rAF defers flipping _scrollPinned/_messageUserUnpinned to the next
+    frame, so both are still stale (pinned) when the cancel fires. The
+    synchronous _messageFollowIntentCache was already invalidated by the
+    scroll-away, so the guard must read the cache and decline to follow.
+    """
+    src = MESSAGES_JS
+    start = src.index("const _wasFollowingAtCancel=")
+    end = src.index(";", src.index("_messageUserUnpinned", start))
+    expr = src[start:end + 1]
+    # Timing parity: the fallback API-fail path must use a byte-identical guard
+    # so both cancel paths observe the same follow-intent.
+    fb_start = src.index("const _wasFollowingAtCancelFb=")
+    fb_end = src.index(";", src.index("_messageUserUnpinned", fb_start))
+    fb_expr = src[fb_start:fb_end + 1]
+    assert _compact(expr[expr.index("=") + 1:]) == _compact(fb_expr[fb_expr.index("=") + 1:]), (
+        "both cancel paths (embedded-snapshot and fallback) must use identical "
+        "follow-intent expressions (#6653)"
+    )
+
+    def run(follow_cache: bool, unpinned: bool) -> int:
+        harness = textwrap.dedent(f"""
+            let _messageFollowIntentCache = {str(follow_cache).lower()};
+            let _scrollPinned = true;   // stale: the scroll rAF has not run yet
+            let _messageUserUnpinned = {str(unpinned).lower()};
+            function _isMessageReaderUnpinned(){{ return {str(unpinned).lower()}; }}
+            let _scrollToBottomCalls = 0;
+            function scrollToBottom(){{ _scrollToBottomCalls++; }}
+            {expr}
+            if(_wasFollowingAtCancel && typeof scrollToBottom==='function') scrollToBottom();
+            console.log(JSON.stringify(_scrollToBottomCalls));
+        """)
+        res = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=30)
+        assert res.returncode == 0, res.stderr
+        return json.loads(res.stdout.strip())
+
+    # THE #6653 WINDOW: reader scrolled up just before cancel. The scroll event
+    # synchronously invalidated the cache, but the rAF (which flips
+    # _scrollPinned/_messageUserUnpinned) has NOT run yet - both are stale
+    # "pinned". scrollToBottom() must NOT be called.
+    assert run(follow_cache=False, unpinned=False) == 0, (
+        "a reader who just scrolled up (cache synchronously invalidated) must "
+        "NOT be yanked back by the cancel handler even though _scrollPinned is "
+        "still stale-true before the scroll rAF runs (#6653)"
+    )
+    # Genuine follower (cache armed, pinned) -> scrollToBottom() re-follows.
+    assert run(follow_cache=True, unpinned=False) == 1
+    # Sticky-unpin guard stays authoritative: cache armed but reader unpinned -> no follow.
+    assert run(follow_cache=True, unpinned=True) == 0

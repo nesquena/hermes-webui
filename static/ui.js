@@ -8980,6 +8980,23 @@ let _lastMessageScrollHeight=null;
 // window after load as suppressed.
 let _lastNonMessageScrollIntentMs=-Infinity;
 let _messageUserUnpinned=false;
+// #6653: layout-free authoritative follow-intent cache for synchronous readers
+// (the SSE cancel handler in messages.js). _scrollPinned/_messageUserUnpinned
+// are only updated inside the scroll listener's requestAnimationFrame callback,
+// so a reader who JUST scrolled away (scrollbar or keyboard) can still read
+// stale pin state until the next frame. Invalidation happens where upstream
+// proves the gesture governs the transcript (_isTranscriptScrollTarget), plus
+// the cumulative scrollbar-drag comparison before the guards; every re-pin
+// re-arms it. Reads never touch scrollHeight/clientHeight, so this is safe
+// inside a synchronous EventSource callback on WKWebView (#6653).
+let _messageFollowIntentCache=true;
+// #6653 re-gate: cumulative scrollTop baseline captured at scrollbar pointerdown.
+// A scrollbar drag that starts inside the programmatic-suppression window has its
+// per-event deltas swallowed by the `if(_programmaticScroll) return` latch, so the
+// raw _lastScrollTop comparison alone cannot see it; comparing the CURRENT
+// scrollTop against this pointerdown baseline measures the cumulative drag
+// distance and still catches the upward drag as authoritative user input.
+let _scrollbarDragBaselineScrollTop=null;
 // A monotonic ownership token lets delayed restores distinguish reader input
 // that happened after a snapshot from input that merely happened recently.
 let _messageScrollInputGeneration=0;
@@ -9145,7 +9162,10 @@ function _recordNonMessageScrollIntent(e){
     // A pane pinned at the gesture's boundary chains the gesture to the
     // transcript, so it must not swallow the capture (#7494, Boundary
     // Gestures Lose Re-Pinning).
-    if(_isTranscriptScrollTarget(target,el,dir)) _captureMessageScrollInputTail(el);
+    if(_isTranscriptScrollTarget(target,el,dir)){
+      _captureMessageScrollInputTail(el);
+      if(dir<0&&el.scrollTop>0) _messageFollowIntentCache=false;
+    }
     if(jumpScrollOwned||e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)||guardedWheelUp){
       if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
     }
@@ -9265,6 +9285,7 @@ function _resetScrollDirectionTracker(){
   _messageScrollInputTailConsumedGeneration=_messageScrollInputTailGeneration;
   _messageUserUnpinned=false;
   _scrollPinned=true;
+  _messageFollowIntentCache=true;
   _nearBottomCount=0;
   _touchStartY=null;
   _messageTouchScrollActive=false;
@@ -9289,6 +9310,7 @@ function _resetStreamScrollFollow(){
   _clearNewMessageScrollCue();
   _messageUserUnpinned=false;
   _scrollPinned=true;
+  _messageFollowIntentCache=true;
   _nearBottomCount=0;
   _lastScrollTop=null;
   _lastMessageScrollHeight=null;
@@ -9382,6 +9404,7 @@ if(typeof window!=='undefined'){
     if(e.target===el&&e.offsetX>=el.clientWidth){
       if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
       _scrollbarDragActive=true;
+      _scrollbarDragBaselineScrollTop=el.scrollTop;
       // The scrollbar belongs to the transcript itself: drag input always
       // targets the transcript scroll surface (#7494).
       if(typeof _captureMessageScrollInputTail==='function') _captureMessageScrollInputTail(el);
@@ -9390,16 +9413,18 @@ if(typeof window!=='undefined'){
   window.addEventListener('pointerup',()=>{
     if(!_scrollbarDragActive) return;
     _scrollbarDragActive=false;
+    _scrollbarDragBaselineScrollTop=null;
     _scheduleMessageVirtualizedRender(true);
   },{passive:true});
   window.addEventListener('pointercancel',()=>{
     if(!_scrollbarDragActive) return;
     _scrollbarDragActive=false;
+    _scrollbarDragBaselineScrollTop=null;
     _scheduleMessageVirtualizedRender(true);
   },{passive:true});
-  window.addEventListener('blur',()=>{ _scrollbarDragActive=false; },{passive:true});
+  window.addEventListener('blur',()=>{ _scrollbarDragActive=false; _scrollbarDragBaselineScrollTop=null; },{passive:true});
   document.addEventListener('visibilitychange',()=>{
-    if(document.visibilityState==='hidden') _scrollbarDragActive=false;
+    if(document.visibilityState==='hidden'){ _scrollbarDragActive=false; _scrollbarDragBaselineScrollTop=null; }
   },{passive:true});
   // #4970 review (greptile P1): record keyboard-driven message-pane scrolling as
   // user intent. PageUp/PageDown, Arrow keys, Space/Shift+Space, Home/End scroll
@@ -9427,9 +9452,18 @@ if(typeof window!=='undefined'){
     // handlers have not yet preventDefault()/stopPropagation()'d; inspect the
     // active/target control path directly.
     if((e.key===' '||e.key==='Spacebar')&&(_isMessageInteractiveKeyTarget(t)||_isMessageInteractiveKeyTarget(a))) return;
-    // Count only when the message pane itself is the scroll target: it is focused,
-    // contains the focus, or the pointer is over it (keyboard scroll w/o focus).
-    if(a===el||el.contains(a)||el.matches(':hover')){
+    // Count only when the message pane itself owns the keyboard: it is focused
+    // or contains the focus. Hovering the pane is the fallback for the case
+    // where nothing owns the keyboard at all (focus on <body>, e.g. right after
+    // a click on empty space) — deliberately kept, because readers scroll a
+    // hovered transcript without focusing it (#7494).
+    // It is NOT ownership when another widget already holds focus: a tree row,
+    // palette or drawer outside the pane consumes ArrowUp/PageUp itself, so the
+    // transcript never scrolls and a follower must not lose its intent (#6653).
+    const focusOnTranscript=!!a&&(a===el||el.contains(a));
+    const focusOnForeignWidget=!!a&&a!==document.body&&a!==document.documentElement&&!focusOnTranscript;
+    if(!focusOnTranscript&&!(el.matches(':hover')&&!focusOnForeignWidget)) return;
+    {
       if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
       const now=performance.now();
       // Nested-pane focus (tool output, code block) consumes scroll keys —
@@ -9448,7 +9482,15 @@ if(typeof window!=='undefined'){
       // (#7494 re-gate: PageDown from a nested pane's boundary was undone by
       // the queued live-render restore).
       const keyDir=(e.key==='PageUp'||e.key==='ArrowUp'||e.key==='Home'||((e.key===' '||e.key==='Spacebar')&&e.shiftKey))?-1:1;
-      if(_isTranscriptScrollTarget(keyTarget,el,keyDir)) _captureMessageScrollInputTail(el);
+      // #6653: the follow-intent cache rides on the same ownership decision that
+      // mints the input tail - a key the transcript actually scrolls, in the up
+      // direction (keyDir already encodes the browser's own key semantics, so
+      // there is no second key list here). A key consumed by a nested pane and a
+      // downward key both leave a follower following.
+      if(_isTranscriptScrollTarget(keyTarget,el,keyDir)){
+        _captureMessageScrollInputTail(el);
+        if(keyDir<0&&el.scrollTop>0) _messageFollowIntentCache=false;
+      }
       _lastMessageKeyScrollIntentMs=now;
       const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
       if(bottomDistance>120) _lastMessageScrollIntentMs=now;
@@ -9456,9 +9498,17 @@ if(typeof window!=='undefined'){
   },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
+    // #6653: the follow-intent cache is invalidated BEFORE the jump-owner and
+    // programmatic guards, because a scrollbar drag is reader input on the
+    // transcript surface itself (a programmatic scroll never sets
+    // _scrollbarDragActive) and a drag that starts inside the programmatic
+    // suppression window has its per-event deltas swallowed by the latch.
+    if(_scrollbarDragActive&&_scrollbarDragBaselineScrollTop!==null
+      &&el.scrollTop<_scrollbarDragBaselineScrollTop-2) _messageFollowIntentCache=false;
     if(_messageJumpScrollOwner){
       _scheduleMessageJumpScrollReconcile(_messageJumpScrollOwner.generation);
       return;
+
     }
     if(_freshProgrammaticScrollActive()) return;
     _scheduleMessageVirtualizedRender();
@@ -9549,6 +9599,7 @@ if(typeof window!=='undefined'){
         _cancelBottomSettle();
         _nearBottomCount=0;
         _scrollPinned=false;
+        _messageFollowIntentCache=false;
         _messageUserUnpinned=true;
       }else if(movedDown&&(nearBottom||caughtInputTail)){
         // Catching the INPUT-CAPTURED tail is decisive: re-pin immediately (no
@@ -9559,6 +9610,7 @@ if(typeof window!=='undefined'){
           _nearBottomCount=0;
           _messageUserUnpinned=false;
           _scrollPinned=true;
+          _messageFollowIntentCache=true;
           if(typeof window!=='undefined'&&window._autoScrollFollow&&typeof _setMessageScrollToBottom==='function') _setMessageScrollToBottom();
         }else{
         _nearBottomCount=_nearBottomCount+1;
@@ -9570,6 +9622,7 @@ if(typeof window!=='undefined'){
           if(!_messageUserUnpinned||bottomDistance<=80){
             _messageUserUnpinned=false;
             _scrollPinned=true;
+            _messageFollowIntentCache=true;
           }
           _nearBottomCount=0;
         }
@@ -9577,7 +9630,7 @@ if(typeof window!=='undefined'){
       }else if(!_messageUserUnpinned){
         if(nearBottom){
           _nearBottomCount=_nearBottomCount+1;
-          if(_nearBottomCount>=2){_scrollPinned=true;_nearBottomCount=0;}
+          if(_nearBottomCount>=2){_scrollPinned=true;_messageFollowIntentCache=true;_nearBottomCount=0;}
         }else if(!movedUp && window._autoScrollFollow && _scrollPinned){
           // Content-grew-beneath-a-pinned-viewport case (NOT a user scroll-away).
           // During streaming on a tall transcript (esp. mobile, where chunks land
@@ -9594,10 +9647,12 @@ if(typeof window!=='undefined'){
         }else{
           _nearBottomCount=0;
           _scrollPinned=false;
+          _messageFollowIntentCache=false;
         }
       }else if(!nearBottom){
         _nearBottomCount=0;
         _scrollPinned=false;
+        _messageFollowIntentCache=false;
       }
       if(nearBottom) _clearNewMessageScrollCue();
       const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80;
@@ -10232,19 +10287,31 @@ document.addEventListener('DOMContentLoaded',function(){
 function _setMessageScrollToBottom(){
   const el=$('messages');
   if(!el) return;
+  // #6653 re-gate: automatic follow must HONOR a false follow-intent cache. A
+  // reader who just scrolled away (cache invalidated synchronously in the
+  // scroll/keydown listeners, BEFORE the rAF flips the pin flags) must not be
+  // yanked back to the bottom by a streaming token arriving in that window -
+  // and the false cache stays STICKY: automatic writers never re-arm it. Only
+  // explicit bottom-navigation (scrollToBottom() re-arms first), stream/session
+  // resets, or confirmed near-bottom/downward motion (scroll listener rAF) may
+  // flip it back to true.
+  if(_messageFollowIntentCache===false) return;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   el.scrollTop=el.scrollHeight;
   _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
   _nearBottomCount=2;
   _scrollPinned=true;
+  _messageFollowIntentCache=true;
   requestAnimationFrame(()=>{
     // Retry the bottom write on the next layout frame so a DOM rebuild that
     // grows the transcript after the first write doesn't strand a pinned
     // conversation mid-scroll (#3319). But by this frame the user may have
     // scrolled up — under the sticky-unpin model (#3343) _messageUserUnpinned
     // is the authoritative "user scrolled away" signal, so DON'T snap them back
-    // or re-pin if so; only release the programmatic-scroll latch.
-    if(_messageUserUnpinned || !_scrollPinned || _recentNonMessageScrollIntent()){
+    // or re-pin if so; only release the programmatic-scroll latch. #6653
+    // re-gate: a false follow-intent cache (scroll-away in the synchronous
+    // window) must also abort the retry so the retry never re-arms or yanks.
+    if(_messageUserUnpinned || !_scrollPinned || _recentNonMessageScrollIntent() || _messageFollowIntentCache===false){
       _deferClearProgrammaticScroll();
       return;
     }
@@ -10252,6 +10319,7 @@ function _setMessageScrollToBottom(){
     _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
     _nearBottomCount=2;
     _scrollPinned=true;
+    _messageFollowIntentCache=true;
     _deferClearProgrammaticScroll();
   });
 }
@@ -10340,7 +10408,7 @@ function _settleMessageScrollToBottom(force, explicit){
   // active one that may now be in the global _settleRO. (Codex review #3.)
   const ro=new ResizeObserver(()=>{
     if(token!==_bottomSettleToken){ ro.disconnect(); if(_settleRO===ro) _settleRO=null; return; }
-    if((!window._autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){
+    if((!window._autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()||_messageFollowIntentCache===false){
       ro.disconnect(); if(_settleRO===ro) _settleRO=null;
       _programmaticScroll=false;
       return;
@@ -10379,7 +10447,7 @@ function _settleMessageScrollToBottom(force, explicit){
   _settleFinalTimer=setTimeout(()=>{
     if(token!==_bottomSettleToken) return;
     ro.disconnect(); if(_settleRO===ro) _settleRO=null;
-    if((!window._autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){ _programmaticScroll=false; return; }
+    if((!window._autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()||_messageFollowIntentCache===false){ _programmaticScroll=false; return; }
     _settleFinalScroll(token);
   },2000);
 }
@@ -10388,7 +10456,7 @@ function _settleFinalScroll(token){
   if(token!==_bottomSettleToken) return;
   const el=document.getElementById('messages');
   if(!el){ _programmaticScroll=false; return; }
-  if(_messageUserUnpinned||!_scrollPinned||_recentNonMessageScrollIntent()||_recentMessageTouchScrollIntent()){
+  if(_messageUserUnpinned||!_scrollPinned||_recentNonMessageScrollIntent()||_recentMessageTouchScrollIntent()||_messageFollowIntentCache===false){
     _programmaticScroll=false;
     return;
   }
@@ -10397,6 +10465,9 @@ function _settleFinalScroll(token){
   _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
   _nearBottomCount=2;
   _scrollPinned=true;
+  // #6653 re-gate: settle is an automatic writer - never flip a false cache
+  // back to true (the bail above already skips the write when it is false).
+  if(_messageFollowIntentCache!==false) _messageFollowIntentCache=true;
   _deferClearProgrammaticScroll();
 }
 function scrollIfPinned(){
@@ -10423,6 +10494,7 @@ function scrollIfPinned(){
     _nearBottomCount=0;
     _messageUserUnpinned=false;
     _scrollPinned=true;
+    _messageFollowIntentCache=true;
   }
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
@@ -10438,6 +10510,7 @@ function scrollToBottom(){
   if(typeof _messageJumpScrollOwner!=='undefined'&&_messageJumpScrollOwner&&typeof _cancelMessageJumpScroll==='function') _cancelMessageJumpScroll();
   _clearNewMessageScrollCue();
   _scrollPinned=true;
+  _messageFollowIntentCache=true;
   _messageUserUnpinned=false;
   // Write scrollTop once synchronously to anchor the viewport, then let
   // ResizeObserver settle handle any late layout growth (Prism, KaTeX,
@@ -21732,6 +21805,7 @@ function _restoreMessageScrollSnapshot(snapshot){
   }else if(snapshot.pinned===true){
     _messageUserUnpinned=false;
     _scrollPinned=true;
+    _messageFollowIntentCache=true;
     _nearBottomCount=2;
   }else{
     const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
@@ -21742,6 +21816,7 @@ function _restoreMessageScrollSnapshot(snapshot){
     }else if(bottomDistance<=120){
       _messageUserUnpinned=false;
       _scrollPinned=true;
+      _messageFollowIntentCache=true;
       _nearBottomCount=2;
     }
   }
@@ -22049,6 +22124,7 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   if(snapshot.pinned===true){
     _messageUserUnpinned=false;
     _scrollPinned=true;
+    _messageFollowIntentCache=true;
     _nearBottomCount=2;
   }else if(snapshot.userUnpinned===true){
     _messageUserUnpinned=true;
@@ -22242,6 +22318,12 @@ function _reanchorPinnedTailAfterRender(wasNearTail){
   if(!wasNearTail) return;
   const el=$('messages');
   if(!el) return;
+  // #6653 re-gate: honor a false follow-intent cache. The re-anchor is an
+  // AUTOMATIC writer — it must never flip a reader's scroll-away back to
+  // "following". A reader who scrolled up (cache synchronously invalidated on
+  // authoritative upward input) stays where they are and the false cache stays
+  // sticky; only a confirmed tail-follower (cache still true) is re-anchored.
+  if(_messageFollowIntentCache===false) return;
   const settledMax=Math.max(0, el.scrollHeight-el.clientHeight);
   if(el.scrollTop < settledMax-1){
     _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
@@ -22249,6 +22331,7 @@ function _reanchorPinnedTailAfterRender(wasNearTail){
     _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
     _nearBottomCount=2;
     _scrollPinned=true;
+    _messageFollowIntentCache=true;
   }
 }
 function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
