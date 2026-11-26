@@ -13133,12 +13133,19 @@ function _showProjectPicker(session, anchorEl){
     const active=(typeof document!=='undefined')?document.activeElement:null;
     const ownedFocus=!!(active&&typeof picker.contains==='function'&&picker.contains(active));
     // Preserve a visible keyboard target when renamed rows change its position.
-    const focusedRect=ownedFocus?active.getBoundingClientRect():null;
-    const pickerTop=ownedFocus?picker.getBoundingClientRect().top+picker.clientTop:0;
-    // 1px tolerance: rows have fractional heights while scrollTop is whole
-    // pixels, so a row aligned to an edge can sit a fraction outside it.
-    const keepFocusedVisible=!!(focusedRect&&picker.clientHeight>0
-      &&focusedRect.top>=pickerTop-1&&focusedRect.bottom<=pickerTop+picker.clientHeight+1);
+    // One definition of "visible", used here and by the reveal below: the box
+    // inside the picker's border, whose bottom edge the sticky "+ New project"
+    // row covers for every other row; 1px either side, because rows have
+    // fractional heights while scrollTop is whole pixels.
+    const visibleBox=row=>{
+      const top=picker.getBoundingClientRect().top+picker.clientTop;
+      const boxBottom=top+picker.clientHeight;
+      return {top,bottom:row===createItem?boxBottom
+        :Math.min(boxBottom,createItem.getBoundingClientRect().top)};
+    };
+    const rowInBox=(rect,box)=>rect.top>=box.top-1&&rect.bottom<=box.bottom+1;
+    const keepFocusedVisible=!!(ownedFocus&&picker.clientHeight>0
+      &&rowInBox(active.getBoundingClientRect(),visibleBox(active)));
     const focusedId=ownedFocus&&typeof active.getAttribute==='function'
       ? active.getAttribute('data-project-id')
       : null;
@@ -13182,12 +13189,11 @@ function _showProjectPicker(session, anchorEl){
       // after that placement, without moving focus or scrolling the page.
       requestAnimationFrame(()=>{
         if(pointerGestureId!==null||picker.isConnected===false||document.activeElement!==active||!picker.contains(active)) return;
-        const top=picker.getBoundingClientRect().top+picker.clientTop;
-        const bottom=active===createItem?top+picker.clientHeight
-          :Math.min(top+picker.clientHeight,createItem.getBoundingClientRect().top);
+        const box=visibleBox(active);
         const rect=active.getBoundingClientRect();
-        if(rect.top<top) picker.scrollTop-=top-rect.top;
-        else if(rect.bottom>bottom) picker.scrollTop+=rect.bottom-bottom;
+        if(rowInBox(rect,box)) return;
+        if(rect.top<box.top) picker.scrollTop-=box.top-rect.top;
+        else picker.scrollTop+=rect.bottom-box.bottom;
       });
     }
     if(ownedFocus&&active!==none&&active!==createItem){

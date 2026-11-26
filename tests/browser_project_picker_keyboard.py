@@ -2202,9 +2202,12 @@ def _check_long_list_rename_leaves_hidden_row_unscrolled(page, seed):
     """A re-sort never scrolls the picker to a focused row the user had
     scrolled out of view (#6577): only a row that was visible stays visible.
 
-    Opens on LONG_PROJECTS_LAST (bottom), scrolls the picker to the top so that
-    focused row is hidden, renames another project, and asserts the picker's
-    scrollTop and the focused node are unchanged."""
+    Opens on LONG_PROJECTS_LAST (bottom) and, with that row focused:
+    - scrolls the picker to the top so the row is hidden, and renames another
+      project so its row MOVES (a real re-sort);
+    - scrolls so the row sits behind the sticky "+ New project" row (only a
+      1-2px sliver above it), and renames that project in place;
+    each time asserting the picker's scrollTop and the focused node are unchanged."""
     failures = []
     problem = _open_single_picker(page, seed["alpha"])
     if problem:
@@ -2224,38 +2227,72 @@ def _check_long_list_rename_leaves_hidden_row_unscrolled(page, seed):
     if state.get("problem") or state["text"] != LONG_PROJECTS_LAST or state["inside"] or hidden["scrollTop"] != 0 or not hidden["other"]:
         page.keyboard.press("Escape")
         return [f"  [hidden row] could not scroll the focused {LONG_PROJECTS_LAST!r} row out of view: {state} {hidden}"]
-    renamed = hidden["other"] + " (renamed)"
-    after = page.evaluate(
-        """async ({from, to}) => {
+    rename_js = """async ({from, to}) => {
           const p = _allProjects.find(p => p.name === from);
           await api('/api/projects/rename', {method: 'POST', body: JSON.stringify({project_id: p.project_id, name: to})});
           await renderSessionList({deferWhileInteracting: false, keepProjectPicker: true});
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           const picker = document.querySelector('.project-picker:not(.batch-project-picker)');
+          const rows = picker ? Array.from(picker.querySelectorAll('.project-picker-item[data-project-id]'))
+            .filter(row => row.getAttribute('data-project-id')) : [];
           return {
             open: !!picker,
             scrollTop: picker ? picker.scrollTop : null,
             sameNode: document.activeElement === window.__hiddenRow,
-            renamedShown: !!picker && Array.from(picker.querySelectorAll('.project-picker-item'))
-              .some(row => row.textContent.trim() === to),
+            renamedAt: rows.findIndex(row => row.textContent.trim() === to),
           };
-        }""",
-        {"from": hidden["other"], "to": renamed},
-    )
-    if not after["open"] or not after["renamedShown"]:
-        failures.append(f"  [hidden row] the open picker did not refresh to show {renamed!r}: {after}")
+        }"""
+    original = hidden["other"]
+    moved = "Zz " + original
+    renamed = moved + " (renamed)"
+    current = original
+    # Leg 1: scrolled to the top; the rename moves a row from first to near the end.
+    after = page.evaluate(rename_js, {"from": original, "to": moved})
+    if after["open"] and after["renamedAt"] >= 0:
+        current = moved
+    if not after["open"] or after["renamedAt"] <= 0:
+        failures.append(f"  [hidden row] the open picker did not re-sort {moved!r} away from the top: {after}")
     elif after["scrollTop"] != 0:
         failures.append(f"  [hidden row] the re-sort scrolled the picker to a row the user had scrolled away from: scrollTop 0 -> {after['scrollTop']}")
     elif not after["sameNode"]:
         failures.append("  [hidden row] the focused row lost focus")
+    if not failures:
+        # Leg 2: the focused row sits behind the sticky "+ New project" row.
+        behind = page.evaluate(
+            """async () => {
+              const picker = document.querySelector('.project-picker:not(.batch-project-picker)');
+              const create = picker.querySelector('.project-picker-create');
+              const row = window.__hiddenRow;
+              const frame = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+              for (let i = 0; i < 3; i++) {
+                const r = row.getBoundingClientRect(), c = create.getBoundingClientRect();
+                picker.scrollTop += Math.round(r.top - (c.top - 1.5));
+                await frame();
+              }
+              const r = row.getBoundingClientRect(), c = create.getBoundingClientRect();
+              return {scrollTop: picker.scrollTop, sliver: c.top - r.top, focused: document.activeElement === row};
+            }"""
+        )
+        if not behind["focused"] or not (0 <= behind["sliver"] <= 2.5):
+            failures.append(f"  [hidden row] could not put the focused row behind the sticky row: {behind}")
+        else:
+            after = page.evaluate(rename_js, {"from": moved, "to": renamed})
+            if after["open"] and after["renamedAt"] >= 0:
+                current = renamed
+            if not after["open"] or after["renamedAt"] < 0:
+                failures.append(f"  [hidden row] the open picker did not refresh to show {renamed!r}: {after}")
+            elif after["scrollTop"] != behind["scrollTop"]:
+                failures.append(f"  [hidden row] a refresh scrolled the picker to a row hidden behind the sticky row: scrollTop {behind['scrollTop']} -> {after['scrollTop']}")
+            elif not after["sameNode"]:
+                failures.append("  [hidden row] the focused row lost focus behind the sticky row")
     page.keyboard.press("Escape")
     page.evaluate(
         """async ({from, to}) => {
           const p = _allProjects.find(p => p.name === from);
-          if (p) await api('/api/projects/rename', {method: 'POST', body: JSON.stringify({project_id: p.project_id, name: to})});
+          if (p && from !== to) await api('/api/projects/rename', {method: 'POST', body: JSON.stringify({project_id: p.project_id, name: to})});
           await renderSessionList({deferWhileInteracting: false});
         }""",
-        {"from": renamed, "to": hidden["other"]},
+        {"from": current, "to": original},
     )
     return failures
 
