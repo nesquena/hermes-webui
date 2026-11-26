@@ -164,6 +164,16 @@ const ctx = {
   upsertActiveSessionForLocalTurn(){},
   renderSessionListFromCache(){},
   _clearComposerDraft: async () => {},
+  // #7781 (P1, greptile 2026-11-26): the draft persistence the restore helper
+  // calls. Records every save so a test can see WHICH chat the command was
+  // handed back to.
+  _draftSaves: [],
+  _switchLog: [],
+  _saveComposerDraftNow(sid, text, files) { ctx._draftSaves.push({ sid, text, files: (files || []) }); return Promise.resolve(); },
+  __draftSaves() { return ctx._draftSaves; },
+  __resetDraftSaves() { ctx._draftSaves.length = 0; },
+  __switchLog() { return ctx._switchLog; },
+  __resetSwitchLog() { ctx._switchLog.length = 0; },
   removeThinking(){},
   history: { replaceState(){} },
   S: { session: { session_id: 'sess-1' }, pendingFiles: [], messages: [], toolCalls: [] },
@@ -185,7 +195,17 @@ const ctx = {
       }
       return { skills: skillsPayload };
     }
-    if (path === '/api/commands') return { commands: [] };
+    if (path === '/api/commands') {
+      // #7781 (P1, greptile 2026-11-26): park the command-metadata fetch so a
+      // chat switch can happen BEFORE the idle resolver clears the composer.
+      if (deferredFetch.target === 'commands') {
+        return new Promise((resolve, reject) => {
+          deferredFetch.resolve = () => resolve({ commands: [] });
+          deferredFetch.reject = reject;
+        });
+      }
+      return { commands: [] };
+    }
     if (path === '/api/commands/bundles') return { bundles: [] };
     if (path.indexOf('/api/skills/content?name=') === 0) {
       const _skillUrl = new URL(path, 'http://localhost/');
@@ -233,7 +253,15 @@ const ctx = {
   // Simulate the user opening another chat (with its own composer draft)
   // while a send is parked on an await. S lives inside the vm context, so
   // the outer-scope knob must reach it through the context object.
-  __switchSession(sid, draft) { ctx.S.session = { session_id: sid }; ctx.S.messages = []; getEl('msg').value = draft; },
+  __switchSession(sid, draft) {
+    // Mirror what loadSession() does on a switch: persist the composer of the
+    // chat being left, then show the other chat's draft. #7781 P1.
+    const fromSid = ctx.S.session && ctx.S.session.session_id;
+    ctx._switchLog.push({ fromSid, savedText: getEl('msg').value, toSid: sid, draft });
+    ctx.S.session = { session_id: sid };
+    ctx.S.messages = [];
+    getEl('msg').value = draft;
+  },
   __messages() { return ctx.S.messages; },
 };
 vm.createContext(ctx);
@@ -244,6 +272,7 @@ vm.runInContext(__MESSAGES_JS__, ctx);
   try {
     const result = await vm.runInContext(`(async () => {
       const run = async (composerText, skills, contentMap) => {
+        S.session = { session_id: 'sess-1' };
         __setComposer(composerText);
         __setSkills(skills);
         __clearSkillContent();
@@ -271,6 +300,8 @@ vm.runInContext(__MESSAGES_JS__, ctx);
       // fetch. Whatever send() does next must belong to the chat that issued
       // the command only.
       const runDeferredSwitch = async (composerText, skills, contentMap, opts) => {
+        __resetDraftSaves();
+        __resetSwitchLog();
         __setComposer(composerText);
         __setSkills(skills);
         __clearSkillContent();
@@ -287,7 +318,9 @@ vm.runInContext(__MESSAGES_JS__, ctx);
         for (let i = 0; i < 200; i++) {
           const reached = __apiCalls().some((c) => c && (opts.defer === 'listing'
             ? c.path === '/api/skills'
-            : c.path.indexOf('/api/skills/content?name=') === 0));
+            : opts.defer === 'commands'
+              ? c.path === '/api/commands'
+              : c.path.indexOf('/api/skills/content?name=') === 0));
           if (reached) break;
           await new Promise((r) => setTimeout(r, 5));
         }
@@ -303,6 +336,8 @@ vm.runInContext(__MESSAGES_JS__, ctx);
           contentFetches: __apiCalls()
             .filter((c) => c && c.path.indexOf('/api/skills/content?name=') === 0)
             .map((c) => c.path),
+          draftSaves: __draftSaves().slice(),
+          switchLog: __switchLog().slice(),
           thrown,
         };
       };
@@ -378,6 +413,8 @@ vm.runInContext(__MESSAGES_JS__, ctx);
       // user opens another chat with a draft, then the fetch settles. Nothing
       // may be steered and the other chat's composer must survive.
       const runBusyDeferredSwitch = async (composerText, skills, contentMap, opts) => {
+        __resetDraftSaves();
+        __resetSwitchLog();
         __setComposer(composerText);
         __setSkills(skills);
         __clearSkillContent();
@@ -408,6 +445,8 @@ vm.runInContext(__MESSAGES_JS__, ctx);
           steerCalls: __apiCalls().filter((c) => c && c.path === '/api/chat/steer').length,
           queueEntries: __queueEntries().map((e) => ({ sid: e.sid, text: e.payload && e.payload.text })),
           composerAfter: __composer(),
+          draftSaves: __draftSaves().slice(),
+          switchLog: __switchLog().slice(),
           thrown,
         };
         S.busy = false;
@@ -453,6 +492,7 @@ vm.runInContext(__MESSAGES_JS__, ctx);
           composerAfter: __composer(),
         };
       };
+      const _switchDuringMetadata = await runDeferredSwitch('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { defer: 'commands', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft', mode: 'success' });
       const _positive = await run('/demo:skill do X', [__PLUGIN_ROW__], { 'demo:skill': 'DEMO SKILL BODY' });
       const _negative = await run('/demo:skill', [__DIRECTORY_ROW__], {});
       // PR #7781 re-gate finding 1 controls: canonical underscore spelling
@@ -494,6 +534,8 @@ vm.runInContext(__MESSAGES_JS__, ctx);
       const _busyQueue = await runBusy('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { mode: 'queue' });
       const _busySwitchContent = await runBusyDeferredSwitch('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { defer: 'content', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft' });
       const _busySwitchListing = await runBusyDeferredSwitch('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { defer: 'listing', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft' });
+      // #7781 (P1, greptile 2026-11-26): the switch lands while the COMMAND
+      // metadata is still loading — before the idle resolver clears anything.
       const _deadRun = await runDeadRunRecovery();
       return {
         positive: _positive,
@@ -514,6 +556,7 @@ vm.runInContext(__MESSAGES_JS__, ctx);
         busyQueue: _busyQueue,
         busySwitchContent: _busySwitchContent,
         busySwitchListing: _busySwitchListing,
+        switchDuringMetadata: _switchDuringMetadata,
         deadRunRecovery: _deadRun,
       };
     })()`, ctx);
@@ -839,28 +882,78 @@ def test_dead_run_recovery_send_keeps_the_skill_body():
     assert result["composerAfter"].startswith("[USER OVERRIDE]"), result
 
 
+def test_idle_switch_during_command_metadata_keeps_the_other_chats_draft():
+    """A switch that lands while /api/commands is still loading must leave the
+    OTHER chat's composer intact — the resolver may not clear it (#7781 P1)."""
+    result = _run_send_harness()["switchDuringMetadata"]
+    assert result["composerAfter"] == "chat B draft", result
+    assert result["startBody"] is None, result
+    assert result["thrown"] is None, result
+    # Chat A's composer was never cleared, so the switch persisted the command
+    # itself: nothing to restore, nothing lost.
+    assert result["switchLog"][0]["savedText"] == "/reviewdemo:under_score do EXACT", result
+
+
+def test_busy_switch_hands_the_unsent_command_back_to_its_own_chat():
+    """The busy clear happens up front, so a switch during the content fetch
+    persisted an EMPTY draft for the issuing chat. The stopped send must put
+    the command back on that chat's draft (#7781 P1)."""
+    result = _run_send_harness()["busySwitchContent"]
+    assert result["composerAfter"] == "chat B draft", result
+    assert result["steerCalls"] == 0, result
+    assert result["switchLog"][0]["savedText"] == "", result
+    saves = [s for s in result["draftSaves"] if s["sid"] == "sess-A"]
+    assert saves, result
+    assert saves[-1]["text"] == "/reviewdemo:under_score do EXACT", result
+    assert all(s["sid"] == "sess-A" for s in saves), result
+
+
+def test_idle_listing_switch_hands_the_unsent_command_back_to_its_own_chat():
+    """Same for the idle resolver: after the listing fetch fails, the switch
+    already saved an empty draft, so the stop must restore it (#7781 P1)."""
+    result = _run_send_harness()["switchListingFail"]
+    assert result["composerAfter"] == "chat B draft", result
+    assert result["switchLog"][0]["savedText"] == "", result
+    saves = [s for s in result["draftSaves"] if s["sid"] == "sess-A"]
+    assert saves, result
+    assert saves[-1]["text"] == "/demo:skill do X", result
+
+
 def test_busy_steer_clears_the_composer_before_the_skill_fetch():
-    """The composer must be cleared BEFORE the first await: holding it across
-    the skill-content fetch wiped an edit typed meanwhile and let a second
-    Enter queue a duplicate next to the steer."""
+    """The composer must be cleared BEFORE the first await, but only for the
+    chat that issued the command (#7781 P1, greptile 2026-11-26): an
+    unconditional clear that ran once the user had switched erased the other
+    chat's draft."""
     start = MESSAGES_JS.index("let _busySteerPayload=text;")
     end = MESSAGES_JS.index("await _trySteer(_busySteerPayload")
     segment = MESSAGES_JS[start:end]
-    clears = segment.count("$('msg').value='';autoResize();")
-    assert clears == 1, segment
-    assert segment.index("$('msg').value='';autoResize();") < segment.index(
+    # The issuing chat is snapshotted before anything is cleared...
+    assert segment.index("const _busyOwnerSid=") < segment.index("$('msg').value=''"), segment
+    # ...and the clear is fenced on that snapshot.
+    assert (
+        "if((S.session&&S.session.session_id||null)===_busyOwnerSid){$('msg').value='';}"
+        in segment
+    ), segment
+    assert segment.index("$('msg').value=''") < segment.index(
         "await _loadPluginSkillForCommand"
     ), "the clear must precede the first await"
-    # A failed fetch restores the command only into an empty composer of the
-    # same chat.
-    assert "!String(_busyRestore.value||'').trim()" in segment
+    # A send that stops after the switch hands the command back to the chat
+    # that issued it — composer when still open, draft either way.
+    assert "_restoreCommandToOwnerChat(_busyOwnerSid,_busySteerRestoreText)" in segment
 
 
 def test_idle_plugin_resolver_clears_the_composer_before_the_listing_fetch():
     start = MESSAGES_JS.index("if(_parsedCmd.name.includes(':')&&!_bundleCmd){")
     end = MESSAGES_JS.index("if(_match){", start)
     segment = MESSAGES_JS[start:end]
+    # #7781 P1: the owner fence runs FIRST — a switch during the metadata waits
+    # above must not have the resolver clear the other chat's composer.
+    owner = "(_slashOwner&&_slashOwner.sid||null)"
+    assert owner in segment, segment
+    assert segment.index(owner) < segment.index("$('msg').value=''"), segment
     assert "$('msg').value='';autoResize();" in segment
     assert segment.index("$('msg').value='';autoResize();") < segment.index(
         "await api('/api/skills')"
     ), "the clear must precede the listing fetch"
+    # Every owner-fence stop hands the cleared command back to its own chat.
+    assert MESSAGES_JS.count("_restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text)") == 4

@@ -1610,6 +1610,35 @@ function _setComposerAfterCliOnlyExplainer(value,owner){
   }
 }
 
+// #7781 (P1, greptile 2026-11-26): a send() that cleared the composer and then
+// stopped — the user switched chats, or the skill fetch failed — must not lose
+// the command. Hand it back to the chat that issued it: into its composer when
+// that chat is still open and nothing new was typed, and onto its saved draft
+// either way. The chat on screen never has its composer or draft rewritten.
+function _restoreCommandToOwnerChat(ownerSid, commandText){
+  const cmd=String(commandText==null?'':commandText);
+  if(!ownerSid||!cmd) return;
+  const currentSid=S.session&&S.session.session_id||null;
+  if(currentSid===ownerSid){
+    const el=$('msg');
+    if(el&&String(el.value||'').trim()) return;   // the user moved on: keep their input
+    if(el){
+      el.value=cmd;
+      if(typeof autoResize==='function')autoResize();
+    }
+  }
+  if(typeof _saveComposerDraftNow!=='function') return;
+  const onFail=(error)=>{
+    if(typeof _handleComposerDraftPostFailure==='function') _handleComposerDraftPostFailure(error,ownerSid,cmd,[]);
+  };
+  try{
+    const result=_saveComposerDraftNow(ownerSid,cmd,[]);
+    if(result&&typeof result.catch==='function') result.catch(onFail);
+  }catch(error){
+    onFail(error);
+  }
+}
+
 async function send(){
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
@@ -1758,35 +1787,41 @@ async function send(){
         // unchanged) and literalSlash keeps master's verbatim behaviour.
         let _busySteerPayload=text;
         let _busySteerRestoreText=text;
+        // Owner fence: snapshot the issuing session BEFORE clearing anything.
+        // #7781 (P1, greptile 2026-11-26): the clear used to run unconditionally
+        // ahead of this snapshot, so a send that resumed after a chat switch had
+        // already wiped the other chat's composer draft.
+        const _busyOwnerSid=S.session&&S.session.session_id||null;
         // #7781 review 2026-11-23 [SHOULD-FIX]: clear the composer BEFORE the
         // first await. Holding the text across the skill-content fetch let an
         // edit typed meanwhile be wiped by the later clear, and a second Enter
         // queued a duplicate next to this steer.
-        $('msg').value='';autoResize();
+        if((S.session&&S.session.session_id||null)===_busyOwnerSid){$('msg').value='';}
+        if(typeof autoResize==='function')autoResize();
         if(!literalSlash&&text.startsWith('/')){
           const _busyCmd=typeof parseCommand==='function'&&parseCommand(text);
           if(_busyCmd&&String(_busyCmd.name||'').indexOf(':')>=0){
-            // Owner fence: snapshot the issuing session before the first
-            // await. A send that resumes after the user switched chats must
-            // not steer into, or clear the composer of, the other chat.
-            const _busyOwnerSid=S.session&&S.session.session_id||null;
             let _busyResolved=null;
             let _busySkillError=null;
             try{
               _busyResolved=await _loadPluginSkillForCommand(_busyCmd.name,_busyOwnerSid);
             }catch(e){_busySkillError=e;}
-            if((S.session&&S.session.session_id||null)!==_busyOwnerSid){hideCmdDropdown();return;}
+            if((S.session&&S.session.session_id||null)!==_busyOwnerSid){
+              // #7781 (P1, greptile 2026-11-26): the composer was cleared and
+              // the chat is gone. Keep the command on the draft of the chat
+              // that issued it — a switch must not lose an unsent command.
+              _restoreCommandToOwnerChat(_busyOwnerSid,_busySteerRestoreText);
+              hideCmdDropdown();return;
+            }
             if(_busySkillError){
               // Nothing was steered: the composer was cleared before the
               // fetch, so put the command back — but only when the same chat
               // is still current and nothing new was typed meanwhile.
               showToast(`Plugin skill error: ${_busySkillError&&_busySkillError.message||_busySkillError}`,3500);
-              const _busyRestore=$('msg');
-              if(_busyRestore&&(S.session&&S.session.session_id||null)===_busyOwnerSid
-                &&!String(_busyRestore.value||'').trim()){
-                _busyRestore.value=_busySteerRestoreText;
-                if(typeof autoResize==='function')autoResize();
-              }
+              // Nothing was steered: the composer was cleared before the
+              // fetch, so put the command back. _restoreCommandToOwnerChat
+              // also persists it on this chat's draft (#7781 P1).
+              _restoreCommandToOwnerChat(_busyOwnerSid,_busySteerRestoreText);
               hideCmdDropdown();
               return;
             }
@@ -2059,6 +2094,13 @@ async function send(){
       // picker.
       let _pluginSkillResolved=false;
       if(_parsedCmd.name.includes(':')&&!_bundleCmd){
+        // #7781 (P1, greptile 2026-11-26): clear only while the chat that
+        // issued the command is still on screen. A switch during the metadata
+        // waits above must not erase the other chat's draft — the owner fence
+        // below would stop this send anyway.
+        if((S.session&&S.session.session_id||null)!==(_slashOwner&&_slashOwner.sid||null)){
+          hideCmdDropdown();return;
+        }
         // #7781 review 2026-11-23 [SHOULD-FIX]: the resolver awaits below
         // hold the composer's text. Clear it before the first await so an
         // edit typed meanwhile is not wiped later and a second Enter cannot
@@ -2084,7 +2126,12 @@ async function send(){
           _match=(Array.isArray(_skillsData&&_skillsData.skills)?_skillsData.skills:[])
             .find(s=>String(s.name||'').toLowerCase()===_parsedCmd.name.toLowerCase()&&s.source==='plugin')||null;
         }catch(e){_match=null;}
-        if((S.session&&S.session.session_id||null)!==_slashOwner.sid){hideCmdDropdown();return;}
+        if((S.session&&S.session.session_id||null)!==_slashOwner.sid){
+          // #7781 (P1, greptile 2026-11-26): the composer was already cleared;
+          // keep the command on its own chat's draft so a switch cannot lose it.
+          _restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text);
+          hideCmdDropdown();return;
+        }
         if(_match){
           try{
             // #7781 review 2026-11-18: pass the owning session id so the
@@ -2100,7 +2147,12 @@ async function send(){
             }
             const _detail=await api('/api/skills/content?name='+encodeURIComponent(_match.name)
               +(_pluginSkillSessionId?`&session_id=${encodeURIComponent(_pluginSkillSessionId)}`:''));
-            if((S.session&&S.session.session_id||null)!==_slashOwner.sid){hideCmdDropdown();return;}
+            if((S.session&&S.session.session_id||null)!==_slashOwner.sid){
+              // #7781 (P1, greptile 2026-11-26): the composer was already cleared;
+              // keep the command on its own chat's draft so a switch cannot lose it.
+              _restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text);
+              hideCmdDropdown();return;
+            }
             const _content=_detail&&typeof _detail.content==='string'?_detail.content.trim():'';
             if(!_content) throw new Error(`Skill \`${_match.name}\` has no readable content.`);
             if(_pluginSkillSessionId&&typeof _refreshSessionSkillUsageForOwner==='function'){
@@ -2111,20 +2163,19 @@ async function send(){
             text=_parsedCmd.args||'';
             _pluginSkillResolved=true;
           }catch(e){
-            if((S.session&&S.session.session_id||null)!==_slashOwner.sid){hideCmdDropdown();return;}
+            if((S.session&&S.session.session_id||null)!==_slashOwner.sid){
+              // #7781 (P1, greptile 2026-11-26): the composer was already cleared;
+              // keep the command on its own chat's draft so a switch cannot lose it.
+              _restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text);
+              hideCmdDropdown();return;
+            }
             if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
             S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
             S.messages.push({role:'assistant',content:`Plugin skill error: ${e&&e.message||e}`,_ts:Date.now()/1000});
             renderMessages();
-            // The composer was cleared before the fetch: restore the command
-            // only when this is still the chat that issued it and nothing new
-            // was typed meanwhile.
-            const _idleRestore=$('msg');
-            if(_idleRestore&&(S.session&&S.session.session_id||null)===_slashOwner.sid
-              &&!String(_idleRestore.value||'').trim()){
-              _idleRestore.value=text;
-              if(typeof autoResize==='function')autoResize();
-            }
+            // The composer was cleared before the fetch: put the command back
+            // on this chat's draft too, so it survives even a later switch.
+            _restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text);
             hideCmdDropdown();return;
           }
         }
