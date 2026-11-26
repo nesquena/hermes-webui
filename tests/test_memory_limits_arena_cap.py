@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import types
 from pathlib import Path
 
 import pytest
@@ -54,8 +55,16 @@ def info_log(caplog):
     return caplog
 
 
+def _lines(caplog, level):
+    return [r.getMessage() for r in caplog.records if r.levelno == level]
+
+
 def _info_lines(caplog):
-    return [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    return _lines(caplog, logging.INFO)
+
+
+def _warning_lines(caplog):
+    return _lines(caplog, logging.WARNING)
 
 
 # ── decision logic ─────────────────────────────────────────────────────────
@@ -119,21 +128,134 @@ def test_os_environ_only_tunable_is_applied():
 _HUGE_DIGITS = pytest.param("9" * 5000, id="5000-digits")  # past Python's int-string limit
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "abc", "2147483648", _HUGE_DIGITS])
-def test_invalid_os_environ_only_value_is_not_overridden(value):
+@pytest.mark.parametrize("value", ["2147483648", _HUGE_DIGITS])
+def test_os_environ_only_value_past_mallopt_int_is_not_overridden(value, info_log):
+    # A positive integer, so the operator asked for (at least) that many arenas.
     applied, libc = _apply({"MALLOC_ARENA_MAX": value}, launch_environ={})
     assert applied is False
     assert libc.calls == []
+    (line,) = _info_lines(info_log)
+    assert line.endswith("after launch; above mallopt's int range")
+    assert _warning_lines(info_log) == []
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc"])
+def test_invalid_os_environ_only_value_is_ignored_with_a_warning(value, info_log):
+    applied, libc = _apply({"MALLOC_ARENA_MAX": value}, launch_environ={})
+    assert applied is True
+    assert libc.calls == [(M_ARENA_MAX, 2)]
+    assert _warning_lines(info_log) == [
+        f"malloc arena cap: ignoring invalid MALLOC_ARENA_MAX={value!r} (not a positive integer)"
+    ]
 
 
 @pytest.mark.parametrize(
-    "env", [{"MALLOC_ARENA_MAX": ""}, {"MALLOC_ARENA_MAX": "  "}, {"GLIBC_TUNABLES": "glibc.malloc.arena_max="}]
+    "env",
+    [
+        {"MALLOC_ARENA_MAX": ""},
+        {"MALLOC_ARENA_MAX": "  "},
+        {"GLIBC_TUNABLES": "glibc.malloc.arena_max="},
+        {"GLIBC_TUNABLES": "glibc.malloc.arena_max=", "MALLOC_ARENA_MAX": ""},
+    ],
 )
-def test_blank_arena_setting_counts_as_unset(env):
-    # glibc ignores a blank value, so the WebUI default still applies.
+def test_blank_arena_setting_counts_as_unset(env, info_log):
+    # glibc ignores a blank value, so the WebUI default still applies, quietly.
     applied, libc = _apply(env, launch_environ=dict(env))
     assert applied is True
     assert libc.calls == [(M_ARENA_MAX, 2)]
+    assert _warning_lines(info_log) == []
+
+
+# An arena setting glibc does not take (zero, negative, non-numeric) leaves the
+# process uncapped, so it must not count as "operator set" (#9359 review).
+_INVALID_LAUNCH_SETTINGS = [
+    pytest.param("MALLOC_ARENA_MAX", "MALLOC_ARENA_MAX", "{}", id="MALLOC_ARENA_MAX"),
+    pytest.param(
+        "GLIBC_TUNABLES glibc.malloc.arena_max",
+        "GLIBC_TUNABLES",
+        "glibc.malloc.tcache_count=0:glibc.malloc.arena_max={}",
+        id="GLIBC_TUNABLES",
+    ),
+]
+
+
+@pytest.mark.parametrize(("shown_name", "var", "template"), _INVALID_LAUNCH_SETTINGS)
+@pytest.mark.parametrize("value", ["0", "abc", "-3", "00", "0x0", "2.5", "4 4"])
+def test_invalid_launch_value_is_ignored_and_the_default_applies(shown_name, var, template, value, info_log):
+    env = {var: template.format(value), "SOME_SECRET": "do-not-log-me"}
+    applied, libc = _apply(env, launch_environ={var: env[var]})
+    assert applied is True
+    assert libc.calls == [(M_ARENA_MAX, 2)]
+    assert _warning_lines(info_log) == [
+        f"malloc arena cap: ignoring invalid {shown_name}={value!r} (not a positive integer)"
+    ]
+    assert _info_lines(info_log) == ["malloc arena cap applied: M_ARENA_MAX=2 (default)"]
+    assert not any("do-not-log-me" in r.getMessage() or "tcache" in r.getMessage() for r in info_log.records)
+
+
+@pytest.mark.parametrize(("shown_name", "var", "template"), _INVALID_LAUNCH_SETTINGS)
+@pytest.mark.parametrize("value", ["", "  "])
+def test_empty_launch_value_is_unset_without_a_warning(shown_name, var, template, value, info_log):
+    env = {var: template.format(value)}
+    applied, libc = _apply(env, launch_environ=dict(env))
+    assert applied is True
+    assert libc.calls == [(M_ARENA_MAX, 2)]
+    assert _warning_lines(info_log) == []
+
+
+@pytest.mark.parametrize(("shown_name", "var", "template"), _INVALID_LAUNCH_SETTINGS)
+@pytest.mark.parametrize("value", ["4", " 4", "+4", "0x4", "010", "99999999999"])
+def test_valid_launch_value_still_wins(shown_name, var, template, value, info_log):
+    # Forms glibc itself accepts (measured on glibc 2.39: +4 and 0x4 give 4 arenas).
+    env = {var: template.format(value), ENV_KNOB: "3"}
+    applied, libc = _apply(env, launch_environ={var: env[var]})
+    assert applied is False
+    assert libc.calls == []
+    assert _warning_lines(info_log) == []
+    assert _info_lines(info_log) == [
+        f"malloc arena cap not applied: operator set {shown_name}={value!r} at launch; glibc already applied it"
+    ]
+
+
+def test_invalid_launch_value_leaves_the_webui_knob_in_charge():
+    applied, libc = _apply({"MALLOC_ARENA_MAX": "0", ENV_KNOB: "3"}, launch_environ={"MALLOC_ARENA_MAX": "0"})
+    assert (applied, libc.calls) == (True, [(M_ARENA_MAX, 3)])
+    applied, libc = _apply({"MALLOC_ARENA_MAX": "0", ENV_KNOB: "off"}, launch_environ={"MALLOC_ARENA_MAX": "0"})
+    assert (applied, libc.calls) == (False, [])
+
+
+def test_invalid_tunable_falls_through_to_a_valid_malloc_arena_max(info_log):
+    env = {"GLIBC_TUNABLES": "glibc.malloc.arena_max=0", "MALLOC_ARENA_MAX": "4"}
+    applied, libc = _apply(env, launch_environ=dict(env))
+    assert (applied, libc.calls) == (False, [])
+    assert _warning_lines(info_log) == [
+        "malloc arena cap: ignoring invalid GLIBC_TUNABLES glibc.malloc.arena_max='0' (not a positive integer)"
+    ]
+    (line,) = _info_lines(info_log)
+    assert "operator set MALLOC_ARENA_MAX='4' at launch" in line
+
+
+def test_same_invalid_value_at_launch_and_in_process_warns_once(info_log):
+    env = {"MALLOC_ARENA_MAX": "abc"}
+    applied, _ = _apply(env, launch_environ=dict(env))
+    assert applied is True
+    assert len(_warning_lines(info_log)) == 1
+
+
+def test_invalid_launch_value_with_valid_in_process_value_applies_it(info_log):
+    applied, libc = _apply({"MALLOC_ARENA_MAX": "6"}, launch_environ={"MALLOC_ARENA_MAX": "0"})
+    assert (applied, libc.calls) == (True, [(M_ARENA_MAX, 6)])
+    assert len(_warning_lines(info_log)) == 1
+
+
+def test_warning_reaches_stderr_without_logging_handlers(capsys, monkeypatch):
+    monkeypatch.setattr(memory_limits.logger, "isEnabledFor", lambda level: False)
+    env = {"MALLOC_ARENA_MAX": "0"}
+    assert apply_startup_arena_cap(environ=env, launch_environ=dict(env), libc=FakeLibc()) is True
+    assert capsys.readouterr().err == (
+        "[memory] WARNING malloc arena cap: ignoring invalid MALLOC_ARENA_MAX='0' (not a positive integer)\n"
+        "[memory] INFO malloc arena cap applied: M_ARENA_MAX=2 (default)\n"
+    )
 
 
 def test_unreadable_proc_environ_treats_os_environ_as_launch_env():
@@ -177,9 +299,60 @@ def test_invalid_webui_knob_falls_back_to_two(value, info_log):
         )
 
 
-def test_non_glibc_returns_false(info_log):
+def test_non_glibc_returns_false_with_a_debug_line_only(info_log):
     assert apply_startup_arena_cap(environ={}, launch_environ={}, libc=None) is False
-    assert _info_lines(info_log) == ["malloc arena cap not applied: not Linux glibc"]
+    assert _info_lines(info_log) == []
+    assert _lines(info_log, logging.DEBUG) == ["malloc arena cap not applied: not Linux glibc"]
+
+
+def test_non_glibc_writes_nothing_to_stderr_without_logging_handlers(capsys, monkeypatch):
+    # Every macOS/Windows/musl start takes this path: no line in the WebUI log.
+    monkeypatch.setattr(memory_limits.logger, "isEnabledFor", lambda level: False)
+    assert apply_startup_arena_cap(environ={}, launch_environ={}, libc=None) is False
+    assert capsys.readouterr().err == ""
+
+
+class _FakeCDLL:
+    """``ctypes.CDLL(None)`` stand-in: a libc with ``mallopt`` and, when
+    *glibc* is true, ``gnu_get_libc_version`` (musl has no such symbol)."""
+
+    def __init__(self, glibc: bool) -> None:
+        self.mallopt_calls: list[tuple[int, int]] = []
+        if glibc:
+            self.gnu_get_libc_version = lambda: b"2.39"
+
+    def mallopt(self, param: int, value: int) -> int:
+        self.mallopt_calls.append((param, value))
+        return 1
+
+
+@pytest.mark.parametrize("glibc", [False, True], ids=["musl-like", "glibc"])
+def test_libc_without_gnu_get_libc_version_is_never_given_mallopt(monkeypatch, info_log, glibc):
+    """Drive the real detection (no libc= injection) on a fake Linux libc. A
+    libc without gnu_get_libc_version (musl) is not glibc even though it may
+    export mallopt: mallopt must not be called. The glibc case proves the
+    seam reaches mallopt, so the musl case cannot pass vacuously."""
+    fake = _FakeCDLL(glibc)
+    monkeypatch.setattr(memory_limits.sys, "platform", "linux")
+    monkeypatch.setattr(memory_limits, "ctypes", types.SimpleNamespace(CDLL=lambda name: fake))
+    applied = apply_startup_arena_cap(environ={}, launch_environ={})
+    if glibc:
+        assert applied is True
+        assert fake.mallopt_calls == [(M_ARENA_MAX, 2)]
+    else:
+        assert applied is False
+        assert fake.mallopt_calls == []
+        assert _lines(info_log, logging.DEBUG)[-1] == "malloc arena cap not applied: not Linux glibc"
+        assert _info_lines(info_log) == []
+
+
+def test_libc_load_failure_is_treated_as_non_glibc(monkeypatch):
+    def broken(name):
+        raise OSError("no libc")
+
+    monkeypatch.setattr(memory_limits.sys, "platform", "linux")
+    monkeypatch.setattr(memory_limits, "ctypes", types.SimpleNamespace(CDLL=broken))
+    assert apply_startup_arena_cap(environ={}, launch_environ={}) is False
 
 
 def test_non_linux_platform_has_no_glibc(monkeypatch):
@@ -357,6 +530,9 @@ def test_server_runs_cap_with_only_the_main_thread(tmp_path):
          "not applied: operator set GLIBC_TUNABLES glibc.malloc.arena_max='1' at launch"),
         ({}, "3", "applied: M_ARENA_MAX=3 (MALLOC_ARENA_MAX set after launch)"),
         ({ENV_KNOB: "off"}, None, "not applied: disabled by HERMES_WEBUI_MALLOC_ARENA_MAX='off'"),
+        ({"MALLOC_ARENA_MAX": "0"}, None, "applied: M_ARENA_MAX=2 (default)"),
+        ({"MALLOC_ARENA_MAX": "abc"}, None, "applied: M_ARENA_MAX=2 (default)"),
+        ({"GLIBC_TUNABLES": "glibc.malloc.arena_max=-3"}, None, "applied: M_ARENA_MAX=2 (default)"),
     ],
 )
 def test_real_exec_time_env_versus_in_process_env(tmp_path, launch_env, set_in_process, expected):
@@ -374,3 +550,28 @@ def test_real_exec_time_env_versus_in_process_env(tmp_path, launch_env, set_in_p
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"[memory] INFO malloc arena cap {expected}" in result.stderr
     assert ("applied=True" in result.stdout) is expected.startswith("applied")
+
+
+@pytest.mark.skipif(not _is_glibc(), reason="Linux glibc only")
+@pytest.mark.parametrize(
+    ("launch_env", "shown"),
+    [
+        ({"MALLOC_ARENA_MAX": "0"}, "MALLOC_ARENA_MAX='0'"),
+        ({"MALLOC_ARENA_MAX": "-3"}, "MALLOC_ARENA_MAX='-3'"),
+        ({"GLIBC_TUNABLES": "glibc.malloc.arena_max=abc"}, "GLIBC_TUNABLES glibc.malloc.arena_max='abc'"),
+    ],
+)
+def test_real_invalid_launch_value_warns_once_and_caps(tmp_path, launch_env, shown):
+    """Real exec-time env and real mallopt: glibc set no cap for these values,
+    so the server applies its own and says once that the value was ignored."""
+    script = f"""
+        import sys
+        sys.path.insert(0, {str(REPO_ROOT)!r})
+        import startup_memory_limits as m
+        print("applied=%s" % m.apply_startup_arena_cap())
+    """
+    result = _run_python(script, _clean_env(**launch_env), tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "applied=True" in result.stdout
+    warnings = [line for line in result.stderr.splitlines() if line.startswith("[memory] WARNING")]
+    assert warnings == [f"[memory] WARNING malloc arena cap: ignoring invalid {shown} (not a positive integer)"]

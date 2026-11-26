@@ -30,6 +30,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
+import re
 import sys
 from collections.abc import Mapping
 from typing import Any
@@ -42,6 +43,8 @@ _M_ARENA_MAX = -8  # glibc <malloc.h> mallopt parameter
 _C_INT_MAX = 2**31 - 1
 _DISABLED = frozenset({"0", "off", "false"})
 _EXEC_ENVIRON = "/proc/self/environ"  # exec-time env block; only the arena keys are read
+# How glibc reads an arena setting: optional "+", then decimal or 0x-hex digits.
+_GLIBC_NUMBER = re.compile(r"\+?(?:0[xX](?P<hex>[0-9a-fA-F]+)|(?P<dec>[0-9]+))")
 _UNSET: Any = object()
 
 
@@ -58,19 +61,29 @@ def _glibc_malloc() -> Any | None:
     return None
 
 
-def _arena_max_setting(env: Mapping[str, str]) -> tuple[str, str] | None:
+def _arena_max_setting(env: Mapping[str, str], invalid: dict[tuple[str, str], None]) -> tuple[str, str] | None:
     """``(name, value)`` of the arena cap *env* asks glibc for, or ``None``.
 
     The exact ``glibc.malloc.arena_max`` item in ``GLIBC_TUNABLES`` wins over
     ``MALLOC_ARENA_MAX``, as it does in glibc. A blank value counts as unset
-    (glibc ignores it too).
+    (glibc ignores it too). So does a value that is not a positive integer:
+    glibc ignores zero and non-numeric values and reads a negative one as a
+    huge cap, so the process would run uncapped. Such a setting is added to
+    *invalid*.
     """
-    for item in (env.get("GLIBC_TUNABLES") or "").split(":"):
-        name, sep, value = item.partition("=")
-        if sep and name == "glibc.malloc.arena_max" and value.strip():
-            return "GLIBC_TUNABLES glibc.malloc.arena_max", value
-    value = env.get("MALLOC_ARENA_MAX")
-    return ("MALLOC_ARENA_MAX", value) if value and value.strip() else None
+    settings = [
+        ("GLIBC_TUNABLES glibc.malloc.arena_max", value)
+        for name, sep, value in (item.partition("=") for item in (env.get("GLIBC_TUNABLES") or "").split(":"))
+        if sep and name == "glibc.malloc.arena_max"
+    ]
+    settings.append(("MALLOC_ARENA_MAX", env.get("MALLOC_ARENA_MAX") or ""))
+    for name, value in settings:
+        if not value.strip():
+            continue
+        if _arena_number(value) is not None:
+            return name, value
+        invalid[(name, value)] = None
+    return None
 
 
 def _launch_environ() -> dict[str, str] | None:
@@ -96,6 +109,22 @@ def _launch_environ() -> dict[str, str] | None:
     return found
 
 
+def _arena_number(value: str) -> int | None:
+    """*value* as glibc reads an arena setting, when that is a positive integer.
+
+    Surrounding blanks are tolerated, so a value glibc may accept is never
+    overridden. A number too long to convert is far past any cap.
+    """
+    match = _GLIBC_NUMBER.fullmatch(value.strip())
+    if match is None:
+        return None
+    digits, base = (match["hex"], 16) if match["hex"] is not None else (match["dec"], 10)
+    digits = digits.lstrip("0")
+    if not digits:
+        return None
+    return int(digits, base) if len(digits) <= 20 else 2**64
+
+
 def _positive_c_int(value: str) -> int | None:
     text = value.strip()
     if not (text.isascii() and text.isdigit()):
@@ -113,17 +142,19 @@ def _shown(value: str) -> str:
 
 def _decide(environ: Mapping[str, str], launch_environ: Mapping[str, str] | None) -> tuple[int | None, str]:
     """``(cap, source)`` to apply, or ``(None, reason)`` when nothing should be applied."""
-    current = _arena_max_setting(environ)
-    launched = current if launch_environ is None else _arena_max_setting(launch_environ)
+    invalid: dict[tuple[str, str], None] = {}
+    launched = _arena_max_setting(environ if launch_environ is None else launch_environ, invalid)
+    current = None if launched is not None else _arena_max_setting(environ, invalid)
+    for name, value in invalid:
+        _log(logging.WARNING, f"malloc arena cap: ignoring invalid {name}={_shown(value)} (not a positive integer)")
     if launched is not None:
         name, value = launched
         return None, f"operator set {name}={_shown(value)} at launch; glibc already applied it"
     if current is not None:
         name, value = current
-        cap = _positive_c_int(value)
-        if cap is None:
-            logger.debug("Ignoring invalid %s=%r set after launch", name, value)
-            return None, f"operator set invalid {name}={_shown(value)}"
+        cap = _arena_number(value)
+        if cap is None or cap > _C_INT_MAX:
+            return None, f"operator set {name}={_shown(value)} after launch; above mallopt's int range"
         return cap, f"{name} set after launch"
     knob = (environ.get(ENV_KNOB) or "").strip()
     if knob.lower() in _DISABLED:
@@ -136,15 +167,16 @@ def _decide(environ: Mapping[str, str], launch_environ: Mapping[str, str] | None
     return DEFAULT_ARENA_MAX, "default"
 
 
-def _log_info(message: str) -> None:
-    """One INFO line. WebUI configures no logging handlers, so an INFO record
-    would be dropped by ``logging.lastResort`` (WARNING+); then write the line
-    to stderr, which the launchers redirect into the WebUI log."""
+def _log(level: int, message: str) -> None:
+    """One log line. WebUI configures no logging handlers, so an INFO record
+    would be dropped by ``logging.lastResort`` (WARNING+); then write INFO and
+    WARNING lines to stderr, which the launchers redirect into the WebUI log.
+    A DEBUG line goes only through logging."""
     try:
-        if logger.isEnabledFor(logging.INFO) and logger.hasHandlers():
-            logger.info(message)
-        else:
-            sys.stderr.write(f"[memory] INFO {message}\n")
+        if logger.isEnabledFor(level) and logger.hasHandlers():
+            logger.log(level, message)
+        elif level >= logging.INFO:
+            sys.stderr.write(f"[memory] {logging.getLevelName(level)} {message}\n")
             sys.stderr.flush()
     except Exception:
         pass
@@ -161,11 +193,13 @@ def apply_startup_arena_cap(
     Call before the process starts any thread: arenas that exist never go
     away, and glibc latches its limit once a thread asks for an arena.
 
-    * Non-Linux or non-glibc (musl, macOS, Windows): nothing.
+    * Non-Linux or non-glibc (musl, macOS, Windows): nothing (debug log).
     * An arena setting in the exec-time environment (``MALLOC_ARENA_MAX`` or
       the ``glibc.malloc.arena_max`` tunable) was already applied by glibc and
       wins: nothing. One only in ``os.environ`` is applied if it is a positive
-      C int.
+      C int. A setting that is not a positive integer (``0``, ``-3``,
+      ``abc``) sets no cap in glibc either, so it counts as unset, with one
+      warning per setting.
     * Otherwise ``HERMES_WEBUI_MALLOC_ARENA_MAX``: a positive int sets the
       cap, ``0``/``off``/``false`` disables it, anything else is ignored
       (debug log) in favour of the default cap of 2.
@@ -174,11 +208,13 @@ def apply_startup_arena_cap(
     The keyword arguments exist for tests. Never raises.
     """
     applied = False
+    level = logging.INFO
     try:
         if libc is _UNSET:
             libc = _glibc_malloc()
         if libc is None:
-            message = "malloc arena cap not applied: not Linux glibc"
+            # Every macOS/Windows/musl start lands here: not worth an INFO line.
+            level, message = logging.DEBUG, "malloc arena cap not applied: not Linux glibc"
         else:
             env = os.environ if environ is None else environ
             launch = _launch_environ() if launch_environ is _UNSET else launch_environ
@@ -196,8 +232,8 @@ def apply_startup_arena_cap(
                     message = f"malloc arena cap not applied: mallopt(M_ARENA_MAX, {cap}) failed ({why})"
     except Exception:
         logger.debug("Could not cap malloc arenas", exc_info=True)
-        applied, message = False, "malloc arena cap not applied: unexpected error"
-    _log_info(message)
+        applied, level, message = False, logging.INFO, "malloc arena cap not applied: unexpected error"
+    _log(level, message)
     return applied
 
 
