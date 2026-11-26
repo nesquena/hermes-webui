@@ -56,8 +56,13 @@ def test_legacy_progress_events_are_suppressed_when_structured_callbacks_are_wir
     src = _read("api/streaming.py")
     block = _function_block(src, "on_tool")
 
+    # Single-owner contract: legacy tool.started and tool.completed events
+    # are suppressed when structured callbacks are wired.
     assert "event_type in (None, 'tool.started') and 'tool_start_callback' in _agent_params" in block
     assert "event_type == 'tool.completed' and 'tool_complete_callback' in _agent_params" in block
+    assert "put('tool'" in block
+    assert "put('tool_complete'" in block
+    # Suppression guard must come before the corresponding legacy emit
     assert block.index("'tool_start_callback' in _agent_params") < block.index("put('tool'")
     assert block.index("'tool_complete_callback' in _agent_params") < block.index("put('tool_complete'")
 
