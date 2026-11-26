@@ -1072,4 +1072,4 @@ if __name__ == "__main__":
                   file=sys.stderr, flush=True)
             while True:
                 signal.pause()
-        raise SystemExit(78 if isinstance(exc, RuntimeConfigurationError) else 1)
+        raise SystemExit(78 if isinstance(exc, RuntimeConfigurationError) else 1) from None
