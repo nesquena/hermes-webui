@@ -55,12 +55,48 @@ def test_resolve_checkpoints_enabled(config_data, expected):
     assert _resolve(config_data) is expected
 
 
-def test_cache_signature_tracks_checkpoints_config():
-    """Changing checkpoints.enabled must change the agent cache signature.
+def test_one_resolved_value_feeds_both_constructor_and_signature():
+    """The flag must be resolved once and feed both consumers identically.
 
-    Without this the already-open session keeps reusing its cached agent, so
-    turning checkpointing on or off mid-session would not take effect.
+    Two independent resolutions could drift — the constructor gets one value
+    while the signature hashes another — which would silently keep reusing a
+    cached agent after a config flip. That is the regression this test pins: the
+    same resolved boolean has to reach `AIAgent(checkpoints_enabled=...)` and
+    `_compute_agent_cache_signature(checkpoints_enabled=...)`.
     """
+    from api.streaming import _compute_agent_cache_signature, _resolve_checkpoints_enabled
+
+    base = dict(
+        resolved_model="m", resolved_api_key="k", resolved_base_url="u",
+        resolved_provider="p", runtime_bundle={},
+        prefill_context={"status": "not_configured"},
+    )
+
+    for config_data in (
+        {"checkpoints": {"enabled": True}},
+        {"checkpoints": {"enabled": False}},
+        {"checkpoints": True},
+        {"checkpoints": False},
+        {},
+        None,
+    ):
+        resolved = _resolve_checkpoints_enabled(config_data)
+
+        # The constructor argument: exactly the resolved value, not a re-parse.
+        ctor_arg = resolved
+        # The signature: same value, passed through unchanged.
+        signature = _compute_agent_cache_signature(**base, checkpoints_enabled=ctor_arg)
+
+        # A signature built from the opposite value must differ, proving the
+        # signature actually tracks this flag rather than ignoring it.
+        opposite = _compute_agent_cache_signature(**base, checkpoints_enabled=not ctor_arg)
+        assert signature != opposite, (
+            f"signature ignores the checkpoint flag for {config_data!r}"
+        )
+
+
+def test_signature_absents_match_default_off():
+    """An absent flag must hash like an explicit False (no needless rebuild)."""
     from api.streaming import _compute_agent_cache_signature
 
     base = dict(
@@ -68,27 +104,34 @@ def test_cache_signature_tracks_checkpoints_config():
         resolved_provider="p", runtime_bundle={},
         prefill_context={"status": "not_configured"},
     )
-    enabled = _compute_agent_cache_signature(**base, checkpoints_cfg={"enabled": True})
-    disabled = _compute_agent_cache_signature(**base, checkpoints_cfg={"enabled": False})
-    absent = _compute_agent_cache_signature(**base, checkpoints_cfg=None)
-
-    assert enabled != disabled, "flipping checkpoints.enabled must rebuild the agent"
-    # Absent means "never opted in", which must stay equivalent to off so an
-    # existing session is not needlessly rebuilt.
-    assert disabled == absent
+    assert _compute_agent_cache_signature(**base) == _compute_agent_cache_signature(
+        **base, checkpoints_enabled=False
+    )
 
 
-def test_enabled_flag_reaches_the_agent_kwargs():
-    """The resolved flag must actually be written into the AIAgent kwargs.
+def test_production_resolves_the_flag_once():
+    """`_run_agent_streaming` must resolve once and reuse that value.
 
-    Guards the wiring, not just the resolver: a resolver that returns True while
-    the kwargs dict drops it would leave the bug in place. `_run_agent_streaming`
-    is one large function, so this asserts the assembly reads the resolver rather
-    than a constant — flipping the config must flip what the agent receives.
+    A second `_resolve_checkpoints_enabled(...)` call inside the streaming
+    worker — for the signature or anywhere else — is how the constructor and the
+    cache signature drift apart. This asserts the production body contains
+    exactly one resolution and that both consumers read its result.
     """
+    import inspect
+    import re
+
     from api import streaming
 
-    on = streaming._resolve_checkpoints_enabled({"checkpoints": {"enabled": True}})
-    off = streaming._resolve_checkpoints_enabled({"checkpoints": {"enabled": False}})
-    assert on is True and off is False
-    assert on is not off, "the flag must be derived from config, not hardcoded"
+    body = inspect.getsource(streaming._run_agent_streaming)
+    assignments = re.findall(
+        r"^\s*_checkpoints_enabled\s*=\s*_resolve_checkpoints_enabled\(", body, re.M
+    )
+    assert len(assignments) == 1, (
+        f"expected exactly one resolution, found {len(assignments)}"
+    )
+    # Both consumers must read the resolved variable, not re-resolve.
+    assert "_agent_kwargs['checkpoints_enabled'] = _checkpoints_enabled" in body
+    assert "checkpoints_enabled=_checkpoints_enabled" in body
+    assert body.count("_resolve_checkpoints_enabled(") == 1, (
+        "the worker must not re-resolve the flag"
+    )

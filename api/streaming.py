@@ -14282,7 +14282,7 @@ def _compute_agent_cache_signature(
     prefill_context=None,
     profile_home: str | None = None,
     safe_profile_runtime_env: dict | None = None,
-    checkpoints_cfg=None,
+    checkpoints_enabled: bool = False,
 ) -> str:
     """Return the SHA256 signature identifying an agent's constructor routing state."""
     import hashlib as _hashlib
@@ -14302,7 +14302,7 @@ def _compute_agent_cache_signature(
         bool(_credential_pool),
         max_iterations_cfg or '',
         max_tokens_cfg or '',
-        _resolve_checkpoints_enabled({'checkpoints': checkpoints_cfg}) if checkpoints_cfg is not None else False,
+        bool(checkpoints_enabled),
         fallback_resolved or {},
         sorted(toolsets) if toolsets else [],
         reasoning_config or {},
@@ -16557,8 +16557,23 @@ def _run_agent_streaming(
                 _agent_kwargs['max_iterations'] = _max_iterations_cfg
             if 'max_tokens' in _agent_params and _max_tokens_cfg is not None:
                 _agent_kwargs['max_tokens'] = _max_tokens_cfg
+            # Checkpoint parity: honour the profile's checkpoints.enabled.
+            # AIAgent defaults checkpoints_enabled to False — the agent ships
+            # checkpointing as an opt-in ("most users never use /rollback") — and
+            # this dict never set it, so a WebUI-created agent took no snapshots
+            # even when the operator had enabled checkpoints in config.yaml. The
+            # TUI and messaging gateways both resolve this flag from config; this
+            # path did not. Read it the same way, keeping the absent-key default
+            # at False so profiles that never opted in are unaffected.
+            #
+            # Resolved ONCE, here, and reused for both the constructor argument
+            # and the cache signature. Two independent resolutions could drift:
+            # the constructor would get one value while the signature hashed
+            # another, so a config flip would not invalidate the cached agent —
+            # the exact failure this flag is meant to fix.
+            _checkpoints_enabled = _resolve_checkpoints_enabled(_cfg)
             if 'checkpoints_enabled' in _agent_params:
-                _agent_kwargs['checkpoints_enabled'] = _resolve_checkpoints_enabled(_cfg)
+                _agent_kwargs['checkpoints_enabled'] = _checkpoints_enabled
             if 'request_overrides' in _agent_params and _main_request_overrides:
                 _agent_kwargs['request_overrides'] = _main_request_overrides
             # Params added in newer hermes-agent — skip if not supported.
@@ -16621,7 +16636,7 @@ def _run_agent_streaming(
                     prefill_context=_prefill_context,
                     profile_home=_profile_home,
                     safe_profile_runtime_env=_safe_profile_runtime_env,
-                    checkpoints_cfg=_cfg.get('checkpoints') if isinstance(_cfg, dict) else None,
+                    checkpoints_enabled=_checkpoints_enabled,
                 )
 
                 agent = None
@@ -17608,7 +17623,7 @@ def _run_agent_streaming(
                                 prefill_context=_prefill_context,
                                 profile_home=_profile_home,
                                 safe_profile_runtime_env=_safe_profile_runtime_env,
-                                checkpoints_cfg=_cfg.get('checkpoints') if isinstance(_cfg, dict) else None,
+                                checkpoints_enabled=_checkpoints_enabled,
                             )
                             if not _heal_cacheable:
                                 _agent_sig = None  # #8517: memory scope failed; never cache it
@@ -19181,7 +19196,7 @@ def _run_agent_streaming(
                         prefill_context=_prefill_context,
                         profile_home=_profile_home,
                         safe_profile_runtime_env=_safe_profile_runtime_env,
-                        checkpoints_cfg=_cfg.get('checkpoints') if isinstance(_cfg, dict) else None,
+                        checkpoints_enabled=_checkpoints_enabled,
                     )
                     if not _heal_cacheable:
                         _agent_sig = None  # #8517: memory scope failed; never cache it
