@@ -2552,7 +2552,6 @@ def _resume_gateway_run_for_session(session) -> bool:
     if not stream_id or not (run.get("run_id") or run.get("request")) or session.active_stream_id != stream_id:
         return False
     sid = session.session_id
-    endpoint = None if run.get("transport") == "session" else _gateway_reattach_endpoint(session, run)
     # Review #7302 (nesquena, 01-Oct-2026) finding 2 -- "CORE": publish the
     # reattached run's ownership (ACTIVE_RUNS row + retained cancel signal) on the
     # SAME STREAMS_LOCK -> ACTIVE_RUNS_LOCK edge that creates the STREAMS entry,
@@ -2600,7 +2599,6 @@ def _resume_gateway_run_for_session(session) -> bool:
                 "goal_related": bool(run.get("goal_related")),
                 "regeneration": bool(run.get("regeneration")),
                 "reattach_run": run,
-                "reattach_endpoint": endpoint,
                 "reattach_claim_token": claim_token,
             },
             name=f"gateway-reattach-{stream_id[:12]}",
@@ -3436,9 +3434,11 @@ def _run_gateway_chat_streaming(
         # applies only to REST turns.
         try:
             base_url, api_key = ("", "") if _use_session_rpc else (
-                reattach_endpoint or _gateway_endpoint_for_profile(getattr(s, "profile", None)))
+                reattach_endpoint or (_gateway_reattach_endpoint(s, reattach_run) if reattach_run
+                                      else _gateway_endpoint_for_profile(getattr(s, "profile", None))))
         except RuntimeError as exc:
-            # A resolver refusal (unresolvable shared URL, doubled profile route) is this turn's terminal error:
+            # A resolver refusal (unresolvable shared URL, doubled profile route), also on a restart reattach, is
+            # this turn's terminal error:
             # keep the prompt and attachments as the user's turn and show an error turn, never drop them.
             error_payload = _settle_gateway_terminal_error(
                 session_id, stream_id, workspace, model, model_provider,

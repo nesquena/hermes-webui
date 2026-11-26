@@ -604,3 +604,28 @@ def test_a_resolver_refusal_keeps_the_prompt_and_attachments_as_the_users_turn(
     assert [a["name"] for a in user.get("attachments") or []] == ["notes.txt"], user
     assert error["role"] == "assistant" and error["_error"] and "Gateway endpoint unavailable" in error["content"]
     assert saved["active_stream_id"] is None and not saved.get("pending_user_message")
+
+
+def test_an_unresolvable_shared_url_at_restart_settles_the_saved_run_with_the_configuration_error(
+        work_profile, sessions, monkeypatch):
+    """Review 4708205425: a resolver refusal on the restart reattach settles in the worker with the configuration
+    error, instead of escaping startup and leaving the turn to stale-pending repair as a bare interruption."""
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_BASE_URL")
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("GW_HOST", raising=False)
+    (work_profile.parents[1] / "config.yaml").write_text("webui_gateway_base_url: http://${GW_HOST}\n")
+    sent = []
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=None: sent.append(req))
+
+    sid, polls, admits = _reattach(monkeypatch, {
+        "run_id": "run_saved", "stream_id": "stream-unresolved", "regeneration": False, "goal_related": False,
+        "endpoint_routing": "profile-v1", "base_url": f"{SHARED}/p/work",
+    })
+
+    assert polls == [] and admits == [] and sent == []  # no Gateway is contacted
+    saved = json.loads((models.SESSION_DIR / f"{sid}.json").read_text())
+    user, error = saved["messages"][-2:]
+    assert user["role"] == "user" and user["content"] == "long task"
+    assert error["_error"] and "Gateway endpoint unavailable" in error["content"]
+    assert "unresolved variable" in json.dumps(saved["messages"])
+    assert saved["active_stream_id"] is None and saved["gateway_run"] is None
