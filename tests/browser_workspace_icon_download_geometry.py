@@ -301,6 +301,90 @@ def _probe_menu_clamp(page, width, height, label):
           f"Delete visible and hit-testable (menu bottom {m['bottom']:.1f} / vh {m['vh']}): OK")
 
 
+MENU_ROWS_JS = """
+() => {
+  const menu = document.querySelector('.file-ctx-menu');
+  if (!menu) return {error: 'menu not found'};
+  const rows = Array.from(menu.children).filter(el => el.tagName === 'DIV');
+  return {coarse: matchMedia('(pointer:coarse)').matches,
+          rows: rows.map(el => ({label: (el.textContent || '').trim(),
+                                 h: el.getBoundingClientRect().height,
+                                 minHeight: getComputedStyle(el).minHeight}))};
+}
+"""
+
+
+def _open_menu_by_contextmenu_event(page, file, target_y):
+    # Touch browsers that open a context menu (Android long-press) deliver a
+    # contextmenu event; dispatch that event on the row, as they do.
+    info = page.evaluate(SCROLL_ROW_JS, {"file": file, "targetY": target_y})
+    assert "error" not in info, info
+    page.evaluate("""(a) => {
+      const row = Array.from(document.querySelectorAll('.file-item'))
+        .find(r => (r.textContent || '').includes(a.file));
+      row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true,
+                                                        clientX: a.cx, clientY: a.cy}));
+    }""", {"file": file, "cx": info["cx"], "cy": info["cy"]})
+    page.wait_for_selector(".file-ctx-menu", timeout=5000)
+
+
+def _probe_touch_menu_targets(browser, base, sid):
+    """On a coarse pointer every action row of the file context menu is a full
+    44px touch target, and the lower-edge clamp still keeps Delete on screen
+    with the taller rows. A fine pointer keeps the compact desktop rows."""
+    ctx = browser.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=3,
+                              is_mobile=True, has_touch=True)
+    try:
+        page = ctx.new_page()
+        page.goto(base, wait_until="domcontentloaded")
+        for _ in range(150):
+            try:
+                if page.evaluate("(typeof S!=='undefined') && S._bootReady===true && typeof loadSession==='function'"):
+                    break
+            except Exception:
+                pass
+            page.wait_for_timeout(200)
+        else:
+            raise AssertionError("touch: page never reached boot-ready")
+        page.evaluate("async (sid) => loadSession(sid)", sid)
+        page.wait_for_timeout(1200)
+        page.evaluate("() => { if (typeof toggleWorkspacePanel === 'function') toggleWorkspacePanel(true); }")
+        page.wait_for_selector(".file-item", timeout=15000)
+        _open_menu_by_contextmenu_event(page, "receipt.pdf", 300)
+        m = page.evaluate(MENU_ROWS_JS)
+        assert m.get("coarse") is True, f"touch context must report a coarse pointer: {m}"
+        labels = [r["label"] for r in m["rows"]]
+        assert "Download" in labels and "Delete" in labels, f"touch menu rows: {labels}"
+        short = [r for r in m["rows"] if r["h"] < 44]
+        assert not short, f"touch: every file-menu row must be >=44px tall; short rows: {short}"
+        page.evaluate("() => document.querySelectorAll('.file-ctx-menu').forEach(el => el.remove())")
+        _open_menu_by_contextmenu_event(page, "receipt.pdf", 844 - 90)
+        c = page.evaluate(MENU_CLAMP_JS)
+        assert c["bottom"] <= c["vh"] and c["top"] >= 0 and c["del"] and c["del"]["hit"], (
+            f"touch: lower-edge menu with 44px rows must stay inside the viewport with "
+            f"Delete hit-testable; got {c}")
+        page.evaluate("() => document.querySelectorAll('.file-ctx-menu').forEach(el => el.remove())")
+        print(f"  [touch] coarse pointer: {len(m['rows'])} menu rows all >=44px "
+              f"(min {min(r['h'] for r in m['rows']):.1f}px); lower-edge clamp keeps Delete "
+              f"hit-testable (bottom {c['bottom']:.1f} / vh {c['vh']}): OK")
+    finally:
+        ctx.close()
+
+
+def _probe_fine_pointer_rows_compact(page):
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    page.evaluate("() => { if (typeof toggleWorkspacePanel === 'function') toggleWorkspacePanel(true); }")
+    page.wait_for_selector(".file-item", timeout=15000)
+    _open_menu_by_contextmenu_event(page, "receipt.pdf", 400)
+    m = page.evaluate(MENU_ROWS_JS)
+    assert m.get("coarse") is False, m
+    # Height alone can't tell: a long label may wrap near the viewport edge.
+    padded = [r for r in m["rows"] if r["minHeight"] not in ("auto", "0px")]
+    assert not padded, f"desktop: fine-pointer menu rows must keep the compact layout; got {padded}"
+    page.evaluate("() => document.querySelectorAll('.file-ctx-menu').forEach(el => el.remove())")
+    print(f"  [desktop] fine pointer: no touch min-height on {len(m['rows'])} menu rows: OK")
+
+
 def _probe_menu_scroll_fallback(page, label):
     """When the menu is taller than the viewport it must clamp to the edge and
     scroll, not overflow: maxHeight + overflowY, with Delete reachable."""
@@ -368,6 +452,12 @@ def main():
     for k in list(env):
         if k.endswith("_API_KEY"):
             env.pop(k, None)
+        # Every path or profile the server reads from HERMES_* comes from the
+        # disposable state below; an inherited override (for example
+        # HERMES_WEBUI_SETTINGS_FILE) would point this server at the caller's
+        # real settings, attachments or plugins.
+        elif k.startswith("HERMES_"):
+            env.pop(k, None)
     for k in ("API_SERVER_KEY", "HERMES_WEBUI_PASSWORD", "HERMES_WEBUI_EXTENSION_DIR",
               "HERMES_WEBUI_EXTENSION_MANIFEST"):
         env.pop(k, None)
@@ -434,6 +524,8 @@ def main():
                 _probe_width(page, width, height, label, __import__("pathlib").Path(artifact_dir))
                 _probe_menu_clamp(page, width, height, label)
             _probe_menu_scroll_fallback(page, "tiny")
+            _probe_fine_pointer_rows_compact(page)
+            _probe_touch_menu_targets(browser, base, sid)
             browser.close()
         print("PASS: workspace download placement (context menu) + row geometry hold at both widths")
         return 0

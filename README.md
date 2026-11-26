@@ -246,7 +246,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Chat links using `workspace://path/to/file` open files in the right-side preview pane
 - Edit, create, delete, and rename files; create folders
 - Binary file download (auto-detected from server). In the file tree, the file
-  context menu (right-click / long-press) offers a Download action for files
+  context menu (right-click, or long-press in touch browsers that open one) offers a Download action for files
   next to the existing Download Folder for directories; PDFs render a document
   glyph like other previewable types, and every file type keeps its usual row
   click behavior (preview, or whole-row download for binary formats).
