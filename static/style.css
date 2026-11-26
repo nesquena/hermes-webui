@@ -3315,10 +3315,13 @@
   .composer-footer.cf-profile .composer-left{gap:3px;}
   .composer-footer.cf-tight .composer-divider,
   .composer-footer.cf-profile .composer-divider{display:none;}
+  /* Tighten a little further before sacrificing profile identity. At the
+     reported 965px active-turn boundary these 27 reclaimed pixels keep the
+     profile name and all three 34px actions visible together. */
   .composer-footer.cf-tight .composer-profile-chip,
   .composer-footer.cf-tight .composer-workspace-chip,
   .composer-footer.cf-tight .composer-model-chip,
-  .composer-footer.cf-tight .composer-reasoning-chip,
+  .composer-footer.cf-tight .composer-reasoning-chip{padding-left:4px;padding-right:3px;gap:4px;}
   .composer-footer.cf-profile .composer-profile-chip,
   .composer-footer.cf-profile .composer-workspace-chip,
   .composer-footer.cf-profile .composer-model-chip,

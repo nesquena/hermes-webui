@@ -6,7 +6,9 @@ Binds the regressions reproduced on PR #8766 (2026-11-05/07/25):
 * ordinary 960–1920px composer sweeps, with the workspace panel open where the
   breakpoint permits, keep Saved prompts and realistic workspace/model labels
   through lossless whitespace/profile-only stages; the later 170/180px caps do
-  not clip those identifiers either (C61-F1);
+  not clip those identifiers either (C61-F1). The exact active-turn 965px frame
+  also keeps the current profile's visible/accessibility identity and all three
+  34px action targets (C62-F1);
 * with Dictate visible, enabled, idle, neither hovered nor focused, Chromium's
   accessibility tree must still name #btnMic "Dictate" (Attach is the positive
   control), and its generated tooltip text must not have been destroyed;
@@ -520,6 +522,7 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
         # that review, driven through the production resize/panel handlers.
         default_scenarios = (
             ("default960", 960, False, "default", "review-model"),
+            ("defaultProfile965", 965, False, "default", "review-model"),
             ("default1000", 1000, False, "default", "review-model"),
             ("realistic1024", 1024, False, "hermes-webui", "Claude Sonnet 4.6"),
             ("panel1280", 1280, True, "hermes-webui", "review-model"),
@@ -529,11 +532,35 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
         evidence["defaultLossless"] = {}
         for name, width, panel_open, workspace_label, model_label in default_scenarios:
             _set_default_scene(page, workspace_label, model_label, panel_open)
+            if name == "defaultProfile965":
+                # The review's active-turn status occupies the right-hand
+                # strip. Include it so 965px exercises the reported narrow
+                # boundary instead of a roomier idle frame.
+                page.evaluate("""() => {
+                  const status = document.getElementById('composerStatus');
+                  status.textContent = 'Running';
+                  status.style.display = 'inline';
+                }""")
             page.set_viewport_size({"width": width, "height": 900})
             page.wait_for_timeout(400)
             geometry = _composer_geometry(page)
             evidence["defaultLossless"][name] = geometry
             _assert_default_lossless_scene(failures, name, geometry)
+            if name == "defaultProfile965":
+                # C62-F1: master keeps the current profile's identity at this
+                # exact short-label boundary. Preserve that identity without
+                # giving back the repaired 34px action targets.
+                profile = next(label for label in geometry["labels"] if label["id"] == "composerProfileLabel")
+                profile_ax_name = _ax_button_name(cdp, ".composer-profile-chip")
+                geometry["profileAxName"] = profile_ax_name
+                if not profile["visible"] or profile["text"] != "default" or profile_ax_name != "default":
+                    failures.append(
+                        f"{name}: current profile identity was lost (label={profile}, AX name={profile_ax_name!r})"
+                    )
+                controls = {child["id"]: child for child in geometry["children"]}
+                for control_id in ("btnAttach", "btnSavedPrompts", "btnMic"):
+                    if abs(controls[control_id]["width"] - 34) > 0.5:
+                        failures.append(f"{name}: {control_id} lost its 34px target: {controls[control_id]}")
             screenshot_dir = os.environ.get("COMPOSER_TOOLTIP_SCREENSHOT_DIR")
             if screenshot_dir:
                 os.makedirs(screenshot_dir, exist_ok=True)
@@ -838,7 +865,7 @@ def main() -> int:
                         print(" - " + failure, file=sys.stderr)
                     print(json.dumps(evidence, indent=2), file=sys.stderr)
                     return 1
-                print("COMPOSER TOOLTIP GEOMETRY PASSED: ordinary 25-width lossless sweep + 6 review frames + realistic shrink caps + idle AX + 2x24 resize frames + 1120px shrink target + Attach-last targets/tooltips + wide/phone recovery")
+                print("COMPOSER TOOLTIP GEOMETRY PASSED: ordinary 25-width lossless sweep + 7 review frames + realistic shrink caps + idle AX + 2x24 resize frames + 1120px shrink target + Attach-last targets/tooltips + wide/phone recovery")
                 return 0
             finally:
                 proc.terminate()
