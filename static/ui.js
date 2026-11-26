@@ -17703,8 +17703,12 @@ function _anchorSceneProseMatchesFinalAnswer(proseText, finalAnswer){
   const a=norm(proseText), b=norm(finalAnswer);
   if(!a||!b) return false;
   if(a===b) return true;
-  if(!(a.startsWith(b)||b.startsWith(a))) return false;
-  const shorter=Math.min(a.length,b.length), longer=Math.max(a.length,b.length);
+  // Fold only when the final answer displays the prose's WHOLE text: `b`
+  // starting with `a` means every interim character is visible in the answer.
+  // The reverse prefix (`a` starts with `b`) leaves the prose's tail shown
+  // nowhere — folding it deletes that text (greptile P1 2026-11-23).
+  if(!b.startsWith(a)) return false;
+  const shorter=a.length, longer=b.length;
   return shorter>=80 && (shorter/longer)>=0.9;
 }
 // #6948 follow-up (duplicate assistant answer; #2051): the same near-equality
@@ -17723,9 +17727,13 @@ function _anchorSceneProseDuplicatesFinalAnswer(proseText, finalAnswer){
   const norm=(s)=>String(s||'').replace(/\s+/g,' ').trim();
   const a=norm(proseText), b=norm(finalAnswer);
   if(!a||!b) return false;
-  if(!(a.startsWith(b)||b.startsWith(a))) return false;
-  const shorter=Math.min(a.length,b.length), longer=Math.max(a.length,b.length);
-  return (shorter/longer)>=0.9;
+  // Same whole-text rule as the render-time matcher: the final answer must
+  // display every character of the interim segment before its row may fold.
+  // A shorter final answer that only repeats the prose's opening is not a
+  // duplicate — the prose's tail would disappear with the row (greptile P1
+  // 2026-11-23: checklist plus a unique trailing warning).
+  if(!b.startsWith(a)) return false;
+  return (a.length/b.length)>=0.9;
 }
 function _anchorSceneWorklogGroup(blocks, opts){
   if(!blocks) return null;
