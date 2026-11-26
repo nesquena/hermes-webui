@@ -6419,7 +6419,7 @@ async function _deleteSelectedSessionsBatch(){
   // mistake that navigation for the delete continuation's own and replace it.
   const startNewChatAfterDelete=typeof window!=='undefined'&&window._newChatOnSessionDelete===true;
   const deleteNewChatOwner=(startNewChatAfterDelete&&S.session&&ids.includes(S.session.session_id))
-    ?_deleteNewChatOwnerSnapshot()
+    ?_deleteNewChatOwnerSnapshot(S.session.session_id)
     :null;
   const modelPickAtDelete=typeof _readComposerModelPick==='function'
     ? _readComposerModelPick()
@@ -6481,6 +6481,7 @@ async function _deleteSelectedSessionsBatch(){
     const error=newChatAfterDeleteResult.error;
     showToast(t('session_batch_delete_new_chat_failed',error&&error.message||error),0,'error');
   }
+  if(typeof _settleEmptyPageAfterSupersededDelete==='function') _settleEmptyPageAfterSupersededDelete(newChatAfterDeleteResult);
   exitSessionSelectMode();await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
 }
 function _showBatchProjectPicker(openerEl){
@@ -12730,8 +12731,9 @@ function _deleteNewChatProfileGeneration(){
   catch(_){return 0;}
 }
 
-function _deleteNewChatOwnerSnapshot(){
+function _deleteNewChatOwnerSnapshot(sessionId=''){
   return {
+    sessionId:String(sessionId||''),
     loadGeneration:_loadSessionGeneration,
     profileGeneration:_deleteNewChatProfileGeneration(),
     newSessionGeneration:Number.isSafeInteger(S._newSessionIntentGeneration)
@@ -12749,8 +12751,17 @@ function _deleteNewChatOwnerIsCurrent(owner,newSessionGeneration=null,loadGenera
   const expectedLoadGeneration=loadGeneration===null
     ? owner.loadGeneration
     : loadGeneration;
-  return !S.session
-    && _loadSessionGeneration===expectedLoadGeneration
+  // A load of the conversation being deleted is a refresh of this same pane,
+  // not navigation away from it. Only a load of a different conversation, or an
+  // active session that is not the deleted one, hands the pane to someone else
+  // (#7898 review 2026-11-26T21:19:40Z).
+  const ownerSessionId=String(owner.sessionId||'');
+  const pendingLoadId=(typeof _loadingSessionId!=='undefined'&&_loadingSessionId)||'';
+  if(pendingLoadId&&ownerSessionId&&pendingLoadId!==ownerSessionId) return false;
+  const activeSessionId=(S.session&&S.session.session_id)||'';
+  if(activeSessionId&&activeSessionId!==ownerSessionId) return false;
+  const samePaneRefresh=!!pendingLoadId&&pendingLoadId===ownerSessionId;
+  return (samePaneRefresh||_loadSessionGeneration===expectedLoadGeneration)
     && _deleteNewChatProfileGeneration()===owner.profileGeneration
     && (Number.isSafeInteger(S._newSessionIntentGeneration)?S._newSessionIntentGeneration:0)===expectedNewSessionGeneration
     && (S.activeProfile||'default')===owner.activeProfile;
@@ -12768,6 +12779,17 @@ function _showEmptyConversationAfterDelete(){
   const empty=$('emptyState');if(empty)empty.style.display='';
   const tree=$('fileTree');if(tree)tree.innerHTML='';
   if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+}
+
+// #7898 review (2026-11-26T21:19:40Z): a superseded delete continuation used to
+// leave the deleted conversation's transcript on screen with no active session.
+// When no load, no New Chat POST and no installed session claims the pane, paint
+// the empty conversation so the page stays usable.
+function _settleEmptyPageAfterSupersededDelete(result){
+  if(!result||!result.superseded||S.session) return;
+  if(typeof _loadingSessionId!=='undefined'&&_loadingSessionId) return;
+  if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight) return;
+  _showEmptyConversationAfterDelete();
 }
 
 async function _startNewChatAfterDeletingCurrentSession(deletedWorkspace, owner=null){
@@ -12868,7 +12890,7 @@ async function deleteSession(sid, beforeDelete=null){
   // that navigation as its own and replace it with a new chat.
   const _startNewChatAfterDelete=typeof window!=='undefined'&&window._newChatOnSessionDelete===true;
   const _deleteNewChatOwner=(_startNewChatAfterDelete&&S.session&&S.session.session_id===sid)
-    ?_deleteNewChatOwnerSnapshot()
+    ?_deleteNewChatOwnerSnapshot(sid)
     :null;
   const modelPickAtDelete=typeof _readComposerModelPick==='function'
     ? _readComposerModelPick()
@@ -12952,6 +12974,7 @@ async function deleteSession(sid, beforeDelete=null){
     const error=newChatAfterDeleteResult.error;
     showToast(t('session_delete_new_chat_failed',error&&error.message||error),0,'error');
   }
+  if(typeof _settleEmptyPageAfterSupersededDelete==='function') _settleEmptyPageAfterSupersededDelete(newChatAfterDeleteResult);
   if(optimisticRendered) void renderSessionList().finally(()=>_optimisticallyRemovedSessionIds.delete(sid));
   else await renderSessionList();
   return !cleanupFailed;

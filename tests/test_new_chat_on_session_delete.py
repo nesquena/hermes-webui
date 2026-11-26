@@ -419,6 +419,7 @@ try {
   eval(extractFunc('_deleteNewChatOwnerSnapshot'));
   eval(extractFunc('_deleteNewChatOwnerIsCurrent'));
   eval(extractFunc('_showEmptyConversationAfterDelete'));
+  eval(extractFunc('_settleEmptyPageAfterSupersededDelete'));
   eval(extractFunc('_startNewChatAfterDeletingCurrentSession'));
 } catch (e) {}
 eval(extractFunc('deleteSession'));

@@ -48,7 +48,10 @@ globalThis.$ = () => null;
 globalThis.t = key => key;
 
 globalThis.S = {
-  session: (scenario.startsWith('project-default-b-') || scenario.startsWith('sidebar-select-during-delete'))
+  session: (scenario.startsWith('project-default-b-')
+            || scenario.startsWith('sidebar-select-during-delete')
+            || scenario.startsWith('refresh-during-delete')
+            || scenario.startsWith('superseded-no-owner'))
     ? {session_id:'deleted-A', workspace:'/ws/A', profile:'default'}
     : null,
   messages: [],
@@ -62,6 +65,7 @@ globalThis.S = {
   activeStreamId: scenario === 'failure' ? 'stream-of-deleted-A' : null,
 };
 globalThis._loadSessionGeneration = 0;
+globalThis._loadingSessionId = null;
 globalThis._profileSwitchGeneration = 0;
 globalThis._newSessionInFlight = null;
 globalThis._messagesTruncated = false;
@@ -121,7 +125,9 @@ let releaseDelete = null;
 const createWorkspaces = [];
 globalThis.api = async (url, options = {}) => {
   if (url === '/api/session/delete') {
-    if (scenario.startsWith('sidebar-select-during-delete')) {
+    if (scenario.startsWith('sidebar-select-during-delete')
+        || scenario.startsWith('refresh-during-delete')
+        || scenario.startsWith('superseded-no-owner')) {
       return await new Promise(resolve => { releaseDelete = () => resolve({}); });
     }
     return {};
@@ -171,8 +177,13 @@ globalThis.api = async (url, options = {}) => {
 };
 globalThis.loadSession = async (_sid, options = {}) => {
   const generation = ++_loadSessionGeneration;
+  _loadingSessionId = _sid;
   if (typeof options.onLoadClaim === 'function') options.onLoadClaim(generation);
-  if (scenario === 'draft-load-failure') throw new Error('remembered draft load failed');
+  if (scenario === 'draft-load-failure') {
+    if (_loadSessionGeneration === generation) _loadingSessionId = null;
+    throw new Error('remembered draft load failed');
+  }
+  if (_loadSessionGeneration === generation) _loadingSessionId = null;
 };
 
 eval(extract('_profileMatchesActiveProfile'));
@@ -185,6 +196,7 @@ eval(extract('_deleteNewChatProfileGeneration'));
 eval(extract('_deleteNewChatOwnerSnapshot'));
 eval(extract('_deleteNewChatOwnerIsCurrent'));
 eval(extract('_showEmptyConversationAfterDelete'));
+eval(extract('_settleEmptyPageAfterSupersededDelete'));
 eval(extract('newSession'));
 eval(extract('_startNewChatAfterDeletingCurrentSession'));
 eval(extract('_sessionDeleteErrorMessage'));
@@ -233,6 +245,43 @@ eval(extract('_deleteSelectedSessionsBatch'));
     await pending;
     // A load owns the pane only if nothing replaced it in the meantime.
     if (_loadSessionGeneration === bGeneration) S.session = {session_id:'B', workspace:'/ws/B'};
+  } else if (scenario.startsWith('refresh-during-delete')) {
+    window._newChatOnSessionDelete = true;
+    if (scenario.endsWith('batch')) {
+      _selectedSessions.add('deleted-A');
+      pending = _deleteSelectedSessionsBatch();
+    } else {
+      pending = deleteSession('deleted-A');
+    }
+    while (!releaseDelete) await new Promise(resolve => setTimeout(resolve, 0));
+    // A background force refresh of the deleted conversation claims the loader
+    // without the user navigating anywhere.
+    _loadingSessionId = 'deleted-A';
+    const refreshGeneration = ++_loadSessionGeneration;
+    releaseDelete();
+    for (let i = 0; i < 50 && !releaseCreate; i++) await new Promise(resolve => setTimeout(resolve, 0));
+    if (releaseCreate) releaseCreate();
+    await pending;
+    if (_loadSessionGeneration === refreshGeneration) {
+      S.session = {session_id:'deleted-A', workspace:'/ws/A'};
+      globalThis.staleRefreshPainted = true;
+    }
+    _loadingSessionId = null;
+  } else if (scenario.startsWith('superseded-no-owner')) {
+    window._newChatOnSessionDelete = true;
+    if (scenario.endsWith('batch')) {
+      _selectedSessions.add('deleted-A');
+      pending = _deleteSelectedSessionsBatch();
+    } else {
+      pending = deleteSession('deleted-A');
+    }
+    while (!releaseDelete) await new Promise(resolve => setTimeout(resolve, 0));
+    // A load that already bailed left no owner: the generation moved on with
+    // nobody loading and no session installed.
+    _loadingSessionId = null;
+    ++_loadSessionGeneration;
+    releaseDelete();
+    await pending;
   } else {
     const owner = _deleteNewChatOwnerSnapshot();
     pending = _startNewChatAfterDeletingCurrentSession('/ws/A', owner);
@@ -290,6 +339,7 @@ eval(extract('_deleteSelectedSessionsBatch'));
     sendButtonUpdates,
     createWorkspaces,
     sentSessionId:globalThis.sentSessionId||null,
+    staleRefreshPainted:!!globalThis.staleRefreshPainted,
   }));
 })().catch(error => {
   process.stderr.write(String(error && error.stack || error));
@@ -454,4 +504,35 @@ def test_sidebar_selection_during_pending_delete_is_not_replaced(driver, scenari
     result = _run(driver, scenario)
     assert result["createWorkspaces"] == []
     assert result["activeSid"] == "B"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize(
+    "scenario",
+    ["refresh-during-delete-single", "refresh-during-delete-batch"],
+)
+def test_same_conversation_refresh_does_not_cancel_the_replacement(driver, scenario):
+    """Greptile P1 (2026-11-26T21:19:40Z): a force refresh of the conversation
+    being deleted is not navigation away from it. The continuation must still
+    start the replacement, and the stale refresh must not repaint the deleted
+    conversation afterwards."""
+    result = _run(driver, scenario)
+    assert result["createWorkspaces"] == ["/ws/A"]
+    assert result["activeSid"] == "created-A"
+    assert result["staleRefreshPainted"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize(
+    "scenario",
+    ["superseded-no-owner-single", "superseded-no-owner-batch"],
+)
+def test_superseded_delete_without_a_new_owner_shows_the_empty_page(driver, scenario):
+    """Greptile P1 (2026-11-26T21:19:40Z): when nothing else claims the pane, a
+    superseded continuation must not leave the deleted conversation on screen."""
+    result = _run(driver, scenario)
+    assert result["createWorkspaces"] == []
+    assert result["activeSid"] is None
+    assert result["replacedUrl"] == "/"
+
 
