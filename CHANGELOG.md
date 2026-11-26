@@ -83,10 +83,6 @@
 
 - **The gateway-sync reset test runs on newer Hermes Agent versions too (#9261, closes #9258).** Both cases of the test that checks a reset conversation stays separate from its reopened parent failed against current Agents, because their fixture used storage calls newer Agents no longer have. The fixture now writes rows with `append_message`, ends the parent session through whichever reset call the installed Agent provides, and checks that the reset took effect.
 
-- **Memory and skill changes can no longer land in the wrong profile after a switch in another tab (#9216, part of #9077).** The active profile is shared across tabs, so an open Memory editor or skill list could still show one profile's data after another tab switched profile, and saving or toggling then wrote into the profile now active. The server now refuses such a write with a clear message, nothing is saved, and the Memory editor keeps your text so you can copy it. Skill toggles show an error and reload the list for the active profile.
-
-- **A reused conversation recovers when its context compressor fails to reconnect to session storage (#9215).** When WebUI keeps an agent cached between turns and hands it a new session-storage handle, it reconnects the context compressor to that handle. If that failed once, it stayed failed for as long as the agent stayed cached, and only a debug line recorded it. The next turn now retries, the first failure logs one warning, and a store that has already been released is replaced instead of reused. The check for whether a hook accepts a keyword argument now matches the Hermes Agent's own rule, and the reconnect is still called once per turn, as the Agent's reset path does.
-
   - Maintainer folds: when nothing is interrupted (only Gateway runs on a Gateway the WebUI can't restart), the update gets a neutral "Update the Agent now?" confirmation instead of an "Interrupt active runs?" warning that counted zero runs, and "2 Gateway run keep running" is fixed. A managed Gateway with no WebUI run gets its own confirmation copy in all 15 locales. The forced update carries what you confirmed (whether the Gateway is restarted, which profile and endpoint, how many runs it interrupts). The server re-checks it just before restarting the Gateway, so if the Gateway changed in the meantime, for example after a profile switch in another tab, it asks again instead of restarting a Gateway the dialog said would keep running.
 
   - **Reload recovery:** reloading a compressed conversation that lands on its archived part didn't find the continuation.
@@ -348,8 +344,6 @@
 
 - **A test now pins that the profile secret-scope setter is inspected again when it is replaced (#9234, refs #9096).** Thanks @chhxbchhxb. Replacing `set_secret_scope` on the same Agent module (an Agent reload, or a plugin that wraps the setter) has to re-check whether the new setter accepts `profile_home`; nothing guarded that half of the cache before.
 
-- **The ledger retry-timer test no longer fails intermittently (#9287, closes #9269).** It counted live timers before the retry timer that had just fired had finished exiting; it now waits for that timer first.
-
 - **CI lint gate:** the ruff diff gate keeps the full history when it fetches `origin/master`, so it diffs against the real merge-base instead of reporting upstream findings as introduced by the PR. Thanks @happy5318.
 
 - **The local full test suite passes in the release sandbox (test-only).** Twenty-one tests failed only because of the host: no package index, the worktree's git dir hidden from git, `HOME=/tmp`, unmapped supplementary groups, no network route for Chromium, a process-wide truststore injection, and two newer-Agent shape changes. They now pass there, or skip with the missing condition named (package index, spare group, Agent org skill mirror). No product code changes, and CI still runs the packaging tests.
@@ -367,6 +361,18 @@
 - **Test suite reads static assets as UTF-8 so it runs on Windows.** 34 test files that opened `static/` assets without an explicit encoding now pass `encoding="utf-8"`, so the suite no longer fails under a non-UTF-8 default locale (Windows `cp1252`). Two method signatures over-matched by the encoding sweep were reverted. Assertions are unchanged. Thanks @mo7al876any. (#5537)
 
 - **Added regression coverage for messaging clear-watermark semantics.** New test locks the watermark behavior so a future change can't silently regress it. Thanks @rodboev. (#5589, #5572)
+
+## [v0.52.735] — 2026-11-26
+
+### Fixed
+
+- **Memory and skill changes can no longer land in the wrong profile after a switch in another tab (#9216, part of #9077).** The active profile is shared across tabs, so an open Memory editor or skill list could still show one profile's data after another tab switched profile, and saving or toggling then wrote into the profile now active. The server now refuses such a write with a clear message, nothing is saved, and the Memory editor keeps your text so you can copy it. Skill toggles show an error and reload the list for the active profile.
+
+- **A reused conversation recovers when its context compressor fails to reconnect to session storage (#9215).** When WebUI keeps an agent cached between turns and hands it a new session-storage handle, it reconnects the context compressor to that handle. If that failed once, it stayed failed for as long as the agent stayed cached, and only a debug line recorded it. The next turn now retries, the first failure logs one warning, and a store that has already been released is replaced instead of reused. The check for whether a hook accepts a keyword argument now matches the Hermes Agent's own rule, and the reconnect is still called once per turn, as the Agent's reset path does.
+
+### Internal
+
+- **The ledger retry-timer test no longer fails intermittently (#9287, closes #9269).** It counted live timers before the retry timer that had just fired had finished exiting; it now waits for that timer first.
 
 ## [v0.52.732] — 2026-11-23
 
