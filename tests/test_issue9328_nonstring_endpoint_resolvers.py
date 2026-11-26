@@ -99,7 +99,7 @@ model:
   provider: openrouter
   default: gpt-base
 providers:
-  fireworks:
+  deepseek:
     base_url: 9
     models:
       gpt-x: {}
@@ -235,8 +235,15 @@ def test_resolve_never_returns_a_non_string_model_endpoint(model_block_int):
 
 
 def test_provider_scan_never_stringifies_a_non_string_endpoint(provider_scan_int):
-    """``providers.<slug>.models`` must not turn ``9`` into the endpoint ``"9"``."""
-    assert config.resolve_model_provider("gpt-x") == ("gpt-x", "fireworks", None)
+    """``providers.<slug>.models`` must not turn ``9`` into the endpoint ``"9"``.
+
+    The slug is one WebUI's own tables know (``deepseek``). A slug that only
+    the plugin registry or the installed Agent catalog knows is classified as
+    a native custom key wherever that discovery is unavailable (CI installs
+    neither), and such a record then answers under ``custom:<slug>`` - an
+    environment difference this scan test must not pin.
+    """
+    assert config.resolve_model_provider("gpt-x") == ("gpt-x", "deepseek", None)
 
 
 # ── Identity: a non-string name mints nothing and suppresses nothing ───────
