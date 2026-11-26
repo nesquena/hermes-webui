@@ -243,7 +243,8 @@ def test_follow_intent_cache_is_fed_by_the_input_tail_ownership():
     # drag is reader input on the transcript surface; a programmatic scroll never
     # sets _scrollbarDragActive).
     start = UI_JS.index("el.addEventListener('scroll'")
-    listener = UI_JS[start : start + 1200]
+    # Everything before the listener's rAF schedule (the synchronous part).
+    listener = UI_JS[start : UI_JS.index("_scrollRaf=requestAnimationFrame", start)]
     lc = _compact(listener)
     invalidate = lc.find("_messageFollowIntentCache=false")
     assert invalidate != -1, (
@@ -255,7 +256,7 @@ def test_follow_intent_cache_is_fed_by_the_input_tail_ownership():
         "a programmatic scroll can never invalidate follow-intent (#6653)"
     )
     jump_guard = lc.find(_compact("if(_messageJumpScrollOwner){"))
-    prog_return = lc.find(_compact("if(_freshProgrammaticScrollActive()&&!_scrollbarDragActive)return;"))
+    prog_return = lc.find(_compact("if(_freshProgrammaticScrollActive())return;"))
     assert jump_guard != -1 and prog_return != -1 and invalidate < jump_guard < prog_return, (
         "the drag invalidation must run BEFORE the jump-owner and "
         "programmatic-scroll early-returns in the scroll listener (#6653)"

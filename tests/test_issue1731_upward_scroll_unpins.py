@@ -146,7 +146,7 @@ def test_programmatic_scroll_guard_still_skips_listener():
     end = UI_JS.index("})", brace)
     listener = UI_JS[brace:end]
 
-    bail_idx = listener.index("if(_freshProgrammaticScrollActive()&&!_scrollbarDragActive) return")
+    bail_idx = listener.index("if(_freshProgrammaticScrollActive()) return")
     # Anchor on the actual rAF SCHEDULE, not the word "requestAnimationFrame" —
     # a comment above the guard may legitimately mention the rAF deferral.
     raf_idx = listener.index("_scrollRaf=requestAnimationFrame")
@@ -154,6 +154,14 @@ def test_programmatic_scroll_guard_still_skips_listener():
         "The _programmaticScroll guard must run before requestAnimationFrame "
         "so programmatic scrollToBottom() calls never update _lastScrollTop "
         "and never spuriously unpin (#1731)."
+    )
+    # #6669: the only way past the guard inside the programmatic window is an
+    # ACTIVE SCROLLBAR DRAG (reader input). A programmatic scroll never sets
+    # _scrollbarDragActive, so it still bails here.
+    bypass = "const _dragThroughProgrammaticLatch=_scrollbarDragActive&&_freshProgrammaticScrollActive();"
+    bypass_idx = listener.index(bypass)
+    assert bypass_idx < bail_idx and "if(!_dragThroughProgrammaticLatch){" in listener[bypass_idx:bail_idx], (
+        "the programmatic guard may only be skipped for an active scrollbar drag (#6669)"
     )
     # #6653: the follow-intent invalidation that sits before the guard must be
     # gated on an ACTIVE SCROLLBAR DRAG — a programmatic scrollToBottom() never

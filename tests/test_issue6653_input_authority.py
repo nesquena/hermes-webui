@@ -305,6 +305,9 @@ def test_scrollbar_drag_back_to_the_tail_rearms_follow_intent_while_the_latch_is
     m = _run(
         "const _rafQueue = [];\n"
         "requestAnimationFrame = (cb) => { _rafQueue.push(cb); return _rafQueue.length; };\n"
+        "let _virtCalls = 0;\n"
+        "_scheduleMessageVirtualizedRender = () => { _virtCalls++; };\n"
+        "_markMessageVirtualScrollActive = () => { _virtCalls++; };\n"
         "// neighbours the listener's rAF reconciliation calls\n"
         "globalThis.window = { _autoScrollFollow: true };\n"
         "Object.assign(globalThis, { _messagesTruncated: false, _newMessageCueVisible: false,\n"
@@ -324,12 +327,16 @@ def test_scrollbar_drag_back_to_the_tail_rearms_follow_intent_while_the_latch_is
         "el.scrollTop = 4200;             // thumb back at the tail\n"
         "_onScroll();\n"
         "T.now += 16; _rafQueue.splice(0).forEach((cb) => cb());\n"
-        "out({afterUp, cache:_messageFollowIntentCache, pinned:_scrollPinned, unpinned:_messageUserUnpinned});\n"
+        "out({afterUp, cache:_messageFollowIntentCache, pinned:_scrollPinned, unpinned:_messageUserUnpinned, virt:_virtCalls});\n"
     )
     assert m["afterUp"] is False, "the upward drag must still invalidate the cache (#6653)"
     assert m["cache"] is True and m["pinned"] is True and m["unpinned"] is False, (
         "dragging the scrollbar back to the tail while the programmatic latch is fresh "
         f"must re-arm following (#6653): {m}"
+    )
+    assert m["virt"] == 0, (
+        "a drag inside the programmatic window must not schedule a virtualized "
+        "re-render or mark virtual scrolling active (#6799)"
     )
 
 

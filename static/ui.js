@@ -9510,9 +9510,18 @@ if(typeof window!=='undefined'){
       return;
 
     }
-    if(_freshProgrammaticScrollActive()&&!_scrollbarDragActive) return;
-    _scheduleMessageVirtualizedRender();
-    _markMessageVirtualScrollActive();
+    // #6669: a scrollbar drag inside the programmatic window (a live token's
+    // follow write keeps the latch fresh) still reaches the follow/unfollow
+    // reconciliation below, or a drag back to the tail never re-arms following.
+    // It skips the virtualized re-render scheduling, which a programmatic scroll
+    // must never trigger (#6799: the virtualization drag branch sets the latch
+    // for its own scroll correction).
+    const _dragThroughProgrammaticLatch=_scrollbarDragActive&&_freshProgrammaticScrollActive();
+    if(!_dragThroughProgrammaticLatch){
+      if(_freshProgrammaticScrollActive()) return;
+      _scheduleMessageVirtualizedRender();
+      _markMessageVirtualScrollActive();
+    }
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
       const top=el.scrollTop;

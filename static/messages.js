@@ -7836,8 +7836,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // check (forced scrollHeight layout, WKWebView freeze) or the raw pin flag
         // (rAF-deferred, stale at cancel time). The cache only stands in for
         // "at the tail" while Auto-follow is on: with it off, the transcript grows
-        // below a reader without following, so cancel never scrolls. An unset
-        // flag means the default (on), as in the settings loader.
+        // below a reader without following, so cancel itself does not scroll
+        // (the render's pinned-tail re-anchor can still hold a reader who was
+        // within a few px of the tail). An unset flag means the default (on),
+        // as in the settings loader.
         const _wasFollowingAtCancel=window._autoScrollFollow!==false
           && ((typeof _messageFollowIntentCache!=='undefined')
             ? _messageFollowIntentCache
