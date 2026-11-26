@@ -24,10 +24,11 @@ stubs respondClarify):
   6. an invalid block (non-JSON, or an array with a non-string entry) renders
      no buttons and leaves the raw block visible (fail-safe).
 
-Review follow-ups (checks 7-14) cover: the busy flag, liveness of older replies,
+Review follow-ups (checks 7-16) cover: the busy flag, liveness of older replies,
 fences authored by the user, draft ownership across a chat switch, a draft typed
-mid-send, a draft's staged attachments (never uploaded with a suggestion, and
-restored with the draft text), and the shared radius tokens.
+mid-send, a draft's staged attachments (never uploaded with a suggestion,
+restored with the draft text, and kept when the user types or switches chats
+while the send is in flight), and the shared radius tokens.
 
 A final phase repeats the important parts in a 390x844 touch context (labels
 wrap, nothing overflows, no clipped labels, the keyboard hint is hidden, and a
@@ -542,6 +543,75 @@ def _review_checks(page, check):
           f"check14: the button follows var(--radius-md) (got {radii!r})")
     check(bool(radii["kbdToken"]) and radii["kbd"] == radii["kbdToken"],
           f"check14: the keyboard hint follows var(--radius-sm) (got {radii!r})")
+
+    # ── Check 15: attachments survive a draft typed while the send is in flight ──
+    page.evaluate(INJECT_ROW_JS, ["row15", _json(["Senden"]), True])
+    _wait(page, "(rowId) => { const r = document.querySelector('[data-test-row=\"' + rowId + '\"]'); "
+                "return r && r.querySelectorAll('.inline-suggestion-btn').length === 1; }", arg="row15")
+    page.evaluate("""() => {
+      window.__draftSaves = [];
+      window.__sentFiles = [];
+      S.session = { session_id: 'sid-E' };
+      window._saveComposerDraft = function(sid, text, files){
+        window.__draftSaves.push([sid, text, (files || []).map(f => f && f.name)]);
+      };
+      document.getElementById('msg').value = 'alter Entwurf';
+      S.pendingFiles = [{ name: 'vertrag.pdf' }];
+      renderTray();
+      window.send = function(){
+        window.__sentFiles.push((S.pendingFiles || []).map(f => f && f.name));
+        S.pendingFiles = [];
+        renderTray();
+        // The user keeps typing while /api/chat/start is still pending.
+        document.getElementById('msg').value = 'neuer Entwurf';
+        return Promise.resolve();
+      };
+    }""")
+    page.evaluate(CLICK_BUTTON_JS, ["row15", 0])
+    page.wait_for_timeout(300)
+    typed15 = page.evaluate(COMPOSER_VALUE_JS)
+    tray15 = page.evaluate("() => (S.pendingFiles || []).map(f => f && f.name)")
+    saves15 = page.evaluate("() => window.__draftSaves.slice()")
+    sent15 = page.evaluate("() => window.__sentFiles.slice()")
+    check(sent15 == [[]],
+          f"check15: the suggestion send carries no draft files (got {sent15!r})")
+    check(typed15 == 'neuer Entwurf',
+          f"check15: the newer draft stays in the composer (got {typed15!r})")
+    check(tray15 == ['vertrag.pdf'],
+          f"check15: the parked attachment is back in the tray after typing (got {tray15!r})")
+    check(saves15 == [['sid-E', 'neuer Entwurf', ['vertrag.pdf']]],
+          f"check15: the newer draft is persisted with its attachment (got {saves15!r})")
+
+    # ── Check 16: an attachment-only draft survives a chat switch mid-send ──
+    page.evaluate(INJECT_ROW_JS, ["row16", _json(["Senden"]), True])
+    _wait(page, "(rowId) => { const r = document.querySelector('[data-test-row=\"' + rowId + '\"]'); "
+                "return r && r.querySelectorAll('.inline-suggestion-btn').length === 1; }", arg="row16")
+    page.evaluate("""() => {
+      window.__draftSaves = [];
+      S.session = { session_id: 'sid-F' };
+      window._saveComposerDraft = function(sid, text, files){
+        window.__draftSaves.push([sid, text, (files || []).map(f => f && f.name)]);
+      };
+      // Attachment-only draft: no text, just a staged file.
+      document.getElementById('msg').value = '';
+      S.pendingFiles = [{ name: 'notiz.txt' }];
+      renderTray();
+      window.send = function(){
+        S.pendingFiles = [];
+        renderTray();
+        // The user opens another chat while /api/chat/start is still pending.
+        S.session = { session_id: 'sid-G' };
+        return Promise.resolve();
+      };
+    }""")
+    page.evaluate(CLICK_BUTTON_JS, ["row16", 0])
+    page.wait_for_timeout(300)
+    saves16 = page.evaluate("() => window.__draftSaves.slice()")
+    tray16 = page.evaluate("() => (S.pendingFiles || []).map(f => f && f.name)")
+    check(saves16 == [['sid-F', '', ['notiz.txt']]],
+          f"check16: the attachment-only draft is parked on its own chat (got {saves16!r})")
+    check(tray16 == [],
+          f"check16: the other chat's tray stays untouched (got {tray16!r})")
 
 
 def _narrow_checks(browser, base, check):

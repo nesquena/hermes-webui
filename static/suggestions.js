@@ -102,10 +102,12 @@
     }finally{
       const _sameChat=_currentSid()===ownerSid;
       const _untouched=!msg.value.trim()||msg.value===label;
-      // Nur wenn wir auch den Text zurücklegen (gleicher Chat, niemand hat
-      // getippt) kommen die Anhänge mit zurück; sonst gehören sie dem Entwurf,
-      // der serverseitig gespeichert wird bzw. verworfen wurde.
-      if(parkedFiles&&_sameChat&&_untouched&&typeof S!=='undefined'&&S&&Array.isArray(S.pendingFiles)){
+      // Die geparkten Anhänge gehören dem Entwurf ihres Chats, nicht der gerade
+      // offenen Ansicht: solange derselbe Chat offen ist, kommen sie in den Tray
+      // zurück — auch wenn der Nutzer während des Sendens weitergetippt hat.
+      // Sonst hätte der Tipp-Autosave den inzwischen geleerten Tray bereits
+      // persistiert und die Dateien wären weg.
+      if(parkedFiles&&_sameChat&&typeof S!=='undefined'&&S&&Array.isArray(S.pendingFiles)){
         const _now=S.pendingFiles.slice();
         for(let i=0;i<parkedFiles.length;i++){
           if(_now.indexOf(parkedFiles[i])<0) _now.push(parkedFiles[i]);
@@ -113,23 +115,25 @@
         S.pendingFiles=_now;
         if(typeof window.renderTray==='function'){ try{ window.renderTray(); }catch(_){} }
       }
-      if(draft){
-        // send() hat den Server-Draft dieses Chats geleert (text:"") - der Text
-        // muss also neu hinterlegt werden, aber nie über einen neueren Entwurf:
-        // nur wenn wir ihn auch wieder ins Feld legen (niemand hat getippt).
-        if(_sameChat&&_untouched){
-          msg.value=draft;
-          if(typeof window.autoResize==='function'){
-            try{ window.autoResize(); }catch(_){}
-          }
-          if(ownerSid&&typeof _saveComposerDraft==='function'){
-            try{ _saveComposerDraft(ownerSid,draft,draftFiles); }catch(_){}
-          }
-        }else if(!_sameChat&&ownerSid&&typeof _saveComposerDraft==='function'){
-          // Chat gewechselt: Entwurf gehört weiter zu seinem Chat, ohne das
-          // Eingabefeld der jetzt offenen Ansicht anzufassen.
-          try{ _saveComposerDraft(ownerSid,draft,draftFiles); }catch(_){}
+      // Text nur zurücklegen, wenn niemand getippt hat und wir im selben Chat
+      // sind: ein neuerer Entwurf wird nie überschrieben.
+      if(_sameChat&&_untouched){
+        msg.value=draft;
+        if(typeof window.autoResize==='function'){
+          try{ window.autoResize(); }catch(_){}
         }
+      }
+      // send() hat den Server-Draft dieses Chats geleert (text:""). Neu hinterlegen:
+      //  - mit geparkten Anhängen immer (der Tipp-Autosave bzw. send() hat sie
+      //    sonst schon aus dem gespeicherten Entwurf entfernt); im selben Chat
+      //    mit neuer Eingabe ist der aktuelle Feldwert der Entwurf, sonst der
+      //    ursprüngliche Text — auch bei reinen Anhang-Entwürfen ohne Text;
+      //  - ohne Anhänge wie bisher nur den erfassten Text (gleicher Chat und
+      //    unangetastet, oder nach einem Chatwechsel).
+      const _saveText=(_sameChat&&!_untouched)?msg.value:draft;
+      const _persistDraft=!!(parkedFiles&&parkedFiles.length)||(!!draft&&(_untouched||!_sameChat));
+      if(_persistDraft&&ownerSid&&typeof _saveComposerDraft==='function'){
+        try{ _saveComposerDraft(ownerSid,_saveText,draftFiles); }catch(_){}
       }
     }
   }
