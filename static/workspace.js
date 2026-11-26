@@ -645,10 +645,12 @@ function _textWriteOpTargets(text, opts){
 
   // Split command text into top-level segments separated by ;, &&, ||, |, &, or newline,
   // respecting quotes and backslash escaping. File descriptor duplications like 2>&1
-  // are preserved within their command segment.
+  // are preserved within their command segment. Separator kinds are preserved so subshell
+  // constructs (pipelines, background jobs) can be distinguished from parent-shell sequences.
   const splitSegments=(t)=>{
     const segments=[];
     let cur='';
+    let start=-1;
     let quote=null;
     for(let i=0;i<t.length;i++){
       const ch=t[i];
@@ -661,54 +663,67 @@ function _textWriteOpTargets(text, opts){
         else if(ch==='"') quote=null;
       }else{
         if(ch==="'"||ch==='"'){
+          if(start<0) start=i;
           quote=ch;
           cur+=ch;
         }else if(ch==='\\'&&i+1<t.length){
+          if(start<0) start=i;
           cur+=ch+t[i+1];
           i++;
         }else if(ch==='\n'||ch===';'){
-          if(cur.trim()) segments.push(cur);
+          if(cur.trim()) segments.push({text:cur, sep:ch, start:start>=0?start:i});
           cur='';
+          start=-1;
         }else if(ch==='&'){
           if(/>\s*$/.test(cur)){
             cur+=ch;
           }else if(i+1<t.length && t[i+1]==='&'){
-            if(cur.trim()) segments.push(cur);
+            if(cur.trim()) segments.push({text:cur, sep:'&&', start:start>=0?start:i});
             cur='';
+            start=-1;
             i++;
           }else{
-            if(cur.trim()) segments.push(cur);
+            if(cur.trim()) segments.push({text:cur, sep:'&', start:start>=0?start:i});
             cur='';
+            start=-1;
           }
         }else if(ch==='|'){
           if(i+1<t.length && t[i+1]==='|'){
-            if(cur.trim()) segments.push(cur);
+            if(cur.trim()) segments.push({text:cur, sep:'||', start:start>=0?start:i});
             cur='';
+            start=-1;
             i++;
           }else{
-            if(cur.trim()) segments.push(cur);
+            if(cur.trim()) segments.push({text:cur, sep:'|', start:start>=0?start:i});
             cur='';
+            start=-1;
           }
         }else{
+          if(!/\s/.test(ch) && start<0) start=i;
           cur+=ch;
         }
       }
     }
-    if(cur.trim()) segments.push(cur);
+    if(cur.trim()) segments.push({text:cur, sep:null, start:start>=0?start:t.length});
     return segments;
   };
 
   const out=[];
   const outDetailed=[];
   const withDirs=Boolean(opts && opts.withDirs);
-  let currentDir=(opts && opts.workdir!==undefined) ? String(opts.workdir) : '';
-  const push=(t)=>{
+  let currentDir=(opts && opts.workdir!==undefined) ? (opts.workdir===null ? null : String(opts.workdir)) : '';
+  const push=(t, dir)=>{
     if(!t) return;
     const s=String(t).trim().replace(/^['"`]+|['"`;,]+$/g,'').replace(/\\/g, '/');
     if(s){
       out.push(s);
-      if(withDirs) outDetailed.push({target:s, workdir:currentDir});
+      const wd=(dir!==undefined) ? dir : currentDir;
+      if(withDirs) outDetailed.push({target:s, workdir:wd});
     }
+  };
+  const isWriteMode=(mode)=>{
+    const m=String(mode||'').toLowerCase();
+    return /^[rwa]b?\+?$/.test(m) && (m[0]==='w'||m[0]==='a'||m.includes('+'));
   };
   const tokenize=(seg)=>{
     const toks=[];
@@ -735,14 +750,14 @@ function _textWriteOpTargets(text, opts){
           quote=ch;
         }else if(ch==='\\'&&i+1<seg.length){
           inTok=true;
-          if(/\s|['"`]/.test(seg[i+1])){
+          if(seg[i+1]==='\\'){
             i++;
-            cur+=seg[i];
-          }else if(seg[i+1]==='\\'){
-            i++;
+            cur+='/';
+          }else if(/[a-zA-Z0-9_.]/.test(seg[i+1])){
             cur+='/';
           }else{
-            cur+='/';
+            i++;
+            cur+=seg[i];
           }
         }else if(/\s/.test(ch)){
           if(inTok){ toks.push(cur); cur=''; inTok=false; }
@@ -795,8 +810,15 @@ function _textWriteOpTargets(text, opts){
       currentDir=_collapseDotSegments(base+'/'+normTarget).replace(/\/+$/,'');
     }
   };
+
   const segments=splitSegments(text);
-  for(const seg of segments){
+  for(let i=0;i<segments.length;i++){
+    const segInfo=segments[i];
+    segInfo.dir=currentDir;
+    const seg=segInfo.text;
+    const nextSep=segInfo.sep;
+    const prevSep=i>0 ? segments[i-1].sep : null;
+    const isSubshell=(nextSep==='|' || prevSep==='|' || nextSep==='&');
     let m;
     // 1. shell redirects: `> file` / `>> file` (excludes numeric-fd / stderr dup
     //    forms like `2> err.log` and `2>&1` — those don't mutate the target).
@@ -861,19 +883,35 @@ function _textWriteOpTargets(text, opts){
     while((m=patchRe.exec(seg))){
       push(m[2]||m[3]||m[4]);
     }
-    // 4. python open('<path>', '<mode>') with a write-capable mode (w/a/+).
-    const openRe=/\bopen\s*\(\s*(?:"([^"]+)"|'([^']+)')\s*,\s*(?:"([^"]*)"|'([^']*)')(?:\s*,[^)]*)?\s*\)/g;
-    while((m=openRe.exec(seg))){
-      const mode=String(m[3]||m[4]||'').toLowerCase();
-      if(/^[rwa]b?\+?$/.test(mode) && (mode[0]==='w'||mode[0]==='a'||mode.includes('+'))) push(m[1]||m[2]);
-    }
-    // 5. write_file('<path>', ...) calls embedded in code text.
-    const wfRe=/\bwrite_file\s*\(\s*(?:"([^"]+)"|'([^']+)')/g;
-    while((m=wfRe.exec(seg))) push(m[1]||m[2]);
 
     // Update effective directory for subsequent segments if this segment was `cd`
-    updateCd(seg);
+    // (a `cd` that runs in a subshell pipeline or background job must not move the parent directory).
+    if(!isSubshell) updateCd(seg);
   }
+
+  // Effective directory at character offset `pos` in `text` across preceding segments.
+  const dirAt=(pos)=>{
+    let d=(opts && opts.workdir!==undefined) ? (opts.workdir===null ? null : String(opts.workdir)) : '';
+    for(const seg of segments){
+      if(seg.start<=pos){
+        d=seg.dir;
+      }else{
+        break;
+      }
+    }
+    return d;
+  };
+
+  // Python write ops embedded in code/command text: parsed across full text so
+  // calls whose arguments span newlines are captured without duplicating mode checks,
+  // resolving against the effective directory in force at the call site.
+  const openRe=/\bopen\s*\(\s*(?:"([^"]+)"|'([^']+)')\s*,\s*(?:"([^"]*)"|'([^']*)')(?:\s*,[^)]*)?\s*\)/g;
+  let pyM;
+  while((pyM=openRe.exec(text))){
+    if(isWriteMode(pyM[3]||pyM[4])) push(pyM[1]||pyM[2], dirAt(pyM.index));
+  }
+  const wfRe=/\bwrite_file\s*\(\s*(?:"([^"]+)"|'([^']+)')/g;
+  while((pyM=wfRe.exec(text))) push(pyM[1]||pyM[2], dirAt(pyM.index));
   return withDirs ? outDetailed : out;
 }
 
