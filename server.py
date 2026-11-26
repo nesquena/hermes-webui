@@ -102,6 +102,10 @@ from urllib.parse import urlparse
 _webui_root = os.path.dirname(os.path.abspath(__file__))
 if _webui_root not in sys.path:
     sys.path.insert(0, _webui_root)
+# #9052: cap glibc malloc arenas HERE, while only the main thread exists and before
+# any Agent or api.* import can start one: glibc latches its arena limit later.
+from startup_memory_limits import apply_startup_arena_cap
+apply_startup_arena_cap()
 from managed_agent_startup import activate_managed_agent
 if os.environ.pop("_HERMES_WEBUI_PREFLIGHT_COMPLETE", ""):
     # Bootstrap selected and tested this interpreter. Suppress PM repair
