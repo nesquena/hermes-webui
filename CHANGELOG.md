@@ -338,10 +338,13 @@
 
 - **Project chips and the "Move to project" pickers are listed alphabetically (#6577, @webtecnica, closes #6393).** The sidebar's project filter chips, the single-conversation picker and the batch picker used to list projects in creation order. Now they share one comparator:
   - It ignores case and accents, using the browser's default collation (`localeCompare` with base sensitivity).
+  - Numbers sort by value, so "Sprint 9" comes before "Sprint 40" and "2 - Active" before "10 - Archive".
   - Two projects with the same name stay in a fixed order (ties break on project id).
   - A long list stays predictable across reloads.
 
-  Opening a picker still focuses and scrolls to the conversation's current project. The browser test for that scroll now puts the conversation in the project the picker lists last, so it still checks the scroll.
+  "All" and "Unassigned" stay first in the chip bar. "No project" stays first in the pickers, and "+ New project" stays last in the single picker.
+
+  A picker that is open when a project is renamed or created re-sorts in place, without moving the focused row. If that row was visible, the picker scrolls only itself to keep it visible; a row the user had scrolled away from is left alone. Opening a picker still focuses and scrolls to the conversation's current project.
 
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
