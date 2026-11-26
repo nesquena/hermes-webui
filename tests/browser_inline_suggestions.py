@@ -24,6 +24,15 @@ stubs respondClarify):
   6. an invalid block (non-JSON, or an array with a non-string entry) renders
      no buttons and leaves the raw block visible (fail-safe).
 
+Review follow-ups (checks 7-14) cover: the busy flag, liveness of older replies,
+fences authored by the user, draft ownership across a chat switch, a draft typed
+mid-send, a draft's staged attachments (never uploaded with a suggestion, and
+restored with the draft text), and the shared radius tokens.
+
+A final phase repeats the important parts in a 390x844 touch context (labels
+wrap, nothing overflows, no clipped labels, the keyboard hint is hidden, and a
+real tap sends the tapped label).
+
 Exercises both markup shapes suggestions.js has to recognise: the
 static/history renderMd() shape (`<div class="pre-header">` +
 `<pre><code class="language-suggestions">`) and the live-stream smd shape
@@ -63,8 +72,18 @@ BENIGN = [
 
 SETUP_JS = """() => {
   window.__sendCalls = [];
+  window.__sendFiles = [];
   window.send = function(){
     window.__sendCalls.push(document.getElementById('msg').value);
+    // Real send() uploads and then drains the staged attachments; mirror that so
+    // a check can prove a suggestion click never takes a draft's files with it.
+    if (typeof S !== 'undefined' && S && Array.isArray(S.pendingFiles)) {
+      window.__sendFiles.push(S.pendingFiles.map(f => f && f.name));
+      S.pendingFiles = [];
+      if (typeof renderTray === 'function') renderTray();
+    } else {
+      window.__sendFiles.push([]);
+    }
     return Promise.resolve();
   };
   const empty = document.getElementById('emptyState');
@@ -466,6 +485,130 @@ def _review_checks(page, check):
     check(saves_typed == [],
           f"check12: the stale captured draft is not saved over the newer one (got {saves_typed!r})")
 
+    # ── Check 13: staged attachments belong to the draft, never to the suggestion ──
+    page.evaluate(INJECT_ROW_JS, ["row13", _json(["Anhänge behalten"]), True])
+    _wait(page, "(rowId) => { const r = document.querySelector('[data-test-row=\"' + rowId + '\"]'); "
+                "return r && r.querySelectorAll('.inline-suggestion-btn').length === 1; }", arg="row13")
+    page.evaluate("""() => {
+      window.__draftSaves = [];
+      window.__sentFiles = [];
+      S.session = { session_id: 'sid-D' };
+      window._saveComposerDraft = function(sid, text, files){
+        window.__draftSaves.push([sid, text, (files || []).map(f => f && f.name)]);
+      };
+      document.getElementById('msg').value = 'Entwurf mit Datei';
+      S.pendingFiles = [{ name: 'vertrag.pdf' }];
+      renderTray();
+      window.send = function(){
+        // Same order as the real send(): record what it was handed, then drain.
+        window.__sendCalls.push(document.getElementById('msg').value);
+        window.__sentFiles.push((S.pendingFiles || []).map(f => f && f.name));
+        S.pendingFiles = [];
+        renderTray();
+        return Promise.resolve();
+      };
+    }""")
+    page.evaluate(CLICK_BUTTON_JS, ["row13", 0])
+    page.wait_for_timeout(300)
+    sent_files = page.evaluate("() => window.__sentFiles.slice()")
+    tray_files = page.evaluate("() => (S.pendingFiles || []).map(f => f && f.name)")
+    tray_visible = page.evaluate(
+        "() => document.getElementById('attachTray').classList.contains('has-files')")
+    draft_text = page.evaluate(COMPOSER_VALUE_JS)
+    saves_files = page.evaluate("() => window.__draftSaves.slice()")
+    check(sent_files == [[]],
+          f"check13: the suggestion send carries none of the draft's files (got {sent_files!r})")
+    check(draft_text == 'Entwurf mit Datei',
+          f"check13: the draft text is restored (got {draft_text!r})")
+    check(tray_files == ['vertrag.pdf'],
+          f"check13: the draft's attachment is back in the tray (got {tray_files!r})")
+    check(tray_visible is True, "check13: the restored attachment chip is rendered again")
+    check(saves_files == [['sid-D', 'Entwurf mit Datei', ['vertrag.pdf']]],
+          f"check13: the draft is persisted with its attachment (got {saves_files!r})")
+
+    # ── Check 14: the new controls use the shared radius tokens ──
+    radii = page.evaluate("""() => {
+      const root = getComputedStyle(document.documentElement);
+      const btn = document.querySelector('[data-test-row="row13"] .inline-suggestion-btn');
+      const kbd = document.querySelector('[data-test-row="row13"] .inline-suggestion-kbd');
+      return {
+        btnToken: root.getPropertyValue('--radius-md').trim(),
+        btn: btn ? getComputedStyle(btn).borderTopLeftRadius : null,
+        kbdToken: root.getPropertyValue('--radius-sm').trim(),
+        kbd: kbd ? getComputedStyle(kbd).borderTopLeftRadius : null,
+      };
+    }""")
+    check(bool(radii["btnToken"]) and radii["btn"] == radii["btnToken"],
+          f"check14: the button follows var(--radius-md) (got {radii!r})")
+    check(bool(radii["kbdToken"]) and radii["kbd"] == radii["kbdToken"],
+          f"check14: the keyboard hint follows var(--radius-sm) (got {radii!r})")
+
+
+def _narrow_checks(browser, base, check):
+    """Narrow-viewport gate: AGENTS.md asks for desktop *and* narrow evidence and
+    coverage of the relevant mobile interaction, so the buttons are exercised in
+    a 390x844 touch context as well (wrapping labels + a real tap)."""
+    ctx = browser.new_context(
+        base_url=base,
+        viewport={"width": 390, "height": 844},
+        is_mobile=True,
+        has_touch=True,
+        device_scale_factor=2,
+    )
+    page = ctx.new_page()
+    try:
+        page.goto("/", wait_until="domcontentloaded")
+        page.wait_for_selector("#msg", state="attached", timeout=15000)
+        page.wait_for_timeout(800)
+        page.evaluate(SETUP_JS)
+
+        long_label = "Erst die Advisor-Variante einrichten und die Kosten später prüfen"
+        labels = ["Ja, direkt einrichten", long_label, "Später"]
+        page.evaluate(INJECT_ROW_JS, ["narrow1", _json(labels), True])
+        _wait(page, "(rowId) => { const r = document.querySelector('[data-test-row=\"' + rowId + '\"]'); "
+                    "return r && r.querySelectorAll('.inline-suggestion-btn').length === 3; }",
+              arg="narrow1")
+
+        metrics = page.evaluate("""() => {
+          const group = document.querySelector('[data-test-row="narrow1"] .inline-suggestions');
+          const btns = Array.from(group.querySelectorAll('.inline-suggestion-btn'));
+          const rects = btns.map(b => b.getBoundingClientRect());
+          const doc = document.documentElement;
+          return {
+            viewport: window.innerWidth,
+            scrollWidth: doc.scrollWidth,
+            groupOverflow: group.scrollWidth - group.clientWidth,
+            buttonsInViewport: rects.every(r => r.left >= 0 && r.right <= window.innerWidth + 1),
+            widestButtonRight: Math.max(...rects.map(r => r.right)),
+            // Wrapped buttons start on a new row: more than one distinct top edge.
+            rows: new Set(rects.map(r => Math.round(r.top))).size,
+            kbdVisible: !!group.querySelector('.inline-suggestion-kbd') &&
+              getComputedStyle(group.querySelector('.inline-suggestion-kbd')).display !== 'none',
+            labelsFit: btns.every(b => b.scrollWidth <= b.clientWidth + 1),
+          };
+        }""")
+        check(metrics["scrollWidth"] <= metrics["viewport"] + 1,
+              f"narrow: the page does not overflow horizontally (got {metrics!r})")
+        check(metrics["groupOverflow"] <= 0,
+              f"narrow: the suggestion group does not overflow (got {metrics!r})")
+        check(metrics["buttonsInViewport"] is True,
+              f"narrow: every button stays inside the viewport (got {metrics!r})")
+        check(metrics["rows"] > 1,
+              f"narrow: long labels wrap onto more than one row (got {metrics!r})")
+        check(metrics["labelsFit"] is True,
+              f"narrow: no label is clipped inside its button (got {metrics!r})")
+        check(metrics["kbdVisible"] is False,
+              f"narrow: the keyboard hint is hidden on a touch pointer (got {metrics!r})")
+
+        # A real tap on the second (long, wrapped) label must send that label.
+        page.evaluate("() => { window.__sendCalls.length = 0; }")
+        page.tap('[data-test-row="narrow1"] .inline-suggestion-btn:nth-of-type(2)')
+        _wait(page, "() => window.__sendCalls.length === 1")
+        tapped = page.evaluate(SEND_CALLS_JS)
+        check(tapped == [long_label], f"narrow: a tap sends the wrapped label (got {tapped!r})")
+    finally:
+        ctx.close()
+
 
 def _json(value):
     import json
@@ -556,6 +699,23 @@ def main():
             meaningful = [e for e in console_errors if not _is_benign(e)]
             for e in meaningful:
                 failures.append(f"  console/pageerror: {e}")
+
+            # ── Narrow-viewport phase (AGENTS.md: desktop *and* narrow evidence,
+            # plus the relevant mobile interaction). Same server, new mobile
+            # context so the touch media queries really apply.
+            narrow_failures = []
+
+            def narrow_check(ok, msg):
+                if ok:
+                    print(f"OK  {msg}")
+                else:
+                    narrow_failures.append(f"  {msg}")
+
+            try:
+                _narrow_checks(browser, base, narrow_check)
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"  exception during narrow checks: {exc!r}")
+            failures.extend(narrow_failures)
 
             # ── Opt-out phase: HERMES_WEBUI_SUGGESTIONS=0 disables the feature on
             # both sides — no buttons in the DOM, raw block left visible, and the
