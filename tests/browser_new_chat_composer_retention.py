@@ -17,7 +17,10 @@ WHAT IT CHECKS
   - the text typed before the click and the text typed while the create is
     held are both present once the created session is current;
   - a clarification answer stashed on the source chat while the create is held
-    does not drop the words typed for the destination before it arrived.
+    does not drop the words typed for the destination before it arrived;
+  - the poll → card → expiry path preserves words typed before and after the
+    card for empty and nonempty source drafts, on successful and rejected
+    creates, in the visible composer and the stored draft.
 
 SCOPE
   Agent-free: the real server.py on an ephemeral port with isolated temp state.
@@ -162,9 +165,27 @@ def _check(browser):
     return failures
 
 
-def _check_clarification_expiry(browser):
-    """A clarification answer stashed on the source chat while New Chat waits
-    must not drop the destination words typed before it arrived."""
+def _read_composer_draft(page, sid):
+    return page.evaluate(
+        """async (sid) => {
+          const data = await api('/api/session?session_id=' + encodeURIComponent(sid)
+            + '&messages=0&resolve_model=0');
+          return (((data || {}).session || {}).composer_draft || {}).text || '';
+        }""",
+        sid,
+    )
+
+
+def _check_clarification_expiry(browser, source_text, pre_type, reject):
+    """Poll → card → expiry while a New Chat create is held.
+
+    The clarification answer belongs to the source chat. Words typed before and
+    after the card belong to the destination and must survive a successful
+    settle; a rejected create must restore the source composer with the rescued
+    answer exactly once. Each case asserts the visible textarea and the stored
+    composer draft.
+    """
+    label = f"source={source_text!r} pre_type={pre_type} reject={reject}"
     failures = []
     ctx = browser.new_context(base_url=BASE)
     page = ctx.new_page()
@@ -176,13 +197,18 @@ def _check_clarification_expiry(browser):
         page, "typeof S !== 'undefined' && typeof newSession === 'function'", 15000
     ):
         ctx.close()
-        return ["  the app did not initialize (clarification case)"]
+        return [f"  the app did not initialize ({label})"]
     page.wait_for_timeout(1200)
     page.evaluate(
         "async () => { if (!S.session) { await newSession(); }"
         " S.messages = [{role: 'user', content: 'earlier turn'}]; }"
     )
     before = page.evaluate("S.session && S.session.session_id")
+
+    # Type the source chat's own draft before New Chat starts.
+    if source_text:
+        page.click("#msg")
+        page.keyboard.type(source_text)
 
     held = []
     page.route(
@@ -191,73 +217,184 @@ def _check_clarification_expiry(browser):
         if route.request.url.split("?")[0].endswith("/api/session/new")
         else route.continue_(),
     )
-    page.click("#msg")
-    page.keyboard.type("alpha")
     page.click("#btnNewChat")
     deadline = time.time() + 6
     while not held and time.time() < deadline:
         page.wait_for_timeout(50)
     if not held:
-        page.unroute("**/api/session/new")
         ctx.close()
-        return ["  the create request was never issued (clarification case)"]
+        return [f"  the create request was never issued ({label})"]
+
+    # The composer stays editable during the handoff: words typed before the
+    # card arrives belong to the destination.
+    if pre_type:
+        page.eval_on_selector(
+            "#msg",
+            "el => { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }",
+        )
+        page.keyboard.type(" beta")
+
+    # Real poll path: /api/clarify/pending returns a live prompt, then null so
+    # the production expiry handler runs and stashes the typed answer.
+    poll_state = {"pending": True}
+
+    def _poll(route):
+        if poll_state["pending"]:
+            now = int(time.time())
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "pending": {
+                        "clarify_id": "retention-expiry",
+                        "question": "Which option?",
+                        "choices": [],
+                        "requested_at": now,
+                        "timeout_seconds": 3600,
+                        "expires_at": now + 3600,
+                    }
+                }),
+            )
+        else:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"pending": None}),
+            )
+
+    page.route("**/api/clarify/pending*", _poll)
+    page.evaluate(
+        "sid => { if (typeof startClarifyPolling === 'function') startClarifyPolling(sid); }",
+        before,
+    )
+    card_visible = _wait_until(
+        page,
+        "(() => { const card = document.getElementById('clarifyCard');"
+        " return !!(card && card.classList.contains('visible')); })()",
+        8000,
+    )
+    if not card_visible:
+        failures.append(f"  the clarification card never appeared ({label})")
+    else:
+        page.click("#clarifyInput")
+        page.keyboard.type("answer")
+        poll_state["pending"] = False
+        if not _wait_until(
+            page,
+            "(() => { const el = document.getElementById('msg');"
+            " return !!(el && el.value.includes('answer')); })()",
+            9000,
+        ):
+            failures.append(
+                f"  the clarification expiry never reached the composer ({label})"
+            )
+    after_clarify = page.eval_on_selector("#msg", "el => el.value")
+    if pre_type and " beta" not in after_clarify:
+        failures.append(
+            f"  the clarification expiry dropped the pre-expiry input: "
+            f"{after_clarify!r} ({label})"
+        )
 
     page.eval_on_selector(
-        "#msg", "el => { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }"
-    )
-    page.keyboard.type(" beta")
-    typed = page.eval_on_selector("#msg", "el => el.value")
-    if typed != "alpha beta":
-        failures.append(
-            f"  the first pending keystrokes did not reach the composer: {typed!r}"
-        )
-    # The production expiry path: the answer is appended to the source chat's
-    # draft while the destination input is still buffered in the textarea.
-    page.evaluate(
-        """() => {
-          const input = document.getElementById('clarifyInput');
-          if (input) input.value = 'answer';
-          if (typeof _stashClarifyDraft === 'function') _stashClarifyDraft('expired');
-        }"""
-    )
-    after_clarify = page.eval_on_selector("#msg", "el => el.value")
-    if " beta" not in after_clarify:
-        failures.append(
-            "  the clarification stash dropped the input typed before it: "
-            f"{after_clarify!r} (was {typed!r})"
-        )
-    page.eval_on_selector(
-        "#msg", "el => { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }"
+        "#msg",
+        "el => { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }",
     )
     page.keyboard.type(" gamma")
 
-    held[0].continue_()
-    page.unroute("**/api/session/new")
-    deadline = time.time() + 12
-    after = ""
-    while time.time() < deadline:
-        sid = page.evaluate("S.session && S.session.session_id")
-        if sid and sid != before:
-            page.wait_for_timeout(400)
+    expected = (" beta" if pre_type else "") + " gamma"
+    if reject:
+        if source_text:
+            expected = source_text + "\n\n" + "answer" + expected
+        else:
+            expected = "answer" + expected
+        kept = held[0]
+        kept.fulfill(
+            status=500,
+            content_type="application/json",
+            body=json.dumps({"error": "create failed"}),
+        )
+        settled = _wait_until(
+            page,
+            f"(() => {{ const el = document.getElementById('msg');"
+            f" return !!el && el.value === {json.dumps(expected)}; }})()",
+            6000,
+        )
+        if not settled:
             after = page.eval_on_selector("#msg", "el => el.value")
-            break
-        page.wait_for_timeout(150)
-    sid_after = page.evaluate("S.session && S.session.session_id")
-    if not sid_after or sid_after == before:
-        failures.append(
-            "  the created session never became current (clarification case)"
-        )
-    if after != " beta gamma":
-        failures.append(
-            "  the handoff lost words typed around the clarification answer: "
-            f"expected {' beta gamma'!r}, got {after!r}"
-        )
+            failures.append(
+                f"  the rejected create did not restore the source composer: "
+                f"expected {expected!r}, got {after!r} ({label})"
+            )
+        else:
+            after = page.eval_on_selector("#msg", "el => el.value")
+        deadline = time.time() + 5
+        draft = ""
+        while time.time() < deadline:
+            draft = _read_composer_draft(page, before)
+            if draft == expected:
+                break
+            page.wait_for_timeout(200)
+        if draft != expected:
+            failures.append(
+                f"  the source draft lost or duplicated the rescued answer: "
+                f"expected {expected!r}, got {draft!r} ({label})"
+            )
+        sid_after = page.evaluate("S.session && S.session.session_id")
+        if sid_after != before:
+            failures.append(
+                f"  a rejected create left another session current: {sid_after!r} ({label})"
+            )
+    else:
+        held[0].continue_()
+        deadline = time.time() + 12
+        after = ""
+        sid_after = before
+        while time.time() < deadline:
+            sid_after = page.evaluate("S.session && S.session.session_id")
+            if sid_after and sid_after != before:
+                page.wait_for_timeout(400)
+                after = page.eval_on_selector("#msg", "el => el.value")
+                break
+            page.wait_for_timeout(150)
+        if not sid_after or sid_after == before:
+            failures.append(
+                f"  the created session never became current ({label})"
+            )
+        if after != expected:
+            failures.append(
+                f"  the successful handoff lost typed words: "
+                f"expected {expected!r}, got {after!r} ({label})"
+            )
+        deadline = time.time() + 5
+        draft = ""
+        while time.time() < deadline:
+            draft = _read_composer_draft(page, sid_after)
+            if draft == expected:
+                break
+            page.wait_for_timeout(200)
+        if draft != expected:
+            failures.append(
+                f"  the destination draft lost typed words: "
+                f"expected {expected!r}, got {draft!r} ({label})"
+            )
+
     for err in errors:
-        failures.append(f"  pageerror: {err}")
+        # A deliberately rejected create surfaces its fetch error as an
+        # unhandled click-handler rejection; that is the injected failure, not
+        # a composer regression.
+        if reject and err == "create failed":
+            continue
+        failures.append(f"  pageerror: {err} ({label})")
     if not failures:
         print(
             "OK  clarification expiry — "
-            + json.dumps({"during": after_clarify, "after": after})
+            + json.dumps({
+                "source": source_text,
+                "pre_type": pre_type,
+                "reject": reject,
+                "during": after_clarify,
+                "after": after,
+            })
         )
     ctx.close()
     return failures
@@ -308,7 +445,13 @@ def main():
             browser = pw.chromium.launch(
                 headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
             )
-            failures = _check(browser) + _check_clarification_expiry(browser)
+            failures = _check(browser)
+            for source_text in ("", "alpha"):
+                for pre_type in (True, False):
+                    for reject in (True, False):
+                        failures += _check_clarification_expiry(
+                            browser, source_text, pre_type, reject
+                        )
             browser.close()
 
         if failures:

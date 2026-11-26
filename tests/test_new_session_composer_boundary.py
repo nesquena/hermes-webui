@@ -207,7 +207,7 @@ def _review_race_production_helpers() -> str:
     )
 
 
-def _run_review_race_harness(schedule: str) -> dict:
+def _run_review_race_harness(schedule: str, source: str = "source draft") -> dict:
     node = shutil.which("node")
     if not node:
         pytest.skip("node is required for the browser behavior harness")
@@ -234,7 +234,7 @@ def _run_review_race_harness(schedule: str) -> dict:
         const sourceFile = {{name:'source.txt',size:1,type:'text/plain'}};
         const restoredFile = {{name:'restored.txt',size:2,type:'text/plain'}};
         const msg = {{
-          value:'source draft', focus(){{}}, setSelectionRange(){{}}, dispatchEvent(){{}}
+          value:{json.dumps(source)}, focus(){{}}, setSelectionRange(){{}}, dispatchEvent(){{}}
         }};
         const clarifyInput = {{value:'clarify answer'}};
         const elements = {{
@@ -300,6 +300,33 @@ def _run_review_race_harness(schedule: str) -> dict:
             afterClarify=msg.value;
             msg.value=`${{afterClarify}} more`;
             _composerRecordNativeText();
+          }}else if(schedule==='clarify-empty-native-tail'){{
+            msg.value=' beta';
+            _composerRecordNativeText();
+            _stashClarifyDraft('expired');
+            afterClarify=msg.value;
+            msg.value=`${{afterClarify}} gamma`;
+            _composerRecordNativeText();
+          }}else if(schedule==='clarify-abort-after-only'){{
+            _stashClarifyDraft('expired');
+            afterClarify=msg.value;
+            msg.value=`${{afterClarify}} gamma`;
+            _composerRecordNativeText();
+            throw new Error('create failed');
+          }}else if(schedule==='clarify-empty-abort-after-only'){{
+            _stashClarifyDraft('expired');
+            afterClarify=msg.value;
+            msg.value=`${{afterClarify}} gamma`;
+            _composerRecordNativeText();
+            throw new Error('create failed');
+          }}else if(schedule==='clarify-empty-abort-before-and-after'){{
+            msg.value=' beta';
+            _composerRecordNativeText();
+            _stashClarifyDraft('expired');
+            afterClarify=msg.value;
+            msg.value=`${{afterClarify}} gamma`;
+            _composerRecordNativeText();
+            throw new Error('create failed');
           }}else if(schedule==='voice-clarify-abort'){{
             _composerSetText('source draft voice','source draft voice',null,'voice-producer');
             _stashClarifyDraft('expired');
@@ -2864,6 +2891,50 @@ def test_clarify_rescue_during_create_keeps_input_typed_for_the_destination():
     assert result["text"] == " typed more"
     source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
     assert source_saves[-1]["text"] == "source draft\n\nclarify answer"
+
+
+def test_empty_source_clarify_rescue_keeps_input_typed_for_the_destination():
+    # An empty source is a valid baseline: the clarification answer still
+    # belongs to the source chat, while words typed before and after it belong
+    # to the destination and must survive the settle.
+    result = _run_review_race_harness("clarify-empty-native-tail", source="")
+
+    assert result["activeSid"] == "new-session"
+    assert result["afterClarify"] == "clarify answer beta"
+    assert result["text"] == " beta gamma"
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves[-1]["text"] == "clarify answer"
+
+
+def test_clarify_rescue_survives_aborted_create_without_duplicating_the_answer():
+    result = _run_review_race_harness("clarify-abort-after-only")
+
+    assert result["error"] == "create failed"
+    assert result["activeSid"] == "old-session"
+    assert result["text"] == "source draft\n\nclarify answer gamma"
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves[-1]["text"] == "source draft\n\nclarify answer gamma"
+
+
+def test_empty_source_clarify_rescue_survives_aborted_create_once():
+    result = _run_review_race_harness("clarify-empty-abort-after-only", source="")
+
+    assert result["error"] == "create failed"
+    assert result["activeSid"] == "old-session"
+    assert result["text"] == "clarify answer gamma"
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves[-1]["text"] == "clarify answer gamma"
+
+
+def test_empty_source_clarify_rescue_abort_keeps_input_typed_before_and_after():
+    result = _run_review_race_harness("clarify-empty-abort-before-and-after", source="")
+
+    assert result["error"] == "create failed"
+    assert result["activeSid"] == "old-session"
+    assert result["afterClarify"] == "clarify answer beta"
+    assert result["text"] == "clarify answer beta gamma"
+    source_saves = [save for save in result["saves"] if save["sid"] == "old-session"]
+    assert source_saves[-1]["text"] == "clarify answer beta gamma"
 
 
 def test_late_clarify_rescue_after_owner_swap_never_mutates_new_session():

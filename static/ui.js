@@ -152,6 +152,12 @@ function _composerRecordNativeText(){
   _composerTransitionRecord('text-set',delta,null,value,{
     semantics:'replace-all',producerToken:'native-input',
   });
+  // A native edit is a whole-text snapshot of the live textarea. Remember its
+  // revision so abort rendering knows which painted appends this snapshot
+  // already contains and must not replay. The record above already rendered
+  // abort text with the previous boundary; re-render once with this revision.
+  tx.abortNativeRevision=tx.revision;
+  _composerRenderAbortText(tx);
   return true;
 }
 function _rememberComposerOwnerState(sid,profile,state,generation){
@@ -343,13 +349,26 @@ function _composerRenderAbortText(tx){
     }
   }
   let text=replacedAt>=0?replacement:base;
+  // Every `text-append` record paints the live textarea as it is recorded
+  // (`_composerAppendText`). A later native edit therefore already contains
+  // that append in its whole-text snapshot: replaying the append slot on top of
+  // it duplicates the rescued clarification answer (or any painted append).
+  // The native snapshot is the visible truth for those slots, so skip appends
+  // that predate it; later appends still compose after the snapshot.
+  const nativeRevision=Number(tx.abortNativeRevision||0);
   for(const token of tx.abortTextOrder){
     const slot=slots.get(token);
     if(!slot)continue;
     if(replacedAt>=0&&Number(slot.revision||0)<=replacedAt)continue;
+    if(slot.kind==='text-append'&&Number(slot.revision||0)<nativeRevision)continue;
     const value=String(slot.value||'');
     if(slot.kind==='text-set'){
-      if(!base||value.startsWith(base))text+=value.slice(base.length);
+      if(value===text)continue;
+      // A whole-text producer may already include every earlier contribution
+      // (a native snapshot, or a producer that read the painted composer). Use
+      // that complete value instead of appending its delta a second time.
+      if(text&&value.startsWith(text))text=value;
+      else if(!base||value.startsWith(base))text+=value.slice(base.length);
       else text=value;
     }
     else if(slot.semantics==='block-append')text=_composerBlockJoin(text,value);
@@ -413,6 +432,7 @@ function _beginComposerOwnershipTransition(sourceSid,sourceProfile,options={}){
     abortBaseText:input?String(input.value||''):'',
     lastNativeValue:input?String(input.value||''):'',
     nativeBaseline:input?String(input.value||''):'',
+    abortNativeRevision:0,
     abortTextSlots:new Map(),
     abortTextOrder:[],
     destinationSlots:new Map(),
@@ -495,11 +515,19 @@ function _composerTransitionRecord(kind,value,ownerSid,abortValue,options={}){
         // baseline, dropping the words typed before the source update.
         const baseline=String(tx.nativeBaseline==null?'':tx.nativeBaseline);
         const live=String(input.value||'');
-        const tail=baseline&&live.startsWith(baseline)?live.slice(baseline.length):'';
-        const nextText=tail?`${state.text}${tail}`:state.text;
+        // An empty source is a valid baseline: words typed while the handoff is
+        // pending are still that composer's live tail. Skipping the empty
+        // baseline repainted the textarea from the source text alone and
+        // dropped them. The equality guard keeps a value that already IS the
+        // new source text from being appended to itself.
+        const nextSourceText=String(state.text||'');
+        const tail=live!==nextSourceText&&live.startsWith(baseline)
+          ?live.slice(baseline.length)
+          :'';
+        const nextText=tail?`${nextSourceText}${tail}`:nextSourceText;
         input.value=nextText;
         tx.lastNativeValue=nextText;
-        tx.nativeBaseline=state.text;
+        tx.nativeBaseline=nextSourceText;
       }
     }
     else S.pendingFiles=[...state.files];
