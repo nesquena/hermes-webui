@@ -1198,8 +1198,6 @@ def test_yolo_post_serializes_post_snapshot_gateway_approval(monkeypatch):
         "pattern_key": "command",
         "pattern_keys": ["command"],
         "command": "touch /tmp/webui-yolo-test",
-        "pattern_key": "command",
-        "pattern_keys": ["command"],
         "description": "test",
         "approval_id": "approval-post-snapshot",
         "run_id": "run-post-snapshot",
