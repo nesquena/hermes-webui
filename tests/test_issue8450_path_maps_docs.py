@@ -59,6 +59,43 @@ def test_the_doc_describes_the_trust_rules_it_cannot_omit():
         assert needle in lowered, f"the doc must mention {needle!r}"
 
 
+def test_the_doc_states_the_profile_authority_limits():
+    """#8450 re-gate round 5: the documented trust-rule limits must name the
+    isolated session-owner authority the repair implements.
+
+    A doc that still reads as "the profile's own config only" without the
+    override-isolation rule describes a boundary the code did not enforce
+    before this round; the doc now has to state it precisely.
+    """
+    doc = MAPS_DOC.read_text(encoding="utf-8")
+    lowered = doc.lower()
+    # The override that used to leak across profiles is named, with the rule
+    # that a named profile never consumes another profile's override.
+    assert "hermes_config_path" in lowered, (
+        "the doc must name the process-level configuration override"
+    )
+    assert "isolated authority" in lowered, (
+        "the doc must state the isolated session-owner profile authority"
+    )
+    # The root profile's documented carve-out is part of the rule.
+    assert "<root>/profiles" in doc, (
+        "the doc must state the root profile's override carve-out"
+    )
+
+
+def test_the_doc_states_one_local_root_for_every_session_origin():
+    """The external-session contract: listing, reading and mutation resolve
+    one local root, and the agent-visible workspace is preserved."""
+    doc = MAPS_DOC.read_text(encoding="utf-8")
+    lowered = doc.lower()
+    assert "owner" in lowered and "external" in lowered, (
+        "the doc must describe the external session's owner-profile resolution"
+    )
+    assert "agent-visible" in lowered, (
+        "the doc must state the agent-visible workspace is preserved"
+    )
+
+
 def test_every_entry_key_the_code_reads_is_documented():
     """The code reads ``agent`` and ``webui``; the doc has to name both."""
     source = WORKSPACE_PY.read_text(encoding="utf-8")

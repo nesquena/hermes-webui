@@ -347,10 +347,15 @@ def _is_default_profile_home(profile_home: Path) -> bool:
 def _remote_terminal_cwd(profile: str | Path | None = None) -> str | None:
     """Return target-side terminal cwd for a remote profile, without local stat()."""
     try:
-        from api.config import get_config_for_profile_home
+        if profile is not None:
+            # Isolated owner authority: a remote backend declared by
+            # ANOTHER profile (e.g. root's ambient config) must never
+            # classify this profile's local paths as target-side.
+            terminal_cfg = _profile_owned_config(profile).get('terminal', {})
+        else:
+            from api.config import get_config
 
-        profile_home = _resolve_profile_home_param(profile)
-        terminal_cfg = get_config_for_profile_home(profile_home).get('terminal', {})
+            terminal_cfg = get_config().get('terminal', {})
 
         if not _is_remote_terminal_backend(terminal_cfg):
             return None
@@ -1166,6 +1171,35 @@ def resolve_trusted_workspace(path: str | Path | None = None, profile: str | Pat
 _WORKSPACE_PATH_MAPS_KEYS = ("webui", "workspace_path_maps")
 
 
+def _profile_owned_config(profile: str | Path) -> dict:
+    """Read *profile*'s own config under that profile's isolated authority.
+
+    The per-profile translation settings (``webui.workspace_path_maps``)
+    and the remote-backend classification that feeds them are
+    profile-owned state: a session must only ever consume the settings
+    its OWNER profile declared. A plain
+    ``get_config_for_profile_home(home)`` read is not enough — when the
+    requested home is also the ACTIVE home it defers to the ambient
+    ``get_config()``, whose file is the process-level
+    ``HERMES_CONFIG_PATH`` override. A boot-time launcher pointing that
+    override at the ROOT profile's config.yaml therefore let a named
+    profile's session consume the ROOT profile's translation settings
+    (the #8450 re-gate blocker: the native file-reader probe returned
+    bytes from the wrong owner-selected root).
+
+    ``isolate_config_override=True`` closes that path: a named profile
+    reads its own ``config.yaml`` and ignores an override outside its
+    home, while the root profile keeps an external override that is not
+    under ``<root>/profiles`` (the documented rule — an external
+    override is the root profile's config) and never consumes one that
+    lives under a named profile's home.
+    """
+    from api.config import get_config_for_profile_home
+
+    home = _resolve_profile_home_param(profile)
+    return get_config_for_profile_home(home, isolate_config_override=True) or {}
+
+
 def _workspace_path_map(profile: str | Path | None) -> list[tuple[PurePosixPath, Path]] | None:
     """Per-profile agent→WebUI workspace root maps, longest agent prefix first.
 
@@ -1176,15 +1210,15 @@ def _workspace_path_map(profile: str | Path | None) -> list[tuple[PurePosixPath,
     The map is read from THIS profile's own config only — never derived from
     sibling profiles and never from a process-global allow-root set — so a
     caller can only ever name roots its own profile declared (the invariant
-    Dragonk called load-bearing in #7217).
+    Dragonk called load-bearing in #7217). The read runs under the profile's
+    isolated authority (:func:`_profile_owned_config`), so a supported
+    ambient configuration override belonging to another profile is never
+    consumed as this profile's translation settings.
     """
     if profile in (None, ""):
         return None
     try:
-        from api.config import get_config_for_profile_home
-
-        home = _resolve_profile_home_param(profile)
-        node = get_config_for_profile_home(home) or {}
+        node = _profile_owned_config(profile)
         for key in _WORKSPACE_PATH_MAPS_KEYS:
             node = node.get(key) if isinstance(node, dict) else None
             if node is None:
@@ -1362,15 +1396,16 @@ def resolve_implicit_workspace_with_recovery(
         # never prove target-side deletion. Config-read uncertainty also fails
         # closed by preserving the original validation error.
         try:
-            from api.config import get_config, get_config_for_profile_home
+            from api.config import get_config
 
             if profile is not None:
                 # Classify the backend from THIS profile's own config, never the
                 # ambient one: a remote profile without terminal.cwd must still be
                 # recognized as remote when loaded under a different ambient home.
-                terminal_cfg = get_config_for_profile_home(
-                    _resolve_profile_home_param(profile)
-                ).get("terminal", {})
+                # Read under the profile's isolated authority so a remote backend
+                # declared by another profile's ambient override cannot flip this
+                # profile's local paths into target-side candidates.
+                terminal_cfg = _profile_owned_config(profile).get("terminal", {})
             else:
                 terminal_cfg = get_config().get("terminal", {})
         except Exception:

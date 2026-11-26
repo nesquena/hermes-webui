@@ -50,6 +50,23 @@ The map is read from the profile's own config **only**. It is never derived
 from a sibling profile and never from a process-global allow-root set, so a
 profile can only ever name roots it declared itself.
 
+That read runs under the profile's **isolated authority**: the
+translation settings are resolved for the session's *owner* profile, and
+a process-level configuration override (`HERMES_CONFIG_PATH`) that
+belongs to a *different* profile is never consumed as this profile's
+translation settings. Concretely:
+
+- a **named** profile always reads its own `<profile_home>/config.yaml`
+  for the map, whatever override the process carries;
+- the **root** profile keeps an external override that is not under
+  `<root>/profiles` (an external override is the root profile's config),
+  and never consumes one that lives under a named profile's home.
+
+The same isolated authority governs the remote-backend classification
+that feeds translation (SSH / Docker profiles bypass translation): a
+remote terminal declared by another profile never turns this profile's
+local paths into target-side candidates.
+
 ## 3. What the map does and does not change
 
 - A profile with **no** declared map keeps the pre-existing direct-path
@@ -95,6 +112,15 @@ The map is consulted by the local, host-side readers:
 - the file-manager endpoints (list, read, write, upload);
 - the workspace Git endpoints — status, branches, diffs, and the
   commit-message suggestions (both the staged and the selected-files variant).
+
+For **every** session origin those readers resolve **one** local root:
+a WebUI session through its own profile, and an external
+(state.db-only, e.g. CLI/Telegram) session through its **owner**
+profile's translation tier when a declared map applies, else through
+that profile's trusted resolution. A listing and the file actions it
+feeds therefore never disagree about the root, and the agent-visible
+workspace is preserved in stored and forwarded session data — only the
+local operation root is translated.
 
 Server-side execution is unaffected: the agent keeps working in the
 agent-visible path.
