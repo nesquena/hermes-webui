@@ -2508,13 +2508,23 @@ def drain_deferred_wakeups_for_session(
         leftover = [e for e in unread if str((e or {}).get("wakeup_prompt") or "").strip()]
         if leftover:
             first = leftover[0]
+            # Compression rotation: if this session has since been archived as
+            # a pre-compression snapshot, the live chat is its continuation and
+            # only the continuation's teardown drains its own key. Re-defer the
+            # remaining entries under the live id, or entries 2..N would wait
+            # on a drain that never happens.
+            try:
+                from api.routes import resolve_wakeup_session_id
+                live_sid = resolve_wakeup_session_id(session_id)
+            except Exception:
+                live_sid = session_id
             # Re-defer entries 2..N BEFORE starting the first turn, so they are
             # already persisted if the first wakeup's own teardown re-runs this
             # hook and tries to claim them. Preserve each entry's dispatch-claim
             # provenance so a retry is never re-classified as an agent read.
             for entry in leftover[1:]:
                 record_deferred_wakeup(
-                    session_id,
+                    live_sid,
                     str((entry or {}).get("process_id") or ""),
                     str((entry or {}).get("wakeup_prompt") or "").strip(),
                     consumed_claimed_by_dispatch=bool(

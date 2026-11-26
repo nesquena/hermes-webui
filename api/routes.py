@@ -31783,6 +31783,26 @@ def start_session_turn(
         # session this file's body names. The wakeup callers drop a 404.
         return {"error": "Session not found", "_status": 404}
 
+    # A durably sealed parent with no safe continuation tip (e.g. its
+    # continuation was explicitly closed by session_reset) is not a legal
+    # turn target: the retarget helper below cannot name a tip, and starting
+    # on the sealed snapshot would resurrect archived history and re-trigger
+    # the ownership collision this admission exists to prevent. Refuse before
+    # constructing a turn. Legacy orphan snapshots without durable sealing
+    # authority keep the existing bounded child hunt.
+    try:
+        from api.compression_continuation import durable_compression_continuation
+        _sealed_parent, _durable_tip = durable_compression_continuation(s)
+    except Exception:
+        _sealed_parent, _durable_tip = False, None
+    if _sealed_parent and not _durable_tip:
+        logger.warning(
+            "start_session_turn: %s is durably sealed with no safe "
+            "continuation; refusing to start a server-side turn on it",
+            session_id,
+        )
+        return {"error": "Session not found", "_status": 404}
+
     # Compression-rotation retarget: server-side wakeups (process completion,
     # deferred-wakeup drains, retry timers, gateway delegation) are keyed by the
     # session id that was live when the event was recorded. If that session has

@@ -17,6 +17,9 @@ second migration is attempted.
 from __future__ import annotations
 
 import collections
+import sqlite3
+from pathlib import Path
+
 import pytest
 
 
@@ -193,3 +196,107 @@ def test_wakeup_requeue_follows_continuation_key(_stub_routes, monkeypatch):
     assert not parent_entries, "nothing may be parked under the sealed parent's key"
     # The turn start itself was also attempted under the continuation id.
     assert started == [("child0000001", "process_wakeup")]
+
+
+def test_multi_completion_drain_rekeys_survivors_to_continuation(_stub_routes):
+    """Entries 2..N of a multi-completion drain survive under the LIVE key.
+
+    Maintainer finding on #9380: ``drain_deferred_wakeups_for_session``
+    re-defers entries 2..N under the ORIGINAL (sealed-parent) key before
+    starting the first wakeup. The first wakeup retargets to the
+    continuation, but the continuation's teardown only drains its own key,
+    so the survivors were stranded on the archived parent forever.
+    """
+    import time
+
+    routes_mod, started = _stub_routes
+    import api.background_process as bp_mod
+    from api import config as config_mod
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+    assert bp_mod.record_deferred_wakeup("parent000001", "proc-a", "prompt A")
+    assert bp_mod.record_deferred_wakeup(
+        "parent000001",
+        "proc-b",
+        "prompt B",
+        consumed_claimed_by_dispatch=True,
+    )
+
+    assert bp_mod.drain_deferred_wakeups_for_session("parent000001") == 1
+
+    deadline = time.time() + 5
+    while time.time() < deadline and not started:
+        time.sleep(0.05)
+    assert started == [("child0000001", "process_wakeup")]
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        parent_entries = list(
+            config_mod.DEFERRED_PROCESS_WAKEUPS.get("parent000001") or []
+        )
+        child_entries = list(
+            config_mod.DEFERRED_PROCESS_WAKEUPS.get("child0000001") or []
+        )
+    assert not parent_entries, "survivors must not stay on the sealed parent"
+    assert [e["wakeup_prompt"] for e in child_entries] == ["prompt B"]
+    assert (
+        child_entries[0].get("consumed_claimed_by_dispatch") is True
+    ), "dispatch-claim provenance must survive the re-key"
+
+    # Subsequent delivery: the continuation's own teardown drains its key.
+    assert bp_mod.drain_deferred_wakeups_for_session("child0000001") == 1
+    deadline = time.time() + 5
+    while time.time() < deadline and len(started) < 2:
+        time.sleep(0.05)
+    assert started == [
+        ("child0000001", "process_wakeup"),
+        ("child0000001", "process_wakeup"),
+    ]
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("child0000001")
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+
+
+def test_sealed_parent_with_closed_continuation_is_refused(_stub_routes, monkeypatch, tmp_path):
+    """A durably sealed parent whose tip was explicitly closed is refused.
+
+    Maintainer finding on #9380: ``durable_compression_continuation``
+    returns ``(True, None)`` when the tip row ended with an explicit
+    ``session_reset``. The optional-id helper loses the sealed flag, and
+    admission fell through to a recording launch on the archived parent
+    (200). Neither sealed row is a safe write target — fail closed.
+    """
+    state = pytest.importorskip("hermes_state")
+    from api import profiles
+
+    monkeypatch.syspath_prepend(str(Path(state.__file__).parent))
+    db = state.SessionDB(tmp_path / "state.db")
+    db.create_session("sealedparent", source="webui")
+    db.create_session("closedchild", source="tui", parent_session_id="sealedparent")
+    db.end_session("sealedparent", "compression")
+    db.end_session("closedchild", "idle_timeout")
+    conn = sqlite3.connect(tmp_path / "state.db")
+    conn.execute(
+        "UPDATE sessions SET end_reason='session_reset' WHERE id='closedchild'"
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        profiles, "_resolve_profile_home_for_name", lambda name: str(tmp_path)
+    )
+
+    routes_mod, started = _stub_routes
+    parent = _FakeSession("sealedparent", snap=True, profile="default", updated=100.0)
+    sessions = {parent.session_id: parent}
+    routes_mod.get_session = lambda sid: sessions[sid]
+    routes_mod.SESSIONS = collections.OrderedDict(sessions)
+
+    resp = routes_mod.start_session_turn(
+        "sealedparent", "background process finished", source="process_wakeup"
+    )
+
+    assert resp == {"error": "Session not found", "_status": 404}
+    assert started == []
+
+    conn.close()
+    db.close()
