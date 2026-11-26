@@ -88,8 +88,11 @@ const elementStub = () => ({
   style: { removeProperty(){}, setProperty(){} },
   dataset: {},
   classList: { add(){}, remove(){}, toggle(){}, contains(){ return false; } },
-  addEventListener(){}, removeEventListener(){},
-  appendChild(){}, setAttribute(){}, removeAttribute(){},
+  _listeners: {},
+  addEventListener(type, fn){ (this._listeners[type] = this._listeners[type] || []).push(fn); },
+  __fire(type){ (this._listeners[type] || []).forEach((fn) => fn({ preventDefault(){}, stopPropagation(){} })); },
+  removeEventListener(){},
+  appendChild(child){ this.children.push(child); return child; }, setAttribute(){}, removeAttribute(){},
   focus(){}, blur(){},
   scrollTop: 0, scrollHeight: 0, offsetHeight: 0, offsetWidth: 0,
   innerHTML: '', textContent: '', children: [],
@@ -100,6 +103,7 @@ const elementStub = () => ({
 });
 
 const elementCache = {};
+const createdElements = [];
 const getEl = (id) => {
   if (!elementCache[id]) elementCache[id] = elementStub();
   return elementCache[id];
@@ -113,7 +117,7 @@ const documentStub = {
   getElementById: getEl,
   querySelector(){ return null; },
   querySelectorAll(){ return []; },
-  createElement(){ return elementStub(); },
+  createElement(tag){ const el = elementStub(); el.tagName = String(tag || '').toUpperCase(); createdElements.push(el); return el; },
   body: elementStub(),
   documentElement: elementStub(),
 };
@@ -209,6 +213,8 @@ const ctx = {
   __setSkillContent(name, content) { skillContentByName[name] = content; },
   __clearSkillContent() { for (const k in skillContentByName) delete skillContentByName[k]; },
   __resetApiCalls() { apiCalls.length = 0; },
+  __created() { return createdElements; },
+  __resetCreated() { createdElements.length = 0; },
   _refreshSessionSkillUsageForOwner(sid) { apiCalls.push({ path: '__skill_usage__', sid }); },
   __apiCalls() { return apiCalls; },
   __resetQueue() { queueEntries.length = 0; },
@@ -409,6 +415,44 @@ vm.runInContext(__MESSAGES_JS__, ctx);
         window._defaultMessageMode = 'steer';
         return out;
       };
+      // #7781 review 2026-11-23 [CORE]: the dead-run recovery strip. A steer
+      // answered fallback:"stream_dead" shows it and restores the SHORT
+      // command; its Send must start the next turn with the SAME skill body,
+      // not the literal command (literalSlash skipped the resolver).
+      const runDeadRunRecovery = async () => {
+        __setComposer('/reviewdemo:under_score do EXACT');
+        __setSkills([__UNDERSCORE_ROW__]);
+        __clearSkillContent();
+        __setSkillContent('reviewdemo:under_score', 'UNDERSCORE SKILL BODY');
+        __resetApiCalls();
+        __resetQueue();
+        __resetCreated();
+        S.session = { session_id: 'sess-1' };
+        S.messages = [];
+        INFLIGHT = {};
+        S.busy = false;
+        S.activeStreamId = null;
+        // The payload the busy branch assembled and handed to _trySteer.
+        const payload = '[USER OVERRIDE] You MUST follow the skill '
+          + "'reviewdemo:under_score' content provided below before responding"
+          + ' to the next message. UNDERSCORE SKILL BODY '
+          + '[FORCED SKILL CONTEXT: reviewdemo:under_score] do EXACT';
+        _showSteerRecovery(payload, true, 'stream_dead', '/reviewdemo:under_score do EXACT');
+        const strip = __created().find((e) => e && e.className === 'steer-recovery');
+        const retry = strip && strip.children.find((c) => c && c.tagName === 'BUTTON');
+        let fired = false;
+        if (retry) { fired = true; retry.__fire('click'); }
+        for (let i = 0; i < 200; i++) {
+          if (__apiCalls().some((c) => c && c.path === '/api/chat/start')) break;
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        const startCall = __apiCalls().find((c) => c && c.path === '/api/chat/start');
+        return {
+          fired,
+          startBody: startCall ? JSON.parse(startCall.opts.body) : null,
+          composerAfter: __composer(),
+        };
+      };
       const _positive = await run('/demo:skill do X', [__PLUGIN_ROW__], { 'demo:skill': 'DEMO SKILL BODY' });
       const _negative = await run('/demo:skill', [__DIRECTORY_ROW__], {});
       // PR #7781 re-gate finding 1 controls: canonical underscore spelling
@@ -450,6 +494,7 @@ vm.runInContext(__MESSAGES_JS__, ctx);
       const _busyQueue = await runBusy('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { mode: 'queue' });
       const _busySwitchContent = await runBusyDeferredSwitch('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { defer: 'content', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft' });
       const _busySwitchListing = await runBusyDeferredSwitch('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { defer: 'listing', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft' });
+      const _deadRun = await runDeadRunRecovery();
       return {
         positive: _positive,
         negative: _negative,
@@ -469,6 +514,7 @@ vm.runInContext(__MESSAGES_JS__, ctx);
         busyQueue: _busyQueue,
         busySwitchContent: _busySwitchContent,
         busySwitchListing: _busySwitchListing,
+        deadRunRecovery: _deadRun,
       };
     })()`, ctx);
     process.stdout.write(JSON.stringify(result), () => process.exit(0));
@@ -777,3 +823,44 @@ def test_busy_steer_listing_session_switch_stops_before_delivery():
     assert result["steerCalls"] == 0, result
     assert result["composerAfter"] == "chat B draft", result
     assert result["thrown"] is None, result
+
+
+def test_dead_run_recovery_send_keeps_the_skill_body():
+    """stream_dead -> recovery Send must start the next turn with the skill
+    body. ``literalSlash`` skips the plugin resolver, so restoring only the
+    short command dropped the payload the steer had already assembled."""
+    result = _run_send_harness()["deadRunRecovery"]
+    assert result["fired"] is True, result
+    body = result["startBody"]
+    assert body is not None, result
+    dumped = json.dumps(body, ensure_ascii=False)
+    assert "UNDERSCORE SKILL BODY" in dumped, result
+    assert "do EXACT" in dumped, result
+    assert result["composerAfter"].startswith("[USER OVERRIDE]"), result
+
+
+def test_busy_steer_clears_the_composer_before_the_skill_fetch():
+    """The composer must be cleared BEFORE the first await: holding it across
+    the skill-content fetch wiped an edit typed meanwhile and let a second
+    Enter queue a duplicate next to the steer."""
+    start = MESSAGES_JS.index("let _busySteerPayload=text;")
+    end = MESSAGES_JS.index("await _trySteer(_busySteerPayload")
+    segment = MESSAGES_JS[start:end]
+    clears = segment.count("$('msg').value='';autoResize();")
+    assert clears == 1, segment
+    assert segment.index("$('msg').value='';autoResize();") < segment.index(
+        "await _loadPluginSkillForCommand"
+    ), "the clear must precede the first await"
+    # A failed fetch restores the command only into an empty composer of the
+    # same chat.
+    assert "!String(_busyRestore.value||'').trim()" in segment
+
+
+def test_idle_plugin_resolver_clears_the_composer_before_the_listing_fetch():
+    start = MESSAGES_JS.index("if(_parsedCmd.name.includes(':')&&!_bundleCmd){")
+    end = MESSAGES_JS.index("if(_match){", start)
+    segment = MESSAGES_JS[start:end]
+    assert "$('msg').value='';autoResize();" in segment
+    assert segment.index("$('msg').value='';autoResize();") < segment.index(
+        "await api('/api/skills')"
+    ), "the clear must precede the listing fetch"

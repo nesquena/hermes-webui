@@ -1758,6 +1758,11 @@ async function send(){
         // unchanged) and literalSlash keeps master's verbatim behaviour.
         let _busySteerPayload=text;
         let _busySteerRestoreText=text;
+        // #7781 review 2026-11-23 [SHOULD-FIX]: clear the composer BEFORE the
+        // first await. Holding the text across the skill-content fetch let an
+        // edit typed meanwhile be wiped by the later clear, and a second Enter
+        // queued a duplicate next to this steer.
+        $('msg').value='';autoResize();
         if(!literalSlash&&text.startsWith('/')){
           const _busyCmd=typeof parseCommand==='function'&&parseCommand(text);
           if(_busyCmd&&String(_busyCmd.name||'').indexOf(':')>=0){
@@ -1772,9 +1777,16 @@ async function send(){
             }catch(e){_busySkillError=e;}
             if((S.session&&S.session.session_id||null)!==_busyOwnerSid){hideCmdDropdown();return;}
             if(_busySkillError){
-              // Nothing was steered: keep the command in the composer so the
-              // user can retry once the skill content is readable again.
+              // Nothing was steered: the composer was cleared before the
+              // fetch, so put the command back — but only when the same chat
+              // is still current and nothing new was typed meanwhile.
               showToast(`Plugin skill error: ${_busySkillError&&_busySkillError.message||_busySkillError}`,3500);
+              const _busyRestore=$('msg');
+              if(_busyRestore&&(S.session&&S.session.session_id||null)===_busyOwnerSid
+                &&!String(_busyRestore.value||'').trim()){
+                _busyRestore.value=_busySteerRestoreText;
+                if(typeof autoResize==='function')autoResize();
+              }
               hideCmdDropdown();
               return;
             }
@@ -1783,7 +1795,6 @@ async function send(){
             }
           }
         }
-        $('msg').value='';autoResize();
         // Do NOT clear pendingFiles yet — _trySteer uploads with clearPending=false,
         // and a failed steer must keep staged files available for the user's next explicit action.
         await _trySteer(_busySteerPayload, /*explicitSteer=*/false, {restoreText:_busySteerRestoreText});
@@ -2048,6 +2059,11 @@ async function send(){
       // picker.
       let _pluginSkillResolved=false;
       if(_parsedCmd.name.includes(':')&&!_bundleCmd){
+        // #7781 review 2026-11-23 [SHOULD-FIX]: the resolver awaits below
+        // hold the composer's text. Clear it before the first await so an
+        // edit typed meanwhile is not wiped later and a second Enter cannot
+        // queue a duplicate next to this turn.
+        $('msg').value='';autoResize();
         // #7781 [CORE]: both fetches below park this send across awaits while
         // the user is free to switch chats. Reuse the #8718 _slashOwner
         // snapshot — captured before send()'s first metadata await — and stop
@@ -2100,7 +2116,16 @@ async function send(){
             S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
             S.messages.push({role:'assistant',content:`Plugin skill error: ${e&&e.message||e}`,_ts:Date.now()/1000});
             renderMessages();
-            $('msg').value='';autoResize();hideCmdDropdown();return;
+            // The composer was cleared before the fetch: restore the command
+            // only when this is still the chat that issued it and nothing new
+            // was typed meanwhile.
+            const _idleRestore=$('msg');
+            if(_idleRestore&&(S.session&&S.session.session_id||null)===_slashOwner.sid
+              &&!String(_idleRestore.value||'').trim()){
+              _idleRestore.value=text;
+              if(typeof autoResize==='function')autoResize();
+            }
+            hideCmdDropdown();return;
           }
         }
       }

@@ -1803,16 +1803,27 @@ function _showSteerRecovery(msg, explicitSteer, fallback, restoreText) {
   retryBtn.addEventListener('click', () => {
     el.remove();
     if(_steerFallbackIsDeadRun(fallback)&&typeof send==='function'){
+      // #7781 review 2026-11-23 [CORE]: a dead-run retry must start the next
+      // turn with the SAME skill body. `literalSlash` skips the plugin
+      // resolver, so restoring only the short command dropped the assembled
+      // payload and the new turn ran without its skill. When the payload
+      // differs from the visible text, restore and send the PAYLOAD itself —
+      // it no longer parses as a plugin command, so send() passes it through
+      // untouched. Only the plain (unresolved) case keeps literalSlash's
+      // verbatim behaviour.
+      const assembled=String(msg||'');
+      const visible=String(restoreText!=null?restoreText:msg||'');
+      const payload=(explicitSteer&&assembled&&assembled!==visible)?assembled:null;
       if(explicitSteer){
         const inp=$('msg');
         if(inp){
-          // #7781: the visible/restored text is the short command the user
-          // typed; `msg` may be the assembled skill payload.
-          inp.value=String(restoreText!=null?restoreText:msg||'').trim();
+          // The visible/restored text is the short command the user typed;
+          // `msg` may be the assembled skill payload.
+          inp.value=(payload||visible).trim();
           if(typeof autoResize==='function')autoResize();
         }
       }
-      void send({literalSlash:true}).catch(console.error);
+      void send(payload?{}:{literalSlash:true}).catch(console.error);
     }else{
       void _trySteer(msg, explicitSteer, {restoreText:restoreText!=null?restoreText:undefined}).catch(console.error);
     }
