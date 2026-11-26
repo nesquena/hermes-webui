@@ -15889,6 +15889,13 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
                 },
                 "by_identity": {},
                 "identity_values": set(),
+                # Every canonical (namespace -> values) pair the group owns,
+                # aggregated across clocks.  Used to decide whether an incoming
+                # ONE-SIDED identity can claim a saved occurrence's replay: a
+                # row whose namespace is already occupied by a DIFFERENT value
+                # belongs to another durable turn, so it must not collapse onto
+                # an identity-less sibling (#8672 gate 2026-11-25).
+                "namespace_values": {},
             },
         )
         occurrence = _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
@@ -15929,6 +15936,9 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
         for identity in identities:
             group["by_identity"].setdefault(identity, key)
             group["identity_values"].add(identity)
+            group["namespace_values"].setdefault(
+                _occurrence_identity_namespace(identity), set()
+            ).add(identity)
         group["members"].append(key)
     # Keep loose_by_key lazy.  Some transcripts contain multi-megabyte tool
     # outputs; eagerly casefolding + regex-tokenizing every visible key on every
@@ -16224,7 +16234,9 @@ def _occurrence_identity_lists_conflict(
     return False
 
 
-def _visible_keys_share_occurrence(left, right) -> bool:
+def _visible_keys_share_occurrence(
+    left, right, *, namespace_conflict=False, provider_payload=False
+) -> bool:
     """True when two occurrences are the same, or neither proves difference.
 
     A row with no usable timestamp cannot prove it is a DIFFERENT occurrence,
@@ -16250,8 +16262,53 @@ def _visible_keys_share_occurrence(left, right) -> bool:
     if _occurrence_identity_conflict(left_identity, right_identity):
         return False
     if left_clock and right_clock:
-        return left_clock == right_clock
+        if left_clock == right_clock:
+            return True
+        # A row that keeps its PRIVATE identity across a clock rewrite is the
+        # same logical row restamped, not a second occurrence (#8672 gate
+        # 2026-11-25).  A durable replay can carry a different (restamped)
+        # timestamp than the saved sidecar row it mirrors -- a legacy SQLite
+        # projection, or a compression pass that rewrites created_at -- while
+        # still naming the SAME durable row id.  Requiring clock equality here
+        # after the identity comparison made the merge append the replay as an
+        # extra displayed turn (5 -> 6) even though the saved occurrence had
+        # replay capacity and provably owned that row.
+        #
+        # A ONE-SIDED identity is evidence, but only together with the provider
+        # payload: the state.db projection carries a durable row id while the
+        # settled sidecar occurrence carries its stable WebUI id, and the two
+        # rows carry the SAME provider bytes -- neither store contradicts the
+        # other, so the clocks alone do not prove two occurrences.  A candidate
+        # that establishes NO identity stays distinguishable by its clock (the
+        # distinct-clock image control), and a bare pair of identity-less rows
+        # keeps the #7587 repeated-turn contract.  The caller also rejects the
+        # one-sided claim when the group already owns a DIFFERENT value in the
+        # incoming namespace (``namespace_conflict``): then the row is a
+        # genuinely distinct durable turn, not a restamp.
+        if _occurrence_identities_overlap(left_identity, right_identity):
+            return True
+        if namespace_conflict:
+            return False
+        if provider_payload:
+            return bool(right_identity)
+        return False
     return True
+
+
+def _occurrence_identities_overlap(left_identity: str, right_identity: str) -> bool:
+    """True when both sides establish the SAME canonical private identity.
+
+    Identity strings are built by ``_established_occurrence_identities``
+    (``id:<field>:<value>``, every durable alias collapsed onto the canonical
+    ``_state_db_row_id`` field), so string equality is namespace-aware value
+    equality.  An empty side overlaps nothing.
+    """
+    if not left_identity or not right_identity:
+        return False
+    return bool(
+        set(_occurrence_identities(left_identity))
+        & set(_occurrence_identities(right_identity))
+    )
 
 
 def _visible_key_capacity_remaining(key, remaining) -> bool:
@@ -16519,6 +16576,147 @@ def _clockless_duplicate_candidate(group: dict, identities, remaining=None):
     )
 
 
+def _group_identity_namespace_conflict(group, identities) -> bool:
+    """True when ``group`` already owns a DIFFERENT value in our namespace.
+
+    A one-sided identity may claim a saved occurrence's replay slot only while
+    the namespace it names is still unoccupied.  When another saved row already
+    establishes a different value in that same namespace, the incoming row is
+    a genuinely distinct durable turn -- it must not collapse onto an
+    identity-less sibling just because the clocks happen to differ
+    (#8672 gate 2026-11-25).
+
+    The lookup is one set-membership test per incoming identity against the
+    group's prebuilt ``namespace_values`` aggregate, so it adds no member scan.
+    """
+    if not identities or not group:
+        return False
+    values = group.get("namespace_values") or {}
+    for identity in identities:
+        owned = values.get(_occurrence_identity_namespace(identity))
+        if owned and identity not in owned:
+            return True
+    return False
+
+
+def _visible_keys_identity_namespace_conflict(visible_keys, identities) -> bool:
+    """Set-wide twin of :func:`_group_identity_namespace_conflict`.
+
+    Used by the small-set fallback that has no prebuilt group.  The set is
+    bounded by ``_VISIBLE_DUPLICATE_FUZZY_MAX_KEYS`` when this runs, so the
+    single pass cannot become the large-transcript scan the index exists to
+    avoid.
+    """
+    if not identities or not visible_keys:
+        return False
+    incoming = set(identities)
+    namespaces = {
+        _occurrence_identity_namespace(identity) for identity in incoming
+    }
+    for key in visible_keys:
+        _clock, identity_text = _occurrence_parts(
+            _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+        )
+        for identity in _occurrence_identities(identity_text):
+            if (
+                _occurrence_identity_namespace(identity) in namespaces
+                and identity not in incoming
+            ):
+                return True
+    return False
+
+
+def _shared_identity_candidate(group: dict, identities, remaining=None):
+    """Return a saved occurrence that establishes one of ``identities``.
+
+    Used when the incoming row carries a clock the group has never seen: an
+    identical private identity proves the two rows are the same logical row
+    under a restamped clock (a legacy SQLite projection or a compression pass
+    that rewrote ``created_at``), so the saved occurrence must absorb its own
+    replay rather than the merge appending an extra displayed turn (#8672 gate
+    2026-11-25).
+
+    The O(1) path is the group's prebuilt ``by_identity`` index.  Only when
+    that indexed representative is EXHAUSTED does the per-signature list walk
+    run, and it is materialised once per signature, so no incoming row rescans
+    the group's members.  A candidate that merely shares a NAMESPACE with a
+    different value is a conflict, not an overlap, and is deliberately not
+    offered here (that shape stays distinct).
+    """
+    if not identities:
+        return None
+    by_identity = group.get("by_identity") or {}
+    for identity in identities:
+        match = by_identity.get(identity)
+        if match is not None and _visible_key_capacity_remaining(match, remaining):
+            return match
+    cache = group.setdefault("shared_identity_cache", {})
+    signature = frozenset(identities)
+    ordered = cache.get(signature)
+    if ordered is None:
+        ordered = []
+        for candidate in group.get("members") or []:
+            occurrence = _visible_key_field(
+                candidate, _VISIBLE_KEY_OCCURRENCE_INDEX, ""
+            )
+            _clock, identity_text = _occurrence_parts(occurrence)
+            if signature & set(_occurrence_identities(identity_text)):
+                ordered.append(candidate)
+        cache[signature] = ordered
+    for candidate in ordered:
+        if _visible_key_capacity_remaining(candidate, remaining):
+            return candidate
+    return None
+
+
+def _group_provider_payload(group) -> bool:
+    """True when the group's rows carry a provider-side payload.
+
+    A restamped replay whose private identity is one-sided (durable id in
+    SQLite, stable id on the settled sidecar row) is accepted only when both
+    rows also carry the SAME provider payload.  The clock-free group key keeps
+    that payload in its sidecar slot, so belonging to the group already proves
+    equality; its presence is the additional evidence that separates a true
+    restamp from a bare same-content turn at a new clock.
+    """
+    if not group:
+        return False
+    return bool(
+        _visible_key_field(
+            group.get("any"), _VISIBLE_KEY_SIDECAR_INDEX, ""
+        )
+    )
+
+
+def _identity_bearing_candidate(group: dict, identities, remaining=None):
+    """Return a saved occurrence that ESTABLISHES a private identity.
+
+    The one-sided-identity relaxation only lets an incoming row collapse onto a
+    saved row that names itself with a stable WebUI id or a durable row id; the
+    candidate list is materialised once from the group's build order and walked
+    through the merge-local cursor, so repeated replays stay amortized linear.
+    """
+    ordered = group.get("identity_bearing_order")
+    if ordered is None:
+        ordered = []
+        for candidate in group.get("members") or []:
+            occurrence = _visible_key_field(
+                candidate, _VISIBLE_KEY_OCCURRENCE_INDEX, ""
+            )
+            _clock, identity_text = _occurrence_parts(occurrence)
+            if _occurrence_identities(identity_text):
+                ordered.append(candidate)
+        group["identity_bearing_order"] = ordered
+    return _available_candidate(
+        ordered,
+        group,
+        "identity_bearing_cursor",
+        remaining,
+        identities,
+        identity_indexed=True,
+    )
+
+
 def _clockfree_duplicate_candidate(group: dict, occurrence, remaining=None):
     """Pick a clock-free duplicate representative consistent with ``occurrence``.
 
@@ -16621,8 +16819,33 @@ def _clockfree_duplicate_candidate(group: dict, occurrence, remaining=None):
         clockless = _clockless_duplicate_candidate(group, identities, remaining)
         if clockless is not None:
             return clockless
+        # A saved occurrence that establishes the SAME private identity is the
+        # same logical row under a restamped clock, so it must absorb its own
+        # replay instead of appending a second displayed turn (#8672 gate
+        # 2026-11-25).  This is the index-path twin of the identity-aware
+        # relaxation in _visible_keys_share_occurrence: that probe serves the
+        # fuzzy loop, while empty/structural/oversized rows and transcripts
+        # over the fuzzy bound resolve HERE.  A genuinely distinct durable
+        # turn carries a conflicting or absent identity, so it still falls
+        # through to the established-clock refusal below.
+        shared = _shared_identity_candidate(group, identities, remaining)
+        if shared is not None:
+            return shared
         if group.get("by_clock"):
-            return None
+            # Only two BARE occurrences (no private identity on the incoming
+            # row) are separated by their established clocks alone -- the #7587
+            # repeated-turn contract.  A one-sided identity may still collapse
+            # onto an occurrence that ESTABLISHES its own private identity,
+            # because the two stores name the same logical row through different
+            # namespaces.  An identity-less candidate is never offered here: a
+            # distinct-clock image turn must stay distinct (P1 control), and an
+            # incoming row whose namespace the group already occupies with a
+            # DIFFERENT value is a genuinely new durable turn.
+            if not identities or _group_identity_namespace_conflict(
+                group, identities
+            ) or not _group_provider_payload(group):
+                return None
+            return _identity_bearing_candidate(group, identities, remaining)
         return _first_compatible_member(group, identities, remaining)
     if identities:
         by_identity = group.get("by_identity") or {}
@@ -16770,6 +16993,12 @@ def _matching_visible_duplicate(
             # scan below for text, and the only path for empty/structural rows
             # when callers pass the key set without a lookup.
             stripped = _visible_key_without_occurrence(visible_key)
+            fallback_identities = _occurrence_identities(
+                _occurrence_parts(occurrence)[1]
+            )
+            fallback_conflict = _visible_keys_identity_namespace_conflict(
+                visible_keys, fallback_identities
+            )
             for existing_key in visible_keys:
                 if _visible_key_without_occurrence(existing_key) != stripped:
                     continue
@@ -16778,6 +17007,8 @@ def _matching_visible_duplicate(
                     _visible_key_field(
                         existing_key, _VISIBLE_KEY_OCCURRENCE_INDEX, ""
                     ),
+                    namespace_conflict=fallback_conflict,
+                    provider_payload=bool(sidecar),
                 ):
                     return existing_key
     # Empty content has no fuzzy identity: the probes above are the only safe
@@ -16810,6 +17041,17 @@ def _matching_visible_duplicate(
     # every candidate exactly as before.
     role_candidates = lookup.get("by_role", {}).get(role) or []
     role_cursor = _consumption_cursor(lookup, ("role_cursor", role), remaining)
+    # One-sided-identity guard, resolved once per incoming row (O(1)): if the
+    # group already owns a different value in the namespace our identity names,
+    # this row is a genuinely distinct durable turn and must not claim an
+    # identity-less sibling's replay slot (#8672 gate 2026-11-25).
+    incoming_identities = _occurrence_identities(_occurrence_parts(occurrence)[1])
+    incoming_group = (lookup.get("by_clockfree") or {}).get(
+        _visible_key_without_occurrence(visible_key)
+    )
+    namespace_conflict = _group_identity_namespace_conflict(
+        incoming_group, incoming_identities
+    )
     for existing_key in _unconsumed_candidates(
         role_candidates, role_cursor, remaining
     ):
@@ -16834,6 +17076,8 @@ def _matching_visible_duplicate(
         if not _visible_keys_share_occurrence(
             occurrence,
             _visible_key_field(existing_key, _VISIBLE_KEY_OCCURRENCE_INDEX, ""),
+            namespace_conflict=namespace_conflict,
+            provider_payload=bool(sidecar),
         ):
             continue
         # This saved occurrence already absorbed its own replay.  The #7587
