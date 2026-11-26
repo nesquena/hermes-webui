@@ -113,6 +113,11 @@ def _launcher_dotenv_values(env_path) -> dict[str, str]:
 # starts, so for a NAMED profile home those values sit in os.environ looking like launcher exports; this snapshot
 # is the provenance record that tells them apart (#8432).
 _INITIAL_HERMES_HOME_DOTENV = _read_dotenv_values(Path(_INITIAL_HERMES_HOME) / '.env') if _INITIAL_HERMES_HOME else {}
+# The same file as ctl.sh exported it (escapes decoded, inline comment dropped); the Agent's reading is recorded
+# at startup by _named_launch_home_readings().
+_INITIAL_HERMES_HOME_LAUNCHER_DOTENV = (
+    _launcher_dotenv_values(Path(_INITIAL_HERMES_HOME) / '.env') if _INITIAL_HERMES_HOME else {})
+_NAMED_LAUNCH_HOME_AGENT_READINGS: dict[str, dict[str, str]] = {}
 _INITIAL_ISOLATED_PROFILE_OPT_IN = os.getenv('HERMES_WEBUI_ISOLATED_PROFILE', '').strip().lower()
 _ISOLATED_SYMLINK_WARNING_EMITTED = False
 _ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED = False
@@ -1185,13 +1190,38 @@ def _value_from_dotenv(key, value, dotenv: dict[str, str]) -> bool:
     return bool(value) and key in dotenv and str(dotenv[key] or "").strip() == value
 
 
-def _from_named_launch_home(key, value) -> bool:
-    """True when *value* for *key* is one a shell launcher (ctl.sh) sourced from a NAMED launch
-    home's ``.env`` before Python started (#8435 provenance, by value; fail closed when the
-    launcher exported the same value too)."""
-    if not _INITIAL_HERMES_HOME or _is_root_profile_home(_INITIAL_HERMES_HOME):
-        return False
-    return _value_from_dotenv(key, value, _INITIAL_HERMES_HOME_DOTENV)
+def _agent_env_file_reader():
+    """The Agent's ``.env`` reader (``agent.secret_scope.load_env_file``); WebUI's on an older Agent."""
+    try:
+        from agent.secret_scope import load_env_file
+    except Exception:
+        logger.debug("Hermes Agent has no secret_scope.load_env_file; reading .env files with WebUI's reader")
+        return _read_dotenv_values
+    return load_env_file
+
+
+def _named_launch_home_readings() -> tuple[dict[str, str], ...]:
+    """The launch home's ``.env`` as it was at startup, by each reading a launcher's export can equal: WebUI's
+    and ctl.sh's (recorded at import) and the Agent's (``load_env_file``; what ``set -a; . file`` exports),
+    recorded by ``init_profile_state()``. A reading through WebUI's fallback reader (Agent not importable yet,
+    or without ``load_env_file``) is not recorded, so a later call takes the Agent's; WebUI's is already here."""
+    if not _INITIAL_HERMES_HOME:
+        return ()
+    home = str(_INITIAL_HERMES_HOME)
+    if home not in _NAMED_LAUNCH_HOME_AGENT_READINGS:
+        reader = _agent_env_file_reader()
+        if reader is _read_dotenv_values:
+            return _INITIAL_HERMES_HOME_DOTENV, _INITIAL_HERMES_HOME_LAUNCHER_DOTENV
+        _NAMED_LAUNCH_HOME_AGENT_READINGS[home] = reader(Path(home).expanduser() / '.env')
+    return _INITIAL_HERMES_HOME_DOTENV, _INITIAL_HERMES_HOME_LAUNCHER_DOTENV, _NAMED_LAUNCH_HOME_AGENT_READINGS[home]
+
+
+def _matches_launch_home_env(key, value, readings=None) -> bool:
+    """True when *value* for *key* equals the launch home's ``.env`` value by any startup reading: a shell
+    launcher sourced it before Python started (#8435 provenance, by value; fail closed when the launcher exported
+    the same value too). No root check: callers decide whether the launch home is a NAMED profile."""
+    readings = _named_launch_home_readings() if readings is None else readings
+    return any(_value_from_dotenv(key, value, dotenv) for dotenv in readings)
 
 
 def operator_env() -> dict[str, str]:
@@ -1199,11 +1229,14 @@ def operator_env() -> dict[str, str]:
     captured at import, before any profile ``.env`` load or worker mirror) without the values a
     shell launcher sourced from a NAMED launch home's ``.env``. Never the live ``os.environ``.
 
-    The source for ``${VAR}`` in administrator-managed config (#9120) and any other value that
-    must belong to the deployment rather than to a profile."""
+    Root's ``${VAR}`` binding (``profile_env_binding``) layers root's ``.env`` over it, and the
+    Agent's launch-profile secret scopes are built from it (``init_profile_state``)."""
     from api import paths as _paths
 
-    return {k: v for k, v in _paths.STARTUP_ENV.items() if not _from_named_launch_home(k, v)}
+    if not _INITIAL_HERMES_HOME or _is_root_profile_home(_INITIAL_HERMES_HOME):
+        return dict(_paths.STARTUP_ENV)
+    readings = _named_launch_home_readings()
+    return {k: v for k, v in _paths.STARTUP_ENV.items() if not _matches_launch_home_env(k, v, readings)}
 
 
 def _profile_env_binding(home, dotenv: dict[str, str]) -> dict[str, str]:
@@ -1287,8 +1320,10 @@ def load_profile_config(home, *, env: Optional[dict] = None) -> dict:
     config_path = Path(home).expanduser() / 'config.yaml'
     try:
         raw = yaml.safe_load(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
-    except Exception:
-        logger.debug("Failed to load profile config from %s", config_path, exc_info=True)
+    except Exception as exc:
+        # #9322: no traceback/snippet — the parser's message quotes the bad line,
+        # which may hold a value the operator does not want in a log file.
+        logger.debug("Failed to load profile config %s: %s", config_path, type(exc).__name__)
         return {}
     if not isinstance(raw, dict) or not raw:
         return {}
@@ -2136,6 +2171,7 @@ def init_profile_state() -> None:
     _set_hermes_home(home)  # also pins the process-profile home (MCP routing anchor)
     install_cron_scheduler_profile_isolation()
     _reload_dotenv(home)
+    _named_launch_home_readings()  # the Agent's reading of the launch home's .env, recorded now (Agent on sys.path)
     _install_operator_env_as_agent_launch_env()
 
 
@@ -2160,11 +2196,7 @@ def _install_operator_env_as_agent_launch_env() -> None:
         logger.warning("Hermes Agent has no launch_profile_policy._launch_env; "
                        "launch-profile secret scopes keep reading the live process env")
         return
-    try:
-        from agent.secret_scope import load_env_file
-    except Exception:
-        logger.debug("Hermes Agent has no secret_scope.load_env_file; reading the root .env with WebUI's reader")
-        load_env_file = _read_dotenv_values
+    load_env_file = _agent_env_file_reader()
     root_env = Path(_DEFAULT_HERMES_HOME) / '.env'
     root_dotenv: dict[str, str] = {}
     root_launcher: dict[str, str] = {}
@@ -2174,13 +2206,6 @@ def _install_operator_env_as_agent_launch_env() -> None:
         if not root_dotenv:
             logger.debug("No readable root .env values to leave out of the frozen launch env")
     launch_env = operator_env()
-    if _INITIAL_HERMES_HOME and not _is_root_profile_home(_INITIAL_HERMES_HOME):
-        # Also by the Agent's reader and by ctl.sh's: operator_env()'s record of the named launch home misses
-        # quoted values with an inline comment or escapes, which would freeze a key later removed in Settings.
-        named = Path(_INITIAL_HERMES_HOME).expanduser() / '.env'
-        launch_dotenv, launch_launcher = load_env_file(named), _launcher_dotenv_values(named)
-        launch_env = {k: v for k, v in launch_env.items()
-                      if not (_value_from_dotenv(k, v, launch_dotenv) or _value_from_dotenv(k, v, launch_launcher))}
     # A key matches the root .env as the Agent reads it or as ctl.sh decoded it (double-quoted \n \r \t);
     # each is re-read the way it matched, so a saved active named profile keeps the value base gave it.
     agent_keys = {k for k, v in launch_env.items() if _value_from_dotenv(k, v, root_dotenv)}

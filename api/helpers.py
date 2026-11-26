@@ -40,6 +40,32 @@ _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
 })
 
 
+# Storage full (#9167): a write that hits ENOSPC/EDQUOT is not an internal bug, and the
+# user can fix it by freeing space. Report it instead of the generic 500.
+_STORAGE_FULL_ERRNOS = frozenset(
+    code for code in (errno.ENOSPC, getattr(errno, "EDQUOT", None)) if code is not None)
+STORAGE_FULL_MESSAGE = "Storage on the server is full. Free up space and try again."
+
+
+def is_storage_full(exc: BaseException | None) -> bool:
+    """True when ``exc`` or an exception it was raised from is ENOSPC/EDQUOT."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, OSError) and exc.errno in _STORAGE_FULL_ERRNOS:
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def send_server_error(handler, exc: BaseException | None) -> None:
+    """The last-resort error response: 507 for storage full, generic 500 otherwise."""
+    if is_storage_full(exc):
+        j(handler, {'error': STORAGE_FULL_MESSAGE}, status=507)
+    else:
+        j(handler, {'error': 'Internal server error'}, status=500)
+
+
 # Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
 # connections often end this way when a browser tab sleeps, a phone switches
 # networks, or Tailscale leaves the socket half-closed.
@@ -786,6 +812,26 @@ def _redaction_policy_namespace(redact_sensitive_text, module):
     return _NO_REDACTION_POLICY
 
 
+# A private-key block runs from a BEGIN line to the first END line after it;
+# the empty group marks that the END line was reached. The second branch
+# matters only when a BEGIN line has no END after it: then no later BEGIN line
+# has one either, so it takes the rest of the text in one step and the text is
+# kept. With the first branch alone, a search retried every later BEGIN line
+# and scanned to the end of the text from each one (quadratic in the number
+# of unterminated BEGIN lines).
+_PRIVATE_KEY_BLOCK_RE = _re.compile(
+    r"-----BEGIN[A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----()|[\s\S]*)"
+)
+
+
+def _private_key_block_replacement(match) -> str:
+    return "[REDACTED PRIVATE KEY]" if match.group(1) is not None else match.group(0)
+
+
+def _redact_private_key_blocks(text: str) -> str:
+    return _PRIVATE_KEY_BLOCK_RE.sub(_private_key_block_replacement, text)
+
+
 def _build_redact_fn():
     """Return a redactor backed by hermes-agent plus local fallback patterns."""
     # Fallback mirrors the agent's known credential prefixes so WebUI API
@@ -845,10 +891,6 @@ def _build_redact_fn():
     _ENV_RE = _re.compile(
         r"([A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50})"
         r"\s*=\s*(['\"]?)(\S+)\2"
-    )
-
-    _PRIVKEY_RE = _re.compile(
-        r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
     )
 
     def _mask(token: str) -> str:
@@ -917,7 +959,7 @@ def _build_redact_fn():
         # Earlier passes may remove delimiters; test the text actually scanned.
         if "=" in text:
             text = _ENV_RE.sub(_env_replacement, text)
-        text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
+        text = _redact_private_key_blocks(text)
         return text
 
     try:
@@ -1147,7 +1189,11 @@ _SENSITIVE_LOWER_MARKERS = (
     '"password"',
     '"bearer"',
 )
-_SENSITIVE_TELEGRAM_MARKER_RE = _re.compile(r"(?:bot)?\d{8,}:[-A-Za-z0-9_]{30,}")
+# ``(?<!\d)`` starts the digit run only at its first digit. Without it a
+# search retried the run from every digit, each try scanning to the run's end
+# (quadratic in the run length). A match that starts inside a run also starts
+# at its first digit, so the verdict and the leftmost match are unchanged.
+_SENSITIVE_TELEGRAM_MARKER_RE = _re.compile(r"(?:bot)?(?<!\d)\d{8,}:[-A-Za-z0-9_]{30,}")
 _SENSITIVE_DISCORD_MARKER_RE = _re.compile(r"<@!?\d{17,20}>")
 _SENSITIVE_PHONE_MARKER_RE = _re.compile(r"(?<![A-Za-z0-9])\+[1-9]\d{6,14}(?![A-Za-z0-9])")
 
