@@ -738,6 +738,116 @@ class TestCanonicalLegacyRecordCollision:
             restore()
 
 
+_DISABLED_LEGACY_FIRST_CFG = {
+    "model": {"provider": "anthropic", "default": "unrelated-model"},
+    "providers": {
+        "mistralai": {
+            "enabled": False,
+            "api_key": "legacy-record-canary",
+            "base_url": "https://legacy-relay.example/v1",
+            "models": ["mistral-small-latest"],
+        },
+        "mistral": {
+            "api_key": "canonical-record-canary",
+            "base_url": "https://api.mistral.ai/v1",
+            "models": ["mistral-large-latest"],
+        },
+    },
+}
+
+
+class TestDisabledLegacyRecordFirst:
+    """A ``enabled: false`` legacy record sorted FIRST must not own the route
+    (#8664 review, 2026-11-23).  The disabled row is invisible to the Agent's
+    resolver, so the enabled canonical record wins regardless of config order::
+
+        providers:
+          mistralai: {enabled: false, api_key: <old>, base_url: https://old/v1}
+          mistral:   {api_key: <current>, base_url: https://current/v1}
+
+    Both ``model.provider: mistral`` and an ``@mistral:mistral-small-latest``
+    pick must resolve to the ENABLED record (current key + current endpoint).
+    """
+
+    def test_raw_key_resolver_skips_the_disabled_legacy_record(self):
+        restore = _swap_in_test_config(_DISABLED_LEGACY_FIRST_CFG)
+        try:
+            for spelling in ("mistral", "mistralai"):
+                raw_key = config._raw_provider_key_for_provider_id(spelling)
+                assert raw_key == "mistral", (
+                    f"{spelling!r} must resolve to the ENABLED 'mistral' record, "
+                    f"got {raw_key!r}"
+                )
+                provider_cfg = config._get_provider_cfg(raw_key)
+                assert provider_cfg.get("api_key") == "canonical-record-canary", (
+                    f"the resolved record must carry the CURRENT key, got {provider_cfg!r}"
+                )
+        finally:
+            restore()
+
+    def test_endpoint_and_dispatch_use_the_enabled_record(self):
+        restore = _swap_in_test_config(_DISABLED_LEGACY_FIRST_CFG)
+        try:
+            assert config._get_provider_base_url("mistral") == (
+                "https://api.mistral.ai/v1"
+            ), "the endpoint must come from the ENABLED record, not the disabled alias"
+            resolved = config.resolve_model_provider("@mistral:mistral-small-latest")
+            assert resolved == (
+                "mistral-small-latest",
+                "mistral",
+                "https://api.mistral.ai/v1",
+            ), f"dispatch must use the ENABLED record, got {resolved!r}"
+        finally:
+            restore()
+
+    def test_static_catalog_selects_the_enabled_record(self, monkeypatch, tmp_path):
+        """The catalog's ``canonical_to_raw_provider_key`` slot (setdefault,
+        first record wins) must be the ENABLED record too, or the picker and
+        the route disagree: the picker would open the disabled alias's group
+        while the runtime routes through the enabled record."""
+        catalog = _static_catalog(monkeypatch, tmp_path, _DISABLED_LEGACY_FIRST_CFG)
+        groups = _mistral_groups(catalog)
+        assert len(groups) == 1, (
+            f"expected exactly one Mistral group, got "
+            f"{[(g['provider'], g['provider_id']) for g in groups]}"
+        )
+        model_ids = [m["id"] for m in groups[0]["models"]]
+        assert "@mistral:mistral-large-latest" in model_ids
+        # The catalog's record identity (the setdefault slot) is the enabled
+        # canonical record: ITS model leads the group.  When the disabled
+        # legacy alias wins the slot, the legacy record's model leads instead.
+        assert model_ids[0] == "@mistral:mistral-large-latest", (
+            f"catalog identity must be the ENABLED record (its model leads the "
+            f"group), got {model_ids}"
+        )
+
+    def test_onboarding_selector_skips_the_disabled_legacy_record(self):
+        providers_cfg = _DISABLED_LEGACY_FIRST_CFG["providers"]
+        for spelling in ("mistral", "mistralai"):
+            raw_key = onboarding._canonical_equivalent_provider_key(
+                spelling, providers_cfg
+            )
+            assert raw_key == "mistral", (
+                f"onboarding selector must resolve {spelling!r} to the ENABLED "
+                f"'mistral' record, got {raw_key!r}"
+            )
+
+    def test_bare_model_name_never_lands_on_the_disabled_record(self):
+        """The bare-model scan of ``providers:`` must skip the disabled alias
+        too: the disabled legacy record carries a leftover models list, and it
+        must not hijack a bare model name that only it lists."""
+        restore = _swap_in_test_config(_DISABLED_LEGACY_FIRST_CFG)
+        try:
+            resolved = config.resolve_model_provider("mistral-small-latest")
+            assert resolved[0] == "mistral-small-latest"
+            assert resolved[1] != "mistralai", (
+                f"bare-model route must NOT land on the disabled legacy record, "
+                f"got provider={resolved[1]!r}"
+            )
+        finally:
+            restore()
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Section 6 — onboarding keeps accepting the legacy selector (#8664 P2)
 # ────────────────────────────────────────────────────────────────────────

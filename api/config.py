@@ -1818,9 +1818,16 @@ def _raw_provider_key_for_provider_id(provider_id: object) -> str:
     canonical = _canonicalise_provider_id(requested)
     if not canonical:
         return requested
-    for raw_key in _get_providers_cfg():
-        if _canonicalise_provider_id(raw_key) == canonical:
-            return raw_key
+    for raw_key, raw_record in _get_providers_cfg().items():
+        if _canonicalise_provider_id(raw_key) != canonical:
+            continue
+        # A disabled record must not own the route: ``enabled: false`` makes
+        # the entry invisible to the Agent's resolver, so a legacy alias that
+        # was switched off must not shadow a live canonical record that comes
+        # later in config order (#8664 review, 2026-11-23).
+        if not _raw_provider_record_enabled(raw_record):
+            continue
+        return raw_key
     return requested
 
 
@@ -3318,6 +3325,12 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         _active_slug = _canon_config_provider
         for slug, pdef in providers_cfg.items():
             if not isinstance(pdef, dict):
+                continue
+            # A disabled record must not own the bare-model route either: the
+            # Agent's resolver ignores enabled:false entries, so a disabled
+            # legacy alias with a leftover models list must not hijack a model
+            # that a later enabled record owns (#8664 review, 2026-11-23).
+            if not _raw_provider_record_enabled(pdef):
                 continue
             # Copilot is the documented exception: `providers.copilot.models` is
             # a per-model SETTINGS map (reasoning_effort, limits, etc.), NOT a
@@ -8141,6 +8154,13 @@ def _static_models_catalog_without_live_probes() -> dict:
                 canonical = _canonicalise_provider_id(provider_key)
                 if not canonical:
                     continue
+                # Disabled records are invisible to the Agent's resolver and
+                # must not own the catalog's ``canonical_to_raw_provider_key``
+                # slot either — otherwise a disabled legacy alias that sorts
+                # first would make the PICKER resolve to a record the ROUTE
+                # skips (#8664 review, 2026-11-23).
+                if not _raw_provider_record_enabled(provider_cfg):
+                    continue
                 is_known_provider = (
                     canonical in _PROVIDER_MODELS
                     or canonical in _PROVIDER_DISPLAY
@@ -10811,6 +10831,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             for _pid_key, _provider_cfg in _cfg_providers.items():
                 _canonical = _canonicalise_provider_id(_pid_key)
                 if not _canonical:
+                    continue
+
+                # A disabled record must not own the picker's
+                # ``_canonical_to_raw_provider_key`` slot: the route resolver
+                # skips enabled:false entries, so the picker must resolve the
+                # same record the runtime would — a disabled legacy alias
+                # sorted first must not shadow a live canonical record
+                # (#8664 review, 2026-11-23).
+                if not _raw_provider_record_enabled(_provider_cfg):
                     continue
 
                 # See the gating comment on the block above. ``_PROVIDER_MODELS``

@@ -27,6 +27,7 @@ from api.config import (
     load_settings,
     reload_config,
     save_settings,
+    _raw_provider_record_enabled,
     verify_hermes_imports,
 )
 from api.paths import _atomic_write_text
@@ -606,9 +607,17 @@ def _canonical_equivalent_provider_key(
     canonical = _canonicalise_provider_id(requested)
     if not canonical:
         return None
-    for raw_key in providers_cfg:
-        if _canonicalise_provider_id(raw_key) == canonical:
-            return raw_key
+    for raw_key, raw_record in providers_cfg.items():
+        if _canonicalise_provider_id(raw_key) != canonical:
+            continue
+        # Mirror api.config._raw_provider_key_for_provider_id: a disabled
+        # record must not own onboarding's stored-key detection either, or a
+        # disabled legacy alias sorted first would shadow the live canonical
+        # record and onboarding would keep reading the switched-off row
+        # (#8664 review, 2026-11-23).
+        if not _raw_provider_record_enabled(raw_record):
+            continue
+        return raw_key
     return None
 
 
