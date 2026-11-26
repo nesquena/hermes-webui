@@ -167,9 +167,32 @@ const ctx = {
   // #7781 (P1, greptile 2026-11-26): the draft persistence the restore helper
   // calls. Records every save so a test can see WHICH chat the command was
   // handed back to.
+  // #7781 (P1, greptile 2026-11-26): the restore helper consults the per-sid
+  // draft revision + last saved payload signature that sessions.js keeps, to
+  // tell a NEWER user-typed draft apart from the draft this send captured.
+  // Mirror that bookkeeping here: a NON-EMPTY payload that differs from the
+  // last one saved for this sid bumps the revision; empty payloads never do
+  // (same rule as sessions.js's _bumpComposerDraftRevision).
   _draftSaves: [],
   _switchLog: [],
-  _saveComposerDraftNow(sid, text, files) { ctx._draftSaves.push({ sid, text, files: (files || []) }); return Promise.resolve(); },
+  _draftRevBySid: new Map(),
+  _composerDraftLastPayloadBySid: new Map(),
+  _composerDraftRevision(sid) { return ctx._draftRevBySid.get(sid) || 0; },
+  _saveComposerDraftNow(sid, text, files) {
+    const normText = String(text || '');
+    const normFiles = (files || []).filter(Boolean);
+    const sig = JSON.stringify({ text: normText, files: normFiles });
+    if (normText || normFiles.length) {
+      if (ctx._composerDraftLastPayloadBySid.get(sid) !== sig) {
+        ctx._composerDraftLastPayloadBySid.set(sid, sig);
+        ctx._draftRevBySid.set(sid, (ctx._draftRevBySid.get(sid) || 0) + 1);
+      }
+    } else {
+      ctx._composerDraftLastPayloadBySid.set(sid, sig);
+    }
+    ctx._draftSaves.push({ sid, text, files: (files || []) });
+    return Promise.resolve();
+  },
   __draftSaves() { return ctx._draftSaves; },
   __resetDraftSaves() { ctx._draftSaves.length = 0; },
   __switchLog() { return ctx._switchLog; },
@@ -253,11 +276,19 @@ const ctx = {
   // Simulate the user opening another chat (with its own composer draft)
   // while a send is parked on an await. S lives inside the vm context, so
   // the outer-scope knob must reach it through the context object.
-  __switchSession(sid, draft) {
-    // Mirror what loadSession() does on a switch: persist the composer of the
-    // chat being left, then show the other chat's draft. #7781 P1.
+  __switchSession(sid, draft, opts) {
+    // Mirror what loadSession() does on a switch: persist the composer and
+    // staged files of the chat being left to ITS draft FIRST, then show the
+    // other chat's draft. #7781 P1: a later restore of a captured command
+    // must compare against what this save left behind.
     const fromSid = ctx.S.session && ctx.S.session.session_id;
-    ctx._switchLog.push({ fromSid, savedText: getEl('msg').value, toSid: sid, draft });
+    const departingText = getEl('msg').value;
+    const departingFiles = (ctx.S.pendingFiles || []).filter(Boolean);
+    ctx._switchLog.push({ fromSid, savedText: departingText, toSid: sid, draft });
+    if (fromSid && (!opts || opts.persist !== false)) {
+      ctx._saveComposerDraftNow(fromSid, departingText, departingFiles);
+      ctx.S.pendingFiles = [];
+    }
     ctx.S.session = { session_id: sid };
     ctx.S.messages = [];
     getEl('msg').value = draft;
@@ -454,10 +485,99 @@ vm.runInContext(__MESSAGES_JS__, ctx);
         window._defaultMessageMode = 'steer';
         return out;
       };
-      // #7781 review 2026-11-23 [CORE]: the dead-run recovery strip. A steer
-      // answered fallback:"stream_dead" shows it and restores the SHORT
-      // command; its Send must start the next turn with the SAME skill body,
-      // not the literal command (literalSlash skipped the resolver).
+      // #7781 (P1 ①, greptile 2026-11-26): while the skill fetch is parked,
+      // the user (still viewing the issuing chat) retypes a NEWER draft into
+      // the composer the send cleared, then opens another chat. loadSession()
+      // persists that newer text for the issuing chat; the restore must NOT
+      // overwrite it with the captured command.
+      const runDeferredSwitchNewerDraft = async (composerText, skills, contentMap, opts) => {
+        __resetDraftSaves();
+        __resetSwitchLog();
+        __setComposer(composerText);
+        __setSkills(skills);
+        __clearSkillContent();
+        for (const k in (contentMap || {})) __setSkillContent(k, contentMap[k]);
+        __resetApiCalls();
+        __failSkillsListing(false);
+        S.session = { session_id: opts.ownerSid };
+        S.messages = [];
+        INFLIGHT = {};
+        __deferFetch(opts.defer || 'content');
+        let thrown = null;
+        const sendPromise = send(composerText).catch((e) => { thrown = String((e && e.message) || e); });
+        for (let i = 0; i < 200; i++) {
+          const reached = __apiCalls().some((c) => c && (opts.defer === 'listing'
+            ? c.path === '/api/skills'
+            : c.path.indexOf('/api/skills/content?name=') === 0));
+          if (reached) break;
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        // The user retypes a newer draft in the issuing chat, then opens
+        // another chat — the switch saves THAT newer draft first.
+        __setComposer(opts.newerDraft);
+        __switchSession(opts.switchToSid, opts.draft);
+        __settleFetch('success');
+        await sendPromise;
+        return {
+          composerAfter: __composer(),
+          messages: S.messages,
+          draftSaves: __draftSaves().slice(),
+          switchLog: __switchLog().slice(),
+          contentFetches: __apiCalls()
+            .filter((c) => c && c.path.indexOf('/api/skills/content?name=') === 0)
+            .map((c) => c.path),
+          thrown,
+        };
+      };
+      // #7781 (P1 ②, greptile 2026-11-26): the issuing chat has staged
+      // attachments when a busy skill send clears the composer; opening another
+      // chat saves those files with the departing draft. Restoring the command
+      // must carry that captured file list instead of writing files: [].
+      const runBusyDeferredSwitchStagedFiles = async (composerText, skills, contentMap, opts) => {
+        __resetDraftSaves();
+        __resetSwitchLog();
+        __setComposer(composerText);
+        __setSkills(skills);
+        __clearSkillContent();
+        for (const k in (contentMap || {})) __setSkillContent(k, contentMap[k]);
+        __resetApiCalls();
+        __resetQueue();
+        __failSkillsListing(false);
+        S.session = { session_id: opts.ownerSid };
+        S.messages = [];
+        INFLIGHT = {};
+        S.busy = true;
+        S.activeStreamId = 'run-steer-1';
+        S.pendingFiles = (opts.pendingFiles || []).map((f) => Object.assign({}, f));
+        window._defaultMessageMode = 'steer';
+        __deferFetch(opts.defer || 'content');
+        let thrown = null;
+        const sendPromise = send(composerText).catch((e) => { thrown = String((e && e.message) || e); });
+        for (let i = 0; i < 200; i++) {
+          const reached = __apiCalls().some((c) => c && (opts.defer === 'listing'
+            ? c.path === '/api/skills'
+            : c.path.indexOf('/api/skills/content?name=') === 0));
+          if (reached) break;
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        // The user opens another chat; the staged files stay with the issuing
+        // chat's departing draft.
+        __switchSession(opts.switchToSid, opts.draft);
+        __settleFetch('success');
+        await sendPromise;
+        const out = {
+          composerAfter: __composer(),
+          steerCalls: __apiCalls().filter((c) => c && c.path === '/api/chat/steer').length,
+          draftSaves: __draftSaves().slice(),
+          switchLog: __switchLog().slice(),
+          thrown,
+        };
+        S.busy = false;
+        S.activeStreamId = null;
+        S.pendingFiles = [];
+        window._defaultMessageMode = 'steer';
+        return out;
+      };
       const runDeadRunRecovery = async () => {
         __setComposer('/reviewdemo:under_score do EXACT');
         __setSkills([__UNDERSCORE_ROW__]);
@@ -534,6 +654,13 @@ vm.runInContext(__MESSAGES_JS__, ctx);
       const _busyQueue = await runBusy('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { mode: 'queue' });
       const _busySwitchContent = await runBusyDeferredSwitch('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { defer: 'content', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft' });
       const _busySwitchListing = await runBusyDeferredSwitch('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { defer: 'listing', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft' });
+      // #7781 (P1 ①, greptile 2026-11-26): while the content fetch is parked,
+      // the user retypes a NEWER draft in the issuing chat, then opens chat B.
+      // The restore must NOT clobber that newer saved draft with the command.
+      const _newerDraftContent = await runDeferredSwitchNewerDraft('/demo:skill do X', [__PLUGIN_ROW__], { 'demo:skill': 'DEMO SKILL BODY' }, { defer: 'content', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft', newerDraft: 'A brand-new draft typed mid-load' });
+      // #7781 (P1 ②, greptile 2026-11-26): staged attachments ride the issuing
+      // chat's departing draft through the switch; restore must keep them.
+      const _stagedFiles = await runBusyDeferredSwitchStagedFiles('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { defer: 'content', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft', pendingFiles: [{ name: 'report.pdf', size: 1024, type: 'application/pdf' }] });
       // #7781 (P1, greptile 2026-11-26): the switch lands while the COMMAND
       // metadata is still loading — before the idle resolver clears anything.
       const _deadRun = await runDeadRunRecovery();
@@ -556,6 +683,8 @@ vm.runInContext(__MESSAGES_JS__, ctx);
         busyQueue: _busyQueue,
         busySwitchContent: _busySwitchContent,
         busySwitchListing: _busySwitchListing,
+        newerDraftContent: _newerDraftContent,
+        stagedFiles: _stagedFiles,
         switchDuringMetadata: _switchDuringMetadata,
         deadRunRecovery: _deadRun,
       };
@@ -938,8 +1067,18 @@ def test_busy_steer_clears_the_composer_before_the_skill_fetch():
         "await _loadPluginSkillForCommand"
     ), "the clear must precede the first await"
     # A send that stops after the switch hands the command back to the chat
-    # that issued it — composer when still open, draft either way.
-    assert "_restoreCommandToOwnerChat(_busyOwnerSid,_busySteerRestoreText)" in segment
+    # that issued it — composer when still open, draft either way. #7781
+    # greptile 2026-11-26: the restore call carries the owning chat's captured
+    # files (②) and its send-time draft revision (①).
+    assert (
+        "_restoreCommandToOwnerChat(_busyOwnerSid,_busySteerRestoreText,"
+        "/* ② */_failedSendFilesSnapshot,/* ① */_busyOwnerDraftRev)"
+        in segment
+    ), segment
+    # The revision is snapshotted before the composer is cleared.
+    assert segment.index("const _busyOwnerDraftRev=") < segment.index(
+        "$('msg').value=''"
+    ), segment
 
 
 def test_idle_plugin_resolver_clears_the_composer_before_the_listing_fetch():
@@ -955,5 +1094,65 @@ def test_idle_plugin_resolver_clears_the_composer_before_the_listing_fetch():
     assert segment.index("$('msg').value='';autoResize();") < segment.index(
         "await api('/api/skills')"
     ), "the clear must precede the listing fetch"
-    # Every owner-fence stop hands the cleared command back to its own chat.
-    assert MESSAGES_JS.count("_restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text)") == 4
+    # Every owner-fence stop hands the cleared command back to its own chat,
+    # carrying the captured files (②) and the send-time draft revision (①)
+    # (#7781 greptile 2026-11-26).
+    assert MESSAGES_JS.count(
+        "_restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text,"
+        "/* ② */_slashOwner&&_slashOwner._files,/* ① */_slashOwner&&_slashOwner._draftRev)"
+    ) == 4
+
+
+# ── #7781 (P1 ①, greptile 2026-11-26): newer drafts get overwritten ─────────────────
+# While the skill fetch is parked, the user can type a new draft in chat A and
+# switch to chat B. loadSession() saves that newer draft for A, but the
+# restore overwrites it with the captured command. The restore must compare
+# against the saved draft state before writing.
+
+
+def test_newer_draft_typed_during_load_is_not_overwritten_by_restore():
+    """The user retypes a NEWER draft into the issuing chat while the content
+    fetch is parked, then opens chat B. The switch saves that newer draft for
+    chat A; the stopped send's restore must NOT clobber it with the old
+    command — returning to A shows the NEWER draft (greptile P1 ①)."""
+    result = _run_send_harness()["newerDraftContent"]
+    # The race window was genuinely exercised: the content fetch happened and
+    # the send stopped before dispatch.
+    assert result["contentFetches"] == [
+        "/api/skills/content?name=demo%3Askill&session_id=sess-A"
+    ], result
+    assert result["composerAfter"] == "chat B draft", result
+    assert result["messages"] == [], result
+    # The issuing chat's switched-away save recorded the NEWER draft...
+    assert result["switchLog"][0]["savedText"] == "A brand-new draft typed mid-load", result
+    # ...and the restore did NOT overwrite it with the old command.
+    saves = [s for s in result["draftSaves"] if s["sid"] == "sess-A"]
+    assert saves, result
+    assert saves[-1]["text"] == "A brand-new draft typed mid-load", result
+    assert result["thrown"] is None, result
+
+
+# ── #7781 (P1 ②, greptile 2026-11-26): saved attachments disappear ──────────────────
+# The restore always saves files: []. Busy skill sends can have staged files,
+# and switching chats saves those files with the departing draft. Restoring the
+# command then replaces the saved file list with an empty one, losing the
+# attachments from the unsent draft.
+
+
+def test_restore_keeps_the_owning_chats_staged_files():
+    """Staged attachments on the issuing chat's departing draft must survive
+    the restore: the command is written back AND the captured file list rides
+    the save instead of files: [] (greptile P1 ②)."""
+    result = _run_send_harness()["stagedFiles"]
+    # The switch happened with a busy steer parked on the content fetch.
+    assert result["steerCalls"] == 0, result
+    assert result["composerAfter"] == "chat B draft", result
+    assert result["thrown"] is None, result
+    saves = [s for s in result["draftSaves"] if s["sid"] == "sess-A"]
+    assert saves, result
+    # The LAST draft save for chat A must carry the staged file with the
+    # command — files: [] would have lost the attachment.
+    last = saves[-1]
+    assert last["text"] == "/reviewdemo:under_score do EXACT", result
+    assert len(last["files"]) == 1, result
+    assert last["files"][0]["name"] == "report.pdf", result
