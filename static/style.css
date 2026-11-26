@@ -3308,6 +3308,16 @@
   .composer-footer.cf-burger .composer-mobile-config-action{flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
   .composer-footer.cf-burger .composer-mobile-context-action{flex:1 0 100%;}
   .composer-footer.cf-burger .ctx-indicator-wrap{display:none!important;}
+  /* #9101: a ⚡-only YOLO pill: the hide setting while YOLO is on (it can't be
+     hidden then), and every pill at the narrowest stage. Its hit area grows to
+     44px tall with an inset pseudo-element; a wider box would cost the
+     mobile-config button its room. */
+  .yolo-pill.yolo-pill-compact .yolo-pill-label,
+  .composer-footer.cf-burger .yolo-pill-label{display:none;}
+  .yolo-pill.yolo-pill-compact,
+  .composer-footer.cf-burger .yolo-pill{position:relative;}
+  .yolo-pill.yolo-pill-compact::after,
+  .composer-footer.cf-burger .yolo-pill::after{content:'';position:absolute;left:0;right:0;top:50%;height:44px;transform:translateY(-50%);}
 
   /* Show session-toolsets chip ONLY when the composer-footer container is wide
      enough to comfortably accommodate it (workspace+model+reasoning+profile+
@@ -6546,8 +6556,48 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 .msg-row[data-role="user"] .msg-body code { color: var(--user-bubble-text); background: rgba(0,0,0,.1); }
 .msg-row[data-role="user"] .msg-body a { color: var(--user-bubble-text); text-decoration: underline; }
 .msg-row[data-role="user"] .msg-files { padding-left: 0; margin-left: 0; justify-content: flex-end; }
-.msg-row[data-role="user"][data-editing="1"] .msg-edit-area { background: var(--user-bubble-bg); border-color: var(--user-bubble-border); color: var(--user-bubble-text); box-shadow: 0 0 0 3px var(--focus-ring); }
+.msg-row[data-role="user"][data-editing="1"] .msg-edit-area { background: var(--user-bubble-bg); border-color: var(--user-bubble-border); color: var(--user-bubble-text); caret-color: var(--user-bubble-text); box-shadow: 0 0 0 3px var(--focus-ring); }
 .msg-row[data-role="user"][data-editing="1"] .msg-edit-area::placeholder { color: var(--user-bubble-placeholder); }
+/* hwc:css-selection — Inline-Edit is a textarea. A ~20% black/white tint
+   sits on the bubble fill (slate accent, translucent dark fills) and the
+   selection disappears. Invert the bubble colors instead. Dark-mode fills
+   are often translucent, so the selected text uses the opaque page background.
+   ::selection and ::-moz-selection must be separate rules: grouping them makes
+   Chromium drop the whole rule, so the faint page ::selection wins. */
+.msg-row[data-role="user"][data-editing="1"] .msg-edit-area::selection {
+  background: var(--user-bubble-text);
+  background-color: var(--user-bubble-text);
+  color: var(--user-bubble-bg);
+}
+.msg-row[data-role="user"][data-editing="1"] .msg-edit-area::-moz-selection {
+  background: var(--user-bubble-text);
+  background-color: var(--user-bubble-text);
+  color: var(--user-bubble-bg);
+}
+:root.dark .msg-row[data-role="user"][data-editing="1"] .msg-edit-area::selection {
+  background: var(--user-bubble-text);
+  background-color: var(--user-bubble-text);
+  color: var(--bg);
+}
+:root.dark .msg-row[data-role="user"][data-editing="1"] .msg-edit-area::-moz-selection {
+  background: var(--user-bubble-text);
+  background-color: var(--user-bubble-text);
+  color: var(--bg);
+}
+/* Geist Contrast light paints the bubble with the blue accent and sets
+   --user-bubble-text to #111. Inverting those tokens is #0070f3 on #111,
+   under 4.5:1. Use this skin's opaque black/white pair (--strong / --bg).
+   ::selection and ::-moz-selection stay in separate rules. */
+:root[data-skin="geist-contrast"]:not(.dark) .msg-row[data-role="user"][data-editing="1"] .msg-edit-area::selection {
+  background: var(--strong);
+  background-color: var(--strong);
+  color: var(--bg);
+}
+:root[data-skin="geist-contrast"]:not(.dark) .msg-row[data-role="user"][data-editing="1"] .msg-edit-area::-moz-selection {
+  background: var(--strong);
+  background-color: var(--strong);
+  color: var(--bg);
+}
 
 /* Turn boundary: right alignment already separates user turns — keep only vertical spacing */
 .msg-row + .msg-row[data-role="user"] {
