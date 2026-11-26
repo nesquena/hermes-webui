@@ -2759,6 +2759,23 @@ def _start_server_side_wakeup_turn(
                         wakeup_prompt,
                         consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
                     )
+                if (
+                    (resp or {}).get("error") == "compression_continuation_unconfirmed"
+                    and not retry_attempt
+                ):
+                    # The session is durably sealed but its continuation tip
+                    # could not be confirmed on this read (rotation mid-write,
+                    # tip churn, failed read). The sealed parent never gets
+                    # another turn teardown, so the re-deferred prompt would
+                    # otherwise wait on a drain that never runs. Schedule the
+                    # bounded one-shot retry drain (#7680 machinery): by then
+                    # the rotation write has landed and the drain's lineage
+                    # re-keying delivers it. Bounded by the attempt marker —
+                    # the retry drain runs with retry_attempt=1 and will not
+                    # reschedule, so a persistently unconfirmable tip parks
+                    # the prompt instead of looping.
+                    from api.routes import _schedule_deferred_wakeup_retry
+                    _schedule_deferred_wakeup_retry(session_id)
                 logger.debug(
                     "server-side wakeup raced an active turn for session %s; "
                     "re-deferred for redelivery on next teardown/turn",

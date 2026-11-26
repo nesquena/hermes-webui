@@ -300,3 +300,183 @@ def test_sealed_parent_with_closed_continuation_is_refused(_stub_routes, monkeyp
 
     conn.close()
     db.close()
+
+
+class _ChurnReader:
+    """Fake persistence reader whose tip read churns between the two calls.
+
+    Reproduces the transient ``(True, None)`` the Greptile P1 on #9380 called
+    out: the seal is real but the tip could not be confirmed on this pass
+    (a newer rotation landed mid-read). The same shape covers a read that
+    raises after the seal was found.
+    """
+
+    def __init__(self, *, churn=True, raises=False):
+        self._tip_calls = 0
+        self._churn = churn
+        self._raises = raises
+
+    def get_session(self, sid):
+        if sid == "sealedparent":
+            return {
+                "id": sid,
+                "end_reason": "compression",
+                "profile_name": "default",
+            }
+        return {
+            "id": sid,
+            "end_reason": None,
+            "profile_name": "default",
+            "source": "tui",
+        }
+
+    def get_compression_tip(self, sid):
+        self._tip_calls += 1
+        if self._raises:
+            raise RuntimeError("database is locked")
+        if self._churn and self._tip_calls > 1:
+            return "childtwo"
+        return "childone"
+
+    def close(self):
+        # Churn is per-pass, not per-connection: every seal_state call must
+        # see the same first-read/second-read divergence.
+        self._tip_calls = 0
+
+
+def _seal_state_for(reader, monkeypatch, tmp_path):
+    from api import compression_continuation as cc
+    from api import profiles
+
+    (tmp_path / "state.db").touch()
+    monkeypatch.setattr(
+        profiles, "_resolve_profile_home_for_name", lambda name: str(tmp_path)
+    )
+    monkeypatch.setattr(cc, "open_compression_reads", lambda _p: reader)
+    return cc.compression_seal_state(
+        _FakeSession("sealedparent", profile="default")
+    )
+
+
+def test_seal_state_splits_confirmed_closure_from_transient(tmp_path, monkeypatch):
+    """compression_seal_state must not conflate churn/read-failure with closure."""
+    sealed, tip, state = _seal_state_for(_ChurnReader(churn=False), monkeypatch, tmp_path)
+    assert (sealed, tip, state) == (True, "childone", "open")
+
+    sealed, tip, state = _seal_state_for(_ChurnReader(churn=True), monkeypatch, tmp_path)
+    assert (sealed, tip, state) == (True, None, "unconfirmed")
+
+    sealed, tip, state = _seal_state_for(_ChurnReader(raises=True), monkeypatch, tmp_path)
+    assert (sealed, tip, state) == (True, None, "unconfirmed")
+
+    # The 2-tuple wrapper keeps its exact previous semantics for old callers.
+    from api.compression_continuation import durable_compression_continuation
+
+    assert durable_compression_continuation(
+        _FakeSession("sealedparent", profile="default")
+    ) == (True, None)
+
+
+def test_sealed_parent_with_unconfirmable_tip_refuses_retryably(
+    _stub_routes, monkeypatch, tmp_path
+):
+    """Greptile P1 on #9380: a transient null tip must not become a 404.
+
+    A 404 at admission is terminal for the wakeup callers — they drop the
+    prompt AND clear every queued wakeup for the session. When the tip merely
+    could not be confirmed on this read the refusal is a 409 so the prompt
+    survives for the bounded retry drain.
+    """
+    _seal_state_for(_ChurnReader(churn=True), monkeypatch, tmp_path)
+
+    routes_mod, started = _stub_routes
+    parent = _FakeSession("sealedparent", snap=True, profile="default", updated=100.0)
+    sessions = {parent.session_id: parent}
+    routes_mod.get_session = lambda sid: sessions[sid]
+    routes_mod.SESSIONS = collections.OrderedDict(sessions)
+
+    resp = routes_mod.start_session_turn(
+        "sealedparent", "background process finished", source="process_wakeup"
+    )
+
+    assert resp == {
+        "error": "compression_continuation_unconfirmed",
+        "_status": 409,
+    }
+    assert started == []
+
+
+def test_unconfirmed_refusal_requeues_prompt_and_schedules_bounded_retry(
+    _stub_routes, monkeypatch
+):
+    """The wakeup caller must re-defer AND arm one bounded retry drain.
+
+    A sealed parent never gets another turn teardown, so a plain re-defer
+    would park the prompt on a key nothing drains again. The 409 branch
+    schedules the #7680 one-shot retry timer — but only for the first
+    attempt: the retry drain runs with retry_attempt=1 and must not
+    reschedule, so a persistently unconfirmable tip parks instead of looping.
+    """
+    import time
+
+    routes_mod, started = _stub_routes
+    import api.background_process as bp_mod
+    from api import config as config_mod
+
+    def _unconfirmed_start(sid, *args, **kwargs):
+        started.append((sid, kwargs.get("source")))
+        return {
+            "_status": 409,
+            "error": "compression_continuation_unconfirmed",
+        }
+
+    scheduled = []
+    monkeypatch.setattr(routes_mod, "start_session_turn", _unconfirmed_start)
+    monkeypatch.setattr(
+        routes_mod,
+        "_schedule_deferred_wakeup_retry",
+        lambda sid, **kwargs: scheduled.append(sid),
+    )
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+
+    bp_mod._start_server_side_wakeup_turn(
+        "parent000001",
+        "[IMPORTANT: Background process proc-y completed (exit_code=0).]",
+        process_id="proc-y",
+    )
+
+    def _wait_for(predicate):
+        deadline = time.time() + 5
+        while time.time() < deadline and not predicate():
+            time.sleep(0.05)
+
+    def _child_entries():
+        with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+            return list(config_mod.DEFERRED_PROCESS_WAKEUPS.get("child0000001") or [])
+
+    _wait_for(lambda: scheduled or _child_entries())
+    assert scheduled == ["child0000001"], (
+        "the retry timer must be armed once, keyed to the live continuation"
+    )
+    entries = _child_entries()
+    assert entries and entries[0]["wakeup_prompt"].startswith("[IMPORTANT:"), (
+        "the prompt must be re-deferred under the continuation key, not dropped"
+    )
+
+    # Bounded: the retry drain's own delivery (retry_attempt=1) must NOT
+    # schedule another timer.
+    scheduled.clear()
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+    bp_mod._start_server_side_wakeup_turn(
+        "parent000001",
+        "[IMPORTANT: Background process proc-z completed (exit_code=0).]",
+        process_id="proc-z",
+        retry_attempt=1,
+    )
+    _wait_for(_child_entries)
+    assert scheduled == [], "the retry drain must not reschedule itself"
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()

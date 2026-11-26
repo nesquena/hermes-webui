@@ -31783,21 +31783,39 @@ def start_session_turn(
         # session this file's body names. The wakeup callers drop a 404.
         return {"error": "Session not found", "_status": 404}
 
-    # A durably sealed parent with no safe continuation tip (e.g. its
-    # continuation was explicitly closed by session_reset) is not a legal
+    # A durably sealed parent with no safe continuation tip is not a legal
     # turn target: the retarget helper below cannot name a tip, and starting
     # on the sealed snapshot would resurrect archived history and re-trigger
     # the ownership collision this admission exists to prevent. Refuse before
     # constructing a turn. Legacy orphan snapshots without durable sealing
     # authority keep the existing bounded child hunt.
+    #
+    # The refusal splits by CONFIRMATION, not just by a null tip
+    # (#9380 review, greptile P1): a 404 here is terminal for the wakeup
+    # callers — they drop the prompt AND clear every queued wakeup for the
+    # session. Only a tip that was read cleanly and is confirmed closed or
+    # deleted earns that. When the tip merely could not be confirmed on this
+    # pass (rotation mid-write, tip churn, failed read) the refusal is a 409:
+    # the wakeup caller re-defers the prompt and schedules one bounded retry
+    # drain, so a transient read never strands or destroys a real wakeup.
     try:
-        from api.compression_continuation import durable_compression_continuation
-        _sealed_parent, _durable_tip = durable_compression_continuation(s)
+        from api.compression_continuation import compression_seal_state
+        _sealed_parent, _durable_tip, _seal_state = compression_seal_state(s)
     except Exception:
-        _sealed_parent, _durable_tip = False, None
+        _sealed_parent, _durable_tip, _seal_state = False, None, "unsealed"
     if _sealed_parent and not _durable_tip:
+        if _seal_state == "unconfirmed":
+            logger.info(
+                "start_session_turn: %s is durably sealed but its continuation "
+                "could not be confirmed on this read; refusing retryably",
+                session_id,
+            )
+            return {
+                "error": "compression_continuation_unconfirmed",
+                "_status": 409,
+            }
         logger.warning(
-            "start_session_turn: %s is durably sealed with no safe "
+            "start_session_turn: %s is durably sealed with a confirmed-closed "
             "continuation; refusing to start a server-side turn on it",
             session_id,
         )
