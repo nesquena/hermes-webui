@@ -3919,10 +3919,67 @@ function _sessionSourceTabCount(filter, renderedWebuiSessionCount, renderedCliSe
   return filter === 'cli' ? renderedCliSessionCount : renderedWebuiSessionCount;
 }
 
+// The sidebar "+" is a real link so a middle/Ctrl/Meta/Shift click can open a
+// new chat in a background tab (#7824). That new tab boots with no memory of
+// the source tab's project filter, so the href carries the selected project as
+// a one-shot `project` param; the new tab applies it before creating the
+// conversation (boot.js -> _consumeNewChatProjectParamFromLocation), which
+// keeps the project's pinned workspace/model bindings instead of silently
+// creating the chat outside the project the user was looking at.
+function _newChatLinkHref(){
+  let projectId='';
+  if(_activeProject===NO_PROJECT_FILTER) projectId=NO_PROJECT_FILTER;
+  else if(_activeProject) projectId=String(_activeProject);
+  return './?action=new-chat'+(projectId?`&project=${encodeURIComponent(projectId)}`:'');
+}
+function _syncNewChatLinkHref(){
+  try{
+    const btn=(typeof $==='function')?$('btnNewChat'):null;
+    if(!btn||btn.tagName!=='A') return;
+    const href=_newChatLinkHref();
+    if(btn.getAttribute('href')!==href) btn.setAttribute('href',href);
+  }catch(_e){}
+}
+function _resolveNewChatProjectIntent(raw){
+  const value=String(raw||'');
+  if(!value) return null;
+  if(value===NO_PROJECT_FILTER) return NO_PROJECT_FILTER;
+  const projects=(typeof _allProjects!=='undefined'&&Array.isArray(_allProjects))?_allProjects:[];
+  const proj=projects.find(p=>p&&p.project_id===value);
+  if(!proj) return null;
+  // Profile boundary, same rule as newSession's binding merge: never apply a
+  // project that belongs to a different profile.
+  if(typeof _profileMatchesActiveProfile==='function'
+     && !_profileMatchesActiveProfile(proj.profile,S.activeProfile)) return null;
+  return value;
+}
+function _consumeNewChatProjectParamFromLocation(){
+  if(typeof window==='undefined'||!window.location||!window.history
+     ||typeof window.history.replaceState!=='function') return null;
+  let raw=null;
+  try{
+    const current=new URL(window.location.href);
+    if(!current.searchParams.getAll('action').includes('new-chat')) return null;
+    if(!current.searchParams.has('project')) return null;
+    raw=current.searchParams.get('project');
+    current.searchParams.delete('project');
+    const after=current.searchParams.toString();
+    window.history.replaceState(window.history.state||null,'',
+      current.pathname+(after?`?${after}`:'')+(current.hash||''));
+  }catch(_e){ return null; }
+  const applied=_resolveNewChatProjectIntent(raw);
+  if(applied){
+    _activeProject=applied;
+    _syncNewChatLinkHref();
+  }
+  return applied;
+}
+
 function _setActiveProjectFilter(projectId) {
   const next = projectId === NO_PROJECT_FILTER ? NO_PROJECT_FILTER : (projectId || null);
-  if (_activeProject === next) return;
+  if (_activeProject === next) { _syncNewChatLinkHref(); return; }
   _activeProject = next;
+  _syncNewChatLinkHref();
   renderSessionListFromCache();
   void renderSessionList({deferWhileInteracting:false});
 }
@@ -3932,6 +3989,7 @@ function _setSessionSourceFilter(filter) {
   if (_sessionSourceFilter === next) return;
   _sessionSourceFilter = next;
   _activeProject = null;
+  _syncNewChatLinkHref();
   _selectedSessions.clear();
   _sessionSelectMode = false;
   try { localStorage.setItem('hermes-session-source-filter', next); } catch (_e) {}
@@ -14889,6 +14947,7 @@ async function _confirmDeleteProject(proj){
   try {
     await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id})});
     if(_activeProject===proj.project_id) _activeProject=null;
+    _syncNewChatLinkHref();
     await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
     showToast('Project deleted');
   } catch(e) {

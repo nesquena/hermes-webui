@@ -4560,6 +4560,16 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     }
   };
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
+  // #7824 review P1: a middle/Ctrl/Meta/Shift click on the sidebar "+" is a
+  // real link to the one-shot new-chat URL, and it carries the project the
+  // source tab was filtered to. Apply that project BEFORE the new-chat branch
+  // below creates the conversation, so the new tab keeps the project's pinned
+  // workspace/model instead of starting outside the project (newSession reads
+  // the active project filter for its bindings). The param is one-shot: it is
+  // stripped here so it cannot leak into the session URL.
+  if(!urlSession&&typeof _consumeNewChatProjectParamFromLocation==='function'){
+    _consumeNewChatProjectParamFromLocation();
+  }
   const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
     ? window.HermesPWA.launchAction()
     : null;

@@ -545,3 +545,195 @@ def test_project_chip_quick_create_swallows_duplicate_inflight_rejections():
     assert out["filterProjectId"] == "keep-me"
     assert {"type": "set-filter", "projectId": "project-123"} not in out["calls"]
     assert out["toasts"] == ["New conversation already in progress"]
+
+
+# ── #7824 review P1: the middle-click new-chat link must carry the selected
+# project, and the new tab must apply it before creating the conversation ──
+
+BOOT_JS = ROOT / "static" / "boot.js"
+
+_NEW_CHAT_LINK_DRIVER = r"""
+const fs = require('fs');
+const [path, argsJson] = process.argv.slice(-2);
+const args = JSON.parse(argsJson);
+const src = fs.readFileSync(path, 'utf8');
+
+function extractFunction(source, name) {
+  const marker = `function ${name}(`;
+  const start = source.indexOf(marker);
+  if (start < 0) throw new Error(name + ' not found');
+  const brace = source.indexOf('{', start);
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error('function body not closed for ' + name);
+}
+
+let replacedUrl = null;
+const anchor = {
+  tagName: 'A',
+  attrs: { href: args.initialHref || './?action=new-chat' },
+  getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attrs, name) ? this.attrs[name] : null; },
+  setAttribute(name, value) { this.attrs[name] = String(value); },
+};
+
+globalThis.window = {
+  location: { href: args.locationHref },
+  history: { state: null, replaceState(_state, _title, url) { replacedUrl = url; } },
+};
+globalThis.document = { baseURI: 'http://example.test/' };
+globalThis.$ = (id) => (id === 'btnNewChat' ? anchor : null);
+globalThis.NO_PROJECT_FILTER = '__none__';
+globalThis.S = { activeProfile: args.activeProfile || 'default' };
+globalThis._allProjects = args.allProjects || [];
+globalThis._profileMatchesActiveProfile = (a, b) => (a || 'default') === (b || 'default');
+globalThis._activeProject = Object.prototype.hasOwnProperty.call(args, 'activeProject') ? args.activeProject : null;
+
+eval(extractFunction(src, '_newChatLinkHref'));
+eval(extractFunction(src, '_syncNewChatLinkHref'));
+eval(extractFunction(src, '_resolveNewChatProjectIntent'));
+eval(extractFunction(src, '_consumeNewChatProjectParamFromLocation'));
+
+let consumed = null;
+if (args.consume) consumed = _consumeNewChatProjectParamFromLocation();
+console.log(JSON.stringify({
+  href: _newChatLinkHref(),
+  anchorHref: anchor.attrs.href,
+  activeProject: globalThis._activeProject,
+  consumed: consumed,
+  replacedUrl: replacedUrl,
+}));
+"""
+
+
+def _run_new_chat_link_case(
+    active_project=None,
+    location_href="http://example.test/",
+    consume=False,
+    all_projects=None,
+    active_profile="default",
+):
+    assert NODE is not None
+    payload = {
+        "activeProject": active_project,
+        "locationHref": location_href,
+        "consume": consume,
+        "allProjects": all_projects or [],
+        "activeProfile": active_profile,
+    }
+    result = subprocess.run(
+        [NODE, "-e", _NEW_CHAT_LINK_DRIVER, str(SESSIONS_JS), json.dumps(payload)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"node driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}"
+        )
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+_PROJECT_ALPHA = [{"project_id": "proj-alpha", "profile": "default"}]
+_PROJECT_FOREIGN = [{"project_id": "proj-alpha", "profile": "work"}]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_chat_link_href_carries_active_project():
+    out = _run_new_chat_link_case(active_project="proj-alpha")
+    assert out["href"] == "./?action=new-chat&project=proj-alpha"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_chat_link_href_stays_plain_without_project_filter():
+    out = _run_new_chat_link_case(active_project=None)
+    assert out["href"] == "./?action=new-chat"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_chat_link_href_carries_unassigned_filter():
+    """The sidebar's "No project" view is a real filter too: a new tab must not
+    silently auto-assign the conversation to some project."""
+    out = _run_new_chat_link_case(active_project="__none__")
+    assert out["href"] == "./?action=new-chat&project=__none__"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_chat_project_param_applies_project_before_creation():
+    out = _run_new_chat_link_case(
+        location_href="http://example.test/?action=new-chat&project=proj-alpha",
+        consume=True,
+        all_projects=_PROJECT_ALPHA,
+    )
+    assert out["consumed"] == "proj-alpha"
+    assert out["activeProject"] == "proj-alpha"
+    # One-shot: the param must not survive into the session URL.
+    assert out["replacedUrl"] == "/?action=new-chat"
+    # The new tab's own "+" keeps carrying the project for the next gesture.
+    assert out["anchorHref"] == "./?action=new-chat&project=proj-alpha"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_chat_project_param_ignores_unknown_project():
+    out = _run_new_chat_link_case(
+        location_href="http://example.test/?action=new-chat&project=ghost",
+        consume=True,
+        all_projects=_PROJECT_ALPHA,
+    )
+    assert out["consumed"] is None
+    assert out["activeProject"] is None
+    assert out["replacedUrl"] == "/?action=new-chat"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_chat_project_param_rejects_foreign_profile_project():
+    out = _run_new_chat_link_case(
+        location_href="http://example.test/?action=new-chat&project=proj-alpha",
+        consume=True,
+        all_projects=_PROJECT_FOREIGN,
+        active_profile="default",
+    )
+    assert out["consumed"] is None
+    assert out["activeProject"] is None
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_chat_project_param_needs_the_new_chat_action():
+    """A bare ?project= URL is not ours: leave it alone instead of silently
+    turning it into a sidebar filter."""
+    out = _run_new_chat_link_case(
+        location_href="http://example.test/?project=proj-alpha",
+        consume=True,
+        all_projects=_PROJECT_ALPHA,
+    )
+    assert out["consumed"] is None
+    assert out["activeProject"] is None
+    assert out["replacedUrl"] is None
+
+
+def test_project_filter_changes_sync_the_new_chat_link():
+    src = _read(SESSIONS_JS)
+    filter_body = _extract_function(src, "_setActiveProjectFilter")
+    assert "_syncNewChatLinkHref()" in filter_body
+    source_body = _extract_function(src, "_setSessionSourceFilter")
+    assert "_syncNewChatLinkHref()" in source_body
+
+
+def test_boot_applies_new_chat_project_before_creating_the_conversation():
+    boot = _read(BOOT_JS)
+    consume_at = boot.find("_consumeNewChatProjectParamFromLocation()")
+    launch_at = boot.find("if(_shouldStartFreshPwaChat(pwaLaunchAction,urlSession))")
+    create_at = boot.find("await newSession(true)", launch_at if launch_at >= 0 else 0)
+    assert consume_at >= 0, "boot must consume the new-chat project param"
+    assert launch_at >= 0, "boot new-chat launch branch not found"
+    assert create_at >= 0, "boot must create the launched conversation"
+    assert consume_at < launch_at < create_at, (
+        "the project intent must be applied before the new chat is created"
+    )
+
