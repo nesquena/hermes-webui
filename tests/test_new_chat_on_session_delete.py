@@ -135,6 +135,33 @@ class TestDeleteFlowSource:
             "the batch delete block must route through the shared helper"
         )
 
+    def test_delete_paths_drop_the_deleted_conversations_selections(self):
+        """Greptile P1 (2026-11-26T20:58:43Z): both delete paths clear S.session
+        before starting the replacement, so loadSession() sees no outgoing
+        session and skips its pending-selection clear. The selected quotes must
+        be dropped at the delete site instead."""
+        src = read('static/sessions.js')
+        for label, start_marker, end_marker in (
+            ('single', 'async function deleteSession(sid, beforeDelete=null)', '// ── Project helpers'),
+            ('batch', 'async function _deleteSelectedSessionsBatch(', '\nfunction _showBatchProjectPicker('),
+        ):
+            start = src.find(start_marker)
+            assert start != -1, f'{label} delete block not found'
+            end = src.find(end_marker, start)
+            assert end != -1, f'{label} delete block end not found'
+            block = src[start:end]
+            clear_at = block.find('window._clearPendingSelections')
+            null_at = block.find('S.session=null')
+            assert clear_at != -1, (
+                f'the {label} delete must clear the deleted conversation\'s '
+                'pending selections'
+            )
+            assert null_at != -1, f'the {label} delete must null S.session'
+            assert clear_at < null_at, (
+                f'the {label} delete must clear selections before S.session is '
+                'nulled, or the replacement inherits them'
+            )
+
     def test_helper_restores_draft_else_starts_new_session(self):
         sess_src = read('static/sessions.js')
         start = sess_src.find('async function _startNewChatAfterDeletingCurrentSession(')
@@ -254,7 +281,12 @@ const out = {
   rememberedKeyAfter: null,
   newSessionOptions: null,
   sendButtonUpdates: 0,
+  pendingClears: 0,
 };
+
+// The real clear lives in static/messages.js; record that the delete flow uses
+// it so a replacement conversation can never inherit the deleted one's quotes.
+window._clearPendingSelections = () => { out.pendingClears += 1; };
 
 // ---- stubs the extracted deleteSession references ----
 var _pendingSessionReflowPositions = null;
@@ -483,6 +515,10 @@ class TestDeleteFlowBehaviour:
         assert out["busyAfter"] is False
         assert out["activeStreamIdAfter"] is None
         assert out["sendButtonUpdates"] > 0
+        assert out["pendingClears"] == 1, (
+            "deleting the open conversation must drop its pending selections "
+            "before the replacement chat starts"
+        )
 
     def test_delete_open_session_reuses_remembered_draft_when_present(self, driver_path):
         out = _run_scenario(driver_path, "flag_on_draft_restored")
@@ -494,6 +530,13 @@ class TestDeleteFlowBehaviour:
         assert out["workspaceFlagAtNewSession"] is None, (
             "the workspace one-shot flag must not leak when the draft path wins"
         )
+        # Greptile P1 (2026-11-26T20:58:43Z): the restored draft replaces the
+        # deleted conversation through loadSession() with S.session already
+        # null, so the delete site must be the one that drops its quotes.
+        assert out["pendingClears"] == 1, (
+            "restoring a remembered draft must not carry the deleted "
+            "conversation's selected quotes into it"
+        )
 
     def test_delete_open_session_loads_most_recent_when_optin_off(self, driver_path):
         out = _run_scenario(driver_path, "flag_off_current_deleted")
@@ -503,6 +546,10 @@ class TestDeleteFlowBehaviour:
         )
         assert out["newSessionCalls"] == 0
         assert out["restoreCalls"] == 0
+        assert out["pendingClears"] == 1, (
+            "the shipped fallback also replaces the conversation without "
+            "loadSession() seeing an outgoing session"
+        )
 
     def test_deleting_other_session_unaffected_when_optin_on(self, driver_path):
         out = _run_scenario(driver_path, "flag_on_other_deleted")
@@ -512,6 +559,10 @@ class TestDeleteFlowBehaviour:
         )
         assert out["loadSessionArgs"] == []
         assert out["sessionsFetchCalls"] == 0
+        assert out["pendingClears"] == 0, (
+            "deleting some other conversation must leave the open composer's "
+            "selected quotes alone"
+        )
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -565,6 +616,10 @@ class TestDraftWorkspaceAwareness:
         out = _run_scenario(driver_path, "batch_flag_on_draft_same_ws")
         assert out["loadSessionArgs"] == ["remembered-1"]
         assert out["newSessionCalls"] == 0
+        assert out["pendingClears"] == 1, (
+            "the batch delete path must drop the deleted conversation's "
+            "selected quotes before restoring the draft"
+        )
 
     def test_pending_draft_lookup_cannot_steal_newer_navigation(self, driver_path):
         out = _run_scenario(driver_path, "flag_on_delayed_draft_navigate_b")

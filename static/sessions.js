@@ -6435,6 +6435,10 @@ async function _deleteSelectedSessionsBatch(){
     const deletedWorkspace=S.session.workspace||null;
     const startNewChatAfterDelete=typeof window!=='undefined'&&window._newChatOnSessionDelete===true;
     const deleteNewChatOwner=startNewChatAfterDelete?_deleteNewChatOwnerSnapshot():null;
+    // #7898 review: same dropped-selection leak as the single-delete path —
+    // S.session is null before either replacement runs, so loadSession() cannot
+    // tell that the user left the deleted conversation.
+    if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     S.session=null;S.messages=[];S.entries=[];S.busy=false;S.activeStreamId=null;
     if(typeof updateSendBtn==='function') updateSendBtn();
     localStorage.removeItem('hermes-webui-session');
@@ -12897,6 +12901,11 @@ async function deleteSession(sid, beforeDelete=null){
     const _deletedWorkspace=(S.session&&S.session.workspace)||(session&&session.workspace)||null;
     const _startNewChatAfterDelete=typeof window!=='undefined'&&window._newChatOnSessionDelete===true;
     const _deleteNewChatOwner=_startNewChatAfterDelete?_deleteNewChatOwnerSnapshot():null;
+    // #7898 review: both branches below replace the conversation without
+    // loadSession() seeing an outgoing session (S.session is null by then), so
+    // its pending-selection clear never runs. Drop the deleted conversation's
+    // selected quotes here so they cannot ride into whatever replaces it.
+    if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     S.session=null;S.messages=[];S.entries=[];S.busy=false;S.activeStreamId=null;
     if(typeof updateSendBtn==='function') updateSendBtn();
     if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
