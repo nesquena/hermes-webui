@@ -11974,6 +11974,58 @@ def _load_cli_sessions_uncached(
                 _cli_workspace_cache[0] = str(get_last_workspace())
         return _cli_workspace_cache[0]
 
+    # #8450: the agent-visible working directory of the session itself.
+    #
+    # get_last_workspace() resolves the ACTIVE workspace of the WebUI host and
+    # rejects any path that does not exist there — but a session created by an
+    # agent in another container names a path that is absent on this host by
+    # design (e.g. ``/workspace``). Such a row used to be projected with the
+    # host-local fallback, so the file-ops view later resolved (and read, and
+    # deleted) inside an unrelated project directory.
+    #
+    # The agent's own choice is preserved instead, but ONLY when it names a
+    # path this host can honour: an unmapped or untrusted agent path falls
+    # back to the previous behaviour rather than widening the trust boundary.
+    # The AGENT-VISIBLE name is what the row carries (the file-ops view
+    # translates it under the owner profile's authority, exactly like every
+    # other agent-visible workspace), so this tier only decides WHICH name
+    # the row shows — never where the bytes live.
+    _agent_workspace_cache: dict = {}
+    def _row_workspace(row: dict) -> str:
+        """The agent-visible workspace of *row*, or the host-local fallback."""
+        agent_cwd = str((row or {}).get('cwd') or '').strip()
+        if not agent_cwd:
+            return _cli_workspace()
+        cached = _agent_workspace_cache.get(agent_cwd)
+        if cached is not None:
+            return cached or _cli_workspace()
+        resolved = ''
+        try:
+            from api.workspace import (
+                resolve_trusted_workspace,
+                resolve_webui_workspace,
+                workspace_translation_applies,
+            )
+            if workspace_translation_applies(agent_cwd, _cli_profile):
+                # A declared map translates the agent root onto its WebUI-local
+                # root; resolve_webui_workspace() re-validates it under the
+                # profile's trust, so a map entry can never widen it.
+                resolve_webui_workspace(agent_cwd, profile=_cli_profile)
+                resolved = agent_cwd
+            else:
+                try:
+                    resolve_trusted_workspace(agent_cwd, profile=_cli_profile)
+                except TypeError:
+                    resolve_trusted_workspace(agent_cwd)
+                resolved = agent_cwd
+        except Exception:
+            # An unusable agent path keeps the pre-existing host-local
+            # behaviour: the row is still listed, and the file-ops view keeps
+            # its own fail-closed answer for it.
+            resolved = ''
+        _agent_workspace_cache[agent_cwd] = resolved
+        return resolved or _cli_workspace()
+
     _webhook_pid_cache: list[str | None] = [None]
     def _webhook_pid():
         if _webhook_pid_cache[0] is None:
@@ -12683,7 +12735,7 @@ def _load_cli_sessions_uncached(
         cli_session = {
             'session_id': sid,
             'title': _display_title,
-            'workspace': _cli_workspace(),
+            'workspace': _row_workspace(row),
             'model': row['model'] or None,
             'message_count': row['message_count'] or row['actual_message_count'] or 0,
             'created_at': row['started_at'],
@@ -12786,7 +12838,7 @@ def _load_cli_sessions_uncached(
                 cli_sessions.append({
                     'session_id': sid,
                     'title': _display_title,
-                    'workspace': _cli_workspace(),
+                    'workspace': _row_workspace(row),
                     'model': row['model'] or None,
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],
@@ -12855,7 +12907,7 @@ def _load_cli_sessions_uncached(
                 cli_sessions.append({
                     'session_id': sid,
                     'title': _display_title,
-                    'workspace': _cli_workspace(),
+                    'workspace': _row_workspace(row),
                     'model': row['model'] or None,
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],
@@ -12922,7 +12974,7 @@ def _load_cli_sessions_uncached(
                 cli_sessions.append({
                     'session_id': sid,
                     'title': _title or 'Kanban Session',
-                    'workspace': _cli_workspace(),
+                    'workspace': _row_workspace(row),
                     'model': row['model'] or None,
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],

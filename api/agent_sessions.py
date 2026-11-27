@@ -831,6 +831,11 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         for key in (
             'id', 'model', 'message_count', 'actual_message_count', 'actual_user_message_count',
             'ended_at', 'end_reason', 'last_activity', 'archived',
+            # #8450: the agent-visible working directory belongs to the
+            # session, and the newest segment is the one that ran last — keep
+            # the tip's value so a resumed chain resolves the directory the
+            # agent is actually working in.
+            'cwd',
         ):
             if key in tip:
                 merged[key] = tip[key]
@@ -1003,6 +1008,13 @@ def read_importable_agent_session_rows(
         platform_expr = _optional_col('platform', session_cols)
         archived_expr = _optional_col('archived', session_cols)
         project_id_expr = _optional_col('project_id', session_cols)
+        # #8450: the agent-visible working directory of the session itself.
+        # Read from state.db so the row producer can preserve the agent's own
+        # choice (e.g. an agent-container path like /workspace) instead of the
+        # host-local last-workspace fallback, which points at an unrelated
+        # project directory. Optional: a legacy schema without the column
+        # projects NULL and keeps the pre-existing behaviour.
+        cwd_expr = _optional_col('cwd', session_cols)
         # Older/minimal state.db schemas can have NO ``messages`` table at all,
         # or a ``messages`` table without a ``session_id`` / ``timestamp`` column.
         # The projection SQL below joins ``messages`` and aggregates
@@ -1215,7 +1227,8 @@ def read_importable_agent_session_rows(
                    {archived_expr},
                    {actual_count_expr} AS actual_message_count,
                    {user_message_count_expr} AS actual_user_message_count,
-                   {last_activity_expr} AS last_activity
+                   {last_activity_expr} AS last_activity,
+                   {cwd_expr}
         """
 
         def _project(raw_rows: list[dict]) -> list[dict]:
