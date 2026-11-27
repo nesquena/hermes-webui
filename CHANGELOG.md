@@ -53,9 +53,13 @@
 
 ### Fixed
 
-- **A managed-startup test no longer fails when the Agent's own dependency is missing from WebUI's venv (#9384).** `tests/test_managed_profile_startup.py::test_real_managed_bootstrap_preserves_named_profile_concurrency` failed under WebUI's venv because the installed Agent now imports `psutil`, which is optional for WebUI. The test now looks at why its isolated child failed and skips only for a missing third-party package imported from the Agent's own source. A broken WebUI import or a renamed Agent module still fails it. This is a test-only change.
+- **A managed-startup test no longer fails when the Agent's own dependency is missing from WebUI's venv (#9384).** `tests/test_managed_profile_startup.py::test_real_managed_bootstrap_preserves_named_profile_concurrency` failed under WebUI's venv because the installed Agent now imports `psutil`, which is optional for WebUI. The test now looks at why its isolated child failed. It skips only when the Agent's own source imports a package that the Agent declares as a runtime dependency in its `pyproject.toml`, and the child exited normally with an error. A deleted or renamed Agent module, a broken WebUI import or a crash still fails it. This is a test-only change.
 
-- **A browser test for dialog-to-conversation binding is now deterministic (#9383).** `tests/test_dialog_actions_bind_their_conversation_browser.py` held whichever draft save arrived first after it installed its route. On a slow runner that could be the composer's debounced autosave rather than the conversation switch's own save. The test now waits until the autosave has been answered, holds only the switch's own save, and releases it explicitly. This is a test-only change.
+- **The dialog-to-conversation binding browser tests no longer time out intermittently (#9383).** `tests/test_dialog_actions_bind_their_conversation_browser.py` had two sources of flakiness:
+  - Its draft-save hold could catch the composer's debounced autosave instead of the conversation switch's own save. The test now waits until the autosave has been answered and holds only the switch's save.
+  - Its release step removed the route right after letting the held request through. Removing the page's last route turns Playwright's request interception off, which could strand the page's next request, so the switch never finished and the test timed out. The hold helper now keeps its route and passes requests through after release. This applies to all twelve tests that use it.
+
+  This is a test-only change.
 
 - **A flaky provider-probe test now passes reliably under load (#9360).** `tests/test_issue7481_probe_dedup.py` ran the bounded model-list rebuild on the real clock with real probe threads. On a busy test host, a late probe thread could run out its time slice and the endpoint was probed twice. The module now uses the fake clock and inline probes that the sibling fairness test already uses. The assertions are unchanged. This is a test-only change.
 
