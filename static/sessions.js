@@ -84,6 +84,18 @@ function _forgetComposerDraftLocalFallback(sid) {
   _composerDraftLocalFallbackBySid.delete(sid);
 }
 
+// Runs the pending debounced save now when it belongs to a DIFFERENT chat than
+// the one about to schedule/save. Without this the shared timer's clearTimeout
+// silently dropped the other chat's autosave (click a suggestion in chat A,
+// switch to B, type there, and A's late _saveComposerDraft cancelled B's save).
+function _flushForeignComposerDraftSave(sid) {
+  if (!_draftSaveTimer || _draftSaveTimerSid === sid) return;
+  const flush = _draftSaveFlush;
+  _draftSaveFlush = null;
+  if (typeof flush !== 'function') return;
+  try { flush(); } catch (_) {}
+}
+
 function _composerDraftFileSignature(file) {
   if (typeof file === 'string') return { value: file };
   if (!file || typeof file !== 'object') return { value: String(file || '') };
@@ -259,18 +271,6 @@ async function _restoreRememberedNewChatDraftSession() {
   }
 }
 
-// Runs the pending debounced save now when it belongs to a DIFFERENT chat than
-// the one about to schedule/save. Without this the shared timer's clearTimeout
-// silently dropped the other chat's autosave (click a suggestion in chat A,
-// switch to B, type there, and A's late _saveComposerDraft cancelled B's save).
-function _flushForeignComposerDraftSave(sid) {
-  if (!_draftSaveTimer || _draftSaveTimerSid === sid) return;
-  const flush = _draftSaveFlush;
-  _draftSaveFlush = null;
-  if (typeof flush !== 'function') return;
-  try { flush(); } catch (_) {}
-}
-
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
   _flushForeignComposerDraftSave(sid);
@@ -303,7 +303,9 @@ function _saveComposerDraft(sid, text, files) {
   const _restoredCont = (typeof _peekRestoredGoalContinuationDraft === 'function')
     ? _peekRestoredGoalContinuationDraft()
     : null;
-  const _flushDraftSave = () => {
+  // The timer callback is also kept in _draftSaveFlush so a save for a
+  // DIFFERENT chat can run it immediately instead of silently cancelling it.
+  _draftSaveTimer = setTimeout(_draftSaveFlush = () => {
     clearTimeout(_draftSaveTimer);
     _draftSaveTimer = null;
     _draftSaveFlush = null;
@@ -315,9 +317,7 @@ function _saveComposerDraft(sid, text, files) {
     _postComposerDraftPayload(sid, normalizedDraft, intent, _autosaveContId).catch((error) => {
       _handleComposerDraftPostFailure(error, sid, normalizedText, liveFiles, intent);
     });
-  };
-  _draftSaveFlush = _flushDraftSave;
-  _draftSaveTimer = setTimeout(_flushDraftSave, _DRAFT_SAVE_DELAY_MS);
+  }, _DRAFT_SAVE_DELAY_MS);
 }
 
 function _safeDraftSessionId(sid) {
