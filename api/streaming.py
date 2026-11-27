@@ -14259,7 +14259,10 @@ _TERMINAL_BACKEND_IDENTITY_FIELDS: tuple[str, ...] = (
     'TERMINAL_DAYTONA_IMAGE',
 )
 
-_TERMINAL_ENV_IDENTITY_BY_KEY: dict[str, tuple[object, tuple[str, ...] | None]] = {}
+_TERMINAL_ENV_IDENTITY_BY_KEY: dict[str, tuple[object | None, tuple[str, ...] | None]] = {}
+# Record format: (exact_environment_object_or_None, identity_or_None).
+# A None object slot represents a pending expectation for the backend that last displaced
+# an environment under that cache key, awaiting binding upon recreation.
 _TERMINAL_ENV_IDENTITY_LOCK = threading.Lock()
 _TERMINAL_ENV_CACHE_KEYS: tuple[str, ...] = ('default', 'host-local-default')
 
@@ -14315,10 +14318,10 @@ def _invalidate_stale_terminal_environments(identity: tuple[str, ...] | dict | N
         for key in _TERMINAL_ENV_CACHE_KEYS:
             inspected = active_envs.get(key)
             if inspected is None:
-                # An absent cache entry must not stamp an identity that a later object would inherit;
-                # drop any recorded identity for this key instead of recording a backend without an object.
+                # An absent cache entry leaves a pending expectation for the requesting backend
+                # so its own next creation can be bound without falling back to first-sight adoption.
                 with _TERMINAL_ENV_IDENTITY_LOCK:
-                    _TERMINAL_ENV_IDENTITY_BY_KEY.pop(key, None)
+                    _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (None, identity)
                 continue
 
             with _TERMINAL_ENV_IDENTITY_LOCK:
@@ -14333,12 +14336,18 @@ def _invalidate_stale_terminal_environments(identity: tuple[str, ...] | dict | N
                 else:
                     recorded_env, recorded_identity = None, None
 
-            if (
-                recorded_env is not inspected
-                or recorded_identity is None
-                or recorded_identity != identity
-            ):
-                candidates.append((key, inspected))
+                if recorded_env is None:
+                    # Pending expectation: the environment that appeared under this key was created
+                    # by the backend that displaced the previous one. Bind it to that backend only;
+                    # anything else found here is unverified and must be invalidated, never adopted.
+                    if recorded_identity == identity and active_envs.get(key) is inspected:
+                        _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (inspected, identity)
+                        continue
+                    # Otherwise the object belongs to another unverified backend and must be evicted.
+                elif recorded_env is inspected and recorded_identity == identity:
+                    continue
+
+            candidates.append((key, inspected))
 
         if not candidates:
             return []
@@ -14354,11 +14363,11 @@ def _invalidate_stale_terminal_environments(identity: tuple[str, ...] | dict | N
                     evicted_keys.append(key)
                     removed_objects.append(inspected)
                     with _TERMINAL_ENV_IDENTITY_LOCK:
-                        _TERMINAL_ENV_IDENTITY_BY_KEY.pop(key, None)
+                        _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (None, identity)
                 else:
                     with _TERMINAL_ENV_IDENTITY_LOCK:
                         if current is None:
-                            _TERMINAL_ENV_IDENTITY_BY_KEY.pop(key, None)
+                            _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (None, identity)
                         else:
                             _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (current, None)
 
