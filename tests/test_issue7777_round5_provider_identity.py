@@ -105,3 +105,64 @@ def test_custom_provider_own_exclusion_does_not_bleed_to_sibling_builtin(
         f"got {custom!r}"
     )
     assert builtin == {"builtin-only"}, builtin
+
+
+# ── 2026-11-23 09:16 re-review: builtin alias names have TWO owners ─────────
+
+def test_alias_key_hides_builtin_but_not_a_custom_endpoint_named_after_it(
+    _settings_store,
+):
+    """``{"glm": ["m"]}`` → zai hides m; custom:glm keeps its own models.
+
+    ``glm`` is a builtin ALIAS of ``zai``. Before the fix
+    ``_provider_id_lookup_keys("custom:glm")`` advertised the bare ``glm``
+    spelling, so one stored key was applied to both providers.
+    """
+    _settings_store({"picker_excludes": {"glm": ["m"]}})
+    assert config.get_picker_excludes("zai") == {"m"}
+    assert config.get_picker_excludes("custom:glm") == set(), (
+        "a builtin alias exclusion leaked onto a custom endpoint of the same name"
+    )
+    assert "glm" not in set(config._provider_id_lookup_keys("custom:glm"))
+
+
+def test_exclusion_under_alias_named_custom_endpoint_does_not_reach_builtin(
+    _settings_store,
+):
+    """``{"custom:glm": ["m"]}`` → custom:glm hides m; zai untouched.
+
+    Reverse direction / over-canonicalisation guard: a fix that stripped the
+    ``custom:`` prefix before alias resolution would fold ``custom:glm`` into
+    ``zai`` and fail this test.
+    """
+    _settings_store({"picker_excludes": {"custom:glm": ["m"]}})
+    assert config.get_picker_excludes("custom:glm") == {"m"}
+    assert config.get_picker_excludes("zai") == set(), (
+        "a custom endpoint's policy reached the builtin behind its alias"
+    )
+    payload = config._picker_excludes_payload()
+    assert payload.get("custom:glm") == ["m"]
+    assert "m" not in payload.get("zai", [])
+
+
+@pytest.mark.parametrize(
+    "alias,canonical",
+    [("glm", "zai"), ("kimi", "kimi-coding"), ("moonshot", "kimi-coding")],
+)
+def test_representative_builtin_alias_keys_are_single_owner(
+    _settings_store, alias, canonical
+):
+    """The rule covers alias keys generally, not only ``glm``."""
+    _settings_store({"picker_excludes": {alias: ["m"]}})
+    assert config.get_picker_excludes(canonical) == {"m"}
+    assert config.get_picker_excludes("custom:" + alias) == set()
+
+
+def test_browser_payload_applies_the_same_ownership_rule(_settings_store):
+    """Server lookup and browser payload agree on which group each key filters."""
+    _settings_store({"picker_excludes": {"glm": ["m"], "custom:glm": ["m2"]}})
+    payload = config._picker_excludes_payload()
+    assert payload == {"zai": ["m"], "custom:glm": ["m2"]}
+    # Same group on both sides: zai sees m, custom:glm sees m2, never crossed.
+    assert config.get_picker_excludes("zai") == set(payload["zai"])
+    assert config.get_picker_excludes("custom:glm") == set(payload["custom:glm"])

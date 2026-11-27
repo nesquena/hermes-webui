@@ -2487,7 +2487,7 @@ _OPENAI_COMPAT_ENDPOINTS = {
 # specific model filtering happens downstream in hermes_cli.
 #
 _LIVE_MODELS_CACHE_TTL = 60.0
-_LIVE_MODELS_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
+_LIVE_MODELS_CACHE: dict[tuple[str, str, str], tuple[float, dict]] = {}
 _LIVE_MODELS_CACHE_LOCK = threading.RLock()
 
 
@@ -2534,7 +2534,7 @@ def _active_profile_for_live_models_cache() -> str:
         return "default"
 
 
-def _live_models_cache_key(provider: str) -> tuple[str, str]:
+def _live_models_cache_key(provider: str) -> tuple[str, str, str]:
     # #7507: the picker-exclude policy is part of the cache identity. A
     # response assembled before a policy change must not satisfy a
     # request issued after it, so the epoch rides in the key and a
@@ -2542,7 +2542,7 @@ def _live_models_cache_key(provider: str) -> tuple[str, str]:
     return (_active_profile_for_live_models_cache(), provider, _picker_excludes_epoch())
 
 
-def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
+def _get_cached_live_models(key: tuple[str, str, str]) -> dict | None:
     now = time.monotonic()
     with _LIVE_MODELS_CACHE_LOCK:
         cached = _LIVE_MODELS_CACHE.get(key)
@@ -2561,7 +2561,7 @@ def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
         return copy.deepcopy(payload)
 
 
-def _set_cached_live_models(key: tuple[str, str], payload: dict) -> None:
+def _set_cached_live_models(key: tuple[str, str, str], payload: dict) -> None:
     stamped = dict(payload)
     stamped["_picker_excludes_epoch"] = key[2]
     with _LIVE_MODELS_CACHE_LOCK:
@@ -2571,6 +2571,55 @@ def _set_cached_live_models(key: tuple[str, str], payload: dict) -> None:
 def _clear_live_models_cache() -> None:
     with _LIVE_MODELS_CACHE_LOCK:
         _LIVE_MODELS_CACHE.clear()
+
+
+def _publish_live_models_result(
+    handler,
+    provider: str,
+    cache_key: tuple[str, str, str],
+    payload: dict,
+):
+    """Publish a live-model payload, fencing it against the CURRENT policy.
+
+    #7777 (review 5489844033, still open at the 2026-11-23 re-gate): the
+    in-flight ``/api/models/live`` request that started BEFORE a
+    ``picker_excludes`` save carries a model list built under the OLD policy.
+    Publishing it makes the very next request re-receive the model the user
+    just hid.
+
+    The previous fence compared ``payload.get("_picker_excludes_epoch",
+    cache_key[2])`` against ``cache_key[2]`` — the payload never carries that
+    key (only :func:`_set_cached_live_models` stamps one, AFTER this check),
+    so the ``get`` fell back to ``cache_key[2]`` and the comparison was
+    ``cache_key[2] != cache_key[2]``: always False, never firing.
+
+    The fence must compare the policy the payload was built under against the
+    policy that is in force NOW. ``cache_key[2]`` is the epoch captured when
+    the request STARTED, so it cannot detect a save that landed mid-fetch —
+    the current epoch is the only value that can. So:
+
+    * the payload is stamped with the epoch in force when it was assembled
+      (captured at the same moment the request's cache key was built), and
+    * at publish time that stamp is compared against the epoch in force now.
+
+    A mismatch means the fetch straddled a save: drop the payload instead of
+    letting the next request re-receive an excluded model.
+    """
+    request_epoch = cache_key[2] if len(cache_key) > 2 else ""
+    payload_epoch = payload.get("_picker_excludes_epoch", request_epoch)
+    try:
+        current_epoch = _picker_excludes_epoch()
+    except Exception:
+        current_epoch = request_epoch
+    if payload_epoch != current_epoch:
+        logger.debug(
+            "discarding stale /api/models/live result for %s (policy changed mid-fetch)",
+            provider,
+        )
+        return j(handler, {"provider": provider, "models": [], "count": 0})
+    _set_cached_live_models(cache_key, payload)
+    payload.pop("_picker_excludes_epoch", None)
+    return j(handler, payload)
 
 
 from api import route_session_list_cache as _route_session_list_cache
@@ -25861,20 +25910,20 @@ def _handle_live_models(handler, parsed):
             cached.pop("_picker_excludes_epoch", None)
             return j(handler, cached)
 
+        # The epoch in force when this request STARTED. The payload assembled
+        # below is stamped with it, and the publish path compares that stamp
+        # against the epoch in force at publish time — so a save that lands
+        # mid-fetch is detected (#7777 live-response race).
+        request_epoch = cache_key[2]
+
         def _finish(payload: dict):
             # #7507: never publish a payload built under a superseded policy.
             # The key already moved on a policy change, so a mismatch here
             # means the fetch straddled a save — drop it instead of letting
             # the next request re-receive an excluded model.
-            if payload.get("_picker_excludes_epoch", cache_key[2]) != cache_key[2]:
-                logger.debug(
-                    "discarding stale /api/models/live result for %s (policy changed mid-fetch)",
-                    provider,
-                )
-                return j(handler, {"provider": provider, "models": [], "count": 0})
-            _set_cached_live_models(cache_key, payload)
-            payload.pop("_picker_excludes_epoch", None)
-            return j(handler, payload)
+            stamped = dict(payload)
+            stamped["_picker_excludes_epoch"] = request_epoch
+            return _publish_live_models_result(handler, provider, cache_key, stamped)
 
         # Delegate to the agent's live-fetch + fallback resolver.
         # provider_model_ids() tries live endpoints first and falls back to

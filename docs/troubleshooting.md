@@ -610,6 +610,15 @@ resolve to the same provider are unioned rather than the first one winning — s
 settings.json that carries both `glm` and `zai` hides everything either list
 names. The API payload publishes the map with canonical keys for the same reason.
 
+**Custom endpoints that share a name with a built-in or an alias.** A configured
+custom endpoint is a provider of its own, even when its name spells a built-in
+provider id (`custom:openai`) or a built-in alias (`custom:glm`). A hide stored
+under a built-in alias key (`glm`) applies to the built-in provider behind that
+alias (`zai`) and **not** to a custom endpoint of the same name; a hide stored
+under `custom:glm` applies to that endpoint and not to `zai`. Each name has
+exactly one owner, and the server and the browser apply the same ownership rule,
+so both sides filter the same group.
+
 **Invalidation.** Saving the policy invalidates the models cache, the live-model
 cache, and the browser's own live-model cache, and the caches are keyed by the
 policy content, so an in-flight rebuild that started before the save discards its

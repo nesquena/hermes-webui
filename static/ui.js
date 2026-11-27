@@ -5559,12 +5559,23 @@ function _pickerExcludesForProvider(providerId){
     // ``zai`` and ``z.ai``, each with its own slice of hides; taking
     // only the first match resurrected the models named under the other
     // key (#7777 P1: "Alias exclusions are dropped").
+    //
+    // #7777 (review 5489844033, alias ownership): the browser must apply the
+    // SAME ownership rule as the server, so both sides filter one group. A
+    // stored BUILTIN ALIAS key (``glm``, ``kimi``, ``moonshot``, …) belongs to
+    // the canonical provider it resolves to (``zai``, ``kimi-coding``, …), and a
+    // stored ``custom:<slug>`` key belongs to that custom endpoint even when
+    // its slug spells a builtin alias (``custom:glm`` stays ``custom:glm``).
+    // Without this the two sides diverged for a custom endpoint named after
+    // a builtin alias.
+    const ownerOf=(key)=>_pickerPolicyOwnerKey(key);
     const keys=[pid,pid.toLowerCase(),pid.replace(/\./g,''),pid.toLowerCase().replace(/\./g,'')];
     const out=new Set();
     const consume=(v)=>{
       if(!Array.isArray(v)) return;
       for(const m of v){ const s=String(m||'').trim(); if(s) out.add(s); }
     };
+    // Direct hits on the requested id's own spellings.
     for(const k of new Set(keys.filter(Boolean))){ if(k in raw) consume(raw[k]); }
     if(pid){
       // Also absorb every stored key that is a punctuation-variant of the
@@ -5580,6 +5591,39 @@ function _pickerExcludesForProvider(providerId){
         for(const k of Object.keys(raw)){
           if(k in raw&&norm(k)===target) consume(raw[k]);
         }
+      }
+      // Alias-ownership match: a stored key whose OWNER is the requested
+      // provider. ``glm`` owns ``zai``; ``custom:glm`` owns only itself.
+      // The owner rule is inlined here (rather than calling a sibling
+      // helper) so this function stays self-contained: a single-function
+      // extraction of it still carries its own data.
+      const ALIAS_OWNERS={
+        'glm':'zai','z-ai':'zai','z.ai':'zai','zhipu':'zai',
+        'github':'copilot','github-copilot':'copilot','github-models':'copilot','github-model':'copilot',
+        'google':'gemini','google-gemini':'gemini','google-ai-studio':'gemini',
+        'kimi':'kimi-coding','moonshot':'kimi-coding',
+        'claude':'anthropic','claude-code':'anthropic',
+        'deep-seek':'deepseek',
+        'minimax-china':'minimax-cn','minimax_cn':'minimax-cn',
+        'opencode':'opencode-zen',
+        'grok':'xai','x-ai':'xai','x.ai':'xai',
+        'aws':'bedrock','aws-bedrock':'bedrock','amazon':'bedrock','amazon-bedrock':'bedrock',
+        'qwen':'alibaba','aliyun':'alibaba','dashscope':'alibaba','alibaba-cloud':'alibaba',
+        'nim':'nvidia','nvidia-nim':'nvidia','build-nvidia':'nvidia','nemotron':'nvidia',
+        'mimo':'xiaomi','xiaomi-mimo':'xiaomi',
+        'local':'custom',
+      };
+      const ownerOf=(key)=>{
+        const k=String(key||'').trim().toLowerCase();
+        if(!k) return '';
+        if(k.startsWith('custom:')) return k;
+        return ALIAS_OWNERS[k]||k;
+      };
+      const wantedOwners=new Set([pid.toLowerCase(),norm(pid)]);
+      for(const k of Object.keys(raw)){
+        if(!(k in raw)) continue;
+        const owner=ownerOf(k);
+        if(owner&&wantedOwners.has(owner)) consume(raw[k]);
       }
       return out;
     }

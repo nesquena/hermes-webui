@@ -1495,6 +1495,33 @@ def _resolve_provider_alias(name: str) -> str:
     return _PROVIDER_ALIASES.get(raw, name)
 
 
+def _is_builtin_provider_alias(name: str) -> bool:
+    """True when *name* is a key in a built-in provider alias table.
+
+    Alias keys (``glm``, ``kimi``, ``moonshot``, …) are owned by the canonical
+    provider they resolve to (``zai``, ``kimi-coding``, …). A custom endpoint
+    whose slug happens to spell one of those aliases is a DIFFERENT provider:
+    bridging its bare spelling to the alias key would apply one stored
+    ``picker_excludes`` entry to both the custom endpoint and the builtin
+    behind the alias (#7777 re-gate 2026-11-23). Checks the WebUI-owned table
+    and — when importable — the agent's table, the same two sources
+    :func:`_resolve_provider_alias` reads, so the gate cannot drift from alias
+    resolution.
+    """
+    raw = str(name or "").strip().lower()
+    if not raw:
+        return False
+    if raw in _PROVIDER_ALIASES:
+        return True
+    try:
+        from hermes_cli.models import _PROVIDER_ALIASES as _agent_aliases
+        if raw in _agent_aliases:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _is_known_model_provider(provider_id: str) -> bool:
     """True when *provider_id* names a model provider WebUI can render.
 
@@ -1796,9 +1823,14 @@ def _provider_id_lookup_keys(provider_id: object) -> tuple[str, ...]:
     Only the custom namespace pair is bridged, and only ever by ADDING the bare
     suffix of an already-namespaced id — a non-namespaced id never gains a
     ``custom:`` key, so a builtin group can never be reached through another
-    provider's namespace. Widening is the safe direction: a wider match can only
-    move a caller off the strip fallback and onto "preserve the id verbatim"
-    (#5979).
+    provider's namespace. The bare suffix is bridged ONLY when no builtin owns
+    that spelling: it must be neither a known provider id nor a key in the
+    built-in alias table (``glm`` → ``zai``, ``kimi``/``moonshot`` →
+    ``kimi-coding``, and every other alias key). Otherwise one stored policy
+    would apply to both a custom endpoint named ``GLM`` and the builtin ``zai``
+    behind the alias (#7777 re-gate 2026-11-23). Widening is the safe direction:
+    a wider match can only move a caller off the strip fallback and onto
+    "preserve the id verbatim" (#5979).
     """
     raw = str(provider_id or "").strip().lower()
     if not raw:
@@ -1812,15 +1844,21 @@ def _provider_id_lookup_keys(provider_id: object) -> tuple[str, ...]:
         keys.append(canonical)
     if raw.startswith("custom:"):
         # The bare suffix of a namespaced custom id is a legitimate spelling
-        # of the SAME provider ONLY when that bare slug is not itself an
-        # existing provider id. A custom endpoint may be named after a builtin
-        # (``custom:openai``); that bare slug belongs to the BUILTIN, so
-        # bridging to it would collapse two distinct providers and apply one's
-        # picker policy to the other (#7777 re-gate 2026-11-23: provider
-        # identity overlap). A bare slug that is not a known provider id stays
-        # bridged — that is the historical custom-provider spelling pair.
+        # of the SAME provider ONLY when no builtin owns it. An endpoint may be
+        # named after a builtin id (``custom:openai``) OR after a builtin ALIAS
+        # (``custom:glm`` → alias of ``zai``); that bare slug belongs to the
+        # BUILTIN side, so bridging to it would collapse two distinct providers
+        # and apply one's picker policy to the other (#7777 re-gate 2026-11-23:
+        # provider identity overlap, then alias-name overlap). A bare slug owned
+        # by nobody stays bridged — the historical custom-provider spelling
+        # pair (asserted by the bare-alpha control).
         bare = raw[len("custom:") :].strip()
-        if bare and bare not in keys and not _is_known_model_provider(bare):
+        if (
+            bare
+            and bare not in keys
+            and not _is_known_model_provider(bare)
+            and not _is_builtin_provider_alias(bare)
+        ):
             keys.append(bare)
     return tuple(keys)
 
@@ -2754,6 +2792,39 @@ def get_picker_excludes(provider_id: str | None = None) -> set[str]:
     return result_ids
 
 
+def _picker_policy_owner_key(provider_key: str) -> str:
+    """Canonical owner key a stored picker-policy entry is published under.
+
+    This is the browser-payload half of the same ownership rule
+    :func:`_provider_id_lookup_keys` applies on the server:
+
+    * a ``custom:<slug>`` entry belongs to the custom endpoint itself, even
+      when its bare slug spells a builtin alias (``custom:glm`` stays
+      ``custom:glm`` — it is NOT folded into ``zai``);
+    * a builtin alias key (``glm``, ``z.ai``, ``kimi``, …) belongs to the
+      canonical provider it resolves to (``zai``, ``kimi-coding``, …).
+
+    Publishing both halves under one rule keeps the server filter and the
+    browser picker filtering the SAME provider group (#7777 re-gate
+    2026-11-23: alias names had two owners).
+    """
+    raw = str(provider_key or "").strip()
+    if not raw:
+        return raw
+    # A ``custom:`` key owns ITSELF, and is published in the same lower-case
+    # form the browser's ``_pickerPolicyOwnerKey`` resolves it to — otherwise a
+    # hand-written ``CUSTOM:glm`` and a ``custom:glm`` would publish as two
+    # separate entries and the two sides would resolve them differently.
+    if raw.lower().startswith("custom:"):
+        return raw.lower()
+    if _is_builtin_provider_alias(raw):
+        try:
+            return str(_resolve_provider_alias(raw) or raw).strip() or raw
+        except Exception:
+            return raw
+    return raw
+
+
 def _picker_excludes_payload() -> dict:
     """Return the ``picker_excludes`` map for API payloads, keyed canonically.
 
@@ -2772,6 +2843,14 @@ def _picker_excludes_payload() -> dict:
     default or previous selection the server had already filtered out would
     be re-injected. Lists stored under several keys that resolve to the same
     canonical provider are unioned, mirroring ``get_picker_excludes``.
+
+    #7777 re-gate 2026-11-23: normalisation follows the SAME ownership rule as
+    the server's ``_provider_id_lookup_keys`` (see
+    :func:`_picker_policy_owner_key`). A builtin alias key (``glm``) is
+    published under its canonical owner (``zai``); a custom endpoint key
+    (``custom:glm``) stays with that endpoint even though its bare slug spells
+    the alias. Without this the server and the picker filter different groups
+    for a custom endpoint named after a builtin alias.
 
     Returns ``{}`` on any read failure so the field is always a JSON object
     for the client.
@@ -2804,12 +2883,7 @@ def _picker_excludes_payload() -> dict:
         cleaned = _clean_ids(ids)
         if not cleaned:
             continue
-        key = pid.strip()
-        try:
-            canonical = _resolve_provider_alias(key) or key
-        except Exception:
-            canonical = key
-        key = str(canonical).strip() or key
+        key = _picker_policy_owner_key(pid)
         # Union rather than overwrite: a settings.json can carry both ``glm``
         # and ``zai`` with a different slice of hides each.
         merged = out.setdefault(key, [])
@@ -2836,6 +2910,16 @@ def _strip_provider_prefix_from_model_id(model_id: object) -> str:
     * ``@opencode-zen:vendor/model:1`` → ``vendor/model:1`` when the model
       id itself contains a colon and the full prefix is a known provider
 
+    #7777 (review 5489844033, colon boundary): the boundary must be the
+    CONFIGURED custom-provider boundary, not "anything that starts with
+    ``custom:``". ``_is_known_model_provider`` accepts every ``custom:*``
+    spelling, so on ``@custom:alpha:model-a:free`` the longest candidate
+    ``custom:alpha:model-a`` was accepted as a provider and the id was cut
+    to ``free`` instead of ``model-a:free`` — the Agent parses it as
+    ``custom:alpha`` / ``model-a:free``. So a configured custom slug is
+    matched FIRST and exactly; only when no configured slug matches does the
+    generic known-provider scan run.
+
     When no boundary names a real provider (unknown slug, no registry
     entry) the generic ``@<first segment>:`` form is stripped as a last
     resort, preserving the historical behaviour for plain
@@ -2847,6 +2931,32 @@ def _strip_provider_prefix_from_model_id(model_id: object) -> str:
         return raw
     body = raw[1:]
     boundaries = [i for i, ch in enumerate(body) if ch == ":"]
+    # 1. The CONFIGURED custom-provider boundary wins, and it is matched
+    #    exactly (not by prefix): a configured ``custom:alpha`` must not
+    #    swallow the model half of ``@custom:alpha:model-a:free``.
+    try:
+        configured_slugs = _named_custom_provider_slugs()
+    except Exception:
+        configured_slugs = set()
+    if configured_slugs:
+        for index in boundaries:  # shortest prefix first: the slug itself
+            candidate = body[:index].strip()
+            if candidate in configured_slugs:
+                return body[index + 1 :].strip()
+    # 2. A ``custom:``-shaped prefix is never a longest-first candidate:
+    #    ``_is_known_model_provider`` accepts EVERY ``custom:*`` spelling, so
+    #    ``custom:alpha:model-a`` would pass as a "provider" and the model
+    #    half would be lost. Delegate to the SHARED route-hint parser, which
+    #    already encodes the boundary rules (endpoint-style ``host:port`` slugs
+    #    keep their port; a plain named slug stops at its own colon).
+    if body.startswith("custom:"):
+        parsed = _parse_provider_qualified_model_id(raw)
+        if parsed is not None:
+            bare_model, provider_hint = parsed
+            if provider_hint.startswith("custom:"):
+                return str(bare_model or "").strip()
+    # 3. Otherwise walk the colon boundaries from the LONGEST candidate
+    #    prefix inward and accept the first one that names a real provider.
     for index in reversed(boundaries):  # longest (most specific) prefix first
         candidate = body[:index].strip()
         if not candidate:

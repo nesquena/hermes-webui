@@ -99,8 +99,14 @@ class TestFinding1ColonPrefixStrip:
             ("@openrouter:gpt-5.6-luna", {"gpt-5.6-luna"}, True),
             # THE BUG: first-colon split left "alpha:chat-a" behind.
             ("@custom:alpha:chat-a", {"chat-a"}, True),
-            # Named custom provider with a colon-bearing MODEL id.
-            ("@custom:backup:model-a:free", {"free"}, True),
+            # Named custom provider with a colon-bearing MODEL id. The Agent
+            # parses "@custom:backup:model-a:free" as provider ``custom:backup``
+            # and model ``model-a:free``, so the exclusion matches the MODEL
+            # half — not the trailing "free" segment. (#7777 review 5489844033,
+            # colon boundary: the old assertion here pinned the split-at-the-
+            # wrong-colon behaviour and had to be corrected.)
+            ("@custom:backup:model-a:free", {"model-a:free"}, True),
+            ("@custom:backup:model-a:free", {"free"}, False),
             # Case-preserving for the exclude entry itself.
             ("@custom:alpha:chat-a", {"CHAT-A"}, False),
             # Non-matching exclusion still False.
