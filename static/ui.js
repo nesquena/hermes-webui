@@ -10858,16 +10858,17 @@ function renderMd(raw){
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
   const media_stash=[];
-  s=s.replace(/MEDIA:"([^"\r\n]+)"/g,(_,raw_ref)=>{
+  const _stashEntry=(ref,raw)=>({ref,raw,toString(){return this.ref;}});
+  s=s.replace(/MEDIA:"([^"\r\n]+)"/g,(token,raw_ref)=>{
     let norm=raw_ref;
     try{ norm=decodeURIComponent(raw_ref); }catch(_){}
-    media_stash.push(norm);
+    media_stash.push(_stashEntry(norm,token));
     return '\x00D'+(media_stash.length-1)+'\x00';
   });
-  s=s.replace(/MEDIA:'([^'\r\n]+)'/g,(_,raw_ref)=>{
+  s=s.replace(/MEDIA:'([^'\r\n]+)'/g,(token,raw_ref)=>{
     let norm=raw_ref;
     try{ norm=decodeURIComponent(raw_ref); }catch(_){}
-    media_stash.push(norm);
+    media_stash.push(_stashEntry(norm,token));
     return '\x00D'+(media_stash.length-1)+'\x00';
   });
   s=s.replace(/MEDIA:([^\s\)\]]+)/g,(token,raw_ref,offset)=>{
@@ -10877,7 +10878,7 @@ function renderMd(raw){
     if(/^["']/.test(raw_ref)) return token;
     const parts=_mediaTokenParts(s,offset,raw_ref);
     if(!parts) return token;
-    media_stash.push(parts[0]);
+    media_stash.push(_stashEntry(parts[0],'MEDIA:'+parts[0]));
     return '\x00D'+(media_stash.length-1)+'\x00'+parts[1];
   });
   // ── End MEDIA stash ─────────────────────────────────────────────────────────
@@ -10940,7 +10941,7 @@ function renderMd(raw){
         // before this pass, so put their source text back here (the stash is
         // restored after this attribute is built) and drop any other stash token.
         const rawSrc=code.replace(/\n$/,'')
-          .replace(/\x00D(\d+)\x00/g,(_,i)=>decode('MEDIA:'+media_stash[+i]))
+          .replace(/\x00D(\d+)\x00/g,(_,i)=>decode(media_stash[+i].raw))
           .replace(/\x00[^\x00]*\x00/g,'').replace(/\x00/g,'');
         // Encode newlines as &#10; to prevent HTML attribute normalization
         // (browsers collapse \n to spaces inside attribute values).
@@ -10992,15 +10993,15 @@ function renderMd(raw){
   // (#3219/#3234). Only bare URLs (line-start or whitespace-delimited) match, so
   // normal [label](file://...) markdown anchors keep the link path below.
   s=s.replace(/(^|\s)file:\/\/"([^"\r\n]+)"/g,(_,lead,ref)=>{
-    media_stash.push('file://'+ref);
+    media_stash.push(_stashEntry('file://'+ref,'file://\"'+ref+'\"'));
     return lead+'\x00D'+(media_stash.length-1)+'\x00';
   });
   s=s.replace(/(^|\s)file:\/\/'([^'\r\n]+)'/g,(_,lead,ref)=>{
-    media_stash.push('file://'+ref);
+    media_stash.push(_stashEntry('file://'+ref,"file://'"+ref+"'"));
     return lead+'\x00D'+(media_stash.length-1)+'\x00';
   });
   s=s.replace(/(^|\s)(file:\/\/[^\s<>"')\]]+)/g,(_,lead,raw_ref)=>{
-    media_stash.push(raw_ref);
+    media_stash.push(_stashEntry(raw_ref,raw_ref));
     return lead+'\x00D'+(media_stash.length-1)+'\x00';
   });
   s=s.replace(/<strong>([\s\S]*?)<\/strong>/gi,(_,t)=>'**'+t+'**');
@@ -11185,14 +11186,14 @@ function renderMd(raw){
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
     // is not consumed by the [label](url) link regex.
-    t=t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^)\r\n]+?)(?:\s+"([^"\r\n]*)")?\)/g,(_,alt,url,title)=>{const u=url.replace(/ /g,'%20');return ((typeof _mdImageHtml==='function')?_mdImageHtml(alt,u):`<img src="${u.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`)+(title?' "'+title+'"':'');});
+    t=t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^)\r\n]+?)(?:\s+("[^"\r\n]*"|'[^'\r\n]*'|\([^)\r\n]*\)))?\)/g,(_,alt,url,title)=>{const u=url.replace(/ /g,'%20');return ((typeof _mdImageHtml==='function')?_mdImageHtml(alt,u):`<img src="${u.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`)+(title?' '+title:'');});
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
     t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
-    t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^)\r\n]+?)(?:\s+"([^"\r\n]*)")?\)/g,(_,lb,u,title)=>{_link_stash.push(_markdownAnchor(lb,u.replace(/ /g,'%20'))+(title?' "'+title+'"':''));return `\x00L${_link_stash.length-1}\x00`;});
+    t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^)\r\n]+?)(?:\s+("[^"\r\n]*"|'[^'\r\n]*'|\([^)\r\n]*\)))?\)/g,(_,lb,u,title)=>{_link_stash.push(_markdownAnchor(lb,u.replace(/ /g,'%20'))+(title?' '+title:''));return `\x00L${_link_stash.length-1}\x00`;});
     // Autolink only the text between tags, as the block pass below does: set
     // aside complete links, images and pre blocks and every other tag, then
     // turn a raw tag left without its closing ">" on its line into text by
@@ -11423,13 +11424,13 @@ function renderMd(raw){
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
-  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^)\r\n]+?)(?:\s+"([^"\r\n]*)")?\)/g,(_,alt,url,title)=>{const u=url.replace(/ /g,'%20');return ((typeof _mdImageHtml==='function')?_mdImageHtml(alt,u):`<img src="${u.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`)+(title?' "'+title+'"':'');});
+  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^)\r\n]+?)(?:\s+("[^"\r\n]*"|'[^'\r\n]*'|\([^)\r\n]*\)))?\)/g,(_,alt,url,title)=>{const u=url.replace(/ /g,'%20');return ((typeof _mdImageHtml==='function')?_mdImageHtml(alt,u):`<img src="${u.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`)+(title?' '+title:'');});
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
   const _a_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
-  s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^)\r\n]+?)(?:\s+"([^"\r\n]*)")?\)/g,(_,label,url,title)=>_markdownAnchor(label,url.replace(/ /g,'%20'))+(title?' "'+title+'"':''));
+  s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^)\r\n]+?)(?:\s+("[^"\r\n]*"|'[^'\r\n]*'|\([^)\r\n]*\)))?\)/g,(_,label,url,title)=>_markdownAnchor(label,url.replace(/ /g,'%20'))+(title?' '+title:''));
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
   // Restore raw <pre> only after markdown rewrites so literal preformatted
   // content stays placeholder-protected, then let the sanitizer normalize tags.
@@ -11693,7 +11694,7 @@ function renderMd(raw){
   s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|table|pre|hr|blockquote)|^\x00[EQ]/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
   s=s.replace(/\x00E(\d+)\x00/g,(_,i)=>_pre_stash[+i]);
   // ── Restore MEDIA stash → inline images or download links ─────────────────
-  s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>_inlineMediaHtmlForRef(media_stash[+i]));
+  s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>_inlineMediaHtmlForRef(media_stash[+i].ref));
 
   // ── End MEDIA restore ──────────────────────────────────────────────────────
   // Restore blockquote stash. Done last so the inner HTML (already produced
