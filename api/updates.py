@@ -1116,6 +1116,107 @@ def _cap_socket_timeout(resp: object, timeout_val: float) -> None:
         pass
 
 
+def _probe_gateway_version_worker(
+    base: str,
+    timeout: float,
+    deadline: float,
+) -> str | None:
+    """Perform the blocking gateway probe across /health and /health/detailed.
+
+    Executed inside a self-terminating daemon worker thread so slow socket
+    operations (connection, status line, header trickles) cannot stretch the
+    probe past _GATEWAY_AGENT_VERSION_DEADLINE (#6289 r6).
+    """
+    for path in ('/health', '/health/detailed'):
+        now = time.monotonic()
+        if now >= deadline:
+            return None
+        remaining = deadline - now
+        req_timeout = min(timeout, remaining)
+        try:
+            with urllib.request.urlopen(f'{base}{path}', timeout=req_timeout) as resp:
+                chunks: list[bytes] = []
+                total_bytes = 0
+                while True:
+                    now = time.monotonic()
+                    if now >= deadline:
+                        return None
+                    rem = deadline - now
+                    # Re-arm the socket timeout with the budget that is left
+                    # before every single-byte read, so one read can no
+                    # longer perform several receives, each allowed the
+                    # full per-operation timeout (#6289).
+                    _cap_socket_timeout(resp, min(timeout, rem))
+                    try:
+                        chunk = resp.read(_GATEWAY_AGENT_VERSION_CHUNK_SIZE)
+                    except TypeError:
+                        # A caller-supplied file-like object may expose
+                        # read() without a size argument; that call reads to
+                        # EOF by contract, and the capped socket timeout
+                        # plus the deadline check still bound it.
+                        whole = resp.read()
+                        if whole:
+                            chunks.append(whole)
+                        break
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    total_bytes += len(chunk)
+                    if total_bytes > _GATEWAY_AGENT_VERSION_MAX_BYTES:
+                        return None
+                if time.monotonic() >= deadline:
+                    return None
+                payload = json.loads(b''.join(chunks).decode('utf-8'))
+        except (
+            OSError,
+            urllib.error.URLError,
+            TimeoutError,
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            http.client.HTTPException,
+            ValueError,
+        ):
+            continue
+        version = _version_from_gateway_health_payload(payload)
+        if version:
+            return version
+    return None
+
+
+class _GatewayProbeWorker:
+    """Tracks a single background probe thread for one gateway base URL."""
+
+    def __init__(self, base: str, timeout: float, deadline: float) -> None:
+        self.base = base
+        self.timeout = timeout
+        self.deadline = deadline
+        self.done = threading.Event()
+        self.result: str | None = None
+        self.error: BaseException | None = None
+        self.abandoned = False
+        self.thread = threading.Thread(
+            target=self._run,
+            name=f"gateway-probe-{base}",
+            daemon=True,
+        )
+
+    def _run(self) -> None:
+        try:
+            self.result = _probe_gateway_version_worker(
+                self.base, self.timeout, self.deadline
+            )
+        except BaseException as exc:
+            self.error = exc
+        finally:
+            self.done.set()
+
+    def start(self) -> None:
+        self.thread.start()
+
+
+_gateway_probe_workers: dict[str, _GatewayProbeWorker] = {}
+
+
 def _detect_agent_version_from_gateway_health(
     timeout: float = 0.75,
     base_url: str | None = None,
@@ -1123,13 +1224,12 @@ def _detect_agent_version_from_gateway_health(
     """Best-effort cross-container gateway API fallback for Agent version.
 
     Bounded by a total time budget (_GATEWAY_AGENT_VERSION_DEADLINE) shared
-    across probe paths (/health and /health/detailed).  The body is read one
-    byte at a time, the socket timeout is re-armed with the budget that is
-    left before every read, and the total body is capped by
-    _GATEWAY_AGENT_VERSION_MAX_BYTES, so a gateway that trickles bytes cannot
-    stretch a single read past the deadline (#6289).  ``base_url`` lets the
-    caller pin the endpoint it already resolved for the cache key, so the URL
-    that is probed is always the URL the result is published under.
+    across probe paths (/health and /health/detailed).  The blocking network
+    call runs in a self-terminating daemon thread, bounding header parsing,
+    connect latency, and slow-trickle responses to at most the remaining
+    budget (#6289 r6).  ``base_url`` lets the caller pin the endpoint it
+    already resolved for the cache key, so the URL that is probed is always
+    the URL the result is published under.
     """
     try:
         base = base_url if base_url is not None else _gateway_health_base_url()
@@ -1139,62 +1239,29 @@ def _detect_agent_version_from_gateway_health(
         if parsed.scheme not in ('http', 'https') or not parsed.netloc:
             return None
         deadline = time.monotonic() + _GATEWAY_AGENT_VERSION_DEADLINE
-        for path in ('/health', '/health/detailed'):
-            now = time.monotonic()
-            if now >= deadline:
-                return None
-            remaining = deadline - now
-            req_timeout = min(timeout, remaining)
-            try:
-                with urllib.request.urlopen(f'{base}{path}', timeout=req_timeout) as resp:
-                    chunks: list[bytes] = []
-                    total_bytes = 0
-                    while True:
-                        now = time.monotonic()
-                        if now >= deadline:
-                            return None
-                        rem = deadline - now
-                        # Re-arm the socket timeout with the budget that is left
-                        # before every single-byte read, so one read can no
-                        # longer perform several receives, each allowed the
-                        # full per-operation timeout (#6289).
-                        _cap_socket_timeout(resp, min(timeout, rem))
-                        try:
-                            chunk = resp.read(_GATEWAY_AGENT_VERSION_CHUNK_SIZE)
-                        except TypeError:
-                            # A caller-supplied file-like object may expose
-                            # read() without a size argument; that call reads to
-                            # EOF by contract, and the capped socket timeout
-                            # plus the deadline check still bound it.
-                            whole = resp.read()
-                            if whole:
-                                chunks.append(whole)
-                            break
-                        if not chunk:
-                            break
-                        chunks.append(chunk)
-                        total_bytes += len(chunk)
-                        if total_bytes > _GATEWAY_AGENT_VERSION_MAX_BYTES:
-                            return None
-                    if time.monotonic() >= deadline:
-                        return None
-                    payload = json.loads(b''.join(chunks).decode('utf-8'))
-            except (
-                OSError,
-                urllib.error.URLError,
-                TimeoutError,
-                json.JSONDecodeError,
-                UnicodeDecodeError,
-                http.client.HTTPException,
-                ValueError,
-            ):
-                continue
-            version = _version_from_gateway_health_payload(payload)
-            if version:
-                return version
+
+        with _gateway_version_lock:
+            worker = _gateway_probe_workers.get(base)
+            if worker is None or not worker.thread.is_alive():
+                worker = _GatewayProbeWorker(base, timeout, deadline)
+                _gateway_probe_workers[base] = worker
+                worker.start()
+
+        rem = max(0.0, deadline - time.monotonic())
+        finished = worker.done.wait(timeout=rem)
+        if not finished:
+            worker.abandoned = True
+            return None
+
+        if worker.error is not None:
+            raise worker.error
+
+        if worker.abandoned:
+            return None
+
+        return worker.result
     except Exception:
         return None
-    return None
 
 
 # Cache so /api/settings doesn't block on every page load when the gateway is
