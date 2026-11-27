@@ -48,7 +48,7 @@ const _composerPendingFilesByOwner = new Map();
 const _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS = 30000;
 
 function _queueComposerDraftWrite(sid, write) {
-  const previous = _composerDraftWriteBySid.get(sid);
+  const previous = _composerDraftPostPromisesBySid.get(sid);
   // Dispatch the FIRST write synchronously: callers (and the loadSession
   // switch path) observe the request in the same task. Only a write queued
   // behind an in-flight one waits for its predecessor to settle.
@@ -59,9 +59,9 @@ function _queueComposerDraftWrite(sid, write) {
   } else {
     current = previous.catch(() => {}).then(write);
   }
-  _composerDraftWriteBySid.set(sid, current);
+  _composerDraftPostPromisesBySid.set(sid, current);
   const cleanup = () => {
-    if (_composerDraftWriteBySid.get(sid) === current) _composerDraftWriteBySid.delete(sid);
+    if (_composerDraftPostPromisesBySid.get(sid) === current) _composerDraftPostPromisesBySid.delete(sid);
   };
   current.then(cleanup, cleanup);
   return current;
@@ -179,7 +179,7 @@ const _composerDraftLatestIntentSequenceBySid = new Map();
 // One write chain per session: every draft POST (autosave, immediate save,
 // compare-and-clear, submit-clear) joins it, so a later write can never
 // overtake an earlier one under HTTP/2 multiplexing.
-const _composerDraftWriteBySid = new Map();
+const _composerDraftPostPromisesBySid = new Map();
 let _composerDraftIntentSequence = 0;
 
 function _setComposerDraftLocalIntent(sid, text, files) {

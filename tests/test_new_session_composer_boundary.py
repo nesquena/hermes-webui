@@ -2671,7 +2671,7 @@ def test_draft_writes_for_one_session_are_serialized():
     )
     script = textwrap.dedent(
         f"""
-        const _composerDraftWriteBySid = new Map();
+        const _composerDraftPostPromisesBySid = new Map();
         {source}
         const order = [];
         let releaseFirst;
@@ -2712,7 +2712,7 @@ def test_draft_write_queue_recovers_after_rejection_and_cleans_up():
     )
     script = textwrap.dedent(
         f"""
-        const _composerDraftWriteBySid = new Map();
+        const _composerDraftPostPromisesBySid = new Map();
         {source}
         const order = [];
         const first = _queueComposerDraftWrite('sid-1', async () => {{
@@ -2728,7 +2728,7 @@ def test_draft_write_queue_recovers_after_rejection_and_cleans_up():
           process.stdout.write(JSON.stringify({{
             firstRejected,
             order,
-            queueSize: _composerDraftWriteBySid.size,
+            queueSize: _composerDraftPostPromisesBySid.size,
           }}));
         }})().catch(error => {{ console.error(error); process.exit(1); }});
         """
@@ -2803,7 +2803,7 @@ def test_all_draft_post_paths_use_the_per_session_write_queue():
     assert SESSIONS_JS.count("function _queueComposerDraftWrite(") == 1
     assert "_queueComposerDraftWrite(targetSid, () =>" in SESSIONS_JS
     assert "_queueComposerDraftWrite(sid, () => api('/api/session/draft'" in SESSIONS_JS
-    assert "_composerDraftWriteBySid" in SESSIONS_JS
+    assert "_composerDraftPostPromisesBySid" in SESSIONS_JS
     assert "enqueue(sid,()=>api('/api/session/draft'" not in SESSIONS_JS
 
 
