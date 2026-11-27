@@ -27,6 +27,7 @@ _METADATA_FIELDS = frozenset(
         "updated_at",
         "pinned",
         "archived",
+        "auto_archived",
         "project_id",
         "profile",
         "input_tokens",

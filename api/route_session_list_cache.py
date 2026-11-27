@@ -72,6 +72,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "last_message_at",
     "pinned",
     "archived",
+    "auto_archived",
     "project_id",
     "profile",
     "input_tokens",

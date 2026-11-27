@@ -11386,7 +11386,12 @@ function renderSessionListFromCache(){
     const attention=_sessionAttentionState(s)||_sessionAttentionState({_child:true,attention:s._child_session_attention});
     const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(ownStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
+    // An archive can come from two places with different resume behaviour: the
+    // user archived it (stays hidden until un-archived) or the agent's idle sweep
+    // hid it (the agent un-hides it on resume or compression). #9366 — the sidebar
+    // used to render both identically, so the row now carries the provenance.
+    const autoArchived=!!(s.archived&&s.auto_archived);
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(autoArchived?' auto-archived':'')+(ownStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
     const swipeReturnOffset=_sessionSwipeReturnOffsets.get(s.session_id);
     if(swipeReturnOffset!==undefined){
       _sessionSwipeReturnOffsets.delete(s.session_id);
@@ -11571,6 +11576,17 @@ function renderSessionListFromCache(){
         };
       }
       titleRow.appendChild(segmentCountEl);
+    }
+    // Provenance badge: an idle-sweep archive is not the user's decision, and the
+    // agent un-hides it on resume or compression. #9366 — without this the sidebar
+    // shows it exactly like a deliberate archive.
+    if(s.archived&&s.auto_archived){
+      const autoArchivedEl=document.createElement('span');
+      autoArchivedEl.className='session-auto-archived-badge';
+      const autoArchivedLabel=t('session_meta_auto_archived');
+      autoArchivedEl.textContent=autoArchivedLabel;
+      autoArchivedEl.title=t('session_meta_auto_archived_desc');
+      titleRow.appendChild(autoArchivedEl);
     }
     const childCount=typeof s._child_session_count==='number'?s._child_session_count:(Array.isArray(s._child_sessions)?s._child_sessions.length:0);
     if(childCount>0){
