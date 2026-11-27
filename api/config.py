@@ -13645,6 +13645,9 @@ _MODELS_PREWARM_LAST_STARTED: dict[str, float] = {}
 _MODELS_PREWARM_RETRY_SECONDS: float = 300.0
 _MODELS_PREWARM_BOOT_GRACE_SECONDS: float = 120.0
 _MODELS_PREWARM_LEAD_SECONDS: float = 600.0
+# How long a prewarm waits for another profile's catalog build to settle before
+# it tries its own. Background work, so waiting costs a user nothing.
+_MODELS_PREWARM_IDLE_WAIT_SECONDS: float = 60.0
 _models_prewarm_booted_at: float = time.monotonic()
 
 
@@ -13663,6 +13666,35 @@ def _models_cache_profiles() -> list[tuple[str, Path]]:
         elif path.name.startswith(prefix) and path.name.endswith(".json"):
             found.append((path.name[len(prefix):-len(".json")], path))
     return found or [("default", base)]
+
+
+def _wait_for_catalog_idle(timeout: float) -> bool:
+    """Block until no catalog build is in flight (or the timeout lapses).
+
+    The catalog rebuild is one process-wide single-flight. A prewarm that
+    arrives while another profile's build runs would spend its (short)
+    foreground budget waiting and then return the stale fallback without ever
+    rebuilding — and the retry backoff would suppress it for five minutes. This
+    thread is background work, so waiting here is free.
+    """
+    deadline = time.monotonic() + max(0.0, timeout)
+    if not _cache_build_cv.acquire(timeout=max(0.0, timeout)):
+        return False
+    try:
+        while _cache_build_in_progress:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _cache_build_cv.wait(remaining)
+    finally:
+        _cache_build_cv.release()
+    return True
+
+
+def _prewarm_profiles(profiles: list[tuple[str, Path]]) -> None:
+    """Rebuild several profiles' catalogs one at a time (never raises)."""
+    for profile, cache_path in profiles:
+        _prewarm_profile_catalog(profile, cache_path)
 
 
 def _prewarm_profile_catalog(profile: str, cache_path: Path) -> None:
@@ -13692,6 +13724,7 @@ def _prewarm_profile_catalog(profile: str, cache_path: Path) -> None:
     try:
         if set_request_profile is not None:
             set_request_profile(profile)
+        _wait_for_catalog_idle(_MODELS_PREWARM_IDLE_WAIT_SECONDS)
         get_available_models(force_refresh=True)
         logger.info(
             "models catalog prewarmed (profile=%s, cache=%s)", profile, cache_path.name
@@ -13740,14 +13773,18 @@ def maybe_prewarm_models_catalog(*, now: float | None = None) -> dict[str, str]:
                 continue
             _MODELS_PREWARM_LAST_STARTED[profile] = tick_now
             due.append((profile, path))
-    for profile, path in due:
+    if due:
+        # One worker for all due profiles, run sequentially: the catalog rebuild
+        # is a process-wide single-flight, so parallel prewarms would make the
+        # later one give up on its budget and serve the stale fallback.
         threading.Thread(
-            target=_prewarm_profile_catalog,
-            args=(profile, path),
+            target=_prewarm_profiles,
+            args=(due,),
             name="models-catalog-prewarm",
             daemon=True,
         ).start()
-        report[profile] = "scheduled"
+        for profile, _path in due:
+            report[profile] = "scheduled"
     _write_prewarm_state(tick_now, state="ran" if report else "not-due", due=sorted(report), ages=ages)
     if report:
         logger.info("models catalog prewarm scheduled: %s", ", ".join(sorted(report)))

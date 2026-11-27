@@ -220,6 +220,78 @@ def test_prewarm_binds_profile_without_mirroring_env(monkeypatch):
     assert profiles.get_active_profile_name() == "default"
 
 
+def test_due_profiles_run_sequentially_in_one_worker(monkeypatch, tmp_path):
+    """Two due profiles must not prewarm in parallel: the rebuild is a
+    process-wide single-flight, so the second would give up and serve stale."""
+    import threading
+
+    from api import profiles
+
+    order = []
+
+    def _record(**kwargs):
+        order.append(profiles.get_active_profile_name())
+        return {"groups": []}
+
+    monkeypatch.setattr(config, "get_available_models", _record)
+    monkeypatch.setattr(config, "_cache_build_in_progress", False)
+
+    captured = []
+
+    class _CapturedThread:
+        def __init__(self, target=None, args=(), name=None, daemon=None):
+            captured.append((target, args))
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(config.threading, "Thread", _CapturedThread)
+    monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
+    monkeypatch.setattr(config, "_models_prewarm_booted_at", time.monotonic() - 10_000)
+    monkeypatch.setattr(config, "_MODELS_PREWARM_LAST_STARTED", {})
+
+    due_before = (
+        config._SESSION_VISIT_MODELS_FRESHNESS_SECONDS - config._MODELS_PREWARM_LEAD_SECONDS
+    )
+    _write_cache(tmp_path / "models_cache.json", time.time() - due_before - 1)
+    _write_cache(tmp_path / "models_cache.personal.json", time.time() - due_before - 1)
+
+    report = config.maybe_prewarm_models_catalog()
+    assert report == {"default": "scheduled", "personal": "scheduled"}
+    assert len(captured) == 1  # single worker for both profiles
+
+    target, args = captured[0]
+    target(*args)
+    assert order == ["default", "personal"]
+
+
+def test_wait_for_catalog_idle(monkeypatch):
+    import threading
+
+    monkeypatch.setattr(config, "_cache_build_in_progress", False)
+    assert config._wait_for_catalog_idle(1.0) is True
+
+    monkeypatch.setattr(config, "_cache_build_in_progress", True)
+    held = threading.Event()
+    release = threading.Event()
+
+    def _hold():
+        with config._cache_build_cv:
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=_hold, daemon=True)
+    holder.start()
+    try:
+        assert held.wait(5)
+        started = time.monotonic()
+        assert config._wait_for_catalog_idle(0.3) is False
+        assert time.monotonic() - started < 2.0
+    finally:
+        release.set()
+        holder.join(5)
+
+
 def test_build_admission_stamps_start_time(tmp_path, monkeypatch):
     """The cold path must publish its start time to the module, otherwise every
     claim looks unstamped and the watchdog can only date it from a later caller."""
