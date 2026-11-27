@@ -2832,7 +2832,7 @@
   .inline-suggestion-btn:focus-visible{outline:none;box-shadow:0 0 0 2px var(--focus-ring);}
   /* Alte Antworten sind keine gültige Antwort mehr — der Tastatur-Hinweis dort lügt. */
   .inline-suggestions-stale .inline-suggestion-kbd{display:none;}
-  .inline-suggestion-kbd{display:inline-flex;align-items:center;justify-content:center;padding:1px 5px;border-radius:var(--radius-sm);font-size:10px;font-family:inherit;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);color:inherit;opacity:.75;line-height:1.4;}
+  .inline-suggestion-kbd{display:inline-flex;align-items:center;justify-content:center;padding:1px 5px;border-radius:var(--radius-sm);font-size:10px;font-family:inherit;background:var(--surface-subtle);border:1px solid var(--border-subtle);color:inherit;opacity:.75;line-height:1.4;}
   @media (hover:none) and (pointer:coarse){
     .inline-suggestion-kbd{display:none;}
   }
