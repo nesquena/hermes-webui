@@ -5931,21 +5931,8 @@ async function populateModelDropdown(opts={}){
     // Without this the re-injection paths (boot default, previous pick,
     // synthesized fallback rows) have no policy to check against and
     // resurrect an id the server already filtered out.
-    if(data&&typeof data.picker_excludes==='object'&&data.picker_excludes!==null){
-      window._pickerExcludes=data.picker_excludes;
-    }else{
-      window._pickerExcludes={};
-    }
-    // #7777 (review 5489844033, alias ownership): the SERVER owns the alias
-    // table (it merges the agent's table when importable) and ships it with
-    // the payload. The browser resolves a stored policy key with THIS map, so
-    // the two sides can never drift — a browser-local copy went stale as soon
-    // as the agent added an alias.
-    if(data&&typeof data.picker_alias_owners==='object'&&data.picker_alias_owners!==null){
-      window._pickerAliasOwners=data.picker_alias_owners;
-    }else{
-      window._pickerAliasOwners={};
-    }
+    window._pickerExcludes=(data&&typeof data.picker_excludes==='object'&&data.picker_excludes!==null)?data.picker_excludes:{};
+    window._pickerAliasOwners=(data&&typeof data.picker_alias_owners==='object'&&data.picker_alias_owners!==null)?data.picker_alias_owners:{};
     // #7777 re-gate finding 5: the server ships the UNFILTERED identities
     // alongside the filtered picker groups. An explicit `/model <name>` is a
     // user instruction, so it resolves against these — a model the user hid
