@@ -81,6 +81,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
   while an agent run is active. Start here for busy-composer behavior, pending
   queued messages, interrupt replacement, steer visibility, or leftover-steer
   recovery changes.
+- [`docs/architecture/run-journal-after-seq-index.md`](architecture/run-journal-after-seq-index.md):
+  current derived-index lifecycle for `after_seq` replay reads: when the bounded
+  offset index is used, which checks invalidate it, how append-only growth extends
+  it, and why failed-appends and regrowth require checkpoint-content validation.
 - [`docs/rfcs/README.md`](rfcs/README.md): RFC conventions and current RFC index.
 - [`docs/rfcs/session-sse-contract-v1.md`](rfcs/session-sse-contract-v1.md):
   proposed contract vocabulary, cursor/resume semantics, replay identity, snapshot
@@ -144,6 +148,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
   launch-phase claim that covers registration-to-admission, and the lock discipline
   (`STREAMS_LOCK → ACTIVE_RUNS_LOCK`). Start here before changing subscriber liveness, channel
   collection, stream registration, or orphan reclaim (#7302).
+
+- [`docs/architecture/async-delegation-ledger-owner.md`](architecture/async-delegation-ledger-owner.md):
+  owner-ledger resolution and the claim-bound ACK/release/retry/replay scope for
+  async-delegation completions (#7214).
 
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,
