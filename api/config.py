@@ -8204,12 +8204,17 @@ def _clear_build_in_progress(rebuild_seq: int) -> None:
 def _release_stale_build_claim() -> bool:
     """Release a build claim that is no longer backed by a running build.
 
-    Returns True when a stale claim was released. Never blocks on a live build:
-    a claim younger than ``_STALE_BUILD_CLAIM_SECONDS`` is left alone, and a
-    claim with no stamp at all (set by an older code path) counts as stale.
+    Returns True when a stale claim was released. The catalog lock is taken
+    NON-BLOCKING: this runs on the fast path before ``force_refresh_started_at``
+    is sampled, so waiting here would push that caller's clock past a build that
+    publishes while it waits — the caller would then reject a result newer than
+    its own arrival and start a duplicate rebuild. A busy lock means a build is
+    running, which is exactly when nothing should be reclaimed anyway.
     """
     global _cache_build_in_progress, _cache_build_started_at
-    with _cache_build_cv:
+    if not _cache_build_cv.acquire(blocking=False):
+        return False
+    try:
         if not _cache_build_in_progress:
             return False
         started = _cache_build_started_at
@@ -8225,11 +8230,14 @@ def _release_stale_build_claim() -> bool:
             return False
         _cache_build_in_progress = False
         _cache_build_started_at = 0.0
+        stale_age = time.monotonic() - started
         _cache_build_cv.notify_all()
+    finally:
+        _cache_build_cv.release()
     logger.warning(
         "released stale models-catalog build claim (age=%s s) — the catalog was "
         "permanently cold behind it",
-        round(time.monotonic() - started, 1),
+        round(stale_age, 1),
     )
     return True
 
@@ -11041,6 +11049,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
+    global _cache_build_started_at
     # Config mtime check — must come before any config reads.
     # (Test #585 verifies _current_mtime appears before active_provider = None)
     try:
@@ -13657,20 +13666,44 @@ def _models_cache_profiles() -> list[tuple[str, Path]]:
 
 
 def _prewarm_profile_catalog(profile: str, cache_path: Path) -> None:
-    """Rebuild one profile's catalog in a detached worker (never raises)."""
+    """Rebuild one profile's catalog in a detached worker (never raises).
+
+    Only the request-profile TLS is bound here. ``get_available_models()`` opens
+    the profile env scope it needs itself — ``profile_env_for_active_request``
+    for the synchronous path and ``profile_scope_for_detached_worker`` for the
+    rebuild worker it spawns. Holding a second, mirrored worker scope around
+    that call nests two env save/restore pairs whose lifetimes do not match: an
+    over-budget rebuild outlives the outer scope, so its later restore can leave
+    the server pointed at the prewarmed profile; on older Agents the two scopes
+    also serialize on the module patch lock until the foreground budget expires.
+    """
+    set_request_profile = None
+    previous: str | None = None
     try:
-        from api.profiles import profile_scope_for_detached_worker as _scope
+        from api.profiles import get_active_profile_name, set_request_profile as _srp
+
+        set_request_profile = _srp
+        try:
+            previous = get_active_profile_name()
+        except Exception:
+            previous = None
     except Exception:
-        _scope = None
+        set_request_profile = None
     try:
-        if _scope is not None:
-            with _scope(profile, "models-catalog-prewarm", logger):
-                get_available_models(force_refresh=True)
-        else:
-            get_available_models(force_refresh=True)
-        logger.info("models catalog prewarmed (profile=%s)", profile)
+        if set_request_profile is not None:
+            set_request_profile(profile)
+        get_available_models(force_refresh=True)
+        logger.info(
+            "models catalog prewarmed (profile=%s, cache=%s)", profile, cache_path.name
+        )
     except Exception:
         logger.debug("models catalog prewarm failed (profile=%s)", profile, exc_info=True)
+    finally:
+        if set_request_profile is not None and previous is not None:
+            try:
+                set_request_profile(previous)
+            except Exception:
+                pass
 
 
 def maybe_prewarm_models_catalog(*, now: float | None = None) -> dict[str, str]:

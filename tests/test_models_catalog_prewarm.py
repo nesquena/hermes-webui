@@ -159,3 +159,98 @@ def test_claim_without_stamp_is_adopted_then_released(monkeypatch):
     )
     assert config._release_stale_build_claim() is True
     assert config._cache_build_in_progress is False
+
+
+def test_release_does_not_block_on_a_held_lock(monkeypatch):
+    """The watchdog runs before the refresh clock is sampled: waiting would move
+    that clock past a build that publishes while we wait, and the caller would
+    rebuild again instead of reusing it."""
+    import threading
+
+    monkeypatch.setattr(config, "_cache_build_in_progress", True)
+    monkeypatch.setattr(
+        config,
+        "_cache_build_started_at",
+        time.monotonic() - config._STALE_BUILD_CLAIM_SECONDS - 1,
+    )
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def _hold():
+        with config._cache_build_cv:
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=_hold, daemon=True)
+    holder.start()
+    try:
+        assert held.wait(5)
+        started = time.monotonic()
+        assert config._release_stale_build_claim() is False
+        assert time.monotonic() - started < 0.5
+    finally:
+        release.set()
+        holder.join(5)
+
+
+def test_prewarm_binds_profile_without_mirroring_env(monkeypatch):
+    """The sweep binds the caller's TLS only: get_available_models opens the env
+    scopes itself, and a second mirrored scope would nest two restores."""
+    import os
+
+    from api import profiles
+
+    observed = {}
+
+    def _capture(**kwargs):
+        observed["profile"] = profiles.get_active_profile_name()
+        observed["env"] = dict(os.environ)
+        return {"groups": []}
+
+    monkeypatch.setattr(config, "get_available_models", _capture)
+    monkeypatch.setattr(profiles, "_active_profile", "default", raising=False)
+
+    before = dict(os.environ)
+    config._prewarm_profile_catalog("personal", config._models_cache_path)
+
+    assert observed["profile"] == "personal"
+    assert observed["env"] == before
+    # Restored, so a later sweep does not inherit this profile.
+    assert profiles.get_active_profile_name() == "default"
+
+
+def test_build_admission_stamps_start_time(tmp_path, monkeypatch):
+    """The cold path must publish its start time to the module, otherwise every
+    claim looks unstamped and the watchdog can only date it from a later caller."""
+    monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 5.0)
+    monkeypatch.setattr(config, "_cache_build_in_progress", False)
+    monkeypatch.setattr(config, "_cache_build_started_at", 0.0)
+    monkeypatch.setattr(config, "_available_models_cache", None)
+    monkeypatch.setattr(config, "_available_models_cache_ts", 0.0)
+    monkeypatch.setattr(config, "_available_models_cache_source_fingerprint", None)
+
+    observed = {}
+    real_allocate = config._allocate_models_rebuild_seq
+
+    def _spy_allocate():
+        # Sampled one statement after the claim is taken.
+        observed["stamp"] = config._cache_build_started_at
+        return real_allocate()
+
+    monkeypatch.setattr(config, "_allocate_models_rebuild_seq", _spy_allocate)
+    monkeypatch.setattr(
+        config,
+        "_invoke_models_rebuild",
+        lambda build: {
+            "active_provider": None,
+            "default_model": "",
+            "configured_model_badges": {},
+            "groups": [],
+        },
+    )
+
+    config.get_available_models(force_refresh=True)
+
+    assert observed.get("stamp", 0.0) > 0.0
