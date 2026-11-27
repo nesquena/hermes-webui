@@ -451,7 +451,6 @@ const _composerDraftRestoreSuppressedUntilBySid = new Map();
 const _composerDraftLocalFallbackBySid = new Map();
 const _composerDraftLatestIntentSequenceBySid = new Map();
 const _composerDraftPostPromisesBySid = new Map();
-const _composerDraftWriteBySid = new Map();
 const _composerPendingFilesByOwner = new Map();
 const _draftSaveTimerByOwner = new Map();
 const _draftSavePendingBySid = new Map();
