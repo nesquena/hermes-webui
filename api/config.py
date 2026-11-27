@@ -8100,10 +8100,33 @@ _available_models_cache_ts: float = 0.0
 _available_models_live_rebuild_ts: float = 0.0
 _available_models_cache_source_fingerprint: dict | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
+# Age-driven live refresh horizon for /api/models?freshness=session_visit.
+# A cold rebuild probes every provider serially and measures ~6 s on a
+# 15-provider install — longer than the foreground rebuild budget — so an
+# age-triggered refresh on the REQUEST path serves a truncated catalog first and
+# only the out-of-band build completes it (and, while it runs, every other
+# request waits on the catalog lock).
+#
+# The window therefore stays short (a remote provider can add models without any
+# local fingerprint axis changing, which is the one thing the fingerprint cannot
+# see), but the rebuild no longer runs on a request at all: the maintenance tick
+# in ``api.background_process`` calls ``maybe_prewarm_models_catalog()`` shortly
+# BEFORE this window expires, so session visits always land on a warm cache.
 _SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 3600.0
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
+# Monotonic stamp of the current claim, and the age past which a claim is
+# treated as abandoned. The cold path sets the flag under ``_cache_build_cv`` and
+# every exit path is supposed to release it, but a build whose release path is
+# skipped (superseded and never re-claimed, worker died mid-publication) leaves
+# the flag True forever: every caller then samples ``should_wait``, waits the
+# whole foreground budget on a condition nobody will notify, and returns a stale
+# or static catalog — the catalog never rebuilds again for the life of the
+# process. A live build is bounded by the rebuild budget (seconds), so a claim
+# older than this is not running.
+_cache_build_started_at: float = 0.0
+_STALE_BUILD_CLAIM_SECONDS: float = 180.0
 
 # ── Catalog publication ordering ─────────────────────────────────────────────
 # Every cold rebuild takes the next sequence number, and the published catalog
@@ -8166,6 +8189,7 @@ def _clear_build_in_progress(rebuild_seq: int) -> None:
     redefined inside ``get_available_models``.
     """
     global _cache_build_in_progress
+    global _cache_build_started_at
     with _cache_build_cv:
         if _models_rebuild_superseded(rebuild_seq):
             # A newer rebuild owns the flag now; releasing it here would wake
@@ -8173,7 +8197,41 @@ def _clear_build_in_progress(rebuild_seq: int) -> None:
             # concurrently with the newer one.
             return
         _cache_build_in_progress = False
+        _cache_build_started_at = 0.0
         _cache_build_cv.notify_all()
+
+
+def _release_stale_build_claim() -> bool:
+    """Release a build claim that is no longer backed by a running build.
+
+    Returns True when a stale claim was released. Never blocks on a live build:
+    a claim younger than ``_STALE_BUILD_CLAIM_SECONDS`` is left alone, and a
+    claim with no stamp at all (set by an older code path) counts as stale.
+    """
+    global _cache_build_in_progress, _cache_build_started_at
+    with _cache_build_cv:
+        if not _cache_build_in_progress:
+            return False
+        started = _cache_build_started_at
+        if not started:
+            # A claim with no stamp was set by a caller that predates this
+            # watchdog (or by a test fixture driving the flag directly). Adopt it
+            # with a fresh stamp instead of releasing immediately: it may be a
+            # live build, and if it is not, the next call past the window will
+            # reclaim it.
+            _cache_build_started_at = time.monotonic()
+            return False
+        if (time.monotonic() - started) < _STALE_BUILD_CLAIM_SECONDS:
+            return False
+        _cache_build_in_progress = False
+        _cache_build_started_at = 0.0
+        _cache_build_cv.notify_all()
+    logger.warning(
+        "released stale models-catalog build claim (age=%s s) — the catalog was "
+        "permanently cold behind it",
+        round(time.monotonic() - started, 1),
+    )
+    return True
 
 
 def _models_build_identity_current(
@@ -10631,7 +10689,7 @@ def _invalidate_models_catalog_epoch(*, delete_disk: bool = True, provider_id: s
     """
     global _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint
-    global _cache_build_in_progress
+    global _cache_build_in_progress, _cache_build_started_at
     # Drop the one-slot parse memo BEFORE the disk unlink below. The memo is
     # keyed on (path, mtime_ns, size, st_ino, st_dev), so a payload parsed
     # before this call keeps a key that still matches the freshly rebuilt file:
@@ -10661,6 +10719,7 @@ def _invalidate_models_catalog_epoch(*, delete_disk: bool = True, provider_id: s
                 _CREDENTIAL_POOL_CACHE.pop((tag, provider_id), None)
                 _CREDENTIAL_POOL_CACHE.pop((tag, _resolve_provider_alias(provider_id)), None)
             _cache_build_in_progress = False
+            _cache_build_started_at = 0.0
             _cache_build_cv.notify_all()
             if delete_disk:
                 _delete_models_cache_on_disk()
@@ -12771,6 +12830,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         })
 
     # ── FAST PATH ─────────────────────────────────────────────────────────────
+    # A claim left behind by a build that never released it (superseded with no
+    # successor, worker died mid-publication) would make every later caller wait
+    # out its budget and serve a stale/static catalog forever. Reclaim it before
+    # sampling the flag, never while a live build can still own it.
+    _release_stale_build_claim()
     # Mark that a build may be in progress BEFORE acquiring the lock.
     # If another thread has already started the cold path, we will wait for
     # its result rather than running the cold path concurrently.
@@ -12943,6 +13007,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # Cold path: full rebuild — only one thread reaches here at a time
         with _cache_build_cv:
             _cache_build_in_progress = True
+            _cache_build_started_at = time.monotonic()
         # This build's position in the publication order. Taken while holding
         # _available_models_cache_lock (above), so no two builds can share one,
         # and used to keep a late out-of-band publisher from overwriting a newer
@@ -13555,6 +13620,136 @@ def get_available_models_for_session_visit() -> dict:
         _mark("prefer_cache_fallback")
         _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
         return get_available_models(prefer_cache=True)
+
+
+# ── Background models-catalog prewarm ─────────────────────────────────────
+# The session-visit path only trusts the disk catalog while it is younger than
+# ``_SESSION_VISIT_MODELS_FRESHNESS_SECONDS``. Past that, the visitor pays the
+# cold rebuild (~6 s of serial provider probes) and receives a truncated catalog
+# because the build outlives the foreground budget. Rebuilding from the
+# maintenance tick a little BEFORE the window expires keeps that cost off every
+# request path, and keeps the window short enough that a model a provider added
+# remotely (which no local fingerprint axis can see) still shows up within the
+# hour.
+_MODELS_PREWARM_LOCK = threading.Lock()
+_MODELS_PREWARM_LAST_STARTED: dict[str, float] = {}
+_MODELS_PREWARM_RETRY_SECONDS: float = 300.0
+_MODELS_PREWARM_BOOT_GRACE_SECONDS: float = 120.0
+_MODELS_PREWARM_LEAD_SECONDS: float = 600.0
+_models_prewarm_booted_at: float = time.monotonic()
+
+
+def _models_cache_profiles() -> list[tuple[str, Path]]:
+    """Return ``(profile, cache_path)`` for every catalog snapshot on disk."""
+    base = _models_cache_path
+    try:
+        candidates = sorted(base.parent.glob(base.stem + "*.json"))
+    except OSError:
+        return [("default", base)]
+    found: list[tuple[str, Path]] = []
+    prefix = base.stem + "."
+    for path in candidates:
+        if path.name == base.name:
+            found.append(("default", path))
+        elif path.name.startswith(prefix) and path.name.endswith(".json"):
+            found.append((path.name[len(prefix):-len(".json")], path))
+    return found or [("default", base)]
+
+
+def _prewarm_profile_catalog(profile: str, cache_path: Path) -> None:
+    """Rebuild one profile's catalog in a detached worker (never raises)."""
+    try:
+        from api.profiles import profile_scope_for_detached_worker as _scope
+    except Exception:
+        _scope = None
+    try:
+        if _scope is not None:
+            with _scope(profile, "models-catalog-prewarm", logger):
+                get_available_models(force_refresh=True)
+        else:
+            get_available_models(force_refresh=True)
+        logger.info("models catalog prewarmed (profile=%s)", profile)
+    except Exception:
+        logger.debug("models catalog prewarm failed (profile=%s)", profile, exc_info=True)
+
+
+def maybe_prewarm_models_catalog(*, now: float | None = None) -> dict[str, str]:
+    """Rebuild stale catalog snapshots off the request path; return what ran.
+
+    Called from the shared maintenance tick in ``api.background_process`` next
+    to the SessionChannel reaper (that tick fires about once a minute; this
+    function decides when a profile is actually due). A profile is due when its
+    disk cache is missing, unloadable, or within ``_MODELS_PREWARM_LEAD_SECONDS``
+    of the session-visit freshness window. Never runs while a catalog build is
+    already in flight, and never repeats a failed attempt for five minutes.
+    """
+    report: dict[str, str] = {}
+    tick_now = time.time() if now is None else float(now)
+    if (time.monotonic() - _models_prewarm_booted_at) < _MODELS_PREWARM_BOOT_GRACE_SECONDS:
+        _write_prewarm_state(tick_now, state="boot-grace")
+        return report
+    due_before = max(0.0, _SESSION_VISIT_MODELS_FRESHNESS_SECONDS - _MODELS_PREWARM_LEAD_SECONDS)
+    with _MODELS_PREWARM_LOCK:
+        # NOTE: an in-flight build is NOT a reason to skip. The single-flight
+        # inside get_available_models() coalesces followers onto that build, and
+        # ``_cache_build_in_progress`` has been observed to stay set in a
+        # long-lived process (the state that kept a profile's catalog cold for
+        # 20 h), which would otherwise make this sweep a permanent no-op.
+        due: list[tuple[str, Path]] = []
+        ages: dict[str, float | None] = {}
+        for profile, path in _models_cache_profiles():
+            age = _models_cache_file_age_seconds(path, tick_now)
+            ages[profile] = age
+            if age is not None and age < due_before:
+                continue
+            last = _MODELS_PREWARM_LAST_STARTED.get(profile)
+            if last is not None and (tick_now - last) < _MODELS_PREWARM_RETRY_SECONDS:
+                continue
+            _MODELS_PREWARM_LAST_STARTED[profile] = tick_now
+            due.append((profile, path))
+    for profile, path in due:
+        threading.Thread(
+            target=_prewarm_profile_catalog,
+            args=(profile, path),
+            name="models-catalog-prewarm",
+            daemon=True,
+        ).start()
+        report[profile] = "scheduled"
+    _write_prewarm_state(tick_now, state="ran" if report else "not-due", due=sorted(report), ages=ages)
+    if report:
+        logger.info("models catalog prewarm scheduled: %s", ", ".join(sorted(report)))
+    return report
+
+
+def _write_prewarm_state(
+    tick_now: float,
+    *,
+    state: str,
+    due: list[str] | None = None,
+    ages: dict[str, float | None] | None = None,
+) -> None:
+    """Record the last prewarm decision for external inspection.
+
+    ``logger.info`` from this process is dropped (the WebUI starts the root
+    logger without a handler), so the sweep leaves its verdict in a small state
+    file instead: whether it ran, which profiles were due, and each profile's
+    cache age at that moment.
+    """
+    try:
+        payload = {
+            "_tick_at": tick_now,
+            "_state": state,
+            "_due": due or [],
+            "_ages": {k: (None if v is None else round(v, 1)) for k, v in (ages or {}).items()},
+            "_window_s": _SESSION_VISIT_MODELS_FRESHNESS_SECONDS,
+            "_lead_s": _MODELS_PREWARM_LEAD_SECONDS,
+        }
+        target = _models_cache_path.parent / "models_prewarm_state.json"
+        tmp = target.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(target)
+    except Exception:
+        logger.debug("models prewarm state write failed", exc_info=True)
 
 
 def _maybe_log_slow_stages(
