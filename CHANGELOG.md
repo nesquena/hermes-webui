@@ -53,6 +53,14 @@
 
 ### Fixed
 
+- **A managed-startup test no longer fails when the Agent's own dependency is missing from WebUI's venv (#9384).** `tests/test_managed_profile_startup.py::test_real_managed_bootstrap_preserves_named_profile_concurrency` failed under WebUI's venv because the installed Agent now imports `psutil`, which is optional for WebUI. The test now looks at why its isolated child failed. It skips only when the Agent's own source imports a package that the Agent declares as a runtime dependency in its `pyproject.toml`, and the child exited normally with an error. A deleted or renamed Agent module, a broken WebUI import or a crash still fails it. This is a test-only change.
+
+- **The dialog-to-conversation binding browser tests no longer time out intermittently (#9383).** `tests/test_dialog_actions_bind_their_conversation_browser.py` had two sources of flakiness:
+  - Its draft-save hold could catch the composer's debounced autosave instead of the conversation switch's own save. The test now waits until the autosave has been answered and holds only the switch's save.
+  - Its release step removed the route right after letting the held request through. Removing the page's last route turns Playwright's request interception off, which could strand the page's next request, so the switch never finished and the test timed out. The hold helper now keeps its route and passes requests through after release. This applies to all twelve tests that use it.
+
+  This is a test-only change.
+
 - **A flaky provider-probe test now passes reliably under load (#9360).** `tests/test_issue7481_probe_dedup.py` ran the bounded model-list rebuild on the real clock with real probe threads. On a busy test host, a late probe thread could run out its time slice and the endpoint was probed twice. The module now uses the fake clock and inline probes that the sibling fairness test already uses. The assertions are unchanged. This is a test-only change.
 
 - **The server now caps glibc malloc arenas at startup (#9359, part of #9052).** On Linux with glibc, a long-running threaded WebUI server could build up many per-thread malloc arenas that never shrink. The server now applies a cap of 2 arenas with `mallopt` before the Agent or any `api` module loads. It does not export `MALLOC_ARENA_MAX`, so programs the server launches keep glibc's default. A `MALLOC_ARENA_MAX` or `GLIBC_TUNABLES` set in the launch environment still takes precedence. The new `HERMES_WEBUI_MALLOC_ARENA_MAX` setting changes the cap; `0`, `off` or `false` turn it off. On musl, macOS and Windows it does nothing. In a 48-thread load test, arena heaps dropped from 52 to 1 at the same throughput. Native code that allocates from many threads at once can be slower with two arenas; raise the cap or turn it off for that workload. The new module ships in the wheel and the Nix package.
