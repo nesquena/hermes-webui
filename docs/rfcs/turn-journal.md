@@ -197,6 +197,12 @@ appending a duplicate. The matching rules are identity-scoped, not content-only:
   persisted cards; the surplus appends. Without that bookkeeping one persisted
   card absorbed every identical journal event (observed with a persisted
   `terminal: running` card) and the surplus journaled calls vanished.
+- **Tagged legacy tool completions follow live settlement order.** With no
+  tool ID or nonempty arguments, a `tool_complete` payload marked
+  `event_type: tool.completed` consumes the newest unconsumed matching start.
+  An existing card's completion is still consumed without rewriting a saved
+  result. New versus reused card state does not change this producer's order.
+  Journals without the producer marker retain their compatibility fallback.
 - **A tokenless row that fully matches the checkpoint IS the current turn.**
   `_pending_recovery_turn_start()` routes every row — tokened or not — through
   the shared `_message_owns_current_turn()` predicate (active-turn token first,

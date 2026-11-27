@@ -5679,11 +5679,8 @@ def _append_journaled_partial_output(
             ).strip()
             # Walk the pool in JOURNAL START ORDER — reused and freshly
             # created cards interleaved exactly as the journal's ``tool``
-            # start events replayed — matching by exact tool id first. The
-            # journal's start order is the only ordering signal an id-less
-            # completion has: pooling every reused card ahead of every fresh
-            # one reversed a same-name pair and attached each tool's result
-            # to the other tool's card (#7167 review 2026-10-27, SILENT).
+            # start events replayed — matching by exact tool id first. Card
+            # reuse must not change the ordering recorded by the journal.
             #
             # Candidates are filtered by what THIS replay already consumed,
             # never by the card's persisted ``done`` flag: a start can dedupe
@@ -5718,8 +5715,8 @@ def _append_journaled_partial_output(
                 # to the other command's card (#7167 gate certification
                 # 2026-11-18, RED finding 1). The command arguments are the
                 # only reliable ownership signal an id-less completion has;
-                # claim a card only on a UNIQUE argument match. Journals that
-                # carry no arguments at all keep the historical FIFO fallback.
+                # claim a card only on a UNIQUE argument match. If the journal
+                # lacks arguments, use the producer order when it is known.
                 completion_args = payload.get('args')
                 args_scoped: list[tuple[int, dict]] = []
                 if isinstance(completion_args, dict) and completion_args:
@@ -5748,23 +5745,23 @@ def _append_journaled_partial_output(
                     # calls (#7167 review 2026-11-19).
                     matched_idx, matched_tool = args_scoped[-1]
                 elif not (isinstance(completion_args, dict) and completion_args):
-                    # No id and no arguments. Three contracts must hold at once:
-                    # * an already-done card is consumed first and never
-                    #   retargeted onto the next unfinished card (round 10);
-                    # * a freshly materialized card is preferred over a reused
-                    #   one, so the journal's start order still decides which
-                    #   command owns an id-less result (round 9);
-                    # * within one class the NEWEST start wins, matching the
-                    #   legacy producer's newest-first live settlement (gate
-                    #   certification 2026-11-25, blocker 2).
-                    def _idless_fallback_rank(item):
-                        pos, call = item
-                        return (
-                            0 if call.get('done') else 1,
-                            0 if call.get('_journal_synthetic_tid') else 1,
-                            -pos,
-                        )
-                    for idx, call in sorted(_candidates, key=_idless_fallback_rank):
+                    if payload.get('event_type') == 'tool.completed':
+                        # The id-less tool-progress producer settles the latest
+                        # same-name start first. Persisted done/new/reused state
+                        # is not a record of that ordering. A selected done card
+                        # still consumes its own completion below, without a rewrite.
+                        ordered = reversed(_candidates)
+                    else:
+                        # An unmarked journal has no producer-order witness.
+                        # Keep the compatibility behavior (rounds 9/10 and the
+                        # fresh-card gate): done first, synthetic starts next,
+                        # newest within each class.
+                        ordered = iter(sorted(_candidates, key=lambda item: (
+                            not item[1].get('done'),
+                            not item[1].get('_journal_synthetic_tid'),
+                            -item[0],
+                        )))
+                    for idx, call in ordered:
                         if not name or call.get('name') == name:
                             matched_idx, matched_tool = idx, call
                             break

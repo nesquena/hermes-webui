@@ -19,7 +19,7 @@ import pytest
 import api.models as models
 import api.profiles as profiles
 from api.models import Session
-from api.run_journal import append_run_event
+from api.run_journal import RunJournalWriter, append_run_event
 
 
 @pytest.fixture
@@ -93,3 +93,69 @@ def test_idless_legacy_completions_match_by_command_arguments_not_fifo(hermes_ho
     assert by_cmd["echo B"]["snippet"] == "result B", by_cmd["echo B"]
     assert by_cmd["echo A"]["done"] is True
     assert by_cmd["echo B"]["done"] is True
+
+
+@pytest.mark.parametrize(
+    ("saved_start", "saved_done"),
+    [(2, False), (1, True), (2, True)],
+    ids=["newest-reused-unfinished", "older-reused-done", "newest-reused-done"],
+)
+def test_tagged_idless_completion_matches_live_settlement_after_reload(
+    hermes_home, saved_start, saved_done,
+):
+    """The legacy producer's event type survives the journal and fixes the order."""
+    sid = "gate_marked_legacy_tool_settlement"
+    stream_id = "stream-gate-marked-legacy"
+    writer = RunJournalWriter(sid, stream_id)
+    for label in ("A", "B"):
+        writer.append_sse_event("tool", {
+            "event_type": "tool.started", "name": "terminal",
+            "args": {}, "preview": f"start {label}",
+        })
+    for label in ("B", "A"):
+        writer.append_sse_event("tool_complete", {
+            "event_type": "tool.completed", "name": "terminal", "args": {},
+            "preview": f"result {label}", "duration": 1.0 if label == "A" else 2.0,
+            "is_error": label == "B",
+        })
+
+    session = Session(
+        session_id=sid,
+        title="legacy tool settlement",
+        messages=[
+            {"role": "user", "content": "Run both tools", "timestamp": 900.5},
+            {"role": "assistant", "content": "", "timestamp": 900.6,
+             "_recovered_from_run_journal": True, "_recovered_stream_id": stream_id},
+        ],
+    )
+    saved_label = "A" if saved_start == 1 else "B"
+    saved_preview = f"persisted {saved_label}" if saved_done else f"start {saved_label}"
+    session.tool_calls = [{
+        "name": "terminal", "preview": saved_preview, "snippet": saved_preview,
+        "tid": "", "assistant_msg_idx": 1, "done": saved_done,
+        "_recovered_from_run_journal": True, "_recovered_stream_id": stream_id,
+        "_recovered_event_id": f"{stream_id}:{saved_start}",
+    }]
+    if saved_done:
+        session.tool_calls[0].update(duration=5.0, is_error=False)
+
+    expected = {
+        f"{stream_id}:1": ("result A", 1.0, False),
+        f"{stream_id}:2": ("result B", 2.0, True),
+    }
+    if saved_done:
+        expected[f"{stream_id}:{saved_start}"] = (saved_preview, 5.0, False)
+
+    # Exercise both recovery and its retry against a cold-loaded sidecar.
+    for _ in range(2):
+        models._append_journaled_partial_output(session, stream_id, dedupe_existing=True)
+        session.save()
+        models.SESSIONS.pop(sid, None)
+        session = Session.load(sid)
+        assert session is not None
+        assert len(session.tool_calls) == 2
+        assert all(card["done"] for card in session.tool_calls)
+        assert {
+            card["_recovered_event_id"]: (card["preview"], card["duration"], card["is_error"])
+            for card in session.tool_calls
+        } == expected
