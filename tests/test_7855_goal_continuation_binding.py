@@ -123,6 +123,7 @@ const target = {
   clearInflightState(){}, clearOptimisticSessionStreaming(){}, renderSessionList(){},
   _saveComposerDraftNow(){},
   _chatPayloadModelState: () => ({ model:'m', model_provider:'p' }),
+  _isSessionCurrentPane: (sid) => !!(target.S.session && target.S.session.session_id === sid),
   _composerTextWithPendingSelections: () => target.__msg.value,
   _clearComposerAfterQueuedSelectionSend(){}, _clearComposerDraft(){},
   attachLiveStream(){}, _flushSelectionBlocksToComposer(){},
