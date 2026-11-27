@@ -89,15 +89,23 @@ def _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages):
     return session
 
 
-def _settled_sidecar():
+def _settled_sidecar(durable_row_ids=None):
     """Saved transcript with stable ids minted by the real producer.
 
-    The saved rows carry only their stable WebUI id, exactly what the display
-    path persists; the durable row id lives on the SQLite side and is projected
-    by the real reader because each repeated prompt carries a provider payload
-    (``api_content``).  That one-sided identity is what the replay comparison
-    has to treat as evidence of the same logical row rather than as a second
-    clock.
+    The saved rows carry their stable WebUI id, exactly what the display
+    path persists.  ``durable_row_ids`` names the state.db rows the saved
+    occurrences OWN (``{sidecar index: durable row id}``): a settled row that
+    knows which durable row it is proves the identity the occurrence
+    comparison needs, so a restamped mirror of that row collapses onto it
+    while a DIFFERENT durable row stays a separate turn.
+
+    Without that knowledge the saved occurrence establishes no durable
+    identity at all, and the provider payload is the only shared signal --
+    which is NOT occurrence-specific: the same provider bytes belong to many
+    different durable rows (a user who sends the same prompt twice writes two
+    state.db rows with identical ``api_content`` and different primary keys).
+    Matching payload bytes therefore drops a real turn, which is what the
+    greptile P1 finding (2026-11-26) reports.
     """
     from api.streaming import (
         _assign_stable_message_ids,
@@ -124,15 +132,19 @@ def _settled_sidecar():
     _assign_stable_message_ids(rows)
     stamped = _stamp_missing_message_timestamps(rows, now=9_000_000.0)
     assert stamped == 0, "the stamper added a timestamp to a supported _ts row"
+    for index, row_id in (durable_row_ids or {}).items():
+        rows[index]["_state_db_row_id"] = row_id
     return rows
 
 
-def _reconcile(monkeypatch, tmp_path, sid, state_rows):
+def _reconcile(monkeypatch, tmp_path, sid, state_rows, durable_row_ids=None):
     """Compose the real reader and the real reconciler over one SQLite store."""
     import api.models as models
 
     _make_state_db(tmp_path / "state.db", sid, state_rows)
-    session = _install_test_session(monkeypatch, tmp_path, sid, _settled_sidecar())
+    session = _install_test_session(
+        monkeypatch, tmp_path, sid, _settled_sidecar(durable_row_ids)
+    )
     # The default display read, exactly what the product calls: a row with a
     # provider payload projects its durable primary key.
     state_messages = models.get_state_db_session_messages(sid)
@@ -147,9 +159,9 @@ def _reconcile(monkeypatch, tmp_path, sid, state_rows):
 def test_restamped_durable_replay_collapses_onto_its_saved_occurrence(monkeypatch, tmp_path):
     """Gate RED: a restamped replay of row 7 must not add a sixth row.
 
-    Frozen master collapses it (five rows).  The candidate head appended it
-    after ``OMEGA`` because the clocks disagree, even though the incoming row
-    names durable row 7 -- the exact occurrence the saved prompt owns.
+    The saved occurrence OWNS durable row 7 -- the same row the incoming
+    replay names -- so the two are provably the same logical row under a
+    rewritten clock, and the replay must collapse onto it.
     """
     display = _reconcile(
         monkeypatch,
@@ -164,6 +176,7 @@ def test_restamped_durable_replay_collapses_onto_its_saved_occurrence(monkeypatc
                 "api_content": "provider-Q-1",
             },
         ],
+        durable_row_ids={1: 7},
     )
     contents = [row.get("content") for row in display]
     assert contents == SAVED_CONTENTS, (
@@ -194,6 +207,7 @@ def test_both_repeated_occurrences_absorb_their_own_restamped_replays(monkeypatc
                 "api_content": "provider-Q-2",
             },
         ],
+        durable_row_ids={1: 7, 3: 9},
     )
     contents = [row.get("content") for row in display]
     assert contents == SAVED_CONTENTS, (
@@ -245,18 +259,17 @@ def test_distinct_durable_turn_is_not_absorbed_by_a_similar_row(monkeypatch, tmp
 def test_identity_less_restamped_replay_keeps_the_strict_separation(monkeypatch, tmp_path):
     """Control: without a shared identity, a restamped clock still separates.
 
-    The first replay names durable row 7 and must collapse onto its saved
-    occurrence; the second carries NO private identity at all, so it cannot
-    prove it is anybody's replay and must be appended.  This pins the boundary
-    of the relaxation: only a SHARED identity grants a restamped row its
-    predecessor's replay slot -- bare content plus a new clock never does.
+    The first replay names durable row 7 and the saved occurrence owns it, so
+    the two collapse; the second carries NO private identity at all, so it
+    cannot prove it is anybody's replay and must be appended.  This pins the
+    boundary of the relaxation: only a SHARED identity grants a restamped row
+    its predecessor's replay slot -- bare content plus a new clock never does.
     """
     import api.models as models
 
-    sid = "webui_8672_matched_no_identity"
     _make_state_db(
         tmp_path / "state.db",
-        sid,
+        "webui_8672_matched_no_identity",
         [
             {
                 "id": 7,
@@ -267,8 +280,17 @@ def test_identity_less_restamped_replay_keeps_the_strict_separation(monkeypatch,
             },
         ],
     )
-    session = _install_test_session(monkeypatch, tmp_path, sid, _settled_sidecar())
-    state_messages = models.get_state_db_session_messages(sid)
+    session = _install_test_session(
+        monkeypatch,
+        tmp_path,
+        "webui_8672_matched_no_identity",
+        _settled_sidecar({1: 7}),
+    )
+    state_messages = models.get_state_db_session_messages(
+        "webui_8672_matched_no_identity"
+    )
+    # The identity-less replay: same content, a new clock, no private identity
+    # at all, so it cannot prove it is anybody's replay.
     state_messages.append(
         {"role": "user", "content": REPEATED_PROMPT, "timestamp": 9001.0}
     )
@@ -279,5 +301,68 @@ def test_identity_less_restamped_replay_keeps_the_strict_separation(monkeypatch,
     contents = [row.get("content") for row in display]
     assert contents == SAVED_CONTENTS + [REPEATED_PROMPT], (
         "an identity-less restamped replay was absorbed without proof: "
+        f"expected six rows got {contents}"
+    )
+
+
+def test_a_new_durable_row_repeating_the_payload_is_not_dropped(monkeypatch, tmp_path):
+    """The greptile P1 direction (2026-11-26): a new row must survive.
+
+    The saved occurrence establishes NO durable identity at all -- it carries
+    only its stable WebUI id -- while the incoming row carries a NEW durable
+    row id and the SAME provider bytes.  Matching payload bytes cannot prove
+    the two are the same occurrence: the same bytes belong to many different
+    durable rows (a user who sends the same prompt twice writes two state.db
+    rows with identical ``api_content`` and different primary keys).
+
+    Collapsing on the payload therefore dropped a real turn.  The incoming row
+    must survive as its own occurrence.
+    """
+    display = _reconcile(
+        monkeypatch,
+        tmp_path,
+        "webui_8672_matched_new_payload_row",
+        [
+            {
+                "id": 51,
+                "role": "user",
+                "content": REPEATED_PROMPT,
+                "timestamp": 9000.0,
+                "api_content": "provider-Q-1",
+            },
+        ],
+    )
+    contents = [row.get("content") for row in display]
+    assert contents == SAVED_CONTENTS + [REPEATED_PROMPT], (
+        "a new durable turn that repeats the provider payload was dropped: "
+        f"expected six rows got {contents}"
+    )
+
+
+def test_a_new_durable_row_survives_next_to_a_known_saved_occurrence(monkeypatch, tmp_path):
+    """The same direction with a saved occurrence that KNOWS its durable row.
+
+    The saved occurrence owns durable row 7 and the incoming row is row 50:
+    the two conflict inside the SAME durable namespace, so the incoming turn
+    is provably distinct and must stay a separate displayed turn.
+    """
+    display = _reconcile(
+        monkeypatch,
+        tmp_path,
+        "webui_8672_matched_new_payload_row_known",
+        [
+            {
+                "id": 50,
+                "role": "user",
+                "content": REPEATED_PROMPT,
+                "timestamp": 9000.0,
+                "api_content": "provider-Q-1",
+            },
+        ],
+        durable_row_ids={1: 7},
+    )
+    contents = [row.get("content") for row in display]
+    assert contents == SAVED_CONTENTS + [REPEATED_PROMPT], (
+        "a genuinely distinct durable turn was suppressed as a duplicate: "
         f"expected six rows got {contents}"
     )

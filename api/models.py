@@ -16289,10 +16289,57 @@ def _visible_keys_share_occurrence(
             return True
         if namespace_conflict:
             return False
-        if provider_payload:
-            return bool(right_identity)
+        # The provider payload alone is NOT an occurrence-level proof
+        # (greptile P1, #8672 2026-11-26): the SAME provider bytes belong to
+        # many DIFFERENT durable rows -- a user who sends the same prompt
+        # twice produces two state.db rows with identical ``api_content`` and
+        # different primary keys.  Matching payload bytes therefore cannot
+        # tell "the same logical row restamped" from "another turn that
+        # happens to repeat the same bytes", and collapsing on it drops a real
+        # turn (the later repeated prompt disappears from the transcript).
+        #
+        # The one-sided claim is only admissible when the two sides can still
+        # be PROVED to name the same logical row: they must agree on a
+        # durable identity value (the same state.db row id), even when the
+        # field they carry it in differs.  A stable WebUI id and a SQLite
+        # row id are different namespaces, so they never satisfy this --
+        # ``provider_payload`` alone therefore never collapses a row.
+        if provider_payload and _occurrence_identity_value_shared(
+            left_identity, right_identity
+        ):
+            return True
         return False
     return True
+
+
+def _occurrence_identity_value_shared(left_identity: str, right_identity: str) -> bool:
+    """True when both sides name the SAME durable row id.
+
+    One-sided identity is evidence of the same logical row only when the two
+    sides agree on the durable row they name.  The agreement is checked on
+    the canonical durable VALUE (every durable alias collapses onto
+    ``_state_db_row_id``), so a side that carries the row id under a
+    different alias still matches.
+
+    The stable WebUI id is deliberately NOT accepted: it lives in its own
+    namespace and never names a state.db row, so it cannot bridge the two
+    stores (greptile P1, #8672 2026-11-26).
+    """
+    if not left_identity or not right_identity:
+        return False
+    left_values = {
+        _occurrence_identity_value(identity)
+        for identity in _occurrence_identities(left_identity)
+        if _occurrence_identity_namespace(identity) == "state_db_row"
+    }
+    if not left_values:
+        return False
+    right_values = {
+        _occurrence_identity_value(identity)
+        for identity in _occurrence_identities(right_identity)
+        if _occurrence_identity_namespace(identity) == "state_db_row"
+    }
+    return bool(left_values & right_values)
 
 
 def _occurrence_identities_overlap(left_identity: str, right_identity: str) -> bool:
@@ -16636,12 +16683,25 @@ def _shared_identity_candidate(group: dict, identities, remaining=None):
     replay rather than the merge appending an extra displayed turn (#8672 gate
     2026-11-25).
 
-    The O(1) path is the group's prebuilt ``by_identity`` index.  Only when
-    that indexed representative is EXHAUSTED does the per-signature list walk
-    run, and it is materialised once per signature, so no incoming row rescans
-    the group's members.  A candidate that merely shares a NAMESPACE with a
-    different value is a conflict, not an overlap, and is deliberately not
-    offered here (that shape stays distinct).
+    The O(1) path is the group's prebuilt ``by_identity`` index, which holds
+    EVERY identity the group owns.  When an incoming identity is absent from
+    that index, NO saved member establishes it, so the member scan below could
+    only produce an empty list -- and it is skipped entirely (greptile P2,
+    #8672 2026-11-26).
+
+    That early return is what keeps the work linear.  The scan's cache used to
+    be keyed by the FULL identity value, so every distinct SQLite row id
+    started a fresh scan of every saved member: N saved repeated turns times
+    N incoming rows that each carry a new clock and a new durable id cost N^2
+    member visits, which slowed large chats down past the fuzzy limit.  The
+    cache is now keyed by the identity VALUE alone, so the candidates for one
+    identity are materialised once and shared by every incoming row that
+    names that identity, and an identity the group has never seen costs one
+    dict lookup instead of a scan.
+
+    A candidate that merely shares a NAMESPACE with a different value is a
+    conflict, not an overlap, and is deliberately not offered here (that shape
+    stays distinct).
     """
     if not identities:
         return None
@@ -16650,19 +16710,28 @@ def _shared_identity_candidate(group: dict, identities, remaining=None):
         match = by_identity.get(identity)
         if match is not None and _visible_key_capacity_remaining(match, remaining):
             return match
+    # An identity the group's index does not carry is established by no saved
+    # member, so there is nothing to absorb the replay (greptile P2, #8672
+    # 2026-11-26).  Return before the member scan instead of materialising an
+    # empty candidate list for every distinct incoming row id.
+    if not any(identity in by_identity for identity in identities):
+        return None
     cache = group.setdefault("shared_identity_cache", {})
-    signature = frozenset(identities)
-    ordered = cache.get(signature)
-    if ordered is None:
-        ordered = []
-        for candidate in group.get("members") or []:
-            occurrence = _visible_key_field(
-                candidate, _VISIBLE_KEY_OCCURRENCE_INDEX, ""
-            )
-            _clock, identity_text = _occurrence_parts(occurrence)
-            if signature & set(_occurrence_identities(identity_text)):
-                ordered.append(candidate)
-        cache[signature] = ordered
+    ordered = []
+    for identity in identities:
+        cached = cache.get(identity)
+        if cached is None:
+            cached = [
+                candidate
+                for candidate in group.get("members") or []
+                if identity in _occurrence_identities(
+                    _occurrence_parts(
+                        _visible_key_field(candidate, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+                    )[1]
+                )
+            ]
+            cache[identity] = cached
+        ordered.extend(cached)
     for candidate in ordered:
         if _visible_key_capacity_remaining(candidate, remaining):
             return candidate
