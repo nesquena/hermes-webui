@@ -500,7 +500,7 @@ def test_share_strips_image_destinations_with_spaces_and_newlines():
 def test_legacy_snapshot_strips_media_on_read():
     """Pre-fix snapshots with file:// content must be sanitized on read."""
     # Simulate a legacy snapshot written directly to disk without sanitization.
-    from api.shares import SHARES_DIR, _write_json_atomic, _share_path, load_share
+    from api.shares import _write_json_atomic, _share_path, load_share
     import secrets
 
     sid = _make_session_with_messages()
