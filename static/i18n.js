@@ -52,6 +52,7 @@ const LOCALES = {
     import_failed: 'Import failed: ',
     import_invalid_json: 'Invalid JSON',
     image_pasted: 'Image pasted: ',
+    image_paste_failed: '❌ Could not read the pasted image — take the screenshot again and re-paste.',
     text_pasted: 'Pasted text attached as ',
     // messages.js
     edit_message: 'Edit message',
@@ -2065,6 +2066,7 @@ const LOCALES = {
     import_failed: 'Importazione fallita: ',
     import_invalid_json: 'JSON non valido',
     image_pasted: 'Immagine incollata: ',
+    image_paste_failed: '❌ Impossibile leggere l\'immagine incollata — rifai lo screenshot e incolla di nuovo.',
     text_pasted: 'Testo incollato allegato come ',
     // messages.js
     edit_message: 'Modifica messaggio',
@@ -3997,6 +3999,7 @@ const LOCALES = {
     import_failed: 'インポート失敗: ',
     import_invalid_json: '無効な JSON',
     image_pasted: '画像を貼り付けました: ',
+    image_paste_failed: '❌ 貼り付けた画像を読み取れませんでした — スクリーンショットを取り直してから貼り付けてください。',
     text_pasted: '貼り付けたテキストを添付しました: ',
     // messages.js
     edit_message: 'メッセージを編集',
@@ -5932,6 +5935,7 @@ const LOCALES = {
     import_failed: 'Не удалось импортировать: ',
     import_invalid_json: 'Неверный JSON',
     image_pasted: 'Изображение вставлено: ',
+    image_paste_failed: '❌ Не удалось прочитать вставленное изображение — сделайте снимок заново и вставьте его ещё раз.',
     text_pasted: 'Вставленный текст прикреплён как ',
     edit_message: 'Редактировать сообщение',
     regenerate: 'Сгенерировать ответ заново',
@@ -7840,6 +7844,7 @@ const LOCALES = {
     import_failed: 'Error al importar: ',
     import_invalid_json: 'JSON inválido',
     image_pasted: 'Imagen pegada: ',
+    image_paste_failed: '❌ No se pudo leer la imagen pegada — vuelve a hacer la captura y pégala de nuevo.',
     text_pasted: 'Texto pegado adjuntado como ',
     // messages.js
     edit_message: 'Editar mensaje',
@@ -9717,6 +9722,7 @@ const LOCALES = {
     import_failed: 'Import fehlgeschlagen: ',
     import_invalid_json: 'Ungültiges JSON',
     image_pasted: 'Bild eingefügt: ',
+    image_paste_failed: '❌ Das eingefügte Bild konnte nicht gelesen werden — Screenshot erneut aufnehmen und wieder einfügen.',
     text_pasted: 'Eingefügter Text angehängt als ',
     // messages.js
     edit_message: 'Nachricht bearbeiten',
@@ -11649,6 +11655,7 @@ const LOCALES = {
     import_failed: '导入失败：',
     import_invalid_json: 'JSON 无效',
     image_pasted: '已粘贴图片：',
+    image_paste_failed: '❌ 剪贴板图片读取失败 — 请重新截图/复制后再粘贴',
     text_pasted: '已将粘贴文本附加为：',
     // messages.js
     edit_message: '编辑消息',
@@ -13530,6 +13537,7 @@ const LOCALES = {
     import_failed: '匯入失敗：',
     import_invalid_json: '無效的 JSON',
     image_pasted: '已貼上圖片：',
+    image_paste_failed: '❌ 無法讀取貼上的圖片，請重新截圖後再貼上。',
     text_pasted: '已將貼上文字附加為：',
     // messages.js
     edit_message: '編輯訊息',
@@ -15452,6 +15460,7 @@ const LOCALES = {
     import_failed: 'Falha na importação: ',
     import_invalid_json: 'JSON inválido',
     image_pasted: 'Imagem colada: ',
+    image_paste_failed: '❌ Não foi possível ler a imagem colada — tire a captura novamente e cole de novo.',
     text_pasted: 'Texto colado anexado como ',
     // messages.js
     edit_message: 'Editar mensagem',
@@ -17192,6 +17201,7 @@ const LOCALES = {
     import_failed: '가져오기 실패: ',
     import_invalid_json: '잘못된 JSON입니다',
     image_pasted: '붙여넣은 이미지: ',
+    image_paste_failed: '❌ 붙여넣은 이미지를 읽을 수 없습니다 — 스크린샷을 다시 찍은 후 붙여넣어 주세요.',
     text_pasted: '붙여넣은 텍스트를 첨부했습니다: ',
     // messages.js
     edit_message: '메시지 편집',
@@ -19126,6 +19136,7 @@ const LOCALES = {
     import_failed: 'Échec de l\'importation :',
     import_invalid_json: 'JSON invalide',
     image_pasted: 'Image collée : ',
+    image_paste_failed: '❌ Impossible de lire l\'image collée — refaites la capture puis collez-la à nouveau.',
     text_pasted: 'Texte collé joint en tant que ',
     edit_message: 'Modifier le message',
     regenerate: 'Régénérer la réponse',
@@ -22444,6 +22455,7 @@ const LOCALES = {
     html_too_large: 'HTML příliš velké pro vložený náhled',
     image_load_failed: 'Nelze načíst obrázek',
     image_pasted: 'Vložený obrázek:',
+    image_paste_failed: '❌ Vložený obrázek nelze přečíst — pořiďte snímek znovu a vložte jej znovu.',
     import_failed: 'Import selhal',
     import_invalid_json: 'Neplatná data JSON',
     jump_to_question: 'na odpověď',
@@ -22924,6 +22936,7 @@ const LOCALES = {
     import_failed: 'İçe aktarma başarısız oldu:',
     import_invalid_json: 'Geçersiz JSON',
     image_pasted: 'Yapıştırılan resim:',
+    image_paste_failed: '❌ Yapıştırılan görsel okunamadı — ekran görüntüsünü yeniden alıp tekrar yapıştırın.',
     text_pasted: 'Yapıştırılan metin şu adla eklendi: ',
     // messages.js
     edit_message: 'Mesajı düzenle',
@@ -24849,6 +24862,7 @@ const LOCALES = {
     import_failed: 'Import nie powiódł się: ',
     import_invalid_json: 'Nieprawidłowy JSON',
     image_pasted: 'Wklejono obraz: ',
+    image_paste_failed: '❌ Nie można odczytać wklejonego obrazu — zrób zrzut ekranu ponownie i wklej go jeszcze raz.',
     text_pasted: 'Wklejony tekst załączono jako ',
     // messages.js
     edit_message: 'Edytuj wiadomość',
@@ -26775,6 +26789,7 @@ const LOCALES = {
     import_failed: 'Nhập thất bại: ',
     import_invalid_json: 'JSON không hợp lệ',
     image_pasted: 'Đã dán ảnh: ',
+    image_paste_failed: '❌ Không thể đọc ảnh đã dán — hãy chụp lại màn hình rồi dán lại.',
     // messages.js
     edit_message: 'Chỉnh sửa tin nhắn',
     regenerate: 'Tạo lại phản hồi',

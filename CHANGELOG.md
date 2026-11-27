@@ -5,6 +5,8 @@
 
 ### Performance
 
+- **Resuming a long run's event stream reads less of its journal (#8991, @CharlesMcquade).** Replaying a run's events after a given point (`after_seq`) used to read and parse the whole run journal on every request. WebUI now keeps a small per-journal index of checkpoints, so a repeated lookup starts reading near the requested point instead of at the beginning. On the Gate's matched fixture, a warm lookup read 146,416 bytes instead of 3,648,926. The first lookup still reads the whole journal. Lookups fall back to the full reader whenever the file was rewritten, archived or rolled back, and the response is the same as before in every case tested.
+
 - **Fork a scheduled-job (cron) conversation into your own editable chat.** Cron-run sessions are read-only (the scheduler owns them), so you couldn't continue one. You can now branch/fork a cron session into a new WebUI-owned conversation — the original read-only session is never modified, and the fork picks up its history so you can carry on. Only genuine cron sessions qualify (verified by the server-side source, not a guessable id), and every other read-only session stays unbranchable. Thanks @rodboev. (#5555, #5477)
 
 - **Pick the exact time and day for scheduled jobs — no cron syntax needed.** The Tasks "New job" form now builds the schedule as a plain sentence: choose a frequency (Hourly / Daily / Weekdays / Weekly / Monthly / Custom) and it shows just the controls that matter — a time picker, a day-of-week dropdown, or a day-of-month dropdown — e.g. "Weekly on Monday at 09:00." The generated cron expression is previewed inline, and the raw cron field now appears only under "Custom." Thanks @rodboev. (#5554, #5552)
@@ -51,6 +53,24 @@
 
 ### Fixed
 
+- **A managed-startup test no longer fails when the Agent's own dependency is missing from WebUI's venv (#9384).** `tests/test_managed_profile_startup.py::test_real_managed_bootstrap_preserves_named_profile_concurrency` failed under WebUI's venv because the installed Agent now imports `psutil`, which is optional for WebUI. The test now looks at why its isolated child failed. It skips only when the Agent's own source imports a package that the Agent declares as a runtime dependency in its `pyproject.toml`, and the child exited normally with an error. A deleted or renamed Agent module, a broken WebUI import or a crash still fails it. This is a test-only change.
+
+- **The dialog-to-conversation binding browser tests no longer time out intermittently (#9383).** `tests/test_dialog_actions_bind_their_conversation_browser.py` had two sources of flakiness:
+  - Its draft-save hold could catch the composer's debounced autosave instead of the conversation switch's own save. The test now waits until the autosave has been answered and holds only the switch's save.
+  - Its release step removed the route right after letting the held request through. Removing the page's last route turns Playwright's request interception off, which could strand the page's next request, so the switch never finished and the test timed out. The hold helper now keeps its route and passes requests through after release. This applies to all twelve tests that use it.
+
+  This is a test-only change.
+
+- **A flaky provider-probe test now passes reliably under load (#9360).** `tests/test_issue7481_probe_dedup.py` ran the bounded model-list rebuild on the real clock with real probe threads. On a busy test host, a late probe thread could run out its time slice and the endpoint was probed twice. The module now uses the fake clock and inline probes that the sibling fairness test already uses. The assertions are unchanged. This is a test-only change.
+
+- **The server now caps glibc malloc arenas at startup (#9359, part of #9052).** On Linux with glibc, a long-running threaded WebUI server could build up many per-thread malloc arenas that never shrink. The server now applies a cap of 2 arenas with `mallopt` before the Agent or any `api` module loads. It does not export `MALLOC_ARENA_MAX`, so programs the server launches keep glibc's default. A `MALLOC_ARENA_MAX` or `GLIBC_TUNABLES` set in the launch environment still takes precedence. The new `HERMES_WEBUI_MALLOC_ARENA_MAX` setting changes the cap; `0`, `off` or `false` turn it off. On musl, macOS and Windows it does nothing. In a 48-thread load test, arena heaps dropped from 52 to 1 at the same throughput. Native code that allocates from many threads at once can be slower with two arenas; raise the cap or turn it off for that workload. The new module ships in the wheel and the Nix package.
+
+- **Selected text stays visible when you edit a sent message (#8625, @solarmaster961).** The inline editor for a sent message is a textarea on the user-bubble colours. On several skins the browser's selection tint matched the bubble, so you couldn't see what you'd selected. This happened on the default light gold bubble, Slate light and Geist Contrast light, and dark mode showed only a faint band. Inside an open inline edit, the selection now inverts the bubble's colours. Dark mode uses the opaque page background for the selected text, and Geist Contrast light uses its black/white pair. The caret also uses the bubble's text colour. This is a CSS-only change scoped to the open inline editor; nothing else on the page changes.
+
+- **Pasting an image whose data never arrived no longer adds a broken attachment (#9194, @chhxbchhxb).** Some screenshot tools and clipboards advertise an image without delivering its data. Pasting one used to add an empty `screenshot-….png` chip that could be sent, and to show a false "Image pasted" message. WebUI now skips image items with no data. If nothing readable was pasted, it shows an error: "Could not read the pasted image — take the screenshot again and re-paste." The message is translated in all 15 locales. If it keeps happening, retake the screenshot, or save the image and attach the saved file with the attachment button instead.
+
+- **The profile picker and Tasks list only the named profile homes the Agent considers live (#8897, @chhxbchhxb).** A deleted (tombstoned) or marker-less home under `profiles/` still showed up in the profile dropdown. Opening Tasks then created `cron/` folders inside it. The picker now applies the Agent's own liveness checks, as far as the installed Agent provides them, and the Tasks job list skips homes that aren't live. The default home and custom `HERMES_HOME` roots stay readable.
+
 - **The opt-in native Gateway session transport no longer reconnects forever when its socket is missing, and Stop reaches a turn in every phase (#8905, #9227, @chhxbchhxb).** With `webui_gateway_session_transport: unix` and a socket path that doesn't exist, a turn kept reconnecting every few seconds and Stop couldn't end it. A failure before the first submission now ends the turn after one attempt. Stop now reaches a turn that hasn't been submitted yet, and one whose submission acknowledgement is still pending. Failures after a submission keep the existing reconnect-and-resume behaviour.
 
 - **Tool cards saved with a turn now keep each result with its own call (#6061, @webtecnica).** When a turn's transcript had no tool-call declarations and the live progress list was missing some ids, the saved tool summaries were paired with results by position, so on reopen one tool's output could appear under another tool's command, or in the wrong order. Results are now matched by tool-call id first, and the rest are paired in order, so each card keeps its own command, arguments and output, in result order. Related: #4666 (memory tool calls missing from the stream), which this does not resolve.
@@ -70,10 +90,6 @@
 - **A public share page no longer hides part of a message (#9214).** Some messages contained text the page left out without any sign: an HTML comment, an attribute value the renderer drops, or angle-bracket text such as `git checkout <branch-name>` or a traceback's `File "<stdin>", line 1, in <module>`. Anyone reading the published snapshot's source could still see it. When the rendered message would leave out any of its words, the share page now shows that message as plain text, with a short note, so every word is visible. Messages the page shows in full render as before. A few formatting-only shapes also fall back to plain text although nothing in them is hidden; they're listed in the PR and tracked in #9267.
 
 - **The gateway-sync reset test runs on newer Hermes Agent versions too (#9261, closes #9258).** Both cases of the test that checks a reset conversation stays separate from its reopened parent failed against current Agents, because their fixture used storage calls newer Agents no longer have. The fixture now writes rows with `append_message`, ends the parent session through whichever reset call the installed Agent provides, and checks that the reset took effect.
-
-- **Memory and skill changes can no longer land in the wrong profile after a switch in another tab (#9216, part of #9077).** The active profile is shared across tabs, so an open Memory editor or skill list could still show one profile's data after another tab switched profile, and saving or toggling then wrote into the profile now active. The server now refuses such a write with a clear message, nothing is saved, and the Memory editor keeps your text so you can copy it. Skill toggles show an error and reload the list for the active profile.
-
-- **A reused conversation recovers when its context compressor fails to reconnect to session storage (#9215).** When WebUI keeps an agent cached between turns and hands it a new session-storage handle, it reconnects the context compressor to that handle. If that failed once, it stayed failed for as long as the agent stayed cached, and only a debug line recorded it. The next turn now retries, the first failure logs one warning, and a store that has already been released is replaced instead of reused. The check for whether a hook accepts a keyword argument now matches the Hermes Agent's own rule, and the reconnect is still called once per turn, as the Agent's reset path does.
 
   - Maintainer folds: when nothing is interrupted (only Gateway runs on a Gateway the WebUI can't restart), the update gets a neutral "Update the Agent now?" confirmation instead of an "Interrupt active runs?" warning that counted zero runs, and "2 Gateway run keep running" is fixed. A managed Gateway with no WebUI run gets its own confirmation copy in all 15 locales. The forced update carries what you confirmed (whether the Gateway is restarted, which profile and endpoint, how many runs it interrupts). The server re-checks it just before restarting the Gateway, so if the Gateway changed in the meantime, for example after a profile switch in another tab, it asks again instead of restarting a Gateway the dialog said would keep running.
 
@@ -336,8 +352,6 @@
 
 - **A test now pins that the profile secret-scope setter is inspected again when it is replaced (#9234, refs #9096).** Thanks @chhxbchhxb. Replacing `set_secret_scope` on the same Agent module (an Agent reload, or a plugin that wraps the setter) has to re-check whether the new setter accepts `profile_home`; nothing guarded that half of the cache before.
 
-- **The ledger retry-timer test no longer fails intermittently (#9287, closes #9269).** It counted live timers before the retry timer that had just fired had finished exiting; it now waits for that timer first.
-
 - **CI lint gate:** the ruff diff gate keeps the full history when it fetches `origin/master`, so it diffs against the real merge-base instead of reporting upstream findings as introduced by the PR. Thanks @happy5318.
 
 - **The local full test suite passes in the release sandbox (test-only).** Twenty-one tests failed only because of the host: no package index, the worktree's git dir hidden from git, `HOME=/tmp`, unmapped supplementary groups, no network route for Chromium, a process-wide truststore injection, and two newer-Agent shape changes. They now pass there, or skip with the missing condition named (package index, spare group, Agent org skill mirror). No product code changes, and CI still runs the packaging tests.
@@ -355,6 +369,18 @@
 - **Test suite reads static assets as UTF-8 so it runs on Windows.** 34 test files that opened `static/` assets without an explicit encoding now pass `encoding="utf-8"`, so the suite no longer fails under a non-UTF-8 default locale (Windows `cp1252`). Two method signatures over-matched by the encoding sweep were reverted. Assertions are unchanged. Thanks @mo7al876any. (#5537)
 
 - **Added regression coverage for messaging clear-watermark semantics.** New test locks the watermark behavior so a future change can't silently regress it. Thanks @rodboev. (#5589, #5572)
+
+## [v0.52.735] — 2026-11-26
+
+### Fixed
+
+- **Memory and skill changes can no longer land in the wrong profile after a switch in another tab (#9216, part of #9077).** The active profile is shared across tabs, so an open Memory editor or skill list could still show one profile's data after another tab switched profile, and saving or toggling then wrote into the profile now active. The server now refuses such a write with a clear message, nothing is saved, and the Memory editor keeps your text so you can copy it. Skill toggles show an error and reload the list for the active profile.
+
+- **A reused conversation recovers when its context compressor fails to reconnect to session storage (#9215).** When WebUI keeps an agent cached between turns and hands it a new session-storage handle, it reconnects the context compressor to that handle. If that failed once, it stayed failed for as long as the agent stayed cached, and only a debug line recorded it. The next turn now retries, the first failure logs one warning, and a store that has already been released is replaced instead of reused. The check for whether a hook accepts a keyword argument now matches the Hermes Agent's own rule, and the reconnect is still called once per turn, as the Agent's reset path does.
+
+### Internal
+
+- **The ledger retry-timer test no longer fails intermittently (#9287, closes #9269).** It counted live timers before the retry timer that had just fired had finished exiting; it now waits for that timer first.
 
 ## [v0.52.732] — 2026-11-23
 
