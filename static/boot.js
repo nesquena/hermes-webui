@@ -4349,12 +4349,12 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     // (the boot one-shot captured it right before its own POST).
     const _recoveryGenAtCheck=Number(window._updateRecoveryGeneration)||0;
     const _checkGen=_owner?_owner.generation:0;
-    _updateCheckInFlight=api('api/updates/check',{method:'POST',body:JSON.stringify({force:false}),timeoutMs:300000}).then(d=>{
+    _updateCheckInFlight=api('api/updates/check',{method:'POST',body:JSON.stringify({force:false}),timeoutMs:300000,timeoutToast:false}).then(d=>{
+      if(_owner&&_owner.generation!==_checkGen) return;
       if(d&&d.disabled){
         if(_bootSettings)_bootSettings.check_for_updates=false;
         return;
       }
-      if(_owner&&_owner.generation!==_checkGen) return;
       // Re-check dismissed state after fetch — the user may have dismissed
       // the banner while the request was in flight, preventing a race where
       // _showUpdateBanner() re-displays a banner the user just closed.
@@ -4363,19 +4363,44 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     }).catch(()=>{}).finally(()=>{_updateCheckInFlight=null;});
     return _updateCheckInFlight;
   };
+  const _setUpdateCheckEnabled=window._setUpdateCheckEnabled=(enabled)=>{
+    if(enabled===false){
+      if(_bootSettings) _bootSettings.check_for_updates=false;
+      if(_updateCheckTimer){
+        clearInterval(_updateCheckTimer);
+        _updateCheckTimer=null;
+      }
+      if(_setUpdateCheckEnabled._visibilityHandler){
+        document.removeEventListener('visibilitychange',_setUpdateCheckEnabled._visibilityHandler);
+        _setUpdateCheckEnabled._visibilityHandler=null;
+      }
+      return;
+    }
+    if(_bootSettings) _bootSettings.check_for_updates=true;
+    if(!_setUpdateCheckEnabled._visibilityHandler){
+      const vh=()=>{if(document.visibilityState==='visible') _checkUpdates();};
+      _setUpdateCheckEnabled._visibilityHandler=vh;
+      document.addEventListener('visibilitychange',vh);
+    }
+    if(!_updateCheckTimer){
+      _updateCheckTimer=setInterval(_checkUpdates,1800000);
+    }
+  };
   if(_testUpdates){
     const _recoveryGenAtCheck=Number(window._updateRecoveryGeneration)||0;
     api('api/updates/check?simulate=1',{method:'GET',timeoutMs:300000}).then(d=>_showUpdateBanner(d,_recoveryGenAtCheck)).catch(()=>{});
   }else{
     _checkUpdates();
-    // Re-check when a background tab becomes visible again (visibilitychange);
-    // a tab that was closed and re-opened is handled by the normal boot path.
-    document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible') _checkUpdates();});
-    // Periodic re-check every 30 minutes for always-open tabs (1,800,000 ms).
-    // The handle is kept in a boot-scope binding so the poll can be torn down;
-    // when the server reports updates disabled, _bootSettings.check_for_updates
-    // is set to false so subsequent ticks short-circuit without issuing requests.
-    _updateCheckTimer=setInterval(_checkUpdates,1800000);
+    // Arm the lifecycle triggers through the same interface the Settings save
+    // paths use, so enable/disable has one implementation. The guard keeps the
+    // trigger block runnable in harnesses that extract it alone (this file uses
+    // the same `typeof` pattern for its other boot-scope helpers).
+    if(typeof _setUpdateCheckEnabled==='function'){
+      _setUpdateCheckEnabled(true);
+    }else{
+      document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible') _checkUpdates();});
+      _updateCheckTimer=setInterval(_checkUpdates,1800000);
+    }
   }
   const _bootActiveProfileUnauthRedirectBudget=(()=>{
     const markerKey='hermes-webui-active-profile-bootstrap-401';

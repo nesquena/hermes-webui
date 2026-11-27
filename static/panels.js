@@ -10043,6 +10043,9 @@ function _schedulePreferencesAutosave(){
 async function _autosavePreferencesSettings(payload){
   try{
     const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
+    if(payload&&payload.check_for_updates!==undefined&&typeof window._setUpdateCheckEnabled==='function'){
+      window._setUpdateCheckEnabled((saved&&saved.check_for_updates!==undefined)?saved.check_for_updates:payload.check_for_updates);
+    }
     if(payload&&payload.screen_reader_mode!==undefined){
       setScreenReaderMode(saved&&saved.screen_reader_mode);
     }
@@ -14288,6 +14291,9 @@ async function saveSettings(andClose){
     if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
     try{
       const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
+      if(payload&&payload.check_for_updates!==undefined&&typeof window._setUpdateCheckEnabled==='function'){
+        window._setUpdateCheckEnabled((saved&&saved.check_for_updates!==undefined)?saved.check_for_updates:payload.check_for_updates);
+      }
       if(modelChanged && model){
         try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
@@ -14331,6 +14337,9 @@ async function saveSettings(andClose){
   }
   try{
     const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(body)});
+    if(body&&body.check_for_updates!==undefined&&typeof window._setUpdateCheckEnabled==='function'){
+      window._setUpdateCheckEnabled((saved&&saved.check_for_updates!==undefined)?saved.check_for_updates:body.check_for_updates);
+    }
     if(modelChanged && model){
       try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
