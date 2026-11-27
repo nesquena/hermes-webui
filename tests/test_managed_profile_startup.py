@@ -22,14 +22,30 @@ _MISSING_MODULE = re.compile(r"^ModuleNotFoundError: No module named '([^']+)'\s
 _TRACEBACK_FRAME = re.compile(r'^\s*File "([^"]+)", line (\d+)')
 
 
+def _agent_declared_dependencies(agent):
+    """Top-level import names of the runtime dependencies the Agent declares in its
+    ``pyproject.toml`` (lower-cased; ``ruamel.yaml`` -> ``ruamel``). Empty when it can't
+    be read, so nothing is skipped."""
+    try:
+        import tomllib
+        project = tomllib.loads((Path(agent) / "pyproject.toml").read_text(encoding="utf-8")).get("project", {})
+    except (ImportError, OSError, ValueError):
+        return frozenset()
+    return frozenset(
+        re.split(r"[\s<>=!~;\[(@]", str(req), maxsplit=1)[0].lower().replace("-", "_").split(".")[0]
+        for req in project.get("dependencies", []))
+
+
 def _agent_dependency_missing_from_interpreter(stderr, agent_dir):
     """``(module, "file:line")`` when the child died because the installed Agent's own
     source imports a third-party package this interpreter lacks, else ``None``.
 
     Only the final traceback counts: the failing import must sit in the Agent's own
     source (not WebUI's, not an installed package), and the missing top-level name must
-    not be first-party to the Agent or WebUI. A broken WebUI import, a renamed Agent
-    module or any other startup failure therefore still fails the test.
+    be a runtime dependency the Agent declares in its ``pyproject.toml``. A deleted or
+    renamed Agent module is not a declared dependency, so it still fails the test, as do
+    a broken WebUI import and any other startup failure. A package whose import name
+    differs from its distribution name (``pillow`` -> ``PIL``) also fails rather than skips.
     """
     lines = (stderr or "").rstrip().splitlines()
     match = _MISSING_MODULE.match(lines[-1]) if lines else None
@@ -42,6 +58,8 @@ def _agent_dependency_missing_from_interpreter(stderr, agent_dir):
         return None
     top = match.group(1).split(".")[0]
     if any((root / top).exists() or (root / f"{top}.py").exists() for root in (agent, ROOT)):
+        return None
+    if top.lower() not in _agent_declared_dependencies(agent):
         return None
     return match.group(1), f"{path.relative_to(agent)}:{line}"
 
@@ -232,7 +250,9 @@ def test_real_managed_bootstrap_preserves_named_profile_concurrency(tmp_path):
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=60,
     )
     if result.returncode != 0:
-        missing = _agent_dependency_missing_from_interpreter(result.stderr, agent_dir)
+        # Only an ordinary uncaught exception (exit 1) can be the missing-package case: a
+        # crash after an import traceback was logged (a signal, exit -11) still fails.
+        missing = result.returncode == 1 and _agent_dependency_missing_from_interpreter(result.stderr, agent_dir)
         if missing:
             # The installed Agent hard-imports a third-party package this interpreter
             # lacks (psutil, ruamel.yaml, ...), so it cannot import run_agent at all and
@@ -254,6 +274,9 @@ def test_dependency_skip_covers_only_a_third_party_import_in_agent_source(tmp_pa
     agent = tmp_path / "agent"
     (agent / "tools").mkdir(parents=True)
     (agent / "hermes_cli").mkdir()
+    (agent / "pyproject.toml").write_text(
+        '[project]\nname = "a"\ndependencies = ["psutil>=5.9", "ruamel.yaml>=0.18", '
+        '"pywin32; sys_platform == \'win32\'"]\n', encoding="utf-8")
     agent_file = str(agent / "tools" / "file_sync.py")
     webui_file = str(ROOT / "api" / "config.py")
     installed = str(agent / "venv" / "lib" / "python3.11" / "site-packages" / "pkg" / "__init__.py")
@@ -278,3 +301,26 @@ def test_dependency_skip_covers_only_a_third_party_import_in_agent_source(tmp_pa
     handled = _traceback((agent_file, 27), final=missing) + "\nDuring handling of the above exception, another exception occurred:\n\n"
     assert check(handled + _traceback((agent_file, 30), final="AssertionError: scopes stalled")) is None
     assert check("") is None and check(None) is None
+
+
+def test_dependency_skip_never_covers_a_missing_first_party_agent_module(tmp_path):
+    # A deleted, renamed or never-shipped Agent module is absent from disk, so only the
+    # Agent's declared dependency list tells it apart from a third-party package.
+    agent = tmp_path / "bare-agent"
+    agent.mkdir()
+    (agent / "pyproject.toml").write_text(
+        '[project]\nname = "a"\ndependencies = ["psutil>=5.9", "ruamel.yaml>=0.18"]\n', encoding="utf-8")
+    run_agent = str(agent / "run_agent.py")
+
+    def check(module):
+        stderr = _traceback((run_agent, 104), final=f"ModuleNotFoundError: No module named '{module}'")
+        return _agent_dependency_missing_from_interpreter(stderr, str(agent))
+
+    assert check("psutil") == ("psutil", "run_agent.py:104")
+    assert check("ruamel.yaml") == ("ruamel.yaml", "run_agent.py:104")
+    for first_party in ("hermes_cli", "hermes_cli.config", "run_agent", "tools", "tools.registry",
+                        "model_tools", "hermes_constants"):
+        assert check(first_party) is None, first_party
+    # Without a readable dependency list nothing is skipped.
+    (agent / "pyproject.toml").unlink()
+    assert check("psutil") is None
