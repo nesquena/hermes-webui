@@ -730,7 +730,7 @@ class TestCachedAgentVersionFromGateway:
         entered = threading.Event()
         release = threading.Event()
 
-        def blocking_detector(timeout=0.75):
+        def blocking_detector(timeout=0.75, base_url=None):
             nonlocal call_count
             with call_lock:
                 call_count += 1
@@ -791,7 +791,7 @@ class TestCachedAgentVersionFromGateway:
 
         call_count = 0
 
-        def counting_detector(timeout=0.75):
+        def counting_detector(timeout=0.75, base_url=None):
             nonlocal call_count
             call_count += 1
             return "v0.61.0"
@@ -812,7 +812,7 @@ class TestCachedAgentVersionFromGateway:
 
         call_count = 0
 
-        def counting_detector(timeout=0.75):
+        def counting_detector(timeout=0.75, base_url=None):
             nonlocal call_count
             call_count += 1
             return "v0.61.0"
@@ -874,7 +874,7 @@ class TestCachedAgentVersionFromGateway:
         boundary = now - ttl  # exact in binary floating point
         calls = []
 
-        def counting_detector(timeout=0.75):
+        def counting_detector(timeout=0.75, base_url=None):
             calls.append(1)
             return "v0.70.0"
 
@@ -923,7 +923,7 @@ class TestCachedAgentVersionFromGateway:
         boundary = now - nttl  # exact in binary floating point
         calls = []
 
-        def counting_detector(timeout=0.75):
+        def counting_detector(timeout=0.75, base_url=None):
             calls.append(1)
             return "v0.70.1"
 
@@ -965,7 +965,7 @@ class TestCachedAgentVersionFromGateway:
         entered = threading.Event()
         release = threading.Event()
 
-        def slow_detector(timeout=0.75):
+        def slow_detector(timeout=0.75, base_url=None):
             started["t"] = time.monotonic()
             entered.set()
             assert release.wait(timeout=5.0), "detector not released"
@@ -998,7 +998,7 @@ class TestCachedAgentVersionFromGateway:
 
         call_log = []
 
-        def two_phase_detector(timeout=0.75):
+        def two_phase_detector(timeout=0.75, base_url=None):
             call_log.append("called")
             if len(call_log) == 1:
                 return None  # simulate internal exception → None
@@ -1062,7 +1062,7 @@ class TestCachedAgentVersionFromGateway:
         release = threading.Event()
         completion_time = {}
 
-        def blocking_detector(timeout=0.75):
+        def blocking_detector(timeout=0.75, base_url=None):
             entered.set()
             assert release.wait(timeout=5.0), "detector not released"
             completion_time["t"] = time.monotonic()
@@ -1175,7 +1175,7 @@ class TestCachedAgentVersionFromGateway:
                 return _GenerationTimestamp(reader_now, seeded_value)
             return _GenerationTimestamp(writer_now, refreshed_value)
 
-        def counting_detector(timeout=0.75):
+        def counting_detector(timeout=0.75, base_url=None):
             detector_calls.append(threading.current_thread().name)
             return refreshed_value
 
@@ -1273,7 +1273,7 @@ class TestCachedAgentVersionFromGateway:
 
         call_log = []
 
-        def flaky_detector(timeout=0.75):
+        def flaky_detector(timeout=0.75, base_url=None):
             call_log.append("called")
             if len(call_log) == 1:
                 raise RuntimeError("gateway unreachable")

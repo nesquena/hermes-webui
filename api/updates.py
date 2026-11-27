@@ -1089,7 +1089,8 @@ def _version_from_gateway_health_payload(payload: object) -> str | None:
 
 
 _GATEWAY_AGENT_VERSION_DEADLINE = 1.5
-_GATEWAY_AGENT_VERSION_CHUNK_SIZE = 16
+_GATEWAY_AGENT_VERSION_CHUNK_SIZE = 1
+_GATEWAY_AGENT_VERSION_MAX_BYTES = 8192
 
 
 def _cap_socket_timeout(resp: object, timeout_val: float) -> None:
@@ -1115,16 +1116,23 @@ def _cap_socket_timeout(resp: object, timeout_val: float) -> None:
         pass
 
 
-def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | None:
+def _detect_agent_version_from_gateway_health(
+    timeout: float = 0.75,
+    base_url: str | None = None,
+) -> str | None:
     """Best-effort cross-container gateway API fallback for Agent version.
 
     Bounded by a total time budget (_GATEWAY_AGENT_VERSION_DEADLINE) shared
-    across probe paths (/health and /health/detailed). The response body is
-    read in bounded chunks and socket timeouts are capped by remaining budget
-    to avoid unbounded reads on trickling servers (#6289).
+    across probe paths (/health and /health/detailed).  The body is read one
+    byte at a time, the socket timeout is re-armed with the budget that is
+    left before every read, and the total body is capped by
+    _GATEWAY_AGENT_VERSION_MAX_BYTES, so a gateway that trickles bytes cannot
+    stretch a single read past the deadline (#6289).  ``base_url`` lets the
+    caller pin the endpoint it already resolved for the cache key, so the URL
+    that is probed is always the URL the result is published under.
     """
     try:
-        base = _gateway_health_base_url()
+        base = base_url if base_url is not None else _gateway_health_base_url()
         if not base:
             return None
         parsed = urlparse(base)
@@ -1140,11 +1148,16 @@ def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | No
             try:
                 with urllib.request.urlopen(f'{base}{path}', timeout=req_timeout) as resp:
                     chunks: list[bytes] = []
+                    total_bytes = 0
                     while True:
                         now = time.monotonic()
                         if now >= deadline:
                             return None
                         rem = deadline - now
+                        # Re-arm the socket timeout with the budget that is left
+                        # before every single-byte read, so one read can no
+                        # longer perform several receives, each allowed the
+                        # full per-operation timeout (#6289).
                         _cap_socket_timeout(resp, min(timeout, rem))
                         try:
                             chunk = resp.read(_GATEWAY_AGENT_VERSION_CHUNK_SIZE)
@@ -1160,6 +1173,9 @@ def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | No
                         if not chunk:
                             break
                         chunks.append(chunk)
+                        total_bytes += len(chunk)
+                        if total_bytes > _GATEWAY_AGENT_VERSION_MAX_BYTES:
+                            return None
                     if time.monotonic() >= deadline:
                         return None
                     payload = json.loads(b''.join(chunks).decode('utf-8'))
@@ -1252,7 +1268,7 @@ def _cached_agent_version_from_gateway() -> str | None:
         if fresh:
             return value
 
-        result = _detect_agent_version_from_gateway_health(timeout=0.75)
+        result = _detect_agent_version_from_gateway_health(timeout=0.75, base_url=key)
         entry = (result, time.monotonic())
         # Publish one entry per gateway in ONE assignment.
         with _gateway_version_lock:
