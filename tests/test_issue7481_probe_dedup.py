@@ -25,19 +25,21 @@ import api.profiles as profiles
 from tests.test_issue7481_custom_probe_budget_fairness import (
     _GATEWAY_MODELS,
     _configure,
+    _install_fake_clock,
     _install_urlopen,
     _models_by_provider,
 )
 
 
 @pytest.fixture
-def isolate_models_catalog_state(monkeypatch, tmp_path):
+def isolate_models_catalog_state(monkeypatch, request, tmp_path):
     """Hermetic catalog state, same harness as the sibling #7481 module.
 
     Defined here rather than imported from there: a fixture imported purely so it
     can be requested as a fixture reads as an unused import to linters (ruff F401)
     and collides with the very parameters that request it (ruff F811). Each test
     module owning its harness is what the rest of this suite does.
+    ``_install_fake_clock`` below is a plain helper function, not a fixture.
     """
     config_path = tmp_path / "config.yaml"
     config_path.write_text("model: {}\n", encoding="utf-8")
@@ -80,8 +82,18 @@ def isolate_models_catalog_state(monkeypatch, tmp_path):
         raise socket.gaierror("hermetic test resolver")
 
     monkeypatch.setattr(socket, "getaddrinfo", _unresolvable)
+    # Run every ``models-endpoint-probe`` thread inline under a virtual monotonic
+    # clock, as the sibling module does since #8789. On real threads a probe the
+    # host schedules late outlives its fair-share slice (a real Event.wait), the
+    # key is memoised as truncated, and the worker's full-cap continuation probes
+    # the same endpoint a second time -- the occasional ['shared.example',
+    # 'shared.example'] these probe-count assertions then report. Inline probes
+    # finish before the wait, and the fake clock (handed to every
+    # ``_install_urlopen`` below) makes dead hosts burn virtual time, not
+    # real sleeps. The helper also fails a test whose probes did not run inline.
+    clock = _install_fake_clock(monkeypatch, request)
 
-    return {"tmp_path": tmp_path, "auth_store_path": auth_store_path}
+    return {"tmp_path": tmp_path, "auth_store_path": auth_store_path, "clock": clock}
 
 
 def _hosts(observed, kind: str) -> list[str]:
@@ -110,7 +122,10 @@ def test_shared_endpoint_between_active_probe_and_lmstudio_fallback_is_probed_on
         ],
     )
     observed = _install_urlopen(
-        monkeypatch, dead_hosts=["lan-dead.example"], live_hosts=["gw-live.example"]
+        monkeypatch,
+        dead_hosts=["lan-dead.example"],
+        live_hosts=["gw-live.example"],
+        clock=isolate_models_catalog_state["clock"],
     )
 
     catalog = cfg.get_available_models()
@@ -132,7 +147,10 @@ def test_shared_reachable_endpoint_is_probed_once_and_still_renders(
         provider_base_url="http://lan-live.example:1234/v1",
     )
     observed = _install_urlopen(
-        monkeypatch, dead_hosts=[], live_hosts=["lan-live.example:1234"]
+        monkeypatch,
+        dead_hosts=[],
+        live_hosts=["lan-live.example:1234"],
+        clock=isolate_models_catalog_state["clock"],
     )
 
     catalog = cfg.get_available_models()
@@ -155,7 +173,10 @@ def test_distinct_endpoints_are_still_each_probed(
         provider_base_url="http://lan-dead-b.example:1234/v1",
     )
     observed = _install_urlopen(
-        monkeypatch, dead_hosts=["lan-dead-a.example", "lan-dead-b.example"], live_hosts=[]
+        monkeypatch,
+        dead_hosts=["lan-dead-a.example", "lan-dead-b.example"],
+        live_hosts=[],
+        clock=isolate_models_catalog_state["clock"],
     )
 
     cfg.get_available_models()
@@ -178,7 +199,10 @@ def test_same_endpoint_with_a_different_credential_is_probed_separately(
     cfg.cfg["model"]["api_key"] = "active-key"
     cfg.cfg["providers"]["lmstudio"]["api_key"] = "lmstudio-key"
     observed = _install_urlopen(
-        monkeypatch, dead_hosts=["lan-dead.example"], live_hosts=[]
+        monkeypatch,
+        dead_hosts=["lan-dead.example"],
+        live_hosts=[],
+        clock=isolate_models_catalog_state["clock"],
     )
 
     cfg.get_available_models()
@@ -201,7 +225,12 @@ def test_named_providers_sharing_an_endpoint_are_probed_once(
             {"name": "Proxy B", "base_url": "https://shared.example/v1", "api_key": "k"},
         ],
     )
-    observed = _install_urlopen(monkeypatch, dead_hosts=[], live_hosts=["shared.example"])
+    observed = _install_urlopen(
+        monkeypatch,
+        dead_hosts=[],
+        live_hosts=["shared.example"],
+        clock=isolate_models_catalog_state["clock"],
+    )
 
     catalog = cfg.get_available_models()
 
@@ -226,7 +255,12 @@ def test_named_provider_repeating_the_active_endpoint_is_probed_once(
             }
         ],
     )
-    observed = _install_urlopen(monkeypatch, dead_hosts=["lan-dead.example"], live_hosts=[])
+    observed = _install_urlopen(
+        monkeypatch,
+        dead_hosts=["lan-dead.example"],
+        live_hosts=[],
+        clock=isolate_models_catalog_state["clock"],
+    )
 
     cfg.get_available_models()
 
@@ -275,7 +309,12 @@ def test_trailing_slash_spelling_of_one_endpoint_is_a_single_probe(
             {"name": "Proxy B", "base_url": "https://shared.example/v1/", "api_key": "k"},
         ],
     )
-    observed = _install_urlopen(monkeypatch, dead_hosts=[], live_hosts=["shared.example"])
+    observed = _install_urlopen(
+        monkeypatch,
+        dead_hosts=[],
+        live_hosts=["shared.example"],
+        clock=isolate_models_catalog_state["clock"],
+    )
 
     cfg.get_available_models()
 

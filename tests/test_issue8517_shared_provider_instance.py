@@ -21,6 +21,7 @@ the claim is refused, and only then calls ``initialize``. One test drives the RE
 # ruff: noqa: F811  (pytest fixtures imported from the #8517 P0/P1 module)
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import logging
 import sys
@@ -44,6 +45,11 @@ from tests.test_issue8517_profile_scoped_memory import (  # noqa: F401  (fixture
 mm_mod = pytest.importorskip("agent.memory_manager")
 if not callable(getattr(mm_mod, "claim_instance", None)):  # pragma: no cover - old Agent
     pytest.skip("installed Agent predates claim_instance", allow_module_level=True)
+
+
+# Third-party packages the real Agent import chain needs that a WebUI-only environment
+# does not install. Keep this list explicit: a missing first-party module must fail.
+_AGENT_ONLY_DEPENDENCIES = frozenset({"psutil", "requests"})
 
 
 def _original_claim():
@@ -199,7 +205,23 @@ def test_real_memory_manager_refuses_a_shared_instance_for_a_second_profile(hc, 
         def get_tool_schemas(self):
             return []
 
-    require_ai_agent_class()  # every WebUI construction site resolves the Agent class here
+    try:
+        require_ai_agent_class()  # every WebUI construction site resolves the Agent class here
+    except ModuleNotFoundError as exc:
+        # A WebUI-only environment can hold the Agent's source without the Agent's own
+        # third-party dependencies. Production treats that as "Agent unavailable"
+        # (get_ai_agent_class). Skip only for a known Agent-only dependency that is truly
+        # absent; any other missing module (run_agent, an Agent root module, a WebUI
+        # import) still fails here.
+        missing = (exc.name or "").split(".")[0]
+        if (
+            missing not in _AGENT_ONLY_DEPENDENCIES
+            or importlib.util.find_spec(missing) is not None
+        ):
+            raise
+        pytest.skip(
+            f"the Agent's dependency {missing!r} is not installed in this environment"
+        )
     singleton = SharedSbx(homes["default"])
     alpha = mm_mod.MemoryManager()
     alpha.add_provider(singleton)
