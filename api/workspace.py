@@ -1374,10 +1374,11 @@ def resolve_webui_workspace(
         # byte-for-byte (maintainer scope: single-container behaviour unchanged).
         root = _resolve_path(workspace, profile) if profile is not None else _resolve_path(workspace)
         return (root, safe_resolve_ws(root, str(rel))) if rel not in (None, "") else root
-    translated = _translate_agent_workspace(workspace, maps)
-    if translated is not None:
-        if _is_blocked_workspace_path(translated, str(translated)):
-            raise ValueError(f"Path points to a system directory: {translated}")
+    parts = _translate_agent_workspace_parts(workspace, maps)
+    if parts is not None:
+        webui_root, tail = parts
+        if _is_blocked_workspace_path(webui_root, str(webui_root)):
+            raise ValueError(f"Path points to a system directory: {webui_root}")
         # #8450: validate the MAPPED ROOT against the profile's trust rules
         # once, then accept the translated sub-path as long as it stays
         # INSIDE that trusted root.
@@ -1389,29 +1390,28 @@ def resolve_webui_workspace(
         # could not read or write its own files. Trusting the mapped root
         # and requiring the sub-path to stay inside it is the same
         # containment the translation already implies.
-        parts = _translate_agent_workspace_parts(workspace, maps)
-        if parts is not None:
-            webui_root, tail = parts
-            trusted_root = resolve_trusted_workspace(webui_root, profile)
-            if tail:
-                # The sub-path must EXIST inside the trusted root: a missing
-                # local counterpart stays fail-closed (it is never silently
-                # coerced to the root, which would open the whole root).
-                # It does NOT have to be trusted in its own right — being
-                # inside the trusted mapped root is what admits it.
-                resolved = safe_resolve_ws(trusted_root, tail)
-                if not resolved.exists():
-                    raise ValueError(
-                        f"Path does not exist: {resolved}"
-                    )
-                if not resolved.is_dir():
-                    raise ValueError(
-                        f"Path is not a directory: {resolved}"
-                    )
-                return (resolved, safe_resolve_ws(resolved, str(rel))) if rel not in (None, "") else resolved
-            root = trusted_root
-            return (root, safe_resolve_ws(root, str(rel))) if rel not in (None, "") else root
-        root = resolve_trusted_workspace(translated, profile)
+        trusted_root = resolve_trusted_workspace(webui_root, profile)
+        if tail:
+            # The sub-path must EXIST inside the trusted root: a missing
+            # local counterpart stays fail-closed (it is never silently
+            # coerced to the root, which would open the whole root).
+            # It does NOT have to be trusted in its own right — being
+            # inside the trusted mapped root is what admits it.
+            #
+            # safe_resolve_ws() resolves the tail and re-checks that it
+            # stays inside the root, so a symlink inside the mapped root
+            # pointing outside it is refused here rather than escaping.
+            resolved = safe_resolve_ws(trusted_root, tail)
+            if not resolved.exists():
+                raise ValueError(
+                    f"Path does not exist: {resolved}"
+                )
+            if not resolved.is_dir():
+                raise ValueError(
+                    f"Path is not a directory: {resolved}"
+                )
+            return (resolved, safe_resolve_ws(resolved, str(rel))) if rel not in (None, "") else resolved
+        root = trusted_root
         return (root, safe_resolve_ws(root, str(rel))) if rel not in (None, "") else root
 
     # (5) Mapped profile, unmapped path: fail closed on untrusted paths — a

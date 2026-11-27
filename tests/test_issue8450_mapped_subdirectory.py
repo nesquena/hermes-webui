@@ -162,3 +162,44 @@ def test_symlink_out_of_the_mapped_root_is_still_refused(
 
     with pytest.raises(ValueError):
         workspace_mod.resolve_webui_workspace("/workspace/escape", profile="alice")
+
+
+def test_symlink_to_a_sibling_under_the_shared_home_is_refused(
+    tmp_path, monkeypatch
+):
+    """The home-directory trust rule must not admit a symlink escape.
+
+    A mapped root under the shared home, with a symlink inside it pointing
+    at ANOTHER directory under that home: resolve_trusted_workspace would
+    accept the target on its own (it is under home), so the containment
+    check against the mapped root is what refuses it.
+    """
+    home = tmp_path / "home"
+    alice = home / "webui" / "alice"
+    bob = home / "webui" / "bob"
+    alice.mkdir(parents=True)
+    bob.mkdir(parents=True)
+    (alice / "link").symlink_to(bob)
+
+    hermes_home = tmp_path / "hermes-home"
+    prof = hermes_home / "profiles" / "alice"
+    prof.mkdir(parents=True)
+    _write(
+        prof / "config.yaml",
+        "webui:\n"
+        "  workspace_path_maps:\n"
+        "    - agent: /workspace\n"
+        f"      webui: {alice}\n",
+    )
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", hermes_home)
+    monkeypatch.setattr(workspace_mod, "_home_path", lambda: home)
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    monkeypatch.setattr(
+        workspace_mod,
+        "load_workspaces",
+        lambda profile=None: [{"path": str(alice)}],
+    )
+
+    with pytest.raises(ValueError):
+        workspace_mod.resolve_webui_workspace("/workspace/link", profile="alice")
