@@ -1,4 +1,8 @@
 """Tests for graceful stash-apply recovery in _apply_update_inner."""
+import re
+import subprocess
+import time
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -47,7 +51,7 @@ def test_pull_failure_untracked_overwrite_flags_conflict(tmp_path):
     assert result['conflict'] is True
     assert result['message'].startswith('Pull failed:')
     assert 'untracked working tree files would be overwritten' in result['message']
-    assert ['stash', 'push', '-m', 'hermes-update-autostash'] not in call_log
+    assert not any(args[:2] == ['stash', 'push'] for args in call_log)
     assert len(restart_calls) == 0
 
 
@@ -140,7 +144,7 @@ def test_stash_apply_conflict_preserves_stash(tmp_path):
             return '', True
         if args == ['status', '--porcelain', '--untracked-files=no']:
             return 'M modified_file.py', True
-        if args == ['stash', 'push', '-m', 'hermes-update-autostash']:
+        if args[:3] == ['stash', 'push', '-m']:
             return '', True
         if args[:2] == ['pull', '--ff-only']:
             return 'Already up to date.', True
@@ -178,7 +182,7 @@ def test_stash_apply_reset_failure_returns_error(tmp_path):
             return '', True
         if args == ['status', '--porcelain', '--untracked-files=no']:
             return 'M modified_file.py', True
-        if args == ['stash', 'push', '-m', 'hermes-update-autostash']:
+        if args[:3] == ['stash', 'push', '-m']:
             return '', True
         if args[:2] == ['pull', '--ff-only']:
             return 'Already up to date.', True
@@ -217,7 +221,7 @@ def test_stash_apply_success_drops_and_restarts(tmp_path):
             return '', True
         if args == ['status', '--porcelain', '--untracked-files=no']:
             return 'M modified_file.py', True
-        if args == ['stash', 'push', '-m', 'hermes-update-autostash']:
+        if args[:3] == ['stash', 'push', '-m']:
             return '', True
         if args[:2] == ['pull', '--ff-only']:
             return 'Already up to date.', True
@@ -253,7 +257,7 @@ def test_stash_apply_success_discloses_drop_failure(tmp_path):
             return '', True
         if args == ['status', '--porcelain', '--untracked-files=no']:
             return 'M modified_file.py', True
-        if args == ['stash', 'push', '-m', 'hermes-update-autostash']:
+        if args[:3] == ['stash', 'push', '-m']:
             return '', True
         if args[:2] == ['pull', '--ff-only']:
             return 'Already up to date.', True
@@ -288,7 +292,7 @@ def test_pull_failure_stash_apply_recovery(tmp_path):
             return '', True
         if args == ['status', '--porcelain', '--untracked-files=no']:
             return 'M modified_file.py', True
-        if args == ['stash', 'push', '-m', 'hermes-update-autostash']:
+        if args[:3] == ['stash', 'push', '-m']:
             return '', True
         if args[:2] == ['pull', '--ff-only']:
             return 'Some unrecognized git error', False
@@ -326,7 +330,7 @@ def test_pull_failure_stash_apply_recovery_discloses_drop_failure(tmp_path):
             return '', True
         if args == ['status', '--porcelain', '--untracked-files=no']:
             return 'M modified_file.py', True
-        if args == ['stash', 'push', '-m', 'hermes-update-autostash']:
+        if args[:3] == ['stash', 'push', '-m']:
             return '', True
         if args[:2] == ['pull', '--ff-only']:
             return 'Some unrecognized git error', False
@@ -359,7 +363,7 @@ def test_pull_failure_stash_apply_recovery_warns_before_diverged_reset(tmp_path)
             return '', True
         if args == ['status', '--porcelain', '--untracked-files=no']:
             return 'M modified_file.py', True
-        if args == ['stash', 'push', '-m', 'hermes-update-autostash']:
+        if args[:3] == ['stash', 'push', '-m']:
             return '', True
         if args[:2] == ['pull', '--ff-only']:
             return 'Not possible to fast-forward, aborting.', False
@@ -394,7 +398,7 @@ def test_pull_failure_stash_apply_conflict_cleans_worktree(tmp_path):
             return '', True
         if args == ['status', '--porcelain', '--untracked-files=no']:
             return 'M modified_file.py', True
-        if args == ['stash', 'push', '-m', 'hermes-update-autostash']:
+        if args[:3] == ['stash', 'push', '-m']:
             return '', True
         if args[:2] == ['pull', '--ff-only']:
             return 'Some unrecognized git error', False
@@ -434,7 +438,7 @@ def test_pull_failure_stash_apply_conflict_preserves_diverged_flag(tmp_path):
             return '', True
         if args == ['status', '--porcelain', '--untracked-files=no']:
             return 'M modified_file.py', True
-        if args == ['stash', 'push', '-m', 'hermes-update-autostash']:
+        if args[:3] == ['stash', 'push', '-m']:
             return '', True
         if args[:2] == ['pull', '--ff-only']:
             return 'Not possible to fast-forward, aborting.', False
@@ -467,7 +471,7 @@ def test_pull_failure_stash_apply_conflict_reset_failure_returns_error(tmp_path)
             return '', True
         if args == ['status', '--porcelain', '--untracked-files=no']:
             return 'M modified_file.py', True
-        if args == ['stash', 'push', '-m', 'hermes-update-autostash']:
+        if args[:3] == ['stash', 'push', '-m']:
             return '', True
         if args[:2] == ['pull', '--ff-only']:
             return 'Some unrecognized git error', False
@@ -495,3 +499,102 @@ def test_pull_failure_stash_apply_conflict_reset_failure_returns_error(tmp_path)
     assert ['reset', '--hard', 'HEAD'] in call_log
     assert ['stash', 'drop'] not in call_log
     assert len(restart_calls) == 0
+
+
+def _git(cwd, *args):
+    return subprocess.run(
+        ['git', *args], cwd=cwd, check=True, capture_output=True, text=True,
+    ).stdout
+
+
+def _checkout_behind_upstream(root):
+    """A checkout one commit behind its upstream, where the upstream commit edits mod.py."""
+    upstream = root / 'upstream.git'
+    _git(root, 'init', '-q', '--bare', '-b', 'main', str(upstream))
+    publisher = root / 'publisher'
+    _git(root, 'clone', '-q', str(upstream), str(publisher))
+    _git(publisher, 'config', 'user.name', 'Test')
+    _git(publisher, 'config', 'user.email', 'test@example.com')
+    (publisher / 'mod.py').write_text('value = 1\n')
+    _git(publisher, 'add', 'mod.py')
+    _git(publisher, 'commit', '-q', '-m', 'initial')
+    _git(publisher, 'push', '-q', 'origin', 'HEAD:main')
+    checkout = root / 'checkout'
+    _git(root, 'clone', '-q', str(upstream), str(checkout))
+    _git(checkout, 'config', 'user.name', 'Test')
+    _git(checkout, 'config', 'user.email', 'test@example.com')
+    (publisher / 'mod.py').write_text('value = 2\n')
+    _git(publisher, 'commit', '-q', '-am', 'upstream change')
+    _git(publisher, 'push', '-q', 'origin', 'HEAD:main')
+    return checkout
+
+
+def test_parked_autostash_carries_utc_stamp_hermes_agent_recognises(tmp_path, monkeypatch):
+    """A stash the updater leaves behind is named hermes-update-autostash-<UTC YYYYMMDD-HHMMSS>,
+    the subject hermes-agent's orphaned-autostash warning parses; a bare name is skipped by it
+    forever (#9377). Real git: the local edit conflicts with upstream, so the entry is kept."""
+    checkout = _checkout_behind_upstream(tmp_path)
+    (checkout / 'mod.py').write_text('value = 3  # local edit\n')
+    monkeypatch.setattr(updates, 'REPO_ROOT', checkout)
+
+    started = datetime.now(timezone.utc).replace(microsecond=0)
+    with (
+        patch.object(updates, '_select_apply_compare_ref', return_value='origin/main'),
+        patch.object(updates, '_schedule_restart'),
+    ):
+        result = updates._apply_update_inner('webui')
+    finished = datetime.now(timezone.utc)
+
+    assert result['ok'] is True
+    assert result['stash_conflict'] is True
+    assert (checkout / 'mod.py').read_text() == 'value = 2\n'
+    subjects = _git(checkout, 'stash', 'list', '--format=%gs').splitlines()
+    assert len(subjects) == 1
+    # hermes-agent's consumer: find the prefix, then strptime the next 15 characters as UTC.
+    match = re.fullmatch(r'On main: hermes-update-autostash-(\d{8}-\d{6})', subjects[0])
+    assert match, subjects
+    stamp = datetime.strptime(match.group(1), '%Y%m%d-%H%M%S').replace(tzinfo=timezone.utc)
+    assert started <= stamp <= finished
+    assert '+value = 3  # local edit' in _git(checkout, 'stash', 'show', '-p')
+
+
+def test_autostash_stamp_is_utc_not_local_time(tmp_path, monkeypatch):
+    """The stamp follows hermes-agent's contract (UTC) whatever the server's local time zone is."""
+    if not hasattr(time, 'tzset'):
+        pytest.skip('time.tzset is not available on this platform')
+    monkeypatch.setenv('TZ', 'Pacific/Kiritimati')  # UTC+14: a local-time stamp would be off by a day
+    time.tzset()
+    try:
+        call_log = []
+
+        def fake_git(args, path, timeout=10):
+            call_log.append(args)
+            if args[:2] == ['fetch', 'origin']:
+                return '', True
+            if args == ['status', '--porcelain', '--untracked-files=no']:
+                return 'M modified_file.py', True
+            if args[:3] == ['stash', 'push', '-m']:
+                return '', True
+            if args[:2] == ['pull', '--ff-only']:
+                return 'Already up to date.', True
+            if args == ['stash', 'apply']:
+                return '', True
+            if args == ['stash', 'drop']:
+                return '', True
+            raise AssertionError(f'unexpected git args: {args!r}')
+
+        started = datetime.now(timezone.utc).replace(microsecond=0)
+        with (
+            patch.object(updates, '_run_git', side_effect=fake_git),
+            patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'),
+            patch.object(updates, '_schedule_restart'),
+        ):
+            updates._apply_update_inner('webui')
+        finished = datetime.now(timezone.utc)
+    finally:
+        monkeypatch.delenv('TZ')
+        time.tzset()
+
+    [push] = [args for args in call_log if args[:3] == ['stash', 'push', '-m']]
+    stamp = datetime.strptime(push[3], 'hermes-update-autostash-%Y%m%d-%H%M%S').replace(tzinfo=timezone.utc)
+    assert started <= stamp <= finished
