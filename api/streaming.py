@@ -5956,156 +5956,6 @@ def _script_counts(text: str) -> dict:
     return counts
 
 
-def _strip_links_for_script_tally(text: str) -> str:
-    """Remove links, bare domains and bare paths before a script tally (#9389).
-
-    A single URL can carry thirty Latin characters the user never typed as
-    words. Counting them as conversation text flips the dominant-script
-    classification of a CJK/Hangul opener to ``latin``, so a correct non-Latin
-    title is rejected as a language mismatch and the chat falls back to a
-    URL-fragment name.
-
-    Only the *user* side of the comparison goes through this. The title side
-    keeps every character: a title that is itself a URL must stay visible to
-    drift detection so it can be rejected.
-    """
-    s = str(text or '')
-    if not s:
-        return ''
-    # Full URLs first, with or without a scheme.
-    s = re.sub(r'\b[a-zA-Z][a-zA-Z0-9+.-]*://\S+', ' ', s)
-    s = re.sub(r'\bwww\.\S+', ' ', s)
-    # Bare domains and host:port shapes (example.com, github.com/owner/repo).
-    s = re.sub(
-        r'\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+'
-        r'(?:com|org|net|io|dev|ai|co|me|app|sh|gg|so|xyz|info|cn|kr|jp|ru|de|uk|fr)'
-        r'(?::\d+)?(?:/\S*)?',
-        ' ',
-        s,
-        flags=re.IGNORECASE,
-    )
-    # E-mail addresses.
-    s = re.sub(r'\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b', ' ', s)
-    # Bare paths that only carry link-ish tokens.
-    s = re.sub(r'(?<!\w)/(?:[\w.~-]+/)+[\w.~-]*', ' ', s)
-    return re.sub(r'\s+', ' ', s).strip()
-
-
-# Host suffixes recognised when a link's topic has to be named (#9389).
-_LINK_HOST_SUFFIXES = (
-    'com', 'org', 'net', 'io', 'dev', 'ai', 'co', 'me', 'app', 'sh', 'gg',
-    'so', 'xyz', 'info', 'cn', 'kr', 'jp', 'ru', 'de', 'uk', 'fr',
-)
-
-# Path segments that carry no topic: platform scaffolding and opaque ids.
-_LINK_NOISE_SEGMENTS = {
-    'r', 's', 'u', 'p', 'c', 'comments', 'comment', 'issues', 'issue', 'pull',
-    'pulls', 'blob', 'tree', 'raw', 'wiki', 'src', 'main', 'master', 'index',
-    'watch', 'edit', 'new', 'view', 'html', 'htm', 'php', 'asp', 'aspx',
-    'www', 'http', 'https', 'about', 'help', 'login', 'signin', 'search',
-}
-
-
-def _link_topic_from_url(url: str) -> str:
-    """Name a link's topic: the last meaningful path segment, then the host (#9389).
-
-    ``github.com/owner/phonetrack`` -> ``phonetrack``;
-    ``github.com/searxng/searxng/issues/6819`` -> ``searxng`` (the repository,
-    because ``issues`` and the number are scaffolding);
-    ``reddit.com/r/SomeSub/comments/abc`` -> ``SomeSub``;
-    ``/r/.../s/<random id>`` -> the subreddit, because the id is skipped.
-    """
-    s = str(url or '').strip()
-    if not s:
-        return ''
-    if '://' in s:
-        s = s.split('://', 1)[1]
-    s = s.split('#', 1)[0].split('?', 1)[0]
-    host, _, path = s.partition('/')
-    host = host.split('@')[-1].split(':')[0].lower()
-    segments = [seg for seg in path.split('/') if seg]
-
-    def _meaningful(seg: str) -> bool:
-        low = seg.lower()
-        if low in _LINK_NOISE_SEGMENTS:
-            return False
-        # Opaque ids: long hex/base36 blobs and long digit runs.
-        if len(low) < 2:
-            return False
-        if re.fullmatch(r'[0-9]+', low):
-            return False
-        if len(low) >= 12 and re.fullmatch(r'[0-9a-f]+', low):
-            return False
-        if len(low) >= 20 and re.fullmatch(r'[0-9a-z]+', low):
-            return False
-        return bool(re.search(r'[A-Za-z]', seg))
-
-    # A subreddit path segment is the topic, not the post id after it.
-    for i, seg in enumerate(segments[:-1]):
-        if seg.lower() == 'r' and _meaningful(segments[i + 1]):
-            return segments[i + 1]
-
-    # The repository name is the segment right after the owner.
-    if 'github' in host and len(segments) >= 2:
-        if segments[0].lower() not in _LINK_NOISE_SEGMENTS:
-            return segments[1] if _meaningful(segments[1]) else ''
-
-    for seg in reversed(segments):
-        if _meaningful(seg):
-            return seg
-
-    labels = [lab for lab in host.split('.') if lab]
-    while labels and labels[0] in ('www', 'm', 'mobile'):
-        labels.pop(0)
-    while labels and labels[-1] in _LINK_HOST_SUFFIXES:
-        labels.pop()
-    return labels[-1] if labels else ''
-
-
-def _first_link_topic(text: str) -> str:
-    """Return the topic name of the first link in *text*, or '' (#9389)."""
-    s = str(text or '')
-    m = re.search(r'\b[a-zA-Z][a-zA-Z0-9+.-]*://\S+', s)
-    if not m:
-        m = re.search(r'\bwww\.\S+', s)
-    if not m:
-        m = re.search(
-            r'\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+'
-            r'(?:' + '|'.join(_LINK_HOST_SUFFIXES) + r')(?::\d+)?(?:/\S*)?',
-            s,
-            flags=re.IGNORECASE,
-        )
-    if not m:
-        return ''
-    return _link_topic_from_url(m.group(0))
-
-
-_URL_SHAPED_TITLE_RE = re.compile(
-    r'^\s*(?:'
-    r'https?://\S*'          # full URL
-    r'|www\.\S+'             # bare www host
-    r'|https?\s+\S+'         # a scheme and one fragment: "https www"
-    r'|(?:[a-zA-Z0-9-]+\.)+'
-    r'(?:com|org|net|io|dev|ai|co|me|app|sh|gg|so|xyz|info|cn|kr|jp|ru|de|uk|fr)'
-    r'(?:/\S*)?'             # bare domain
-    r')\s*$',
-    flags=re.IGNORECASE,
-)
-
-
-def _is_url_shaped_title(title) -> bool:
-    """True when *title* is a URL, a bare domain, or a scheme plus a fragment (#9389).
-
-    A chat named ``https www`` describes nothing. Leaving the title unsettled is
-    better than persisting a fragment, so every place that decides what to save
-    refuses these.
-    """
-    s = str(title or '').strip()
-    if not s:
-        return False
-    return bool(_URL_SHAPED_TITLE_RE.match(s))
-
-
 def _dominant_script(text: str) -> str:
     """Return a coarse writing-script bucket for *text*, or '' when undecidable.
 
@@ -6722,16 +6572,7 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
     # contains CJK — i.e. the title is genuinely mixed, not pure drift.
     # A pure-Latin title for a CJK conversation is still rejected.
     # Unrelated scripts (Cyrillic, Arabic, Greek …) are always flagged.
-    # Links are stripped before the tally because a single URL can carry thirty
-    # Latin characters the user never typed as words (#9389). Only when nothing
-    # alphabetic survives the strip — a link-only opener — do the links become
-    # the only signal there is, and the guard falls back to the raw text rather
-    # than switching itself off.
-    stripped = _strip_links_for_script_tally(user_text)
-    if sum(_script_counts(stripped).values()) >= 2:
-        user_script = _dominant_script(stripped)
-    else:
-        user_script = _dominant_script(user_text)
+    user_script = _dominant_script(user_text)
     if user_script and _script_drift(candidate, user_script):
         return True
 
@@ -7510,13 +7351,8 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     if any(k in combined for k in ('issue', 'github', 'pr')) and any(k in combined for k in ('triage', 'bug', 'review')):
         return 'GitHub Issue Triage'
 
-    head = re.split(r'[.!?\n]', _strip_links_for_script_tally(user_text))[0].strip()
+    head = re.split(r'[.!?\n]', user_text)[0].strip()
     if not head:
-        # A link-only opener carries no prose. Name the topic from the link
-        # itself instead of splitting the URL into "https www" (#9389).
-        topic = _first_link_topic(user_text)
-        if topic:
-            return topic[:60]
         return None
 
     stop_en = {
@@ -7549,14 +7385,7 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
 
 
 def _is_generic_fallback_title(title) -> bool:
-    """Return True for low-information fallback labels that should not be persisted.
-
-    Includes URL-shaped candidates (#9389): a chat named ``https www`` or
-    ``www.example.com`` describes nothing, and leaving the title unsettled is
-    better than locking in a fragment.
-    """
-    if _is_url_shaped_title(title):
-        return True
+    """Return True for low-information fallback labels that should not be persisted."""
     return str(title or '').strip().lower() in {'conversation topic'}
 
 
