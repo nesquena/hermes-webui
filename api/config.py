@@ -13658,10 +13658,11 @@ def get_available_models_for_session_visit() -> dict:
 # ``_SESSION_VISIT_MODELS_FRESHNESS_SECONDS``. Past that, the visitor pays the
 # cold rebuild (~6 s of serial provider probes) and receives a truncated catalog
 # because the build outlives the foreground budget. Rebuilding from the
-# maintenance tick a little BEFORE the window expires keeps that cost off every
-# request path, and keeps the window short enough that a model a provider added
-# remotely (which no local fingerprint axis can see) still shows up within the
-# hour.
+# maintenance tick a little BEFORE the window expires moves that rebuild off the
+# request path (the cold build still holds the catalog lock for its budget
+# window, so a visitor arriving mid-sweep can wait up to that budget), and keeps
+# the window short enough that a model a provider added remotely (which no local
+# fingerprint axis can see) still shows up within the hour.
 _MODELS_PREWARM_LOCK = threading.Lock()
 _MODELS_PREWARM_LAST_STARTED: dict[str, float] = {}
 _MODELS_PREWARM_THREAD: threading.Thread | None = None
