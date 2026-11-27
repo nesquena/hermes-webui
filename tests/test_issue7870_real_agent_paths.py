@@ -1,22 +1,22 @@
-"""#7870 review round 2 — the tests now run against the REAL installed agent.
+"""#7870 review round 3 — the tests now run against the REAL installed agent,
+with NO module fakes anywhere in the branch.
 
-The re-gate found that ``tests/test_issue7870_env_keys_profile_auth.py``
-replaces the very modules the code under test depends on:
+Round 2 had already replaced the fake agent modules with the installed ones,
+but ``tests/test_issue7870_env_keys_profile_auth.py`` still replaced WebUI's
+authorization seams: the active profile and the profile→home resolver were
+monkeypatched, so ``get_active_profile_name`` and
+``get_hermes_home_for_profile`` never ran. Round 3 removed those too — both
+files now bind requests through ``api.profiles.set_request_profile`` (the
+function ``server.py`` calls from the ``hermes_profile`` cookie), point the
+real resolver's ``_DEFAULT_HERMES_HOME`` input at temp homes, and assert the
+real isolation predicate ``_is_isolated_profile_mode()``. Every module the
+reviewer named — ``hermes_cli.config``, ``hermes_constants``,
+``agent.secret_scope``, the writers — is the installed implementation, and no
+``sys.modules`` injection remains.
 
-- ``sys.modules["hermes_cli.config"]`` is a fake writer (~123–127, 176);
-- ``sys.modules["hermes_constants"]`` is a fake override (~196–203), so the
-  scope this PR now depends on is never exercised;
-- ``sys.modules["hermes_cli.web_server_profiles"]`` (~177) fakes a module the
-  code no longer imports.
-
-``test_scope_never_activates_process_wide_multi_profile_hosting`` therefore
-checks a fake activation counter rather than the agent's real multiplex flag.
-
-This module drives the same routes through the **installed**
-``hermes_cli.config`` / ``hermes_constants`` against temp profile homes. It is
-skipped when those modules are unavailable, which is a real environment fact and
-not something to paper over with a fake: an assertion that passes against a stub
-is worse than no assertion, because it reads as coverage.
+It is skipped when those modules are unavailable, which is a real environment
+fact and not something to paper over with a fake: an assertion that passes
+against a stub is worse than no assertion, because it reads as coverage.
 
 The one finding this module *disproves* is worth stating up front, because it is
 the reason the previous round could not have found it: the reviewer asked for a
@@ -277,7 +277,7 @@ def test_the_default_profile_writes_to_the_default_home_through_the_real_writer(
     So: a write for the default profile lands in the default home's own
     ``.env``, and in no named profile's home.
     """
-    env.state["name"] = "default"
+    _activate(env, "default")
 
     handler = _Handler()
     _put(env, handler, {"name": "DEFAULT_KEY", "value": "default-value"})
@@ -318,7 +318,7 @@ def test_the_default_profile_write_does_not_reach_a_named_profile_home(env):
     the write lands in the default home even when a named home exists
     alongside it.
     """
-    env.state["name"] = "default"
+    _activate(env, "default")
 
     # A named profile with the same key name, so a misrouted write would be
     # visible rather than merely absent.
@@ -363,7 +363,7 @@ def test_a_default_profile_write_publishes_only_its_own_value(env):
     import hermes_constants
 
     config, constants = env.config, env.constants
-    env.state["name"] = "default"
+    _activate(env, "default")
 
     base_home = env.homes
     # The production layout: the process serves the default profile's home.
@@ -447,7 +447,7 @@ def test_a_named_profile_put_and_delete_leave_the_shared_environment_unchanged(e
         _write_scoped_env(config, constants, base_home, probe, "launch-value")
         os.environ[probe] = "launch-value"
 
-        env.state["name"] = "alpha"
+        _activate(env, "alpha")
         handler = _Handler()
         _put(env, handler, {"name": probe, "value": "named-value"})
         assert handler.status == 200, handler.payload
@@ -529,11 +529,14 @@ class _Handler:
 def env(monkeypatch, tmp_path, real_agent):
     """Wire ``api.env_keys`` to the REAL agent writer over temp profile homes.
 
-    Only two things are faked, and both are WebUI's own seams rather than the
-    agent's: the active profile (WebUI's authorization source) and the profile →
-    home resolver (pointed at the temp homes this fixture creates). Everything
-    the reviewer named — the config writer, the constants override, the scope's
-    side effects — is the installed implementation.
+    The authorization seam is the REAL one too: current requests are bound with
+    ``api.profiles.set_request_profile`` — the function ``server.py`` itself
+    calls from the ``hermes_profile`` cookie — and ``get_active_profile_name``
+    is never monkeypatched. The profile → home resolver is the real one as
+    well; it resolves against a temp base via the same ``_DEFAULT_HERMES_HOME``
+    input production uses. Everything the reviewer named — the config writer,
+    the constants override, the scope's side effects — is the installed
+    implementation.
     """
     import importlib
 
@@ -558,30 +561,48 @@ def env(monkeypatch, tmp_path, real_agent):
     homes = base
     monkeypatch.setenv("HERMES_HOME", str(base))
 
+    # Environment inputs for the real resolver/isolation predicate.
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME", str(base))
+    monkeypatch.setattr(profiles, "_INITIAL_ISOLATED_PROFILE_OPT_IN", "")
+
+    # Production pins the home it serves; the real writer uses that anchor to
+    # decide whether a write is "routed" (must not publish into os.environ).
+    previous_pin = getattr(real_agent[1], "_PINNED_PROCESS_HERMES_HOME", None)
+    previous_webui_home = profiles._PROCESS_PROFILE_HOME
+    profiles._pin_process_profile_home(base)
+
+    with profiles._root_profile_name_cache_lock:
+        previous_cache = set(profiles._root_profile_name_cache)
+        previous_cache_loaded = profiles._root_profile_name_cache_loaded
+        profiles._root_profile_name_cache.clear()
+        profiles._root_profile_name_cache.add("default")
+        profiles._root_profile_name_cache_loaded = True
+
     mod = importlib.reload(env_keys)
 
-    state = {"name": "alpha"}
-    monkeypatch.setattr(
-        profiles, "get_active_profile_name", lambda: state["name"], raising=False
-    )
-
-    _known = {"alpha", "beta"}
-
-    def _home_for(name):
-        if not name or name not in _known:
-            return homes
-        return profiles_dir / name
-
-    monkeypatch.setattr(
-        profiles, "get_hermes_home_for_profile", _home_for, raising=False
-    )
-    monkeypatch.setattr(
-        mod, "_authorized_profile", lambda: mod._canonical_profile_name(state["name"])
-    )
+    profiles.clear_request_profile()
+    profiles.set_request_profile("alpha")
     config, constants = real_agent
-    return SimpleNamespace(
-        mod=mod, state=state, homes=homes, config=config, constants=constants
-    )
+    try:
+        yield SimpleNamespace(
+            mod=mod, homes=homes, config=config, constants=constants, profiles=profiles
+        )
+    finally:
+        profiles.clear_request_profile()
+        profiles._PROCESS_PROFILE_HOME = previous_webui_home
+        real_agent[1].pin_process_hermes_home(previous_pin)
+        with profiles._root_profile_name_cache_lock:
+            profiles._root_profile_name_cache.clear()
+            profiles._root_profile_name_cache.update(previous_cache)
+            profiles._root_profile_name_cache_loaded = previous_cache_loaded
+
+
+def _activate(env, name: str) -> None:
+    """Bind the request to *name* exactly as server.py does from the cookie."""
+    env.profiles.clear_request_profile()
+    env.profiles.set_request_profile(name)
+
 
 
 def _keys(env, handler, query=""):
