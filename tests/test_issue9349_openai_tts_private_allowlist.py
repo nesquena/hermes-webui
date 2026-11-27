@@ -244,13 +244,27 @@ def test_approved_plain_http_host_is_dialled_through_the_pinned_connection(monke
 
     handler = routes._PinnedHTTPSHandler()
     handler.allow_private_hosts = ("kokoro.lan",)
-    req = routes.Request("http://kokoro.lan:8880/v1/audio/speech", data=b"{}")
-    # http_open() hands the dial to a pinned connection class; drive that class
-    # directly so the assertion is about the address, not urllib plumbing.
-    scoped = handler.http_open.__self__  # sanity: the handler owns the call
-    conn = routes._PinnedHTTPConnection("kokoro.lan", 8880)
-    conn.allow_private_hosts = tuple(handler.allow_private_hosts)
 
+    # http_open() must hand the dial to the pinned connection class. Capture the
+    # class it passes to do_open() and drive that, so this asserts the wiring the
+    # fix adds rather than calling the connection directly.
+    captured = {}
+
+    def _fake_do_open(http_class, req, **kwargs):
+        captured["http_class"] = http_class
+        raise OSError("stop here: the class is what this test asserts")
+
+    monkeypatch.setattr(handler, "do_open", _fake_do_open)
+    req = routes.Request("http://kokoro.lan:8880/v1/audio/speech", data=b"{}")
+    with pytest.raises(OSError, match="stop here"):
+        handler.http_open(req)
+
+    http_class = captured["http_class"]
+    assert issubclass(http_class, routes._PinnedHTTPConnection)
+    assert http_class.allow_private_hosts == ("kokoro.lan",)
+
+    # And the class it hands over really does pin: drive its connect().
+    conn = http_class("kokoro.lan", 8880)
     with pytest.raises(OSError, match="stop here"):
         conn.connect()
 
