@@ -6,6 +6,14 @@ Current identity, restoration, and selection rules for the model picker.
 
 A model option is identified by both its provider and its model ID. The same model ID under two providers must remain two selectable options, and only the option for the selected provider can appear active or carry the Selected badge.
 
+## Mistral provider identity
+
+Use `mistral` for the WebUI provider ID. The legacy provider IDs `mistralai` and `mistral-ai` are still accepted when reading existing settings. This does not rename vendor prefixes in model IDs such as OpenRouter routes.
+
+For an accepted built-in route, when multiple `providers:` keys normalize to `mistral`, the picker uses the first matching enabled record in configuration order (`enabled: false` records are skipped). Model discovery and routing take their settings from that same record; they do not borrow credentials from a later alias. The separate ambiguity guard can still reject a legacy-spelled request when enabled built-in providers collide. Prefer one `providers.mistral` record rather than keeping several aliases.
+
+The selected record is chosen on its enabled state alone, not on whether it declares an endpoint. When that record declares no `base_url`, the provider's own default endpoint applies: model discovery falls back to the vendor endpoint for that provider, and routing falls back to the active model's `base_url` when the active model names the same provider. A later alias is never consulted for the missing endpoint, so a record that is missing its endpoint does not cause the request to be paired with another alias's credential or URL.
+
 ## OpenRouter route identity
 
 OpenRouter route identity is case-insensitive and may include the WebUI's optional `@openrouter:` wrapper. All other route text must match exactly.
