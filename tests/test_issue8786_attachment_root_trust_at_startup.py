@@ -392,7 +392,12 @@ _STARTUP_STORAGE_FAULTS = [errno.EIO, errno.EACCES]
 
 
 def _inject_resolve_errno(monkeypatch, target: Path, err: int) -> None:
-    """Make the startup by-name resolve() of *target* fail with *err*."""
+    """Make the startup by-name resolve() of *target* fail with *err*.
+
+    *monkeypatch* must be a SCOPED patcher (``monkeypatch.context()``): the
+    fault has to exist only while the startup trust decision runs, so the
+    request that follows sees a recovered filesystem.
+    """
     real_resolve = Path.resolve
 
     def resolve(self, strict=False):
@@ -404,7 +409,12 @@ def _inject_resolve_errno(monkeypatch, target: Path, err: int) -> None:
 
 
 def _inject_stat_errno(monkeypatch, target: Path, err: int) -> None:
-    """Make the startup usability stat() of *target* fail with *err*."""
+    """Make the startup usability stat() of *target* fail with *err*.
+
+    *monkeypatch* must be a SCOPED patcher (``monkeypatch.context()``): the
+    fault has to exist only while the startup trust decision runs, so the
+    request that follows sees a recovered filesystem.
+    """
     real_stat = os.stat
 
     def stat(path, *args, **kwargs):
@@ -413,6 +423,27 @@ def _inject_stat_errno(monkeypatch, target: Path, err: int) -> None:
         return real_stat(path, *args, **kwargs)
 
     monkeypatch.setattr(upload.os, "stat", stat)
+
+
+def _assert_storage_recovered(att: Path) -> None:
+    """Assert no injected startup fault is live anymore.
+
+    The gate's recovered-storage cases only mean something while the
+    filesystem is healthy again: if a patch leaked past the startup call,
+    the request would fail for the wrong reason and the test would no
+    longer distinguish "the cached failure is reported" from "the fault is
+    still there".
+    """
+    for label, call in (
+        ("resolve", lambda: Path(att).resolve()),
+        ("stat", lambda: os.stat(att)),
+    ):
+        try:
+            call()
+        except OSError as exc:
+            raise AssertionError(
+                f"the injected startup fault is still live ({label}: {exc})"
+            ) from exc
 
 
 @pytest.mark.parametrize("err", _STARTUP_STORAGE_FAULTS, ids=lambda e: errno.errorcode[e])
@@ -430,13 +461,21 @@ def test_startup_storage_fault_is_logged_500_with_restart_diagnostic(
     att = tmp_path / "attachments"
     _put(att)
     monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(att))
-    if seam == "resolve":
-        _inject_resolve_errno(monkeypatch, att, err)
-    else:
-        _inject_stat_errno(monkeypatch, att, err)
-    # The startup trust decision under the injected fault (the same call the
-    # server makes at import), after which the filesystem is healthy again.
-    upload._trusted_attachment_root()
+    # The fault exists only while the startup call runs; the request below
+    # sees a healthy filesystem (the gate's recovered-storage cases).  The
+    # patch is therefore scoped to the startup call: a fault still live at
+    # request time would make the request fail for the wrong reason, and a
+    # regression that re-resolved the root after startup would go unnoticed.
+    with monkeypatch.context() as fault:
+        if seam == "resolve":
+            _inject_resolve_errno(fault, att, err)
+        else:
+            _inject_stat_errno(fault, att, err)
+        # The startup trust decision under the injected fault (the same call
+        # the server makes at import), after which the filesystem is healthy
+        # again.
+        upload._trusted_attachment_root()
+    _assert_storage_recovered(att)
 
     h = _upload(monkeypatch, "sess-9231", "x.txt", b"x")
 
@@ -462,8 +501,13 @@ def test_startup_storage_fault_on_extract_route_is_logged_500(
     att = tmp_path / "attachments"
     _put(att)
     monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(att))
-    _inject_stat_errno(monkeypatch, att, err)
-    upload._trusted_attachment_root()
+    # Same scoping as the plain-upload case: the fault lives only during the
+    # startup trust decision, so the request below sees a recovered
+    # filesystem and exercises the cached failure, not the live fault.
+    with monkeypatch.context() as fault:
+        _inject_stat_errno(fault, att, err)
+        upload._trusted_attachment_root()
+    _assert_storage_recovered(att)
 
     h = _upload_extract(monkeypatch, "sess-9231x", "bundle.zip", b"PK\x03\x04payload")
 
