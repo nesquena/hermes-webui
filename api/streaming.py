@@ -15125,6 +15125,19 @@ def _run_agent_streaming(
     _streaming_skill_home_snapshot = None
     _restore_streaming_skill_home_modules = False
     _acquired_streaming_skill_home_patch_lock = False
+    def _worker_is_cancelled():
+        """Admission predicate shared by cached-agent reuse and registration.
+
+        Mirrors ``_register_agent_if_current``'s cancellation view exactly:
+        the retained cancel event OR a detachment from ``STREAMS`` (Stop pops
+        the stream eagerly, before the worker's finally runs). A cache-hit
+        worker checks this BEFORE touching the borrowed Agent so a Stop that
+        landed during startup cannot leave its mutation on the object a
+        successor is already using (#9397).
+        """
+        with STREAMS_LOCK:
+            return cancel_event.is_set() or stream_id not in STREAMS
+
     def _register_agent_if_current(candidate, cache_signature=None):
         nonlocal agent
         # Every constructor, including both credential self-heal branches, must
@@ -16637,6 +16650,17 @@ def _run_agent_streaming(
                         logger.debug("Failed to close identity-mismatched cached agent for session %s", session_id, exc_info=True)
 
                 if agent is not None:
+                    # A borrowed cache hit is a shared object: a Stop that
+                    # landed during startup must not let this worker refresh or
+                    # mutate it. A successor admitted after Stop may already be
+                    # using it; admission for a cache hit is deliberately a
+                    # no-interrupt rejection, so the borrow itself must be
+                    # guarded (#9397).
+                    if _worker_is_cancelled():
+                        with _agent_lock:
+                            _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                        put('cancel', _cancel_event_payload('Cancelled by user'))
+                        return
                     # Refresh volatile runtime credentials selected from provider
                     # pools without discarding cross-turn agent/provider state.
                     if not _refresh_cached_agent_runtime(agent, _agent_kwargs):
@@ -16655,6 +16679,15 @@ def _run_agent_streaming(
                         agent = None
 
                 if agent is not None:
+                    # The runtime refresh above can be the Stop boundary too
+                    # (cancel_stream may land while it runs). Re-check before
+                    # rebinding callbacks / adopting the per-request SessionDB:
+                    # those mutations belong to a turn this worker still owns.
+                    if _worker_is_cancelled():
+                        with _agent_lock:
+                            _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                        put('cancel', _cancel_event_payload('Cancelled by user'))
+                        return
                     # Refresh per-turn callbacks — these close over request-scoped
                     # objects (put queue, cancel_event) that are new each request.
                     agent.stream_delta_callback = _agent_kwargs.get('stream_delta_callback')
@@ -16691,7 +16724,22 @@ def _run_agent_streaming(
                     if hasattr(agent, '_api_call_count'):
                         agent._api_call_count = 0
                     # Reset interrupt state from a prior cancel so the reused
-                    # agent does not think it is still interrupted.
+                    # agent does not think it is still interrupted. Newer
+                    # Agents keep the request in ``_interrupt_requested`` and
+                    # clear it in the turn finalizer — but a Stop that landed
+                    # before run_conversation returned early, so the finalizer
+                    # never ran. clear_interrupt() is the only reset for that
+                    # generation; the legacy attributes remain for older
+                    # builds (#9397).
+                    _clear_interrupt = getattr(agent, 'clear_interrupt', None)
+                    if callable(_clear_interrupt):
+                        try:
+                            _clear_interrupt()
+                        except Exception:
+                            logger.debug(
+                                "Failed to clear cached agent interrupt state",
+                                exc_info=True,
+                            )
                     if hasattr(agent, '_interrupted'):
                         agent._interrupted = False
                     if hasattr(agent, '_interrupt_message'):
