@@ -14259,7 +14259,7 @@ _TERMINAL_BACKEND_IDENTITY_FIELDS: tuple[str, ...] = (
     'TERMINAL_DAYTONA_IMAGE',
 )
 
-_TERMINAL_ENV_IDENTITY_BY_KEY: dict[str, tuple[str, ...]] = {}
+_TERMINAL_ENV_IDENTITY_BY_KEY: dict[str, tuple[object, tuple[str, ...] | None]] = {}
 _TERMINAL_ENV_IDENTITY_LOCK = threading.Lock()
 _TERMINAL_ENV_CACHE_KEYS: tuple[str, ...] = ('default', 'host-local-default')
 
@@ -14314,20 +14314,31 @@ def _invalidate_stale_terminal_environments(identity: tuple[str, ...] | dict | N
         candidates: list[tuple[str, object]] = []
         for key in _TERMINAL_ENV_CACHE_KEYS:
             inspected = active_envs.get(key)
+            if inspected is None:
+                # An absent cache entry must not stamp an identity that a later object would inherit;
+                # drop any recorded identity for this key instead of recording a backend without an object.
+                with _TERMINAL_ENV_IDENTITY_LOCK:
+                    _TERMINAL_ENV_IDENTITY_BY_KEY.pop(key, None)
+                continue
+
             with _TERMINAL_ENV_IDENTITY_LOCK:
                 if key not in _TERMINAL_ENV_IDENTITY_BY_KEY:
                     # Adopting the current identity on first sight preserves any pre-existing
                     # environment already running for the active backend while establishing a baseline.
-                    _TERMINAL_ENV_IDENTITY_BY_KEY[key] = identity
+                    _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (inspected, identity)
                     continue
-                recorded = _TERMINAL_ENV_IDENTITY_BY_KEY[key]
+                entry = _TERMINAL_ENV_IDENTITY_BY_KEY[key]
+                if isinstance(entry, tuple) and len(entry) == 2:
+                    recorded_env, recorded_identity = entry
+                else:
+                    recorded_env, recorded_identity = None, None
 
-            if inspected is not None:
-                if recorded != identity:
-                    candidates.append((key, inspected))
-            else:
-                with _TERMINAL_ENV_IDENTITY_LOCK:
-                    _TERMINAL_ENV_IDENTITY_BY_KEY[key] = identity
+            if (
+                recorded_env is not inspected
+                or recorded_identity is None
+                or recorded_identity != identity
+            ):
+                candidates.append((key, inspected))
 
         if not candidates:
             return []
@@ -14342,8 +14353,14 @@ def _invalidate_stale_terminal_environments(identity: tuple[str, ...] | dict | N
                     active_envs.pop(key, None)
                     evicted_keys.append(key)
                     removed_objects.append(inspected)
-                with _TERMINAL_ENV_IDENTITY_LOCK:
-                    _TERMINAL_ENV_IDENTITY_BY_KEY[key] = identity
+                    with _TERMINAL_ENV_IDENTITY_LOCK:
+                        _TERMINAL_ENV_IDENTITY_BY_KEY.pop(key, None)
+                else:
+                    with _TERMINAL_ENV_IDENTITY_LOCK:
+                        if current is None:
+                            _TERMINAL_ENV_IDENTITY_BY_KEY.pop(key, None)
+                        else:
+                            _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (current, None)
 
         # Cleanup runs outside all locks to prevent blocking concurrent turns or deadlocking with teardown.
         cleaned_ids: set[int] = set()
