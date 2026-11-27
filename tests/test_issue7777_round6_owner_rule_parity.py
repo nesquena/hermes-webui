@@ -112,8 +112,11 @@ def _server_hides(stored_key: str, group: str) -> bool:
 
 def _assert_parity(driver_path, pairs):
     browser = _browser_hides(driver_path, pairs)
+    assert len(browser) == len(pairs), (
+        f"the browser answered {len(browser)} of {len(pairs)} probes"
+    )
     mismatches = {}
-    for (stored_key, group), browser_says in zip(pairs, browser):
+    for (stored_key, group), browser_says in zip(pairs, browser, strict=True):
         server_says = _server_hides(stored_key, group)
         if browser_says != server_says:
             mismatches[(stored_key, group)] = (server_says, browser_says)
