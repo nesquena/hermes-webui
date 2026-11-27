@@ -53,6 +53,8 @@
 
 ### Fixed
 
+- **A cached Agent whose context-engine rebind keeps failing no longer repeats the same traceback every turn (#9285, #9271).** When a cached Agent adopts a new session store and the context engine's `bind_session_state` hook raises, WebUI retries the bind on the next cached turn. Before, each retry logged the full traceback again. Now each Agent logs one WARNING naming the exception type and one traceback, on its first DEBUG entry. Later failures log a DEBUG line with the exception type and message, so a different later error stays diagnosable. A lock makes sure two concurrent failing turns on the same Agent log the first failure only once. Separately, a positional-only `run_conversation` parameter no longer receives a keyword argument it can't accept. The turn itself is unchanged: a failing bind never breaks it. Thanks @webtecnica.
+
 - **A managed-startup test no longer fails when the Agent's own dependency is missing from WebUI's venv (#9384).** `tests/test_managed_profile_startup.py::test_real_managed_bootstrap_preserves_named_profile_concurrency` failed under WebUI's venv because the installed Agent now imports `psutil`, which is optional for WebUI. The test now looks at why its isolated child failed. It skips only when the Agent's own source imports a package that the Agent declares as a runtime dependency in its `pyproject.toml`, and the child exited normally with an error. A deleted or renamed Agent module, a broken WebUI import or a crash still fails it. This is a test-only change.
 
 - **The dialog-to-conversation binding browser tests no longer time out intermittently (#9383).** `tests/test_dialog_actions_bind_their_conversation_browser.py` had two sources of flakiness:
