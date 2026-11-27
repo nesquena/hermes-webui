@@ -562,38 +562,38 @@ def test_autostash_stamp_is_utc_not_local_time(tmp_path, monkeypatch):
     """The stamp follows hermes-agent's contract (UTC) whatever the server's local time zone is."""
     if not hasattr(time, 'tzset'):
         pytest.skip('time.tzset is not available on this platform')
-    monkeypatch.setenv('TZ', 'Pacific/Kiritimati')  # UTC+14: a local-time stamp would be off by a day
-    time.tzset()
+    call_log = []
     try:
-        call_log = []
+        with monkeypatch.context() as tz_patch:
+            tz_patch.setenv('TZ', 'Pacific/Kiritimati')  # UTC+14: a local-time stamp would be off by a day
+            time.tzset()
 
-        def fake_git(args, path, timeout=10):
-            call_log.append(args)
-            if args[:2] == ['fetch', 'origin']:
-                return '', True
-            if args == ['status', '--porcelain', '--untracked-files=no']:
-                return 'M modified_file.py', True
-            if args[:3] == ['stash', 'push', '-m']:
-                return '', True
-            if args[:2] == ['pull', '--ff-only']:
-                return 'Already up to date.', True
-            if args == ['stash', 'apply']:
-                return '', True
-            if args == ['stash', 'drop']:
-                return '', True
-            raise AssertionError(f'unexpected git args: {args!r}')
+            def fake_git(args, path, timeout=10):
+                call_log.append(args)
+                if args[:2] == ['fetch', 'origin']:
+                    return '', True
+                if args == ['status', '--porcelain', '--untracked-files=no']:
+                    return 'M modified_file.py', True
+                if args[:3] == ['stash', 'push', '-m']:
+                    return '', True
+                if args[:2] == ['pull', '--ff-only']:
+                    return 'Already up to date.', True
+                if args == ['stash', 'apply']:
+                    return '', True
+                if args == ['stash', 'drop']:
+                    return '', True
+                raise AssertionError(f'unexpected git args: {args!r}')
 
-        started = datetime.now(timezone.utc).replace(microsecond=0)
-        with (
-            patch.object(updates, '_run_git', side_effect=fake_git),
-            patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'),
-            patch.object(updates, '_schedule_restart'),
-        ):
-            updates._apply_update_inner('webui')
-        finished = datetime.now(timezone.utc)
+            started = datetime.now(timezone.utc).replace(microsecond=0)
+            with (
+                patch.object(updates, '_run_git', side_effect=fake_git),
+                patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'),
+                patch.object(updates, '_schedule_restart'),
+            ):
+                updates._apply_update_inner('webui')
+            finished = datetime.now(timezone.utc)
     finally:
-        monkeypatch.delenv('TZ')
-        time.tzset()
+        time.tzset()  # after the context restored the runner's own TZ (or its absence)
 
     [push] = [args for args in call_log if args[:3] == ['stash', 'push', '-m']]
     stamp = datetime.strptime(push[3], 'hermes-update-autostash-%Y%m%d-%H%M%S').replace(tzinfo=timezone.utc)
