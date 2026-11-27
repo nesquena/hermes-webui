@@ -11092,6 +11092,12 @@ function attachBtwStream(parentSid, streamId, question){
   let btwRow=null;
   let _streamDone=false;
   function _ensureBtwRow(){
+    // The bubble is appended to #msgInner, which belongs to whichever session
+    // is on screen. A /btw answer is ephemeral and belongs only to the session
+    // that asked the question, so every caller (token, done) has to refuse to
+    // paint into a different chat. Switching back re-creates the bubble from
+    // the accumulated `answer` in this closure.
+    if(!(S.session&&S.session.session_id===parentSid)) return;
     if(btwRow&&btwRow.isConnected) return;
     const inner=$('msgInner');
     if(!inner) return;
