@@ -12334,7 +12334,14 @@ function showToast(msg,ms,type){
   const duration=(ms==null||!(Number(ms)>0))?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms;
   el.className='toast show '+t;
   el.dataset.toastMessage=s;
-  if(t==='error') el.innerHTML=`<span class="toast-message">${esc(s)}</span><button class="toast-copy" type="button" data-toast-copy="1" onclick="copyToastText(this);event.stopPropagation()">${esc(t('toast_copy'))}</button><button class="toast-dismiss" type="button" aria-label="${esc(t('toast_dismiss_label'))}" data-toast-dismiss="1" onclick="dismissToast(this);event.stopPropagation()">${esc(t('toast_dismiss'))}</button>`;
+  if(t==='error'){
+    // #9374: this function shadows the global t() with `let t=type`, so the
+    // catalog lookup goes through a differently named reference. The
+    // `typeof` guard is this file's established pattern for the extracted-JS
+    // harnesses that run showToast() without i18n loaded.
+    const _tt = (typeof globalThis.t === 'function') ? globalThis.t : (k => ({toast_copy:'Copy',toast_dismiss:'Dismiss',toast_dismiss_label:'Dismiss error toast'}[k] || k));
+    el.innerHTML=`<span class="toast-message">${esc(s)}</span><button class="toast-copy" type="button" data-toast-copy="1" onclick="copyToastText(this);event.stopPropagation()">${esc(_tt('toast_copy'))}</button><button class="toast-dismiss" type="button" aria-label="${esc(_tt('toast_dismiss_label'))}" data-toast-dismiss="1" onclick="dismissToast(this);event.stopPropagation()">${esc(_tt('toast_dismiss'))}</button>`;
+  }
   else el.textContent=s;
   el.onmouseenter=()=>clearToastDismissTimer(el);
   el.onmouseleave=()=>setToastDismissTimer(el,duration);
