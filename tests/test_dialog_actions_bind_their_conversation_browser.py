@@ -727,20 +727,29 @@ def test_dialog_opened_during_a_pending_switch_never_acts_on_the_next_conversati
 
 def _hold(page, matcher, select=None):
     """Hold the requests ``matcher`` selects (only those ``select(request)`` accepts,
-    when given; the others go on) until ``release()``."""
+    when given; the others go on) until ``release()``.
+
+    ``release()`` never unroutes. Removing the page's last route turns Playwright's
+    request interception off, and a request the page issues at that moment can be
+    stranded: the switch's next fetch never reached the server, and the test timed out
+    waiting for the conversation to change. After release the handler passes every
+    request on, so interception stays on and nothing is in flight while routes change.
+    """
     held = []
+    released = False
 
     def handler(route):
-        if select is None or select(route.request):
+        if not released and (select is None or select(route.request)):
             held.append(route)
         else:
             route.fallback()
     page.route(matcher, handler)
 
     def release():
+        nonlocal released
+        released = True  # a request matched from here on goes straight through
         while held:
             held.pop(0).continue_()
-        page.unroute(matcher)  # also lets through a request matched since the loop
     return held, release
 
 
