@@ -1256,14 +1256,35 @@ def _translate_agent_workspace(
     agent container, which this host may not be able to stat); the WebUI side
     is a real host path. Sub-paths translate with their relative tail.
     """
+    parts = _translate_agent_workspace_parts(workspace, maps)
+    if parts is None:
+        return None
+    webui_root, tail = parts
+    return webui_root / tail if tail else webui_root
+
+
+def _translate_agent_workspace_parts(
+    workspace: str | Path, maps: list[tuple[PurePosixPath, Path]]
+) -> tuple[Path, str] | None:
+    """Like :func:`_translate_agent_workspace`, but split into root + tail.
+
+    Returns ``(webui_root, relative_tail)`` for the matched map entry, or
+    ``None`` when no map matches. The tail is POSIX-style (it names a path
+    inside the agent container); the root is a real host path.
+
+    Splitting the two lets the caller validate the MAPPED ROOT against the
+    profile's trust rules once, and then accept the translated sub-path as
+    long as it stays INSIDE that trusted root — instead of demanding that
+    each sub-directory be trusted in its own right.
+    """
     raw_posix = _as_posix_path(workspace)
     if raw_posix is None:
         return None
     for agent_root, webui_root in maps:
         if raw_posix == agent_root:
-            return webui_root
+            return webui_root, ''
         if _posix_is_within(raw_posix, agent_root):
-            return webui_root / raw_posix.relative_to(agent_root)
+            return webui_root, raw_posix.relative_to(agent_root).as_posix()
     return None
 
 
@@ -1357,6 +1378,39 @@ def resolve_webui_workspace(
     if translated is not None:
         if _is_blocked_workspace_path(translated, str(translated)):
             raise ValueError(f"Path points to a system directory: {translated}")
+        # #8450: validate the MAPPED ROOT against the profile's trust rules
+        # once, then accept the translated sub-path as long as it stays
+        # INSIDE that trusted root.
+        #
+        # resolve_trusted_workspace() admits a saved workspace by EXACT
+        # match, so a session working BELOW a mapped root (e.g. /workspace
+        # -> /data/alice, session cwd /workspace/project) had its translated
+        # sub-directory rejected as an untrusted path — a valid session
+        # could not read or write its own files. Trusting the mapped root
+        # and requiring the sub-path to stay inside it is the same
+        # containment the translation already implies.
+        parts = _translate_agent_workspace_parts(workspace, maps)
+        if parts is not None:
+            webui_root, tail = parts
+            trusted_root = resolve_trusted_workspace(webui_root, profile)
+            if tail:
+                # The sub-path must EXIST inside the trusted root: a missing
+                # local counterpart stays fail-closed (it is never silently
+                # coerced to the root, which would open the whole root).
+                # It does NOT have to be trusted in its own right — being
+                # inside the trusted mapped root is what admits it.
+                resolved = safe_resolve_ws(trusted_root, tail)
+                if not resolved.exists():
+                    raise ValueError(
+                        f"Path does not exist: {resolved}"
+                    )
+                if not resolved.is_dir():
+                    raise ValueError(
+                        f"Path is not a directory: {resolved}"
+                    )
+                return (resolved, safe_resolve_ws(resolved, str(rel))) if rel not in (None, "") else resolved
+            root = trusted_root
+            return (root, safe_resolve_ws(root, str(rel))) if rel not in (None, "") else root
         root = resolve_trusted_workspace(translated, profile)
         return (root, safe_resolve_ws(root, str(rel))) if rel not in (None, "") else root
 
