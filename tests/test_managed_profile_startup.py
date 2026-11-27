@@ -8,6 +8,7 @@ No provider calls or server sockets are needed.
 import importlib.util
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import sysconfig
@@ -17,6 +18,32 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+_MISSING_MODULE = re.compile(r"^ModuleNotFoundError: No module named '([^']+)'\s*$")
+_TRACEBACK_FRAME = re.compile(r'^\s*File "([^"]+)", line (\d+)')
+
+
+def _agent_dependency_missing_from_interpreter(stderr, agent_dir):
+    """``(module, "file:line")`` when the child died because the installed Agent's own
+    source imports a third-party package this interpreter lacks, else ``None``.
+
+    Only the final traceback counts: the failing import must sit in the Agent's own
+    source (not WebUI's, not an installed package), and the missing top-level name must
+    not be first-party to the Agent or WebUI. A broken WebUI import, a renamed Agent
+    module or any other startup failure therefore still fails the test.
+    """
+    lines = (stderr or "").rstrip().splitlines()
+    match = _MISSING_MODULE.match(lines[-1]) if lines else None
+    frames = [frame for frame in map(_TRACEBACK_FRAME.match, lines) if frame]
+    if not match or not frames:
+        return None
+    path, line = Path(frames[-1].group(1)).resolve(), frames[-1].group(2)
+    agent = Path(agent_dir).resolve()
+    if not path.is_relative_to(agent) or {"site-packages", "dist-packages"} & set(path.parts):
+        return None
+    top = match.group(1).split(".")[0]
+    if any((root / top).exists() or (root / f"{top}.py").exists() for root in (agent, ROOT)):
+        return None
+    return match.group(1), f"{path.relative_to(agent)}:{line}"
 
 
 def test_real_managed_bootstrap_preserves_named_profile_concurrency(tmp_path):
@@ -29,12 +56,6 @@ def test_real_managed_bootstrap_preserves_named_profile_concurrency(tmp_path):
     if not (Path(agent_dir) / "pm" / "environments.py").is_file():
         pytest.skip("requires a package-managed Hermes Agent")
     python = os.environ.get("HERMES_WEBUI_PYTHON", sys.executable)
-    # The installed Agent's first-party YAML (hermes_yaml) needs ruamel.yaml; an
-    # interpreter without it cannot import run_agent at all, so the scenario this
-    # test models (a working managed runtime) does not exist there.
-    probe = subprocess.run([python, "-c", "import ruamel.yaml"], capture_output=True)
-    if probe.returncode != 0:
-        pytest.skip("test interpreter cannot import ruamel.yaml (required by the installed Agent)")
     base = tmp_path / "base"
     home = base / "profiles" / "rocky"
     skill = home / "skills" / "named-only"
@@ -210,6 +231,50 @@ def test_real_managed_bootstrap_preserves_named_profile_concurrency(tmp_path):
         '''), sysconfig.get_path("purelib")],
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=60,
     )
+    if result.returncode != 0:
+        missing = _agent_dependency_missing_from_interpreter(result.stderr, agent_dir)
+        if missing:
+            # The installed Agent hard-imports a third-party package this interpreter
+            # lacks (psutil, ruamel.yaml, ...), so it cannot import run_agent at all and
+            # the scenario this test models, a working managed runtime, does not exist
+            # here. The canonical suite runs with the Agent's own interpreter.
+            pytest.skip(f"test interpreter lacks {missing[0]!r}, which the installed Agent "
+                        f"imports at {missing[1]}")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "two turn scopes + catalog progressed" in result.stdout
     print(result.stdout)
+
+
+def _traceback(*frames, final):
+    body = "".join(f'  File "{path}", line {line}, in <module>\n    import x\n' for path, line in frames)
+    return "Traceback (most recent call last):\n" + body + final + "\n"
+
+
+def test_dependency_skip_covers_only_a_third_party_import_in_agent_source(tmp_path):
+    agent = tmp_path / "agent"
+    (agent / "tools").mkdir(parents=True)
+    (agent / "hermes_cli").mkdir()
+    agent_file = str(agent / "tools" / "file_sync.py")
+    webui_file = str(ROOT / "api" / "config.py")
+    installed = str(agent / "venv" / "lib" / "python3.11" / "site-packages" / "pkg" / "__init__.py")
+    missing = "ModuleNotFoundError: No module named 'psutil'"
+
+    def check(stderr):
+        return _agent_dependency_missing_from_interpreter(stderr, str(agent))
+
+    # The Agent's own source hard-imports a package this interpreter lacks: skip.
+    assert check(_traceback((webui_file, 3), (agent_file, 27), final=missing)) == (
+        "psutil", "tools/file_sync.py:27")
+    assert check(_traceback((agent_file, 9), final="ModuleNotFoundError: No module named 'ruamel.yaml'"))[0] == (
+        "ruamel.yaml")
+    # The failing import is WebUI's or an installed package's, not the Agent's: fail.
+    assert check(_traceback((agent_file, 27), (webui_file, 3), final=missing)) is None
+    assert check(_traceback((agent_file, 27), (installed, 1), final=missing)) is None
+    # A first-party name (a renamed or deleted Agent/WebUI module) is a real break: fail.
+    assert check(_traceback((agent_file, 2), final="ModuleNotFoundError: No module named 'hermes_cli.gone'")) is None
+    assert check(_traceback((agent_file, 2), final="ModuleNotFoundError: No module named 'api'")) is None
+    # Any other failure, or an earlier missing module that was handled, still fails.
+    assert check(_traceback((agent_file, 27), final="ImportError: cannot import name 'x'")) is None
+    handled = _traceback((agent_file, 27), final=missing) + "\nDuring handling of the above exception, another exception occurred:\n\n"
+    assert check(handled + _traceback((agent_file, 30), final="AssertionError: scopes stalled")) is None
+    assert check("") is None and check(None) is None
