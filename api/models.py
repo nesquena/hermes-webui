@@ -16764,6 +16764,16 @@ def _identity_bearing_candidate(group: dict, identities, remaining=None):
     saved row that names itself with a stable WebUI id or a durable row id; the
     candidate list is materialised once from the group's build order and walked
     through the merge-local cursor, so repeated replays stay amortized linear.
+
+    The candidate must additionally name the SAME durable row the incoming row
+    names (greptile P1, #8672 2026-11-26).  "Establishes some private
+    identity" is not an occurrence-level proof: a saved occurrence carrying
+    only its stable WebUI id and an incoming row carrying a NEW durable row id
+    establish two DIFFERENT things, and collapsing them lets a genuinely new
+    turn disappear.  The indexed branch reaches this helper only after the
+    shared-identity probe already missed, so requiring the shared durable row
+    here is what keeps that branch from undoing the same loss by the back
+    door.
     """
     ordered = group.get("identity_bearing_order")
     if ordered is None:
@@ -16776,13 +16786,32 @@ def _identity_bearing_candidate(group: dict, identities, remaining=None):
             if _occurrence_identities(identity_text):
                 ordered.append(candidate)
         group["identity_bearing_order"] = ordered
+    if not identities:
+        return None
+    shared = [
+        candidate
+        for candidate in ordered
+        if _occurrence_identity_value_shared(
+            _occurrence_parts(
+                _visible_key_field(candidate, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+            )[1],
+            ",".join(identities),
+        )
+    ]
+    if not shared:
+        return None
+    # The candidates are already filtered down to the ones that name the SAME
+    # durable row, so the namespace filter of the ``identity_indexed`` walk
+    # (which exists to EXCLUDE candidates that collide with the incoming
+    # identity) must not run here: the surviving candidates collide by
+    # construction.  Capacity is still respected, and the walk stays on the
+    # merge-local cursor.
     return _available_candidate(
-        ordered,
+        shared,
         group,
         "identity_bearing_cursor",
         remaining,
         identities,
-        identity_indexed=True,
     )
 
 
