@@ -7142,6 +7142,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(!_doneAdoption.snapshotAdopted&&typeof _messagesTruncated!=='undefined') _messagesTruncated=_preSettleMessagesTruncated;
           }
           S.messages=_filterRecoveryControlMessages(S.messages || []);
+          // #8994-R3 — stamp settled-row provenance before any tool summary
+          // attaches, so ownership resolves by absolute transcript coordinate.
+          if(typeof _stampDoneSettledProvenance==='function')
+            _stampDoneSettledProvenance(d.session);
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
           if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
           if(S.session&&S.session.session_id){
@@ -7246,15 +7250,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             return hasTc||hasPartialTc||hasTu;
           });
           if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
-            // #8994-F1 — d.session.tool_calls carries FULL-transcript
-            // assistant_msg_idx values, but the card renderer resolves them
-            // against the RESIDENT array (which the done handler just trimmed
-            // to a bounded tail window / filtered recovery rows). Rebase to
-            // the resident coordinate space by message identity and drop
-            // owners that did not survive the window.
+            // #8994-F1/#8994-R3 — the session summaries' assistant_msg_idx is an
+            // ABSOLUTE transcript coordinate; the renderer reads it as a
+            // RESIDENT index. Rebase by settled-row provenance.
             const _settledFull=Array.isArray(d.session.messages)?d.session.messages:[];
             const _remapped=typeof _remapDoneToolCallsToResident==='function'
-              ? _remapDoneToolCallsToResident(d.session.tool_calls,_settledFull,S.messages||[])
+              ? _remapDoneToolCallsToResident(d.session.tool_calls,_settledFull,S.messages||[],_settledPayloadAbsOrigin(d.session))
               : d.session.tool_calls;
             S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(_remapped);
           } else {
@@ -8096,47 +8097,145 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return pre.slice(0,anchor).concat(settled);
   }
-  // #8994-F1 — the `done` listener's settled session-level tool_calls carry
-  // FULL-transcript coordinates, but the card renderer reads S.toolCalls'
-  // assistant_msg_idx as a RESIDENT-array index. When the settled full
-  // transcript is adopted behind a bounded tail window (positive offset) or
-  // after legacy recovery rows were filtered out, full→resident is not an
-  // identity (nor a fixed rebase): a full-index 9 can land on an unrelated
-  // resident assistant row at local index 9. Rebase each settled tool card
-  // against the ACTUAL adopted resident messages by message identity, and drop
-  // any card whose owner did not survive into the resident set (evicted by the
-  // window, or removed by the recovery filter). Returns [] when nothing maps.
-  function _remapDoneToolCallsToResident(toolCalls, settledFull, resident){
+  // #8994-R3 — settled-row provenance. `d.session.tool_calls` carries
+  // FULL-transcript assistant indices while the card renderer resolves
+  // S.toolCalls' assistant_msg_idx against the RESIDENT array. Content
+  // identity cannot bridge the two coordinate spaces: tool-only assistant
+  // rows (empty content / missing timestamp) all collapse onto one identity
+  // key, so a window-external owner can alias an unrelated resident row, and
+  // two genuinely distinct rows that share a key are both dropped as
+  // "ambiguous". Stamp every settled row with the ABSOLUTE transcript
+  // coordinate it was produced at, then resolve each summary against that
+  // stamp — ownership by provenance, never by position or content.
+  //
+  // The stamp is written under a stable string key (not a Symbol) so a row
+  // that survives into the resident array keeps its provenance across the
+  // settle, and so a row the settle did NOT produce is distinguishable from
+  // one it did (a missing stamp ⇒ ownership unprovable ⇒ the card is
+  // dropped rather than guessed onto a neighbour).
+  const _SETTLED_PROVENANCE_KEY='_8994SettledProvenance';
+  let _settledProvenanceSource=null;
+  // The absolute transcript index of a settled payload's first row. The `done`
+  // event always embeds the FULL transcript (api/streaming.py::
+  // _session_payload_with_full_messages), so its origin is 0 and the
+  // session-level summaries' `assistant_msg_idx` are absolute transcript
+  // coordinates. A payload that demonstrably starts at a later transcript row
+  // carries a non-zero origin, and the server marks that with
+  // `_messages_truncated` — a paginated GET, not the `done` settle. Derive the
+  // origin from the payload's own truncation flag instead of trusting a
+  // leftover offset field.
+  function _settledPayloadAbsOrigin(dSession){
+    if(!dSession||typeof dSession!=='object') return 0;
+    if(dSession._messages_truncated!==true) return 0;
+    const off=dSession._messages_offset;
+    if(!Number.isSafeInteger(off)||off<=0) return 0;
+    return off;
+  }
+  // Stamp the settled payload's rows with their absolute transcript
+  // coordinate. `settledFull` is the payload's own message array; `absOrigin`
+  // is the absolute index of its first row: 0 when the server sent the whole
+  // transcript, the server's `_messages_offset` when it sent a window. Rows
+  // are stamped in place, so the resident array (a slice of these very rows)
+  // carries the stamp with them.
+  function _stampDoneSettledProvenance(settledFull,absOrigin){
+    if(settledFull&&!Array.isArray(settledFull)&&typeof settledFull==='object'){
+      // Session-shaped call: derive the payload and its origin from the
+      // session the `done` event delivered.
+      const dSession=settledFull;
+      return _stampDoneSettledProvenance(
+        Array.isArray(dSession.messages)?dSession.messages:null,
+        _settledPayloadAbsOrigin(dSession)
+      );
+    }
+    if(!Array.isArray(settledFull)) return null;
+    const origin=Number.isSafeInteger(absOrigin)&&absOrigin>0?absOrigin:0;
+    if(_settledProvenanceSource===settledFull) {
+      // Same payload stamped before: keep the existing absolute coordinates
+      // rather than re-stamping them from a different origin.
+      let already=true;
+      for(let i=0;i<settledFull.length;i++){
+        const row=settledFull[i];
+        if(!row||typeof row!=='object') continue;
+        if(!row[_SETTLED_PROVENANCE_KEY]){ already=false; break; }
+      }
+      if(already) return settledFull;
+    }
+    let turnStart=0;
+    for(let i=0;i<settledFull.length;i++){
+      const row=settledFull[i];
+      if(!row||typeof row!=='object') continue;
+      if(row.role==='user') turnStart=i;
+      const toolIds=[];
+      if(Array.isArray(row.tool_calls)){
+        for(const call of row.tool_calls){
+          const tid=call&&(call.id||call.call_id||call.tool_use_id);
+          if(tid) toolIds.push(tid);
+        }
+      }
+      row[_SETTLED_PROVENANCE_KEY]={absIdx:origin+i,turnStart:origin+turnStart,toolIds:toolIds};
+    }
+    _settledProvenanceSource=settledFull;
+    return settledFull;
+  }
+  function _settledRowAbsIdx(row){
+    if(!row||typeof row!=='object') return -1;
+    const prov=row[_SETTLED_PROVENANCE_KEY];
+    return (prov&&Number.isSafeInteger(prov.absIdx))?prov.absIdx:-1;
+  }
+  // #8994-F1/#8994-R3 — rebase settled session-level tool summaries from the
+  // FULL-transcript coordinate space into the RESIDENT array. Ownership is
+  // established from the settled-row provenance stamped before adoption; a
+  // card whose owner was evicted by the bounded window or removed by the
+  // recovery filter is dropped rather than guessed onto a nearby row. Returns
+  // [] when nothing can be proven.
+  //
+  // `absOrigin` is the absolute transcript index of settledFull[0] (0 for a
+  // full-transcript payload, the server's `_messages_offset` for a paginated
+  // one). The card's `assistant_msg_idx` is an ABSOLUTE coordinate, so it is
+  // resolved against the absolute coordinate stamped on each resident row.
+  function _remapDoneToolCallsToResident(toolCalls, settledFull, resident, absOrigin){
     if(!Array.isArray(toolCalls)||!toolCalls.length) return [];
     if(!Array.isArray(settledFull)||!Array.isArray(resident)) return toolCalls.slice();
-    // Identity→resident index (first occurrence). An ambiguous duplicate key
-    // cannot name a unique visible owner, so it is left out of the map and its
-    // card is dropped rather than attached to a guess.
-    const residentByIdentity=new Map();
-    const ambiguousIdentities=new Set();
+    const origin=Number.isSafeInteger(absOrigin)&&absOrigin>0?absOrigin:0;
+    // The done listener stamps before attaching; stamping here too keeps direct
+    // callers (harnesses / older entry points) on the same ownership contract.
+    if(typeof _stampDoneSettledProvenance==='function'){
+      _stampDoneSettledProvenance(settledFull,origin);
+    }
+    // ABSOLUTE coordinate → resident position. One coordinate must be visible
+    // at exactly one position; a duplicate means no unique owner is on screen.
+    const residentByAbsIdx=new Map();
+    const ambiguousAbsIdx=new Set();
     for(let i=0;i<resident.length;i++){
-      const key=_messageIdentityKey(resident[i]);
-      if(!key) continue;
-      if(!residentByIdentity.has(key)) residentByIdentity.set(key,i);
-      else ambiguousIdentities.add(key);
+      const row=resident[i];
+      if(!row||typeof row!=='object') continue;
+      const rowAbsIdx=_settledRowAbsIdx(row);
+      if(rowAbsIdx<0) continue;
+      if(!residentByAbsIdx.has(rowAbsIdx)) residentByAbsIdx.set(rowAbsIdx,i);
+      else ambiguousAbsIdx.add(rowAbsIdx);
     }
     const out=[];
     for(const tc of toolCalls){
       if(!tc||typeof tc!=='object') continue;
-      const fullIdx=typeof tc.toolIdx==='number'?tc.toolIdx:parseInt(tc.assistant_msg_idx,10);
-      if(!Number.isFinite(fullIdx)||fullIdx<0||fullIdx>=settledFull.length) continue;
-      const owner=settledFull[fullIdx];
+      const absIdx=typeof tc.toolIdx==='number'?tc.toolIdx:parseInt(tc.assistant_msg_idx,10);
+      if(!Number.isFinite(absIdx)||absIdx<0) continue;
+      // The owner row inside the settled payload, in ABSOLUTE coordinates.
+      const settledIdx=absIdx-origin;
+      if(settledIdx<0||settledIdx>=settledFull.length) continue;
+      const owner=settledFull[settledIdx];
       if(!owner||owner.role!=='assistant') continue;
-      // Locate the same message in the resident array by identity — the
-      // authoritative bridge, because the settle's recovery filter shifts
-      // local indices away from any fixed full−offset rebase.
-      const ownerKey=_messageIdentityKey(owner);
-      if(!ownerKey||ambiguousIdentities.has(ownerKey)) continue;
-      const localIdx=residentByIdentity.get(ownerKey);
-      if(typeof localIdx!=='number'||localIdx<0) continue; // evicted or filtered — drop
+      // No provenance (a row this settle did not produce) or provenance that
+      // disagrees with the card's coordinate ⇒ ownership cannot be proven.
+      if(_settledRowAbsIdx(owner)!==absIdx) continue;
+      if(ambiguousAbsIdx.has(absIdx)) continue;
+      const localIdx=residentByAbsIdx.get(absIdx);
+      if(typeof localIdx!=='number'||localIdx<0) continue; // evicted / filtered out
       const next={...tc};
+      // Keep both spellings of the owner index in the resident coordinate
+      // space; two aliases that disagree are exactly the ambiguity this
+      // helper exists to remove.
       if(typeof next.toolIdx==='number') next.toolIdx=localIdx;
-      else next.assistant_msg_idx=localIdx;
+      next.assistant_msg_idx=localIdx;
       out.push(next);
     }
     return out;

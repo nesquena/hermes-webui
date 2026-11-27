@@ -88,6 +88,13 @@ def _pieces() -> list[str]:
         # The F1 helper is required — a missing helper means the PR's fix was
         # reverted, which must FAIL (RED) rather than silently skip.
         _optional_function(MESSAGES_JS, "_remapDoneToolCallsToResident"),
+        # #8994-R3 provenance stamp. Optional so this harness also runs against
+        # the pre-R3 production tree, where the new tests must go RED.
+        _optional_function(MESSAGES_JS, "_settledPayloadAbsOrigin"),
+        _optional_function(MESSAGES_JS, "_stampDoneSettledProvenance"),
+        _optional_function(MESSAGES_JS, "_settledRowAbsIdx"),
+        "let _settledProvenanceSource=null;",
+        "const _SETTLED_PROVENANCE_KEY='_8994_settled_provenance';",
         _optional_function(MESSAGES_JS, "_mergeResidentPrefix"),
         _optional_function(MESSAGES_JS, "_doneResidentMergeOptions"),
         _optional_function(MESSAGES_JS, "_mergeSettledToolCallsWithLiveMetadata"),
@@ -860,9 +867,12 @@ def _f1_scenario() -> dict:
     settled_full = full + turn
     # The bounded tail the listener adopts is sliced off the SETTLED payload:
     # settled[148:] = the 52-row resident span plus the 4-row turn. Raw-161's
-    # assistant row is then evicted by _filterRecoveryControlMessages.
-    resident = [dict(m) for m in settled_full[148:]]
+    # assistant row is then evicted by _filterRecoveryControlMessages. The
+    # harness keeps the settled row objects (slice, not copies) so ownership
+    # bridging can use object identity, matching the production settle path.
+    resident = settled_full[148:]
     resident = [m for m in resident if str(m["_ts"]) != str(161 + 1)]
+    # (resident is referenced only via the node-side slice below.)
 
     tool_calls = [
         {"assistant_msg_idx": 9, "tid": "t-out", "name": "outside-win", "snippet": "out-summary"},
@@ -873,7 +883,11 @@ def _f1_scenario() -> dict:
     case = "\n".join(
         [
             "const settledFull=" + json.dumps(settled_full) + ";",
-            "const resident=" + json.dumps(resident) + ";",
+            # The resident window is a SLICE of the settled payload, exactly as
+            # _boundedDoneTailWindow / _adoptDoneSnapshotMessages hand it to the
+            # listener: same row objects, only the array is trimmed. Recovery
+            # rows are then removed by the listener's final filter.
+            "const resident=settledFull.slice(148).filter(m=>String(m._ts)!=='162');",
             "const toolCalls=" + json.dumps(tool_calls) + ";",
             "const out=_remapDoneToolCallsToResident(toolCalls,settledFull,resident);",
             "const report=out.map(tc=>{",
@@ -954,7 +968,6 @@ def test_done_fallback_attaches_rebased_tool_cards_to_resident_owners() -> None:
         {"role": "assistant", "content": STREAMED_ANSWER, "_ts": "9002"},
     ]
     settled_full = full + turn
-    resident = [dict(m) for m in settled_full[148:]]
     tool_calls = [
         # Out-of-window owner (absolute 9) — the maintainer's exact repro.
         {"assistant_msg_idx": 9, "tid": "t-out", "name": "old", "snippet": "out"},
@@ -964,9 +977,13 @@ def test_done_fallback_attaches_rebased_tool_cards_to_resident_owners() -> None:
     case = "\n".join(
         [
             *_RUNTIME_STUBS,
-            "const S={toolCalls:[],messages:" + json.dumps(resident) + "};",
-            "const d={session:{messages:" + json.dumps(settled_full) + ",tool_calls:"
-            + json.dumps(tool_calls) + "}};",
+            # The settled payload is ONE JSON document; the resident window is a
+            # slice of those row objects, exactly as _boundedDoneTailWindow hands
+            # the list to the listener. Object identity survives that slice.
+            "const settledFull=" + json.dumps(settled_full) + ";",
+            "const resident=settledFull.slice(148);",
+            "const S={toolCalls:[],messages:resident};",
+            "const d={session:{messages:settledFull,tool_calls:" + json.dumps(tool_calls) + "}};",
             # The exact fallback block from the done listener, executed verbatim.
             _done_fallback_statements(),
             "const report=(S.toolCalls||[]).map(tc=>{",
@@ -986,4 +1003,184 @@ def test_done_fallback_attaches_rebased_tool_cards_to_resident_owners() -> None:
     assert "t-in" in report, f"in-window owner must survive: {got}"
     assert report["t-in"]["identity"] == "assistant|152|transcript row 151", (
         f"t-in must map to its real resident owner: {got}"
+    )
+
+
+def _duplicate_identity_replay(settled_full: list[dict], tool_calls: list[dict], slice_from: int = 148, abs_origin: int = 0) -> dict:
+    """Drive the real remap helper over one settled payload / resident slice."""
+    case = "\n".join(
+        [
+            "const settledFull=" + json.dumps(settled_full) + ";",
+            "const resident=settledFull.slice(" + str(slice_from) + ");",
+            "const toolCalls=" + json.dumps(tool_calls) + ";",
+            "const out=_remapDoneToolCallsToResident(toolCalls,settledFull,resident," + str(abs_origin) + ");",
+            "const report=out.map(tc=>{",
+            "  const idx=typeof tc.toolIdx==='number'?tc.toolIdx:tc.assistant_msg_idx;",
+            "  const owner=resident[idx]||{};",
+            "  return {tid:tc.tid,idx:idx,identity:_messageIdentityKey(owner)};",
+            "});",
+            "console.log(JSON.stringify({report:report,residentCount:resident.length}));",
+        ]
+    )
+    return _run_node(case)
+
+
+def test_done_ownership_ignores_a_foreign_row_with_the_same_identity() -> None:
+    """A window-external owner must not alias a resident row by content identity.
+
+    Ownership is not identity: the transcript can legitimately contain two rows
+    with the same role/_ts/content prefix. When a card's real owner (full index
+    9) is outside the adopted window and an unrelated resident row (full index
+    181) happens to share its identity, the old identity-keyed rebase attaches
+    the card to that foreign row. Provenance pins the card to the owner's
+    absolute coordinate, so a card whose owner did not survive is dropped
+    instead of mis-attached.
+    """
+    full = _transcript(200)  # assistant rows sit at odd full indices
+    turn = [
+        {"role": "user", "content": "the new question", "_ts": "9001"},
+        {"role": "assistant", "content": STREAMED_ANSWER, "_ts": "9002"},
+    ]
+    settled_full = full + turn
+    # full[181] becomes byte-identical to full[9]: role assistant, _ts '10',
+    # content 'transcript row 9'.
+    settled_full[181] = dict(full[9])
+    tool_calls = [
+        {"assistant_msg_idx": 9, "tid": "t-shadow", "name": "old", "snippet": "shadow-summary"},
+        {"assistant_msg_idx": 181, "tid": "t-real", "name": "recent", "snippet": "real-summary"},
+    ]
+    got = _duplicate_identity_replay(settled_full, tool_calls)
+    report = {r["tid"]: r for r in got["report"]}
+    assert "t-shadow" not in report, (
+        f"the window-external owner must be dropped, not aliased onto the resident "
+        f"row that shares its identity: {got}"
+    )
+    assert "t-real" in report, f"the resident owner must keep its summary: {got}"
+    assert report["t-real"]["idx"] == 181 - 148, (
+        f"t-real must rebase to its absolute owner (local {181 - 148}), not to a "
+        f"content twin: {got}"
+    )
+
+
+def test_done_ownership_survives_duplicate_identities_in_the_resident_window() -> None:
+    """Two identical rows in the window must each keep their own summary.
+
+    A shared identity key makes the old map mark BOTH as ambiguous and drop
+    every card ("cannot name a unique visible owner"). Provenance distinguishes
+    them by absolute coordinate, so each summary lands on the row it was
+    produced for instead of being lost to the collision.
+    """
+    full = _transcript(200)
+    turn = [
+        {"role": "user", "content": "the new question", "_ts": "9001"},
+        {"role": "assistant", "content": STREAMED_ANSWER, "_ts": "9002"},
+    ]
+    settled_full = full + turn
+    dup = {"role": "assistant", "content": "duplicate row", "_ts": "dup-ts"}
+    settled_full[181] = dict(dup)
+    settled_full[183] = dict(dup)
+    tool_calls = [
+        {"assistant_msg_idx": 181, "tid": "t-first", "name": "first", "snippet": "first-summary"},
+        {"assistant_msg_idx": 183, "tid": "t-second", "name": "second", "snippet": "second-summary"},
+    ]
+    got = _duplicate_identity_replay(settled_full, tool_calls)
+    report = {r["tid"]: r for r in got["report"]}
+    assert "t-first" in report, f"first duplicate owner lost its summary: {got}"
+    assert "t-second" in report, f"second duplicate owner lost its summary: {got}"
+    assert report["t-first"]["idx"] == 181 - 148, (
+        f"t-first must land on its own row (local {181 - 148}): {got}"
+    )
+    assert report["t-second"]["idx"] == 183 - 148, (
+        f"t-second must land on its own row (local {183 - 148}): {got}"
+    )
+    assert report["t-first"]["identity"] == "assistant|dup-ts|duplicate row", (
+        f"t-first owner identity drifted: {got}"
+    )
+    assert report["t-second"]["identity"] == "assistant|dup-ts|duplicate row", (
+        f"t-second owner identity drifted: {got}"
+    )
+
+
+def test_done_ownership_respects_a_paginated_payload_origin() -> None:
+    """A settled payload that starts mid-transcript must keep absolute ownership.
+
+    The `done` event normally embeds the FULL transcript, so the payload's
+    origin is 0 and the session summaries' `assistant_msg_idx` are absolute
+    transcript coordinates. A payload that demonstrably starts at a later
+    transcript row (the server marks that with `_messages_truncated`) has a
+    non-zero origin: the summary's absolute coordinate then points BEYOND the
+    payload's own array, and resolving it without the origin rebase picks the
+    wrong owner row.
+
+    The card must land on the row the absolute coordinate names, never on the
+    row at the same array position.
+    """
+    # The payload is rows 148.. of a 200-row transcript: its own array index 0
+    # is absolute 148.
+    payload = _transcript(52, start_ts=149)
+    turn = [
+        {"role": "user", "content": "the new question", "_ts": "9001"},
+        {"role": "assistant", "content": STREAMED_ANSWER, "_ts": "9002"},
+    ]
+    settled_full = payload + turn
+    # The reader holds the whole payload (no windowing in this arm).
+    tool_calls = [
+        # Absolute 151 -> the payload's own index 3 (an assistant row).
+        {"assistant_msg_idx": 151, "tid": "t-orig", "name": "shell", "snippet": "orig"},
+        # Absolute 149 -> the payload's own index 1 (an assistant row).
+        {"assistant_msg_idx": 149, "tid": "t-one", "name": "shell", "snippet": "one"},
+    ]
+    got = _duplicate_identity_replay(settled_full, tool_calls, slice_from=0, abs_origin=148)
+    report = {r["tid"]: r for r in got["report"]}
+    assert "t-orig" in report, f"the retained owner lost its summary: {got}"
+    assert report["t-orig"]["idx"] == 3, (
+        f"absolute 151 must land on the payload's own row 3, not on the row at "
+        f"the same array position as the absolute index: {got}"
+    )
+    assert "t-one" in report, f"the payload's first assistant row lost its summary: {got}"
+    assert report["t-one"]["idx"] == 1, (
+        f"absolute 149 must land on the payload's own row 1: {got}"
+    )
+
+
+def test_done_settle_stamps_row_provenance_before_attach() -> None:
+    """The settle path must carry row provenance before summaries attach.
+
+    Ownership cannot be re-derived from content after the window is adopted.
+    The stamp has to be written while the settled rows are still the payload's
+    own rows (immediately after the resident set is finalised by the recovery
+    filter), and the rebase must resolve against that provenance instead of a
+    content-identity map.
+    """
+    anchor = MESSAGES_JS.find(
+        "S.messages=_filterRecoveryControlMessages(S.messages || []);"
+    )
+    assert anchor >= 0, "done listener recovery filter not found"
+    # Locate the stamp by anchor, not by a fixed character window: the
+    # derivation block's comment length is not a contract. What matters is the
+    # ORDER — the stamp must happen after the resident set is finalised and
+    # before the tool-summary fallback attaches summaries to messages.
+    stamp_anchor = MESSAGES_JS.find("_stampDoneSettledProvenance(", anchor)
+    assert stamp_anchor > anchor, (
+        "the done listener must stamp settled-row provenance after the resident "
+        "set is finalised and before any tool summary attaches"
+    )
+    fallback_anchor = MESSAGES_JS.find(
+        "if(!hasMessageToolMetadata&&d.session.tool_calls", anchor
+    )
+    assert fallback_anchor > anchor, "done tool-summary fallback not found"
+    assert stamp_anchor < fallback_anchor, (
+        "settled-row provenance must be stamped BEFORE the tool-summary "
+        "fallback attaches summaries to messages"
+    )
+    helper = _extract_function(MESSAGES_JS, "_remapDoneToolCallsToResident")
+    assert "residentByIdentity" not in helper, (
+        "ownership must not be re-derived from a content-identity map"
+    )
+    assert "_settledRowAbsIdx(" in helper, (
+        "the rebase must resolve owners through settled-row provenance"
+    )
+    reader = _extract_function(MESSAGES_JS, "_settledRowAbsIdx")
+    assert "_SETTLED_PROVENANCE_KEY" in reader, (
+        "the rebase must read the provenance stamp the settle wrote"
     )
