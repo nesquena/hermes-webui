@@ -98,6 +98,35 @@ def _share_message_text(message: dict) -> str:
     return ""
 
 
+_IMAGE_TAIL = re.compile(r"file://[^\)]+\)")
+_LINK_TAIL = re.compile(r"file://[^\s\)]+\)")
+
+
+def _replace_md_file_refs(seg: str, *, image: bool) -> str:
+    tail = _IMAGE_TAIL if image else _LINK_TAIL
+    opener = "![" if image else "["
+    out, pos, scan = [], 0, 0
+    while True:
+        try:
+            j = seg.index("](file://", scan)
+        except ValueError:
+            break
+        if seg.find(")", j) == -1:
+            break
+        m = tail.match(seg, j + 2)
+        prev_close = seg.rfind("]", pos, j)
+        start = pos if prev_close == -1 else prev_close + 1
+        k = seg.find(opener, start, j) if m else -1
+        if not m or k < 0 or (not image and j == k + 1):
+            scan = j + 1
+            continue
+        out.append(seg[pos:k])
+        out.append(_PLACEHOLDER)
+        pos = scan = m.end()
+    out.append(seg[pos:])
+    return "".join(out)
+
+
 def _strip_media_references(text: str) -> str:
     """Replace local MEDIA: tokens and file:// URLs with inert placeholders.
 
@@ -119,7 +148,8 @@ def _strip_media_references(text: str) -> str:
     lowercase file:// spelling — inert file: and file:/ forms are left as-is.
 
     Process order matches the real renderer's (ui.js) pipeline:
-      1. CRLF normalisation (renderer normalises before any parsing)
+      1. NUL byte replacement with U+FFFD and CRLF normalisation (renderer
+         replaces NUL and normalises CRLF before any parsing)
       1b. Blockquote pre-pass (iterative walk with depth cap ~400, preserving
           original > or &gt; line prefixes and complete blockquoted fences)
       2. MEDIA: replacement (renderer converts MEDIA: to media tokens
@@ -128,19 +158,24 @@ def _strip_media_references(text: str) -> str:
       3. Fenced code stashing (only complete balanced fences — an
          unmatched opener stays as active prose for sanitisation)
       4. Inline code stashing
-      4b. Display math stashing ($$...$$ and \\[...\\])
+      4b. Display math stashing ($$...$$ and \\[...\\]) and inline math stashing
+          (\\(...\\) and $...$ with renderer boundary rules)
       4c. Raw <pre> and entity-encoded <pre> block stashing
       5. file:// URL replacement (images with renderer-matched [^\\)]+
          destinations first, then links, then bare URLs)
-      6. Stash restoration (raw <pre>, math, inline, fences)
-      7. Blockquote restoration in reverse nesting order
+      6. Stash restoration (single re.sub pass over table: raw <pre>, math,
+         inline, fences)
+      7. Blockquote restoration in reverse nesting order (single re.sub pass
+         per segment over table)
     """
     if not isinstance(text, str) or not text:
         return text
 
-    # (1) Normalise CRLF / bare CR to LF — renderMd() does this first
-    # so the close-fence regex does not miss \r\n-terminated lines.
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # (1) Normalise NUL bytes to U+FFFD (renderer replaces NUL before any
+    # stash token is generated so user text cannot spell internal markers)
+    # and normalise CRLF / bare CR to LF so the close-fence regex does not
+    # miss \r\n-terminated lines.
+    text = text.replace("\x00", "\ufffd").replace("\r\n", "\n").replace("\r", "\n")
 
     # (1b) Iterative blockquote walk — mirror renderMd()'s _applyBlockquotes
     # using an explicit worklist and bounded depth cap (~400).
@@ -294,10 +329,27 @@ def _strip_media_references(text: str) -> str:
             seg,
         )
 
-        # (4b) Stash multiline display math ($$...$$ and \[...\])
+        # (4b) Stash multiline display math ($$...$$ and \[...\]) and inline math
         _math: list[str] = []
         seg = re.sub(
             r"(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\])",
+            lambda m, _acc=_math: _acc.append(m.group(0)) or f"\x00M{len(_acc) - 1}\x00",
+            seg,
+        )
+
+        def _stash_dollar_math(m: re.Match, _acc=_math) -> str:
+            if " | " in m.group(1):
+                return m.group(0)
+            _acc.append(m.group(0))
+            return f"\x00M{len(_acc) - 1}\x00"
+
+        seg = re.sub(
+            r"\$([^\s$\d\n][^$\n]*?[^\s$\n]|[^\s$\d\n])\$",
+            _stash_dollar_math,
+            seg,
+        )
+        seg = re.sub(
+            r"\\\((.+?)\\\)",
             lambda m, _acc=_math: _acc.append(m.group(0)) or f"\x00M{len(_acc) - 1}\x00",
             seg,
         )
@@ -312,25 +364,45 @@ def _strip_media_references(text: str) -> str:
         )
 
         # (5) file:// URL replacement
-        seg = re.sub(r"!\[[^\]]*\]\(file://[^\)]+\)", _PLACEHOLDER, seg)
-        seg = re.sub(r"\[[^\]]+\]\(file://[^\s\)]+\)", _PLACEHOLDER, seg)
-        seg = re.sub(r"(^|\s)file://[^\s<>\"')\]]+", r"\1" + _PLACEHOLDER, seg)
+        if "file://" in seg:
+            if "](file://" in seg:
+                seg = _replace_md_file_refs(seg, image=True)
+                seg = _replace_md_file_refs(seg, image=False)
+            seg = re.sub(
+                r"(^|\s)file://[^\s<>\"')\]]+",
+                r"\1" + _PLACEHOLDER,
+                seg,
+            )
 
         # (6) Restore stashed regions
-        for i, s in enumerate(_raw_pre):
-            seg = seg.replace(f"\x00R{i}\x00", s)
-        for i, s in enumerate(_math):
-            seg = seg.replace(f"\x00M{i}\x00", s)
-        for i, s in enumerate(_inline):
-            seg = seg.replace(f"\x00I{i}\x00", s)
-        for i, s in enumerate(_fenced):
-            seg = seg.replace(f"\x00F{i}\x00", s)
+        _tables = {
+            "R": _raw_pre,
+            "M": _math,
+            "I": _inline,
+            "F": _fenced,
+        }
+
+        def _restore_stash(m: re.Match, _tables=_tables) -> str:
+            lst = _tables.get(m[1])
+            idx = int(m[2])
+            if lst is not None and 0 <= idx < len(lst):
+                return lst[idx]
+            return m[0]
+
+        seg = re.sub(r"\x00([RMIF])(\d+)\x00", _restore_stash, seg)
 
         segments[k][0] = seg
 
     # (7) Restore blockquotes in reverse nesting order
+    _reprefixed_table: dict[int, str] = {}
     for k in range(len(segments) - 1, 0, -1):
-        child_text, _, parent_idx, saved_prefixes = segments[k]
+        child_text, _, _, saved_prefixes = segments[k]
+        if "\x00Q" in child_text:
+            child_text = re.sub(
+                r"\x00Q(\d+)\x00",
+                lambda m: _reprefixed_table.get(int(m[1]), m[0]),
+                child_text,
+            )
         child_lines = child_text.split("\n")
         reprefixed_lines = []
         if len(child_lines) == len(saved_prefixes):
@@ -346,12 +418,16 @@ def _strip_media_references(text: str) -> str:
                 reprefixed_lines.append(
                     (default_p + default_sep + line) if line else default_p
                 )
-        reprefixed = "\n".join(reprefixed_lines)
-        segments[parent_idx][0] = segments[parent_idx][0].replace(
-            f"\x00Q{k}\x00", reprefixed
-        )
+        _reprefixed_table[k] = "\n".join(reprefixed_lines)
 
-    return segments[0][0]
+    root_text = segments[0][0]
+    if "\x00Q" in root_text:
+        root_text = re.sub(
+            r"\x00Q(\d+)\x00",
+            lambda m: _reprefixed_table.get(int(m[1]), m[0]),
+            root_text,
+        )
+    return root_text
 
 
 def _redact_share_paths(text: str, extra_paths) -> str:
