@@ -176,6 +176,7 @@ def test_flag_claim_has_a_single_winner_under_simulated_concurrency(monkeypatch)
     for thread in threads:
         thread.join(timeout=10)
 
+    assert all(not thread.is_alive() for thread in threads)
     assert errors == []
     assert agent._one_shot_flag is True
     assert len(winners) == 1
@@ -185,6 +186,7 @@ def test_concurrent_failing_rebinds_log_one_warning(caplog, monkeypatch):
     _slow_flag_set(monkeypatch)
     caplog.set_level(logging.DEBUG, logger=streaming.logger.name)
     gate = threading.Barrier(2)
+    passed_barrier = []
 
     class GatedFailingHook:
         def __init__(self):
@@ -195,6 +197,7 @@ def test_concurrent_failing_rebinds_log_one_warning(caplog, monkeypatch):
             # Both turns are inside the failing hook at the same time, so the
             # warn-once claim races in production shape rather than serially.
             gate.wait(timeout=5)
+            passed_barrier.append(threading.get_ident())
             raise RuntimeError("controlled hook failure")
 
     hook = GatedFailingHook()
@@ -214,7 +217,11 @@ def test_concurrent_failing_rebinds_log_one_warning(caplog, monkeypatch):
     for thread in threads:
         thread.join(timeout=10)
 
+    assert all(not thread.is_alive() for thread in threads)
     assert errors == []
+    assert not gate.broken
+    assert len(passed_barrier) == 2
+    assert len(set(passed_barrier)) == 2
     assert hook.calls == 2
     assert len(_bind_warning_records(caplog)) == 1
     debug_records = _bind_debug_records(caplog)
