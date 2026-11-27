@@ -24,8 +24,8 @@ _TRACEBACK_FRAME = re.compile(r'^\s*File "([^"]+)", line (\d+)')
 
 def _agent_declared_dependencies(agent):
     """Top-level import names of the runtime dependencies the Agent declares in its
-    ``pyproject.toml`` (lower-cased; ``ruamel.yaml`` -> ``ruamel``). Empty when it can't
-    be read, so nothing is skipped."""
+    ``pyproject.toml`` (lower-cased, as distribution names are case-insensitive;
+    ``ruamel.yaml`` -> ``ruamel``). Empty when it can't be read, so nothing is skipped."""
     try:
         import tomllib
         project = tomllib.loads((Path(agent) / "pyproject.toml").read_text(encoding="utf-8")).get("project", {})
@@ -59,7 +59,9 @@ def _agent_dependency_missing_from_interpreter(stderr, agent_dir):
     top = match.group(1).split(".")[0]
     if any((root / top).exists() or (root / f"{top}.py").exists() for root in (agent, ROOT)):
         return None
-    if top.lower() not in _agent_declared_dependencies(agent):
+    # Import names are case-sensitive, so a wrong-case import of a declared package
+    # (``import Markdown`` for ``markdown``) is a real break, not a missing package.
+    if top not in _agent_declared_dependencies(agent):
         return None
     return match.group(1), f"{path.relative_to(agent)}:{line}"
 
@@ -309,7 +311,8 @@ def test_dependency_skip_never_covers_a_missing_first_party_agent_module(tmp_pat
     agent = tmp_path / "bare-agent"
     agent.mkdir()
     (agent / "pyproject.toml").write_text(
-        '[project]\nname = "a"\ndependencies = ["psutil>=5.9", "ruamel.yaml>=0.18"]\n', encoding="utf-8")
+        '[project]\nname = "a"\ndependencies = ["psutil>=5.9", "ruamel.yaml>=0.18", "Markdown>=3"]\n',
+        encoding="utf-8")
     run_agent = str(agent / "run_agent.py")
 
     def check(module):
@@ -318,6 +321,9 @@ def test_dependency_skip_never_covers_a_missing_first_party_agent_module(tmp_pat
 
     assert check("psutil") == ("psutil", "run_agent.py:104")
     assert check("ruamel.yaml") == ("ruamel.yaml", "run_agent.py:104")
+    assert check("markdown") == ("markdown", "run_agent.py:104")
+    # A wrong-case import of a declared package is a real break.
+    assert check("Markdown") is None
     for first_party in ("hermes_cli", "hermes_cli.config", "run_agent", "tools", "tools.registry",
                         "model_tools", "hermes_constants"):
         assert check(first_party) is None, first_party

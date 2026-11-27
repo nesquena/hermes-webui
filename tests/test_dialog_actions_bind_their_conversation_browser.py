@@ -704,7 +704,9 @@ def test_dialog_opened_during_a_pending_switch_never_acts_on_the_next_conversati
     _wait_until(page, "() => _isAppDialogOpen()")
     assert len(held) == 1, f"{len(held)} draft saves held, expected the switch's own"
     release()
-    _active(page, first)
+    # The switch has finished (``_loadingSessionId`` cleared), not just swapped S.session:
+    # answering mid-load would hit the loading check instead of the identity check.
+    _wait_until(page, "(sid) => !!S.session && S.session.session_id === sid && !_loadingSessionId", first)
     # The user's next click if the dialog is still on screen (checked and clicked in
     # one step), then wait for the dialog's action to settle.
     page.evaluate("() => { if (_isAppDialogOpen()) document.querySelector('#appDialogConfirm').click(); return true; }")
