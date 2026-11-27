@@ -2513,9 +2513,29 @@ def drain_deferred_wakeups_for_session(
             # only the continuation's teardown drains its own key. Re-defer the
             # remaining entries under the live id, or entries 2..N would wait
             # on a drain that never happens.
+            #
+            # #9380 review (round 6): the drain's FIRST resolution can go
+            # stale mid-drain — the continuation itself may rotate (child-one
+            # -> child-two) after this resolver returned but before the
+            # survivors are persisted, stranding them on a key that just
+            # became sealed (reproduced by the maintainer: the first
+            # completion independently reaches child-two, whose teardown
+            # drains its own key and finds 0). Survivors must follow the
+            # FINAL validated delivery continuation, so the lineage is walked
+            # to its current tip before parking. A failed walk step keeps the
+            # deepest safely observed tip — survivors are never stranded on
+            # the originally captured key when a better tip was validated.
             try:
                 from api.routes import resolve_wakeup_session_id
                 live_sid = resolve_wakeup_session_id(session_id)
+                for _ in range(4):
+                    try:
+                        _next_tip = resolve_wakeup_session_id(live_sid)
+                    except Exception:
+                        break
+                    if not _next_tip or _next_tip == live_sid:
+                        break
+                    live_sid = _next_tip
             except Exception:
                 live_sid = session_id
             # Re-defer entries 2..N BEFORE starting the first turn, so they are

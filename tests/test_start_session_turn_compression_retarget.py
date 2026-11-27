@@ -258,6 +258,156 @@ def test_multi_completion_drain_rekeys_survivors_to_continuation(_stub_routes):
         config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
 
 
+def _three_generation_graph(routes_mod):
+    """sealedparent -> child-one -> child-two (mid-drain rotation fixture)."""
+    parent = _FakeSession("sealedparent", snap=True, profile="default", updated=100.0)
+    child_one = _FakeSession(
+        "childone00001", parent="sealedparent", profile="default", updated=200.0
+    )
+    child_two = _FakeSession(
+        "childtwo00001", parent="childone00001", profile="default", updated=300.0
+    )
+    sessions = {s.session_id: s for s in (parent, child_one, child_two)}
+    routes_mod.get_session = lambda sid: sessions[sid]
+    routes_mod.SESSIONS = collections.OrderedDict(sessions)
+
+
+def test_multi_completion_drain_rotation_published_before_first_resolve(
+    _stub_routes, monkeypatch
+):
+    """#9380 round-6 acceptance, publication order 1 (positive control).
+
+    The child-one -> child-two rotation is ALREADY published when the drain
+    first resolves: survivors must park under child-two and child-two's own
+    later teardown must deliver one of them. Green before and after the fix;
+    pinned as the maintainer asked, so the stable-lineage path cannot regress.
+    """
+    import time
+
+    routes_mod, started = _stub_routes
+    _three_generation_graph(routes_mod)
+    monkeypatch.setattr(
+        routes_mod,
+        "resolve_wakeup_session_id",
+        lambda sid: {"sealedparent": "childtwo00001", "childone00001": "childtwo00001"}.get(
+            sid, sid
+        ),
+    )
+
+    import api.background_process as bp_mod
+    from api import config as config_mod
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+    assert bp_mod.record_deferred_wakeup("sealedparent", "proc-a", "prompt A")
+    assert bp_mod.record_deferred_wakeup(
+        "sealedparent",
+        "proc-b",
+        "prompt B",
+        consumed_claimed_by_dispatch=True,
+    )
+
+    assert bp_mod.drain_deferred_wakeups_for_session("sealedparent") == 1
+    deadline = time.time() + 5
+    while time.time() < deadline and not started:
+        time.sleep(0.05)
+    assert started == [("childtwo00001", "process_wakeup")]
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("sealedparent")
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("childone00001")
+        survivors = list(config_mod.DEFERRED_PROCESS_WAKEUPS.get("childtwo00001") or [])
+    assert [e["wakeup_prompt"] for e in survivors] == ["prompt B"]
+    assert (
+        survivors[0].get("consumed_claimed_by_dispatch") is True
+    ), "dispatch-claim provenance must survive the re-key"
+
+    # Subsequent delivery through the tip's own teardown drain.
+    assert bp_mod.drain_deferred_wakeups_for_session("childtwo00001") == 1
+    deadline = time.time() + 5
+    while time.time() < deadline and len(started) < 2:
+        time.sleep(0.05)
+    assert started == [
+        ("childtwo00001", "process_wakeup"),
+        ("childtwo00001", "process_wakeup"),
+    ]
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("childtwo00001")
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+
+
+def test_multi_completion_drain_rotation_published_mid_drain(
+    _stub_routes, monkeypatch
+):
+    """#9380 round-6 acceptance, publication order 2 (the maintainer's strand).
+
+    The drain's FIRST resolution still sees child-one; the child-one ->
+    child-two rotation is published mid-drain, before survivors are
+    persisted. Parking survivors under the once-captured child-one strands
+    them on a key that just became sealed: the first completion independently
+    reaches child-two, and child-two's teardown drain reads its own key and
+    finds 0. Survivors must follow the FINAL validated delivery continuation,
+    so the drain walks the lineage to its current tip before parking. Red on
+    the pre-fix code: the survivor stays under childone00001 and the
+    child-two teardown drain returns 0.
+    """
+    import time
+
+    routes_mod, started = _stub_routes
+    _three_generation_graph(routes_mod)
+    calls = {"n": 0}
+
+    def _rotating_resolver(sid):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "childone00001"  # pre-rotation view of the parent
+        return {"sealedparent": "childtwo00001", "childone00001": "childtwo00001"}.get(
+            sid, sid
+        )
+
+    monkeypatch.setattr(routes_mod, "resolve_wakeup_session_id", _rotating_resolver)
+
+    import api.background_process as bp_mod
+    from api import config as config_mod
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+    assert bp_mod.record_deferred_wakeup("sealedparent", "proc-a", "prompt A")
+    assert bp_mod.record_deferred_wakeup(
+        "sealedparent",
+        "proc-b",
+        "prompt B",
+        consumed_claimed_by_dispatch=True,
+    )
+
+    assert bp_mod.drain_deferred_wakeups_for_session("sealedparent") == 1
+    deadline = time.time() + 5
+    while time.time() < deadline and not started:
+        time.sleep(0.05)
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("sealedparent")
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("childone00001"), (
+            "survivors must not stay under the key that went stale mid-drain"
+        )
+        survivors = list(config_mod.DEFERRED_PROCESS_WAKEUPS.get("childtwo00001") or [])
+    assert [e["wakeup_prompt"] for e in survivors] == ["prompt B"], (
+        "the survivor must be parked under the FINAL validated continuation"
+    )
+    assert survivors[0].get("consumed_claimed_by_dispatch") is True
+
+    # Reachability, not just placement: the tip's teardown drain delivers it.
+    assert bp_mod.drain_deferred_wakeups_for_session("childtwo00001") == 1
+    deadline = time.time() + 5
+    while time.time() < deadline and len(started) < 2:
+        time.sleep(0.05)
+    assert len(started) == 2
+    assert started[-1] == ("childtwo00001", "process_wakeup")
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("childtwo00001")
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+
+
 def test_sealed_parent_with_closed_continuation_is_refused(_stub_routes, monkeypatch, tmp_path):
     """A durably sealed parent whose tip was explicitly closed is refused.
 
