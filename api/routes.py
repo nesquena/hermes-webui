@@ -26711,6 +26711,41 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname)
 
 
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """Connect to a pinned IP for an operator-approved plain-http host (#9349).
+
+    The https sibling keeps TLS SNI on the hostname; a plain-http dial has no
+    TLS layer, so this only pins the address that actually gets dialled.
+    """
+
+    allow_private_hosts = ()
+
+    def connect(self):
+        sys.audit("http.client.connect", self, self.host, self.port)
+        last_error = None
+        for pinned_host in _tts_resolve_pinned_addresses(
+            self.host, self.port, allow_private_hosts=self.allow_private_hosts
+        ):
+            try:
+                self.sock = _socket.create_connection(
+                    (pinned_host, self.port),
+                    self.timeout,
+                    getattr(self, "source_address", None),
+                )
+                break
+            except OSError as exc:
+                last_error = exc
+        else:
+            if last_error is not None:
+                raise last_error
+            raise OSError("could not connect to any pinned OpenAI TTS target")
+        try:
+            self.sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+        except OSError as exc:
+            if exc.errno != errno.ENOPROTOOPT:
+                raise
+
+
 class _PinnedHTTPSHandler(HTTPSHandler):
     # #9349: exact-host allowlist for this request/opener. Empty by default.
     allow_private_hosts = ()
@@ -26729,6 +26764,26 @@ class _PinnedHTTPSHandler(HTTPSHandler):
         else:
             scoped_connection = _PinnedHTTPSConnection
         return self.do_open(scoped_connection, req, context=self._context)
+
+    def http_open(self, req):
+        """Pin the dial for an approved plain-http private host (#9349).
+
+        Without this the opener falls through to urllib's default HTTPHandler,
+        which resolves the name again at connect time — so an approved hostname
+        whose DNS answer changes between validation and dial would reach an
+        unapproved address, and the pinning that protects the https path would
+        simply not exist here. Only taken when the operator allowlisted a host;
+        an empty allowlist leaves the opener chain untouched.
+        """
+        opts = tuple(self.allow_private_hosts or ())
+        if not opts:
+            return None
+        scoped_connection = type(
+            "_ScopedPinnedHTTPConnection",
+            (_PinnedHTTPConnection,),
+            {"allow_private_hosts": opts},
+        )
+        return self.do_open(scoped_connection, req)
 
 
 def _tts_open(req, *, timeout=30, opener_factory=None):

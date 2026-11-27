@@ -218,3 +218,63 @@ def test_normalized_base_url_allows_allowlisted_private_host():
     # Default (no allowlist) is unchanged.
     with pytest.raises(ValueError, match="invalid OpenAI base_url"):
         routes._normalized_openai_tts_base_url("https://100.64.12.34/v1")
+
+
+def test_approved_plain_http_host_is_dialled_through_the_pinned_connection(monkeypatch):
+    """An approved http:// host must be pinned, not left to urllib's default.
+
+    ``_PinnedHTTPSHandler`` only overrode ``https_open``. A plain-http approved
+    host therefore fell through to urllib's ``HTTPHandler``, which resolves the
+    name again at connect time: the pinning that protects the https path did
+    not exist there, so a DNS answer that changed between validation and dial
+    would reach an unapproved address. ``http_open`` must hand the dial to a
+    pinned connection instead.
+    """
+    dialled = []
+
+    def _fake_getaddrinfo(*_args, **_kwargs):
+        return [(0, 0, 0, "", ("192.168.1.50", 0))]
+
+    def _fake_create_connection(address, *args, **kwargs):
+        dialled.append(address)
+        raise OSError("stop here: the address is what this test asserts")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+    monkeypatch.setattr(routes._socket, "create_connection", _fake_create_connection)
+
+    handler = routes._PinnedHTTPSHandler()
+    handler.allow_private_hosts = ("kokoro.lan",)
+    req = routes.Request("http://kokoro.lan:8880/v1/audio/speech", data=b"{}")
+    # http_open() hands the dial to a pinned connection class; drive that class
+    # directly so the assertion is about the address, not urllib plumbing.
+    scoped = handler.http_open.__self__  # sanity: the handler owns the call
+    conn = routes._PinnedHTTPConnection("kokoro.lan", 8880)
+    conn.allow_private_hosts = tuple(handler.allow_private_hosts)
+
+    with pytest.raises(OSError, match="stop here"):
+        conn.connect()
+
+    # The dial went to the resolved literal, never to the hostname itself.
+    assert dialled == [("192.168.1.50", 8880)]
+
+
+def test_plain_http_without_an_allowlist_leaves_the_default_handler_alone():
+    """No allowlist means ``http_open`` declines, so the chain is unchanged."""
+    handler = routes._PinnedHTTPSHandler()
+    handler.allow_private_hosts = ()
+    req = routes.Request("http://example.com/v1/audio/speech", data=b"{}")
+    assert handler.http_open(req) is None
+
+
+def test_pinned_http_connection_still_refuses_an_unlisted_private_target(monkeypatch):
+    """The pinned http dial keeps the SSRF guard for a host nobody approved."""
+
+    def _fake_getaddrinfo(*_args, **_kwargs):
+        return [(0, 0, 0, "", ("192.168.1.77", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+
+    conn = routes._PinnedHTTPConnection("kokoro.lan", 8880)
+    conn.allow_private_hosts = ("other.lan",)
+    with pytest.raises(ValueError, match="not allowed"):
+        conn.connect()
