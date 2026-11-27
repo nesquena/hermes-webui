@@ -3081,6 +3081,8 @@ def _prune_orphaned_webui_zero_message_sessions(rows, *, diag_stage=None):
         and not s.get("active_stream_id")
         and not s.get("has_pending_user_message")
         and not s.get("worktree_path")
+        and not s.get("handoff_source_session_id")
+        and not s.get("handoff_compressed")
         and (
             s.get("title", "Untitled") != "Untitled"
             or _numeric_count(s.get("message_count")) > 0
@@ -3142,7 +3144,12 @@ def _prune_orphaned_webui_zero_message_sessions(rows, *, diag_stage=None):
                     from api.models import _load_session_for_listing
                     _loaded = _load_session_for_listing(sid)
                     sidecar_has_messages = bool(
-                        _loaded is not None and len(_loaded.messages or []) > 0
+                        _loaded is not None
+                        and (
+                            len(_loaded.messages or []) > 0
+                            or getattr(_loaded, "handoff_source_session_id", None)
+                            or getattr(_loaded, "handoff_compressed", False)
+                        )
                     )
                 except Exception:
                     logger.debug(
@@ -37308,6 +37315,28 @@ def _handle_handoff_summary(handler, body):
         })
 
 
+def _session_compression_marker_key(session) -> str | None:
+    """Return a stable signature of the active compression marker/anchor in session."""
+    anchor = getattr(session, "compression_anchor_message_key", None)
+    if anchor:
+        return str(anchor).strip()
+    ctx = getattr(session, "context_messages", None)
+    if isinstance(ctx, list):
+        from api.compression_anchor import is_context_compression_marker
+
+        for m in reversed(ctx):
+            if is_context_compression_marker(m):
+                role = str(m.get("role") or "")
+                content = m.get("content", "")
+                if isinstance(content, list):
+                    c_str = json.dumps(content, sort_keys=True)
+                else:
+                    c_str = str(content)
+                ts = str(m.get("_ts") or m.get("timestamp") or "")
+                return f"{role}:{ts}:{c_str}"
+    return None
+
+
 def _session_handoff_eligibility_error(session) -> str | None:
     """Return an error message if *session* is not eligible for handoff, or None."""
     from api.compression_anchor import is_context_compression_marker
@@ -37325,6 +37354,12 @@ def _session_handoff_eligibility_error(session) -> str | None:
     # Must not be a pre-compression snapshot
     if getattr(session, "pre_compression_snapshot", False):
         return "Cannot hand off from a pre-compression snapshot session."
+    # A handoff session requires a new compression before repeat handoff
+    if getattr(session, "handoff_source_session_id", None) or getattr(session, "handoff_consumed_anchor", None):
+        consumed = getattr(session, "handoff_consumed_anchor", None)
+        current = _session_compression_marker_key(session)
+        if not current or current == consumed:
+            return "Source session is a handoff session and has not undergone a new compression."
     return None
 
 
@@ -37441,19 +37476,41 @@ def _extract_latest_completed_exchange(messages: list) -> tuple:
     resolved_tool_ids = set()
     for msg in turn_messages[:-1]:
         if msg.get("role") == "tool":
-            tid = msg.get("tool_call_id") or msg.get("tool_use_id") or msg.get("id")
+            tid = (
+                msg.get("tool_call_id")
+                or msg.get("tool_use_id")
+                or msg.get("id")
+                or msg.get("call_id")
+            )
             if tid:
                 resolved_tool_ids.add(str(tid).strip())
         content = msg.get("content")
         if isinstance(content, list):
             for part in content:
                 if isinstance(part, dict):
+                    if _assistant_content_part_is_tool_use(part):
+                        continue
                     if part.get("type") in ("tool_result", "tool_response"):
-                        res_id = part.get("tool_use_id") or part.get("tool_call_id") or part.get("id")
+                        res_id = (
+                            part.get("tool_use_id")
+                            or part.get("tool_call_id")
+                            or part.get("id")
+                            or part.get("call_id")
+                        )
                         if res_id:
                             resolved_tool_ids.add(str(res_id).strip())
-                    elif part.get("tool_call_id") or part.get("tool_use_id"):
-                        res_id = part.get("tool_call_id") or part.get("tool_use_id")
+                    elif msg.get("role") == "tool" and (
+                        part.get("tool_call_id")
+                        or part.get("tool_use_id")
+                        or part.get("call_id")
+                        or part.get("id")
+                    ):
+                        res_id = (
+                            part.get("tool_call_id")
+                            or part.get("tool_use_id")
+                            or part.get("call_id")
+                            or part.get("id")
+                        )
                         resolved_tool_ids.add(str(res_id).strip())
 
     if not declared_tool_ids.issubset(resolved_tool_ids):
@@ -37702,21 +37759,59 @@ def _build_handoff_context_messages(source_context, last_user, last_assistant) -
 def _handle_session_handoff(handler, body, *, diag=None):
     """Create a fresh session with compressed-context handoff from a source session.
 
-    Request body::
+    Request::
 
-        { "session_id": "<source_session_id>",
-          "workspace": "...",    (optional, defaults to source session)
-          "model": "...",        (optional, defaults to source session)
-          "model_provider": "...", (optional)
-          "profile": "...",      (optional)
+        POST /api/session/handoff
+        Content-Type: application/json
+
+        Body:
+        {
+            "session_id": "<source_session_id>",
+            "workspace": "...",        (optional, defaults to source session)
+            "model": "...",            (optional, defaults to source session)
+            "model_provider": "...",   (optional, defaults to source session)
+            "profile": "...",          (optional, defaults to source session)
+            "title": "...",            (optional, defaults to derived source title)
+            "project_id": "..."        (optional, defaults to source session project_id)
         }
 
-    Response::
+    Eligibility Preconditions:
+        - Source session must exist and be visible to the active profile.
+        - Source session must contain at least one canonical compression marker in
+          ``context_messages`` (passes ``is_context_compression_marker``).
+        - Source session must not be actively streaming (``active_stream_id`` is None).
+        - Source session must not have an unsettled pending user turn (``pending_user_message`` is None).
+        - Source session must not be an immutable pre-compression snapshot
+          (``pre_compression_snapshot`` is False).
+        - If the source session was itself created by a previous handoff, it must have
+          undergone a new compression since the handoff boundary before another handoff
+          can be created.
+        - If the source session has non-empty visible messages (``messages``), the newest turn
+          must be a fully completed exchange (has terminal assistant prose response with all
+          declared tool calls resolved, and no partial or interrupted outputs).
 
-        { "session": <new_session_compact>,
-          "handoff_source": "<source_session_id>",
-          "handoff_compressed": True,
-          "announcement": "Fresh session started. ..."
+    What Is NOT Inherited:
+        - Transcript: The new session starts with a clean, independent visible transcript
+          (``messages = []``). Display lineage stitching is isolated via
+          ``relationship_type = 'child_session'``.
+        - Active stream / run: Stream and execution state are not transferred.
+        - Approvals: Pending or historical tool approval decisions are not inherited.
+        - Attachments: Pending file or image attachments are not transferred.
+        - Pending input: Pending user inputs and composer drafts remain with the source.
+
+    Error Codes:
+        - 400 Bad Request: Missing ``session_id``, ineligible source session (no compressed context,
+          active stream, pending turn, snapshot session, repeated handoff without new compression),
+          or incomplete latest turn in visible transcript.
+        - 404 Not Found: Source session does not exist or is invisible to the active profile.
+
+    Response (200 OK)::
+
+        {
+            "session": <new_session_compact_with_empty_messages>,
+            "handoff_source": "<source_session_id>",
+            "handoff_compressed": True,
+            "announcement": "Fresh session started. ..."
         }
     """
     try:
@@ -37761,6 +37856,12 @@ def _handle_session_handoff(handler, body, *, diag=None):
     last_user, last_assistant = _extract_latest_completed_exchange(
         source_messages
     )
+    if source_messages and (last_user is None or last_assistant is None):
+        return bad(
+            handler,
+            "Latest turn in source session is incomplete or unavailable for handoff.",
+            status=400,
+        )
 
     # Build the handoff context_messages for the new session
     handoff_context = _build_handoff_context_messages(
@@ -37788,25 +37889,36 @@ def _handle_session_handoff(handler, body, *, diag=None):
     if dest_profile != source_profile and not _session_visible_to_active_profile(dest_profile, handler):
         return bad(handler, "Source session not found", status=404)
 
+    source_title = getattr(session, "title", None)
+    if source_title and str(source_title).strip() and str(source_title).strip() != "Untitled":
+        derived_title = f"{str(source_title).strip()} (Handoff)"
+    else:
+        derived_title = f"Handoff from {sid[:8]}"
+    new_title = body.get("title") or derived_title
+
     # Create the new session (empty transcript, no messages)
     from api.models import new_session as _new_session
 
     s = _new_session(
+        title=new_title,
         workspace=resolved_workspace,
         model=model,
         model_provider=model_provider,
         profile=dest_profile,
         project_id=body.get("project_id") or getattr(session, "project_id", None),
     )
+    s.title = new_title
 
     # Inject handoff context — the compressed continuity block
     s.context_messages = handoff_context
     s.parent_session_id = sid
+    s.relationship_type = "child_session"
 
-    # Handoff provenance metadata (persisted via Session __dict__ extras)
+    # Handoff provenance metadata (persisted via Session metadata fields)
     s.handoff_source_session_id = sid
     s.handoff_created_at = time.time()
     s.handoff_compressed = True
+    s.handoff_consumed_anchor = _session_compression_marker_key(session)
 
     # Persist immediately — the session has meaningful continuity context
     s.save()
@@ -37817,10 +37929,16 @@ def _handle_session_handoff(handler, body, *, diag=None):
         session_id=getattr(s, "session_id", None),
     )
 
-    announcement = (
-        "Fresh session started. "
-        "Previous compressed context and the latest completed exchange were included."
-    )
+    if last_user is not None and last_assistant is not None:
+        announcement = (
+            "Fresh session started. "
+            "Previous compressed context and the latest completed exchange were included."
+        )
+    else:
+        announcement = (
+            "Fresh session started. "
+            "Previous compressed context block was included."
+        )
 
     return j(handler, {
         "session": s.compact() | {"messages": s.messages},
