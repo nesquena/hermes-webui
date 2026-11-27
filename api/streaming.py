@@ -5986,8 +5986,23 @@ def _strip_links_for_script_tally(text: str) -> str:
     )
     # E-mail addresses.
     s = re.sub(r'\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b', ' ', s)
-    # Bare paths that only carry link-ish tokens.
-    s = re.sub(r'(?<!\w)/(?:[\w.~-]+/)+[\w.~-]*', ' ', s)
+    # Bare paths that only carry link-ish tokens. A path is only link-ish when it
+    # has at least two segments and at least one looks like a file or a platform
+    # route — otherwise a quoted directory such as `/tmp/project` (which the
+    # legacy `[Workspace: ...]` prefix leaves in the text) loses its slashes and
+    # the opener's first words change (#1913).
+    def _strip_bare_path(match: 're.Match[str]') -> str:
+        path = match.group(0)
+        segments = [seg for seg in path.split('/') if seg]
+        if len(segments) < 2:
+            return path
+        linkish = any(
+            '.' in seg or seg.lower() in _LINK_NOISE_SEGMENTS
+            for seg in segments
+        )
+        return ' ' if linkish else path
+
+    s = re.sub(r'(?<!\w)/(?:[\w.~-]+/)+[\w.~-]*', _strip_bare_path, s)
     return re.sub(r'\s+', ' ', s).strip()
 
 
