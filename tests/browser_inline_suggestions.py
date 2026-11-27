@@ -24,12 +24,13 @@ stubs respondClarify):
   6. an invalid block (non-JSON, or an array with a non-string entry) renders
      no buttons and leaves the raw block visible (fail-safe).
 
-Review follow-ups (checks 7-18) cover: the busy flag, liveness of older replies,
+Review follow-ups (checks 7-19) cover: the busy flag, liveness of older replies,
 fences authored by the user, draft ownership across a chat switch, a draft typed
 mid-send, a draft's staged attachments (never uploaded with a suggestion,
 restored with the draft text, and kept when the user types or switches chats
 while the send is in flight), the shared radius tokens, a file staged mid-send
-(still in the saved draft), and a failed send (its retry text survives).
+(still in the saved draft), a failed send (its retry text survives), and a late
+save for one chat not cancelling another chat's pending debounced autosave.
 
 A final phase repeats the important parts in a 390x844 touch context (labels
 wrap, nothing overflows, no clipped labels, the keyboard hint is hidden, and a
@@ -218,6 +219,9 @@ def _run_checks(page, failures):
             failures.append(f"  {msg}")
 
     page.evaluate(SETUP_JS)
+    # Checks 10-18 stub _saveComposerDraft to record calls; check19 needs the real
+    # debounced implementation, so keep a reference to it before any stubbing.
+    page.evaluate("() => { window.__realSaveComposerDraft = window._saveComposerDraft; }")
 
     # ── Check 1: valid block -> no visible raw code, exactly N buttons, first primary ──
     labels_row1 = ["Ja, einrichten", "Erst nur Advisor"]
@@ -677,6 +681,27 @@ def _review_checks(page, check):
           f"check18: the failed send's retry text stays in the composer (got {text18!r})")
     check(saves18 == [['sid-I', 'Nochmal senden', []]],
           f"check18: the retry text is what gets persisted, not an empty draft (got {saves18!r})")
+
+    # ── Check 19: a late save for chat A keeps chat B's pending autosave ──
+    # The 400 ms debounce is shared by all chats. A save that arrives for a chat
+    # the user already left (e.g. A's /api/chat/start finishing after a switch)
+    # must flush the pending autosave of the OTHER chat instead of cancelling it,
+    # otherwise B's latest typing never reaches the server.
+    page.evaluate("""() => {
+      window._saveComposerDraft = window.__realSaveComposerDraft;
+      window.__draftPosts = [];
+      window._postComposerDraftPayload = function(sid, draft){
+        window.__draftPosts.push([sid, draft && draft.text]);
+        return Promise.resolve();
+      };
+      window._saveComposerDraft('sid-J', 'Entwurf J', []);
+      // The user is in chat K now and keeps typing while J's send is pending.
+      window._saveComposerDraft('sid-K', 'Entwurf K', []);
+    }""")
+    page.wait_for_timeout(800)
+    posts19 = page.evaluate("() => window.__draftPosts.slice()")
+    check(sorted(posts19) == [['sid-J', 'Entwurf J'], ['sid-K', 'Entwurf K']],
+          f"check19: a save for one chat does not drop another chat's pending autosave (got {posts19!r})")
 
 
 def _narrow_checks(browser, base, check):
