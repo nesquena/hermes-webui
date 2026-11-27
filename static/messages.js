@@ -1616,7 +1616,7 @@ function _setComposerAfterCliOnlyExplainer(value,owner){
 // that chat is still open and nothing new was typed, and onto its saved draft
 // either way. The chat on screen never has its composer or draft rewritten.
 //
-// Two 2026-11-26 findings shape the draft write:
+// Three findings shape the draft write:
 //  ① A NEWER draft may exist on the owning chat. While the skill loaded the
 //    user can retype the composer, and the switch that follows saves that
 //    newer draft (loadSession() persists the departing text+files). The save
@@ -1626,7 +1626,14 @@ function _setComposerAfterCliOnlyExplainer(value,owner){
 //  ② The restore used to persist `files: []`, wiping the staged attachments
 //    that the switch saved with the departing draft. Both the save and the
 //    failure path carry the owning chat's captured file list instead.
-function _ownerChatSavedDraftText(ownerSid){
+//  ③ (P1, greptile 2026-11-26) A staged attachment can be REMOVED while the
+//    skill loads. loadSession() saves the updated (removed-down-to-empty)
+//    file list with the departing draft, but writing the send-time snapshot
+//    back resurrected the removed attachment — the old guard compared only
+//    saved text, so an empty composer let the removed file back in. The
+//    restore must therefore keep the owning chat's LATEST saved files (the
+//    user's current attachment edits) rather than always the send-time list.
+function _ownerChatSavedDraftPayload(ownerSid){
   // sessions.js keeps the last payload signature per sid ({"text","files"}).
   // Read it defensively: the helper is useless (and must not disable the
   // restore) when that module is not loaded.
@@ -1636,27 +1643,50 @@ function _ownerChatSavedDraftText(ownerSid){
     const signature=_composerDraftLastPayloadBySid.get(ownerSid);
     if(typeof signature!=='string'||!signature) return null;
     const payload=JSON.parse(signature);
-    return payload&&typeof payload.text==='string'?payload.text:null;
+    return payload&&typeof payload==='object'
+      ?{text:typeof payload.text==='string'?payload.text:null,
+        files:Array.isArray(payload.files)?payload.files:[]}
+      :null;
   }catch(_error){ return null; }
 }
 
-function _restoreCommandToOwnerChat(ownerSid, commandText, ownerFiles, capturedDraftRevision){
+function _restoreCommandToOwnerChat(ownerSid, commandText, ownerFiles, capturedDraftSignature){
   const cmd=String(commandText==null?'':commandText);
   if(!ownerSid||!cmd) return;
-  const files=Array.isArray(ownerFiles)?ownerFiles.filter(Boolean).slice():[];
-  // ①: did the owning chat's saved draft move past the send-time snapshot?
-  // A moved revision means a save happened while this send was parked (the
-  // switch's departing-draft save). When that save carries non-empty text the
-  // user typed a newer draft — it wins; never overwrite it with the command.
-  // A files-only save (text empty) still gets the command back, WITH its files.
-  let savedText=null;
-  if(typeof capturedDraftRevision==='number'
-     &&typeof _composerDraftRevision==='function'
-     &&_composerDraftRevision(ownerSid)!==capturedDraftRevision){
-    savedText=_ownerChatSavedDraftText(ownerSid);
+  const capturedFiles=Array.isArray(ownerFiles)?ownerFiles.filter(Boolean).slice():[];
+  // ①/③: did the owning chat's saved draft move past the send-time snapshot?
+  // ANY save during the park — a retyped draft, a switched-away departing
+  // save, or a staged-file REMOVAL saved as an empty payload — rewrites the
+  // last-payload signature in sessions.js (the revision only moves for
+  // non-empty differing payloads, which is why it missed the removal save).
+  // Compare the signature (null-normalized: a chat nobody had saved yet has
+  // no entry, so an entry appearing at restore time is itself a save).
+  const capturedSig=(typeof capturedDraftSignature==='string')?capturedDraftSignature:null;
+  let currentSig=null;
+  if(typeof _composerDraftLastPayloadBySid!=='undefined'&&_composerDraftLastPayloadBySid
+     &&typeof _composerDraftLastPayloadBySid.get==='function'){
+    const sig=_composerDraftLastPayloadBySid.get(ownerSid);
+    currentSig=(typeof sig==='string'&&sig)?sig:null;
   }
-  if(savedText&&savedText.trim()&&savedText.trim()!==cmd.trim()) return;
+  let savedPayload=null;
+  if(currentSig!==capturedSig) savedPayload=_ownerChatSavedDraftPayload(ownerSid);
+  if(savedPayload){
+    const savedText=savedPayload.text;
+    if(savedText&&savedText.trim()&&savedText.trim()!==cmd.trim()) return;
+  }
+  // The file list the command writes back with: the owning chat's latest
+  // saved files when a save happened during the park (respects a mid-load
+  // removal/re-staging — ③), else the send-time capture. And when the owner
+  // chat is still on screen, its LIVE staged files are the most current edit
+  // of all: the tray the user sees (and already pruned) is what the draft
+  // must mirror, not an older capture.
   const currentSid=S.session&&S.session.session_id||null;
+  let files=(savedPayload&&Array.isArray(savedPayload.files))
+    ?savedPayload.files.filter(Boolean)
+    :capturedFiles;
+  if(currentSid===ownerSid&&typeof S!=='undefined'&&Array.isArray(S.pendingFiles)){
+    files=S.pendingFiles.filter(Boolean).slice();
+  }
   if(currentSid===ownerSid){
     const el=$('msg');
     if(el&&String(el.value||'').trim()) return;   // the user moved on: keep their input
@@ -1667,8 +1697,9 @@ function _restoreCommandToOwnerChat(ownerSid, commandText, ownerFiles, capturedD
   }
   if(typeof _saveComposerDraftNow!=='function') return;
   const onFail=(error)=>{
-    // ②: the failure path must keep the captured files too — a retry path that
-    // re-members an empty list loses the attachment just as the save would.
+    // ②: the failure path must keep the same file list the save writes — a
+    // retry path that re-members an empty list loses the attachment just as
+    // the save would.
     if(typeof _handleComposerDraftPostFailure==='function') _handleComposerDraftPostFailure(error,ownerSid,cmd,/* ② */files);
   };
   try{
@@ -1833,10 +1864,16 @@ async function send(){
         // already wiped the other chat's composer draft.
         const _busyOwnerSid=S.session&&S.session.session_id||null;
         // #7781 (P1, greptile 2026-11-26): snapshot the owning chat's draft
-        // revision before anything clears, so the restore can tell whether a
-        // NEWER draft got saved on that chat while this send was parked.
-        const _busyOwnerDraftRev=(typeof _composerDraftRevision==='function')
-          ?_composerDraftRevision(_busyOwnerSid):null;
+        // payload signature before anything clears. ANY save on that chat
+        // during the park — a retyped draft, a switch's departing save, or a
+        // staged-attachment REMOVAL saved as an empty payload — moves the
+        // signature; comparing it on restore is what keeps later attachment
+        // edits (③) from being replaced by the send-time snapshot. Revision
+        // alone misses the empty removal save, which never bumps it.
+        const _busyOwnerDraftSignature=(typeof _composerDraftLastPayloadBySid!=='undefined'
+          &&_composerDraftLastPayloadBySid
+          &&typeof _composerDraftLastPayloadBySid.get==='function')
+          ?(_composerDraftLastPayloadBySid.get(_busyOwnerSid)||null):null;
         // #7781 review 2026-11-23 [SHOULD-FIX]: clear the composer BEFORE the
         // first await. Holding the text across the skill-content fetch let an
         // edit typed meanwhile be wiped by the later clear, and a second Enter
@@ -1855,7 +1892,7 @@ async function send(){
               // #7781 (P1, greptile 2026-11-26): the composer was cleared and
               // the chat is gone. Keep the command on the draft of the chat
               // that issued it — a switch must not lose an unsent command.
-              _restoreCommandToOwnerChat(_busyOwnerSid,_busySteerRestoreText,/* ② */_failedSendFilesSnapshot,/* ① */_busyOwnerDraftRev);
+              _restoreCommandToOwnerChat(_busyOwnerSid,_busySteerRestoreText,/* ② */_failedSendFilesSnapshot,/* ① */_busyOwnerDraftSignature);
               hideCmdDropdown();return;
             }
             if(_busySkillError){
@@ -1866,7 +1903,7 @@ async function send(){
               // Nothing was steered: the composer was cleared before the
               // fetch, so put the command back. _restoreCommandToOwnerChat
               // also persists it on this chat's draft (#7781 P1).
-              _restoreCommandToOwnerChat(_busyOwnerSid,_busySteerRestoreText,/* ② */_failedSendFilesSnapshot,/* ① */_busyOwnerDraftRev);
+              _restoreCommandToOwnerChat(_busyOwnerSid,_busySteerRestoreText,/* ② */_failedSendFilesSnapshot,/* ① */_busyOwnerDraftSignature);
               hideCmdDropdown();
               return;
             }
@@ -1927,12 +1964,15 @@ async function send(){
   // writes after those awaits go through
   // _setComposerAfterCliOnlyExplainer(value,_slashOwner).
   // #7781 (P1, greptile 2026-11-26): also capture the owning chat's draft
-  // revision and staged files, so a restore after the awaits can (a) tell
-  // whether a NEWER draft was saved while this send was parked and (b) carry
-  // the staged attachments with the command instead of writing files: [].
+  // payload signature and staged files, so a restore after the awaits can
+  // (a) tell whether ANY new save (newer text OR a staged-file edit/removal
+  // → ③) happened while this send was parked and (b) carry the staged
+  // attachments with the command instead of writing files: [].
   const _slashOwnerSid=S.session&&S.session.session_id||null;
   const _slashOwner={sid:_slashOwnerSid,text,
-    _draftRev:(typeof _composerDraftRevision==='function')?_composerDraftRevision(_slashOwnerSid):null,
+    _draftSig:(typeof _composerDraftLastPayloadBySid!=='undefined'&&_composerDraftLastPayloadBySid
+      &&typeof _composerDraftLastPayloadBySid.get==='function')
+      ?(_composerDraftLastPayloadBySid.get(_slashOwnerSid)||null):null,
     _files:[...(S.pendingFiles||[])]};
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
@@ -2181,7 +2221,7 @@ async function send(){
         if((S.session&&S.session.session_id||null)!==_slashOwner.sid){
           // #7781 (P1, greptile 2026-11-26): the composer was already cleared;
           // keep the command on its own chat's draft so a switch cannot lose it.
-          _restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text,/* ② */_slashOwner&&_slashOwner._files,/* ① */_slashOwner&&_slashOwner._draftRev);
+          _restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text,/* ② */_slashOwner&&_slashOwner._files,/* ① */_slashOwner&&_slashOwner._draftSig);
           hideCmdDropdown();return;
         }
         if(_match){
@@ -2202,7 +2242,7 @@ async function send(){
             if((S.session&&S.session.session_id||null)!==_slashOwner.sid){
               // #7781 (P1, greptile 2026-11-26): the composer was already cleared;
               // keep the command on its own chat's draft so a switch cannot lose it.
-              _restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text,/* ② */_slashOwner&&_slashOwner._files,/* ① */_slashOwner&&_slashOwner._draftRev);
+              _restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text,/* ② */_slashOwner&&_slashOwner._files,/* ① */_slashOwner&&_slashOwner._draftSig);
               hideCmdDropdown();return;
             }
             const _content=_detail&&typeof _detail.content==='string'?_detail.content.trim():'';
@@ -2218,7 +2258,7 @@ async function send(){
             if((S.session&&S.session.session_id||null)!==_slashOwner.sid){
               // #7781 (P1, greptile 2026-11-26): the composer was already cleared;
               // keep the command on its own chat's draft so a switch cannot lose it.
-              _restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text,/* ② */_slashOwner&&_slashOwner._files,/* ① */_slashOwner&&_slashOwner._draftRev);
+              _restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text,/* ② */_slashOwner&&_slashOwner._files,/* ① */_slashOwner&&_slashOwner._draftSig);
               hideCmdDropdown();return;
             }
             if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
@@ -2227,7 +2267,7 @@ async function send(){
             renderMessages();
             // The composer was cleared before the fetch: put the command back
             // on this chat's draft too, so it survives even a later switch.
-            _restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text,/* ② */_slashOwner&&_slashOwner._files,/* ① */_slashOwner&&_slashOwner._draftRev);
+            _restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text,/* ② */_slashOwner&&_slashOwner._files,/* ① */_slashOwner&&_slashOwner._draftSig);
             hideCmdDropdown();return;
           }
         }

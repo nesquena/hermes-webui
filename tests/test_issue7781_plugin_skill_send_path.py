@@ -195,6 +195,10 @@ const ctx = {
   },
   __draftSaves() { return ctx._draftSaves; },
   __resetDraftSaves() { ctx._draftSaves.length = 0; },
+  __draftPayloads() { return Object.fromEntries(ctx._composerDraftLastPayloadBySid); },
+  __resetDraftPayloads() { ctx._composerDraftLastPayloadBySid = new Map(); },
+  __resetDraftRevisions() { ctx._draftRevBySid = new Map(); },
+  __setPendingFiles(files) { ctx.S.pendingFiles = files ? files.map((f) => Object.assign({}, f)) : []; },
   __switchLog() { return ctx._switchLog; },
   __resetSwitchLog() { ctx._switchLog.length = 0; },
   removeThinking(){},
@@ -578,6 +582,61 @@ vm.runInContext(__MESSAGES_JS__, ctx);
         window._defaultMessageMode = 'steer';
         return out;
       };
+      // #7781 (P1 ③, greptile 2026-11-26): while the busy skill load is parked,
+      // the user REMOVES a staged attachment and switches chats. loadSession()
+      // saves the updated (now-empty) file list with the departing draft;
+      // restoring the command must NOT write the send-time snapshot back, or
+      // the removed attachment resurrects. The restore must keep the saved
+      // files (empty here) rather than the capture.
+      const runBusyRemoveStagedFileAndSwitch = async (composerText, skills, contentMap, opts) => {
+        __resetDraftSaves();
+        __resetSwitchLog();
+        __resetDraftPayloads();
+        __resetDraftRevisions();
+        __setComposer(composerText);
+        __setSkills(skills);
+        __clearSkillContent();
+        for (const k in (contentMap || {})) __setSkillContent(k, contentMap[k]);
+        __resetApiCalls();
+        __resetQueue();
+        __failSkillsListing(false);
+        S.session = { session_id: opts.ownerSid };
+        S.messages = [];
+        INFLIGHT = {};
+        S.busy = true;
+        S.activeStreamId = 'run-steer-1';
+        S.pendingFiles = (opts.pendingFilesInitial || []).map((f) => Object.assign({}, f));
+        window._defaultMessageMode = 'steer';
+        __deferFetch(opts.defer || 'content');
+        let thrown = null;
+        const sendPromise = send(composerText).catch((e) => { thrown = String((e && e.message) || e); });
+        for (let i = 0; i < 200; i++) {
+          const reached = __apiCalls().some((c) => c && (opts.defer === 'listing'
+            ? c.path === '/api/skills'
+            : c.path.indexOf('/api/skills/content?name=') === 0));
+          if (reached) break;
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        // The user removes the staged attachment (empty tray), then opens
+        // another chat — the switch saves the now-empty departing draft.
+        __setPendingFiles(opts.pendingFilesAfterRemoval || []);
+        __switchSession(opts.switchToSid, opts.draft);
+        __settleFetch('success');
+        await sendPromise;
+        const out = {
+          composerAfter: __composer(),
+          steerCalls: __apiCalls().filter((c) => c && c.path === '/api/chat/steer').length,
+          draftSaves: __draftSaves().slice(),
+          switchLog: __switchLog().slice(),
+          draftPayloads: __draftPayloads(),
+          thrown,
+        };
+        S.busy = false;
+        S.activeStreamId = null;
+        S.pendingFiles = [];
+        window._defaultMessageMode = 'steer';
+        return out;
+      };
       const runDeadRunRecovery = async () => {
         __setComposer('/reviewdemo:under_score do EXACT');
         __setSkills([__UNDERSCORE_ROW__]);
@@ -661,6 +720,11 @@ vm.runInContext(__MESSAGES_JS__, ctx);
       // #7781 (P1 ②, greptile 2026-11-26): staged attachments ride the issuing
       // chat's departing draft through the switch; restore must keep them.
       const _stagedFiles = await runBusyDeferredSwitchStagedFiles('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { defer: 'content', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft', pendingFiles: [{ name: 'report.pdf', size: 1024, type: 'application/pdf' }] });
+      // #7781 (P1 ③, greptile 2026-11-26): the user REMOVES the staged
+      // attachment while the busy skill load is parked, then switches. The
+      // switch's departing save records the empty file list; the restore must
+      // NOT resurrect report.pdf from the send-time snapshot.
+      const _removedAttachment = await runBusyRemoveStagedFileAndSwitch('/reviewdemo:under_score do EXACT', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' }, { defer: 'content', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft', pendingFilesInitial: [{ name: 'report.pdf', size: 1024, type: 'application/pdf' }], pendingFilesAfterRemoval: [] });
       // #7781 (P1, greptile 2026-11-26): the switch lands while the COMMAND
       // metadata is still loading — before the idle resolver clears anything.
       const _deadRun = await runDeadRunRecovery();
@@ -685,6 +749,7 @@ vm.runInContext(__MESSAGES_JS__, ctx);
         busySwitchListing: _busySwitchListing,
         newerDraftContent: _newerDraftContent,
         stagedFiles: _stagedFiles,
+        removedAttachment: _removedAttachment,
         switchDuringMetadata: _switchDuringMetadata,
         deadRunRecovery: _deadRun,
       };
@@ -1069,14 +1134,14 @@ def test_busy_steer_clears_the_composer_before_the_skill_fetch():
     # A send that stops after the switch hands the command back to the chat
     # that issued it — composer when still open, draft either way. #7781
     # greptile 2026-11-26: the restore call carries the owning chat's captured
-    # files (②) and its send-time draft revision (①).
+    # files (②) and its send-time draft payload signature (①).
     assert (
         "_restoreCommandToOwnerChat(_busyOwnerSid,_busySteerRestoreText,"
-        "/* ② */_failedSendFilesSnapshot,/* ① */_busyOwnerDraftRev)"
+        "/* ② */_failedSendFilesSnapshot,/* ① */_busyOwnerDraftSignature)"
         in segment
     ), segment
-    # The revision is snapshotted before the composer is cleared.
-    assert segment.index("const _busyOwnerDraftRev=") < segment.index(
+    # The signature is snapshotted before the composer is cleared.
+    assert segment.index("const _busyOwnerDraftSignature=") < segment.index(
         "$('msg').value=''"
     ), segment
 
@@ -1095,11 +1160,11 @@ def test_idle_plugin_resolver_clears_the_composer_before_the_listing_fetch():
         "await api('/api/skills')"
     ), "the clear must precede the listing fetch"
     # Every owner-fence stop hands the cleared command back to its own chat,
-    # carrying the captured files (②) and the send-time draft revision (①)
-    # (#7781 greptile 2026-11-26).
+    # carrying the captured files (②) and the send-time draft payload
+    # signature (①) (#7781 greptile 2026-11-26).
     assert MESSAGES_JS.count(
         "_restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text,"
-        "/* ② */_slashOwner&&_slashOwner._files,/* ① */_slashOwner&&_slashOwner._draftRev)"
+        "/* ② */_slashOwner&&_slashOwner._files,/* ① */_slashOwner&&_slashOwner._draftSig)"
     ) == 4
 
 
@@ -1156,3 +1221,32 @@ def test_restore_keeps_the_owning_chats_staged_files():
     assert last["text"] == "/reviewdemo:under_score do EXACT", result
     assert len(last["files"]) == 1, result
     assert last["files"][0]["name"] == "report.pdf", result
+
+
+# ── #7781 (P1 ③, greptile 2026-11-26): removed attachments return ────────────────────
+# While a busy skill loads, the user can REMOVE a staged attachment and switch
+# chats. loadSession() saves the updated (now-empty) file list with the
+# departing draft, but the restore used to replace it with the send-time
+# snapshot — the removed attachment came back. The restore must keep the
+# LATEST saved file list instead.
+
+
+def test_removed_staged_attachment_does_not_return_on_restore():
+    """The user drops report.pdf while the busy skill fetch is parked and
+    opens another chat. The departing save records the empty list; the
+    restore must write the command back WITHOUT resurrecting report.pdf from
+    the send-time snapshot (greptile P1 ③)."""
+    result = _run_send_harness()["removedAttachment"]
+    assert result["steerCalls"] == 0, result
+    assert result["composerAfter"] == "chat B draft", result
+    assert result["thrown"] is None, result
+    # The switch's departing save recorded the removed (empty) file list...
+    assert result["switchLog"][0]["fromSid"] == "sess-A", result
+    assert result["switchLog"][0]["savedText"] == "", result
+    saves = [s for s in result["draftSaves"] if s["sid"] == "sess-A"]
+    assert saves, result
+    # ...and the restore's final save must keep that empty list. A send-time
+    # snapshot would put report.pdf back into the saved draft.
+    last = saves[-1]
+    assert last["text"] == "/reviewdemo:under_score do EXACT", result
+    assert last["files"] == [], result
