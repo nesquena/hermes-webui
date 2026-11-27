@@ -5568,7 +5568,6 @@ function _pickerExcludesForProvider(providerId){
     // its slug spells a builtin alias (``custom:glm`` stays ``custom:glm``).
     // Without this the two sides diverged for a custom endpoint named after
     // a builtin alias.
-    const ownerOf=(key)=>_pickerPolicyOwnerKey(key);
     const keys=[pid,pid.toLowerCase(),pid.replace(/\./g,''),pid.toLowerCase().replace(/\./g,'')];
     const out=new Set();
     const consume=(v)=>{
@@ -5594,10 +5593,13 @@ function _pickerExcludesForProvider(providerId){
       }
       // Alias-ownership match: a stored key whose OWNER is the requested
       // provider. ``glm`` owns ``zai``; ``custom:glm`` owns only itself.
-      // The owner rule is inlined here (rather than calling a sibling
-      // helper) so this function stays self-contained: a single-function
-      // extraction of it still carries its own data.
-      const ALIAS_OWNERS={
+      // The server OWNS the alias table and ships it as
+      // ``_pickerAliasOwners`` (payload ``picker_alias_owners``) — the same
+      // table its own resolver uses (agent aliases included), so the browser
+      // can never drift from the server (#7777 review 5489844033). The
+      // fallback table below is a small built-in subset for payloads that
+      // predate the field; the shipped map wins when present.
+      const ALIAS_OWNERS_FALLBACK={
         'glm':'zai','z-ai':'zai','z.ai':'zai','zhipu':'zai',
         'github':'copilot','github-copilot':'copilot','github-models':'copilot','github-model':'copilot',
         'google':'gemini','google-gemini':'gemini','google-ai-studio':'gemini',
@@ -5613,11 +5615,15 @@ function _pickerExcludesForProvider(providerId){
         'mimo':'xiaomi','xiaomi-mimo':'xiaomi',
         'local':'custom',
       };
+      const shippedAliases=(typeof window!=='undefined'&&window
+        &&window._pickerAliasOwners&&typeof window._pickerAliasOwners==='object')
+        ?window._pickerAliasOwners:{};
       const ownerOf=(key)=>{
         const k=String(key||'').trim().toLowerCase();
         if(!k) return '';
         if(k.startsWith('custom:')) return k;
-        return ALIAS_OWNERS[k]||k;
+        if(Object.prototype.hasOwnProperty.call(shippedAliases,k)) return String(shippedAliases[k]).toLowerCase();
+        return ALIAS_OWNERS_FALLBACK[k]||k;
       };
       const wantedOwners=new Set([pid.toLowerCase(),norm(pid)]);
       for(const k of Object.keys(raw)){
@@ -5929,6 +5935,16 @@ async function populateModelDropdown(opts={}){
       window._pickerExcludes=data.picker_excludes;
     }else{
       window._pickerExcludes={};
+    }
+    // #7777 (review 5489844033, alias ownership): the SERVER owns the alias
+    // table (it merges the agent's table when importable) and ships it with
+    // the payload. The browser resolves a stored policy key with THIS map, so
+    // the two sides can never drift — a browser-local copy went stale as soon
+    // as the agent added an alias.
+    if(data&&typeof data.picker_alias_owners==='object'&&data.picker_alias_owners!==null){
+      window._pickerAliasOwners=data.picker_alias_owners;
+    }else{
+      window._pickerAliasOwners={};
     }
     // #7777 re-gate finding 5: the server ships the UNFILTERED identities
     // alongside the filtered picker groups. An explicit `/model <name>` is a

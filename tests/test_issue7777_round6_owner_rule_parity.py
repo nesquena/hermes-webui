@@ -63,6 +63,12 @@ eval(extractFunc('_isKnownPickerProvider'));
 eval(extractFunc('_bareModelIdForExcludeMatch'));
 eval(extractFunc('_modelIsPickerExcluded'));
 
+// #7777: the SERVER owns the alias table and ships it with the payload as
+// ``picker_alias_owners``; the browser resolves with that map. Install the
+// same map here so the parity check exercises the real browser path (and
+// covers every alias the server knows, including the agent's).
+window._pickerAliasOwners = JSON.parse(process.argv[4] || '{}');
+
 // For each (storedKey, candidateGroup) pair: does the browser hide "m" for
 // that group under a policy stored under storedKey?
 const pairs = JSON.parse(process.argv[3]);
@@ -88,11 +94,22 @@ def driver_path(tmp_path_factory):
 
 
 def _browser_hides(driver_path: Path, pairs: list[tuple[str, str]]) -> list[bool]:
-    """For each (storedKey, group), does the browser hide the model?"""
+    """For each (storedKey, group), does the browser hide the model?
+
+    The server's alias map is shipped into the page the same way the real
+    payload does it, so this exercises the production path rather than a
+    browser-local copy that can drift.
+    """
     node = NODE or shutil.which("node")
     assert node, "node not on PATH"
     result = subprocess.run(
-        [node, str(driver_path), str(UI_JS_PATH), json.dumps(pairs)],
+        [
+            node,
+            str(driver_path),
+            str(UI_JS_PATH),
+            json.dumps(pairs),
+            json.dumps(config._picker_alias_owner_map()),
+        ],
         capture_output=True,
         text=True,
         timeout=60,

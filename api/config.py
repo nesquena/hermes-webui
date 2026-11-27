@@ -2825,6 +2825,51 @@ def _picker_policy_owner_key(provider_key: str) -> str:
     return raw
 
 
+def _picker_alias_owner_map() -> dict:
+    """Return the alias → canonical-owner map the browser must apply.
+
+    #7777 (review 5489844033, alias ownership): the browser used to keep its
+    OWN copy of the alias table. That copy is the WebUI-local
+    ``_PROVIDER_ALIASES``, while the server resolves through
+    ``_resolve_provider_alias``, which PREFERS the agent's table when
+    ``hermes_cli`` is importable. The two therefore diverge as soon as the
+    agent adds an alias (CI caught it on ``chatgpt`` → ``openai-codex`` and
+    ``novita-ai`` → ``novita``), and the server and the picker end up filtering
+    different groups.
+
+    So the server OWNS the table and ships it: the models payload carries this
+    map, and the browser resolves a stored policy key with it. One definition,
+    no drift.
+
+    Keys are lower-cased; ``custom:``-shaped keys are deliberately absent —
+    they own themselves on both sides (see :func:`_picker_policy_owner_key`).
+    Returns ``{}`` on any import failure so the client always gets a JSON
+    object.
+    """
+    merged: dict[str, str] = {}
+    try:
+        merged.update(
+            {
+                str(k).strip().lower(): str(v).strip().lower()
+                for k, v in _PROVIDER_ALIASES.items()
+                if str(k).strip() and str(v).strip()
+            }
+        )
+    except Exception:
+        pass
+    try:
+        from hermes_cli.models import _PROVIDER_ALIASES as _agent_aliases
+
+        for key, value in dict(_agent_aliases).items():
+            k = str(key).strip().lower()
+            v = str(value).strip().lower()
+            if k and v and k not in merged:
+                merged[k] = v
+    except Exception:
+        pass
+    return merged
+
+
 def _picker_excludes_payload() -> dict:
     """Return the ``picker_excludes`` map for API payloads, keyed canonically.
 
@@ -8074,6 +8119,7 @@ def _minimal_static_models_catalog() -> dict:
             # #7507: ship the raw policy map so the browser's re-injection
             # paths honour the same excludes as the server-side filter.
             "picker_excludes": _picker_excludes_payload(),
+            "picker_alias_owners": _picker_alias_owner_map(),
         }
         # #7507: when the ONLY candidate (the default model) is excluded,
         # surface an explicit no-eligible-model state so the browser can
@@ -8523,6 +8569,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             # #7507: ship the raw policy map so the browser's re-injection
             # paths honour the same excludes as the server-side filter.
             "picker_excludes": _picker_excludes_payload(),
+            "picker_alias_owners": _picker_alias_owner_map(),
         })
     except Exception:
         logger.debug("static models catalog build failed", exc_info=True)
@@ -12312,6 +12359,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # (boot default, previous pick, synthesized fallback rows)
             # server-side filtering never sees.
             "picker_excludes": _picker_excludes_payload(),
+            "picker_alias_owners": _picker_alias_owner_map(),
             # #7777 re-gate finding 3: the unfiltered counterpart of ``groups``.
             # Consumed by the cache-publication path below (routing provenance
             # must not see the picker policy) and stripped before the payload
