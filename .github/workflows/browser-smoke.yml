@@ -167,3 +167,7 @@ jobs:
       - name: Run terminal screen-reader-mode gate
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_terminal_screen_reader_mode.py
+
+      - name: Run share hidden-text gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_share_hidden_text.py

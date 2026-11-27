@@ -102,6 +102,10 @@ from urllib.parse import urlparse
 _webui_root = os.path.dirname(os.path.abspath(__file__))
 if _webui_root not in sys.path:
     sys.path.insert(0, _webui_root)
+# #9052: cap glibc malloc arenas HERE, while only the main thread exists and before
+# any Agent or api.* import can start one: glibc latches its arena limit later.
+from startup_memory_limits import apply_startup_arena_cap
+apply_startup_arena_cap()
 from managed_agent_startup import activate_managed_agent
 activate_managed_agent()
 
@@ -117,6 +121,7 @@ from api.helpers import (
     get_profile_cookie,
     _build_csp_report_only_policy,
     _CLIENT_DISCONNECT_ERRORS,
+    send_server_error,
 )
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers, fold_api_path
@@ -398,10 +403,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         except RunAdmissionClosed as exc:  # #7293: a restart/drain closed run admission
             send_admission_closed(self, exc)
-        except Exception:
+        except Exception as exc:
             self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
             try:
-                j(self, {'error': 'Internal server error'}, status=500)
+                send_server_error(self, exc)  # 507 when storage is full (#9167)
             except _CLIENT_DISCONNECT_ERRORS:
                 pass
             except Exception:
@@ -426,10 +431,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         except RunAdmissionClosed as exc:  # #7293: a restart/drain closed run admission
             send_admission_closed(self, exc)
-        except Exception:
+        except Exception as exc:
             self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
             try:
-                j(self, {'error': 'Internal server error'}, status=500)
+                send_server_error(self, exc)  # 507 when storage is full (#9167)
             except _CLIENT_DISCONNECT_ERRORS:
                 pass
             except Exception:
