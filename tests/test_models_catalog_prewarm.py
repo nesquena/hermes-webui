@@ -16,12 +16,14 @@ import api.config as config
 
 
 def _write_cache(path, built_at):
+    """Write a cache the due check treats as loadable (real fingerprint)."""
     path.write_text(
         json.dumps(
             {
                 "_schema_version": config._MODELS_CACHE_SCHEMA_VERSION,
+                "_webui_version": config._current_webui_version(),
                 "_built_at": built_at,
-                "_source_fingerprint": {},
+                "_source_fingerprint": config._models_cache_source_fingerprint(),
                 "active_provider": None,
                 "default_model": "",
                 "configured_model_badges": {},
@@ -39,6 +41,9 @@ def prewarm_env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "_models_cache_path", base)
     monkeypatch.setattr(config, "_models_prewarm_booted_at", time.monotonic() - 10_000)
     monkeypatch.setattr(config, "_MODELS_PREWARM_LAST_STARTED", {})
+    monkeypatch.setattr(config, "_MODELS_PREWARM_PROBE_CACHE", {})
+    monkeypatch.setattr(config, "_MODELS_PREWARM_THREAD", None)
+    monkeypatch.setattr(config, "_MODELS_PREWARM_ENABLED", True)
 
     calls = []
     monkeypatch.setattr(
@@ -49,14 +54,15 @@ def prewarm_env(tmp_path, monkeypatch):
 
     workers = []
 
-    class _CapturedThread:
-        def __init__(self, target=None, args=(), name=None, daemon=None):
-            workers.append((target, args))
+    class _CapturedWorker:
+        def is_alive(self):
+            return False
 
-        def start(self):
-            return None
+    def _fake_start(profiles):
+        workers.append(list(profiles))
+        return _CapturedWorker()
 
-    monkeypatch.setattr(config.threading, "Thread", _CapturedThread)
+    monkeypatch.setattr(config, "_start_prewarm_thread", _fake_start)
     return base, calls, workers
 
 
@@ -78,9 +84,9 @@ def test_cache_near_expiry_is_prewarmed(prewarm_env):
 
     assert config.maybe_prewarm_models_catalog() == {"default": "scheduled"}
     assert len(workers) == 1
+    assert [profile for profile, _path in workers[0]] == ["default"]
 
-    target, args = workers[0]
-    target(*args)
+    config._prewarm_profiles(workers[0])
     assert calls == [{"force_refresh": True}]
 
 
@@ -223,8 +229,6 @@ def test_prewarm_binds_profile_without_mirroring_env(monkeypatch):
 def test_due_profiles_run_sequentially_in_one_worker(monkeypatch, tmp_path):
     """Two due profiles must not prewarm in parallel: the rebuild is a
     process-wide single-flight, so the second would give up and serve stale."""
-    import threading
-
     from api import profiles
 
     order = []
@@ -238,17 +242,21 @@ def test_due_profiles_run_sequentially_in_one_worker(monkeypatch, tmp_path):
 
     captured = []
 
-    class _CapturedThread:
-        def __init__(self, target=None, args=(), name=None, daemon=None):
-            captured.append((target, args))
+    class _CapturedWorker:
+        def is_alive(self):
+            return False
 
-        def start(self):
-            return None
+    def _fake_start(profiles_list):
+        captured.append(list(profiles_list))
+        return _CapturedWorker()
 
-    monkeypatch.setattr(config.threading, "Thread", _CapturedThread)
+    monkeypatch.setattr(config, "_start_prewarm_thread", _fake_start)
     monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
     monkeypatch.setattr(config, "_models_prewarm_booted_at", time.monotonic() - 10_000)
     monkeypatch.setattr(config, "_MODELS_PREWARM_LAST_STARTED", {})
+    monkeypatch.setattr(config, "_MODELS_PREWARM_PROBE_CACHE", {})
+    monkeypatch.setattr(config, "_MODELS_PREWARM_THREAD", None)
+    monkeypatch.setattr(config, "_MODELS_PREWARM_ENABLED", True)
 
     due_before = (
         config._SESSION_VISIT_MODELS_FRESHNESS_SECONDS - config._MODELS_PREWARM_LEAD_SECONDS
@@ -260,8 +268,7 @@ def test_due_profiles_run_sequentially_in_one_worker(monkeypatch, tmp_path):
     assert report == {"default": "scheduled", "personal": "scheduled"}
     assert len(captured) == 1  # single worker for both profiles
 
-    target, args = captured[0]
-    target(*args)
+    config._prewarm_profiles(captured[0])
     assert order == ["default", "personal"]
 
 
@@ -326,3 +333,73 @@ def test_build_admission_stamps_start_time(tmp_path, monkeypatch):
     config.get_available_models(force_refresh=True)
 
     assert observed.get("stamp", 0.0) > 0.0
+
+
+def test_disabled_by_env_flag(prewarm_env, monkeypatch):
+    base, _calls, workers = prewarm_env
+    monkeypatch.setattr(config, "_MODELS_PREWARM_ENABLED", False)
+    _write_cache(base, time.time() - 10_000)
+
+    assert config.maybe_prewarm_models_catalog() == {}
+    assert workers == []
+
+
+def test_sync_mode_skips_the_sweep(prewarm_env, monkeypatch):
+    base, _calls, workers = prewarm_env
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0)
+    _write_cache(base, time.time() - 10_000)
+
+    assert config.maybe_prewarm_models_catalog() == {}
+    assert workers == []
+
+
+def test_unloadable_young_cache_is_due(prewarm_env):
+    base, _calls, workers = prewarm_env
+    _write_cache(base, time.time())
+    raw = json.loads(base.read_text(encoding="utf-8"))
+    raw["_source_fingerprint"] = {"stale": "fingerprint"}
+    base.write_text(json.dumps(raw), encoding="utf-8")
+
+    # Young file, unusable catalog: the visitor would still pay a cold build.
+    assert config.maybe_prewarm_models_catalog() == {"default": "scheduled"}
+    assert len(workers) == 1
+
+
+def test_missing_default_cache_is_swept_while_named_cache_is_fresh(prewarm_env):
+    base, _calls, workers = prewarm_env
+    named = base.parent / "models_cache.personal.json"
+    _write_cache(named, time.time())
+    assert not base.exists()
+
+    # A glob of existing files alone would miss the default profile entirely,
+    # and its file is what a config save deletes.
+    assert config.maybe_prewarm_models_catalog() == {"default": "scheduled"}
+    assert len(workers) == 1
+
+
+def test_worker_busy_skips_scheduling(prewarm_env, monkeypatch):
+    base, _calls, workers = prewarm_env
+
+    class _Alive:
+        def is_alive(self):
+            return True
+
+    monkeypatch.setattr(config, "_MODELS_PREWARM_THREAD", _Alive())
+    _write_cache(base, time.time() - 10_000)
+
+    assert config.maybe_prewarm_models_catalog() == {}
+    assert workers == []
+
+
+def test_claim_with_a_live_owner_is_not_reclaimed(monkeypatch):
+    class _Alive:
+        def is_alive(self):
+            return True
+
+    monkeypatch.setattr(config, "_cache_build_in_progress", True)
+    monkeypatch.setattr(config, "_cache_build_started_at", time.monotonic() - 10_000)
+    monkeypatch.setattr(config, "_cache_build_owner", _Alive())
+
+    # An out-of-band worker can outlive the budget; age alone must not reclaim it.
+    assert config._release_stale_build_claim() is False
+    assert config._cache_build_in_progress is True

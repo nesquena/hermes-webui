@@ -8127,6 +8127,10 @@ _cache_build_in_progress = False  # True while a cold path is actively building
 # older than this is not running.
 _cache_build_started_at: float = 0.0
 _STALE_BUILD_CLAIM_SECONDS: float = 180.0
+# The worker that owns the current claim, when one was started. A live worker
+# must never be reclaimed on age alone: the age is a fallback for claims with no
+# owner (a foreground build that died between admission and hand-off).
+_cache_build_owner: threading.Thread | None = None
 
 # ── Catalog publication ordering ─────────────────────────────────────────────
 # Every cold rebuild takes the next sequence number, and the published catalog
@@ -8190,6 +8194,7 @@ def _clear_build_in_progress(rebuild_seq: int) -> None:
     """
     global _cache_build_in_progress
     global _cache_build_started_at
+    global _cache_build_owner
     with _cache_build_cv:
         if _models_rebuild_superseded(rebuild_seq):
             # A newer rebuild owns the flag now; releasing it here would wake
@@ -8198,6 +8203,7 @@ def _clear_build_in_progress(rebuild_seq: int) -> None:
             return
         _cache_build_in_progress = False
         _cache_build_started_at = 0.0
+        _cache_build_owner = None
         _cache_build_cv.notify_all()
 
 
@@ -8216,6 +8222,12 @@ def _release_stale_build_claim() -> bool:
         return False
     try:
         if not _cache_build_in_progress:
+            return False
+        owner = _cache_build_owner
+        if owner is not None and owner.is_alive():
+            # A running build is not stale, whatever its age: an out-of-band
+            # worker can outlive the budget (retry after abandon, slow probe,
+            # profile patch lock), and reclaiming it would start a duplicate.
             return False
         started = _cache_build_started_at
         if not started:
@@ -10697,7 +10709,7 @@ def _invalidate_models_catalog_epoch(*, delete_disk: bool = True, provider_id: s
     """
     global _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint
-    global _cache_build_in_progress, _cache_build_started_at
+    global _cache_build_in_progress, _cache_build_started_at, _cache_build_owner
     # Drop the one-slot parse memo BEFORE the disk unlink below. The memo is
     # keyed on (path, mtime_ns, size, st_ino, st_dev), so a payload parsed
     # before this call keeps a key that still matches the freshly rebuilt file:
@@ -10728,6 +10740,7 @@ def _invalidate_models_catalog_epoch(*, delete_disk: bool = True, provider_id: s
                 _CREDENTIAL_POOL_CACHE.pop((tag, _resolve_provider_alias(provider_id)), None)
             _cache_build_in_progress = False
             _cache_build_started_at = 0.0
+            _cache_build_owner = None
             _cache_build_cv.notify_all()
             if delete_disk:
                 _delete_models_cache_on_disk()
@@ -11049,7 +11062,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
-    global _cache_build_started_at
+    global _cache_build_started_at, _cache_build_owner
     # Config mtime check — must come before any config reads.
     # (Test #585 verifies _current_mtime appears before active_provider = None)
     try:
@@ -13336,7 +13349,16 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             name="models-catalog-rebuild",
             daemon=True,
         )
-        _worker.start()
+        with _cache_build_cv:
+            _cache_build_owner = _worker
+        try:
+            _worker.start()
+        except BaseException:
+            # Thread exhaustion (RuntimeError) must not leave the claim set:
+            # every later caller would wait out its budget on a build that never
+            # started, until the stale-claim watchdog fired.
+            _clear_build_in_progress(rebuild_seq)
+            raise
 
         # Wait on the SAME absolute deadline the probe schedule draws its slices
         # from (#7481 review), not on a fresh full window started here: with two
@@ -13642,30 +13664,75 @@ def get_available_models_for_session_visit() -> dict:
 # hour.
 _MODELS_PREWARM_LOCK = threading.Lock()
 _MODELS_PREWARM_LAST_STARTED: dict[str, float] = {}
+_MODELS_PREWARM_THREAD: threading.Thread | None = None
+_MODELS_PREWARM_PROBE_CACHE: dict[str, tuple[int, int, float | None, bool]] = {}
+_MODELS_PREWARM_ENABLED: bool = (
+    (os.environ.get("HERMES_WEBUI_MODELS_PREWARM", "1") or "").strip().lower()
+    not in ("0", "false", "no", "off")
+)
 _MODELS_PREWARM_RETRY_SECONDS: float = 300.0
 _MODELS_PREWARM_BOOT_GRACE_SECONDS: float = 120.0
 _MODELS_PREWARM_LEAD_SECONDS: float = 600.0
 # How long a prewarm waits for another profile's catalog build to settle before
 # it tries its own. Background work, so waiting costs a user nothing.
 _MODELS_PREWARM_IDLE_WAIT_SECONDS: float = 60.0
+_PROFILE_ID_RE_FOR_CACHE = re.compile(r"^[A-Za-z0-9_-]+$")
 _models_prewarm_booted_at: float = time.monotonic()
 
 
 def _models_cache_profiles() -> list[tuple[str, Path]]:
-    """Return ``(profile, cache_path)`` for every catalog snapshot on disk."""
+    """Return ``(profile, cache_path)`` for the default profile and every named one.
+
+    The default profile is always included: its file is exactly what
+    ``invalidate_models_cache()`` deletes on a config save, so it may be missing
+    while named-profile caches survive, and a glob of existing files alone would
+    never sweep it. Named entries are kept only when the filename parses to a
+    plausible profile id.
+    """
     base = _models_cache_path
+    found: list[tuple[str, Path]] = [("default", base)]
     try:
         candidates = sorted(base.parent.glob(base.stem + "*.json"))
     except OSError:
-        return [("default", base)]
-    found: list[tuple[str, Path]] = []
+        return found
     prefix = base.stem + "."
     for path in candidates:
-        if path.name == base.name:
-            found.append(("default", path))
-        elif path.name.startswith(prefix) and path.name.endswith(".json"):
-            found.append((path.name[len(prefix):-len(".json")], path))
-    return found or [("default", base)]
+        name = path.name
+        if name == base.name or not name.startswith(prefix) or not name.endswith(".json"):
+            continue
+        profile = name[len(prefix):-len(".json")]
+        if profile and _PROFILE_ID_RE_FOR_CACHE.match(profile):
+            found.append((profile, path))
+    return found
+
+
+def _models_cache_due_probe(path: Path, now: float) -> tuple[float | None, bool]:
+    """Return ``(age_seconds, loadable)`` for one cache file.
+
+    Stat-keyed: the age check runs every tick for every profile, and re-parsing a
+    multi-MB catalog each time would both cost CPU on the reaper thread and keep
+    the one-slot parse memo resident (the invariant the session-visit path
+    documents). Only a changed file is parsed again.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None, False
+    key = str(path)
+    entry = _MODELS_PREWARM_PROBE_CACHE.get(key)
+    if entry is not None and entry[0] == st.st_mtime_ns and entry[1] == st.st_size:
+        built_at, loadable = entry[2], entry[3]
+    else:
+        built_at = _models_disk_cache_built_at(path)
+        try:
+            loadable = _is_loadable_disk_cache(_read_models_cache_disk_payload(path))
+        except Exception:
+            loadable = False
+        _clear_models_disk_payload_memo()
+        _MODELS_PREWARM_PROBE_CACHE[key] = (st.st_mtime_ns, st.st_size, built_at, loadable)
+    if built_at is not None:
+        return max(0.0, now - built_at), loadable
+    return max(0.0, now - st.st_mtime), loadable
 
 
 def _wait_for_catalog_idle(timeout: float) -> bool:
@@ -13697,6 +13764,24 @@ def _prewarm_profiles(profiles: list[tuple[str, Path]]) -> None:
         _prewarm_profile_catalog(profile, cache_path)
 
 
+def _start_prewarm_thread(profiles: list[tuple[str, Path]]) -> threading.Thread:
+    """Start the single prewarm worker (seam for tests; no stdlib patching)."""
+    thread = threading.Thread(
+        target=_prewarm_profiles,
+        args=(profiles,),
+        name="models-catalog-prewarm",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def _release_prewarm_backoff(profile: str) -> None:
+    """Allow the next tick to retry a profile whose prewarm did not rebuild."""
+    with _MODELS_PREWARM_LOCK:
+        _MODELS_PREWARM_LAST_STARTED.pop(profile, None)
+
+
 def _prewarm_profile_catalog(profile: str, cache_path: Path) -> None:
     """Rebuild one profile's catalog in a detached worker (never raises).
 
@@ -13710,31 +13795,45 @@ def _prewarm_profile_catalog(profile: str, cache_path: Path) -> None:
     also serialize on the module patch lock until the foreground budget expires.
     """
     set_request_profile = None
-    previous: str | None = None
+    clear_request_profile = None
     try:
-        from api.profiles import get_active_profile_name, set_request_profile as _srp
+        from api.profiles import (
+            clear_request_profile as _crp,
+            set_request_profile as _srp,
+        )
 
-        set_request_profile = _srp
-        try:
-            previous = get_active_profile_name()
-        except Exception:
-            previous = None
+        set_request_profile, clear_request_profile = _srp, _crp
     except Exception:
-        set_request_profile = None
+        set_request_profile = clear_request_profile = None
+
+    built_before = _models_disk_cache_built_at(cache_path)
     try:
         if set_request_profile is not None:
             set_request_profile(profile)
         _wait_for_catalog_idle(_MODELS_PREWARM_IDLE_WAIT_SECONDS)
         get_available_models(force_refresh=True)
-        logger.info(
-            "models catalog prewarmed (profile=%s, cache=%s)", profile, cache_path.name
-        )
+        # get_available_models() answers with the stale/static fallback instead
+        # of raising when its budget lapses or another build owns the lock, so
+        # the persisted stamp is the only evidence that work happened.
+        _MODELS_PREWARM_PROBE_CACHE.pop(str(cache_path), None)
+        _clear_models_disk_payload_memo()
+        built_after = _models_disk_cache_built_at(cache_path)
+        if built_after is not None and built_after != built_before:
+            logger.info(
+                "models catalog prewarmed (profile=%s, cache=%s)", profile, cache_path.name
+            )
+        else:
+            # Coalesced onto another build or still running out of band: retry
+            # on the next tick instead of spending the lead window on backoff.
+            _release_prewarm_backoff(profile)
+            logger.info("models catalog prewarm did not rebuild (profile=%s)", profile)
     except Exception:
+        _release_prewarm_backoff(profile)
         logger.debug("models catalog prewarm failed (profile=%s)", profile, exc_info=True)
     finally:
-        if set_request_profile is not None and previous is not None:
+        if clear_request_profile is not None:
             try:
-                set_request_profile(previous)
+                clear_request_profile()
             except Exception:
                 pass
 
@@ -13746,45 +13845,53 @@ def maybe_prewarm_models_catalog(*, now: float | None = None) -> dict[str, str]:
     to the SessionChannel reaper (that tick fires about once a minute; this
     function decides when a profile is actually due). A profile is due when its
     disk cache is missing, unloadable, or within ``_MODELS_PREWARM_LEAD_SECONDS``
-    of the session-visit freshness window. Never runs while a catalog build is
-    already in flight, and never repeats a failed attempt for five minutes.
+    of the session-visit freshness window. At most one prewarm worker runs at a
+    time; a coalesced or failed attempt is retried on the next tick instead of
+    waiting out the backoff; ``HERMES_WEBUI_MODELS_PREWARM=0`` disables the sweep
+    for tests and operators.
     """
+    global _MODELS_PREWARM_THREAD
     report: dict[str, str] = {}
     tick_now = time.time() if now is None else float(now)
+    if not _MODELS_PREWARM_ENABLED:
+        _write_prewarm_state(tick_now, state="disabled")
+        return report
+    if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
+        # Legacy synchronous rebuild: the calling thread holds the catalog lock
+        # for the whole build, so a periodic participant would only add a party
+        # to the catalog -> patch-lock order. Leave that mode to requests.
+        _write_prewarm_state(tick_now, state="sync-mode")
+        return report
     if (time.monotonic() - _models_prewarm_booted_at) < _MODELS_PREWARM_BOOT_GRACE_SECONDS:
         _write_prewarm_state(tick_now, state="boot-grace")
         return report
+    mono_now = time.monotonic()
     due_before = max(0.0, _SESSION_VISIT_MODELS_FRESHNESS_SECONDS - _MODELS_PREWARM_LEAD_SECONDS)
     with _MODELS_PREWARM_LOCK:
-        # NOTE: an in-flight build is NOT a reason to skip. The single-flight
-        # inside get_available_models() coalesces followers onto that build, and
-        # ``_cache_build_in_progress`` has been observed to stay set in a
-        # long-lived process (the state that kept a profile's catalog cold for
-        # 20 h), which would otherwise make this sweep a permanent no-op.
+        if _MODELS_PREWARM_THREAD is not None and _MODELS_PREWARM_THREAD.is_alive():
+            # One worker at a time: profiles that come due meanwhile are picked
+            # up on a later tick instead of fighting the single-flight.
+            _write_prewarm_state(tick_now, state="worker-busy")
+            return report
         due: list[tuple[str, Path]] = []
         ages: dict[str, float | None] = {}
         for profile, path in _models_cache_profiles():
-            age = _models_cache_file_age_seconds(path, tick_now)
+            age, loadable = _models_cache_due_probe(path, tick_now)
             ages[profile] = age
-            if age is not None and age < due_before:
+            if loadable and age is not None and age < due_before:
                 continue
             last = _MODELS_PREWARM_LAST_STARTED.get(profile)
-            if last is not None and (tick_now - last) < _MODELS_PREWARM_RETRY_SECONDS:
+            if last is not None and (mono_now - last) < _MODELS_PREWARM_RETRY_SECONDS:
                 continue
-            _MODELS_PREWARM_LAST_STARTED[profile] = tick_now
+            _MODELS_PREWARM_LAST_STARTED[profile] = mono_now
             due.append((profile, path))
-    if due:
-        # One worker for all due profiles, run sequentially: the catalog rebuild
-        # is a process-wide single-flight, so parallel prewarms would make the
-        # later one give up on its budget and serve the stale fallback.
-        threading.Thread(
-            target=_prewarm_profiles,
-            args=(due,),
-            name="models-catalog-prewarm",
-            daemon=True,
-        ).start()
-        for profile, _path in due:
-            report[profile] = "scheduled"
+        if due:
+            # One worker walks the due profiles in order: the catalog rebuild is
+            # a process-wide single-flight, so parallel prewarms would make the
+            # later one give up on its budget and serve the stale fallback.
+            _MODELS_PREWARM_THREAD = _start_prewarm_thread(due)
+            for profile, _path in due:
+                report[profile] = "scheduled"
     _write_prewarm_state(tick_now, state="ran" if report else "not-due", due=sorted(report), ages=ages)
     if report:
         logger.info("models catalog prewarm scheduled: %s", ", ".join(sorted(report)))
