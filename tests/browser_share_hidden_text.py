@@ -199,6 +199,9 @@ WIDE_TABLE = "\n".join(
     )
 )
 
+TABLE_LIST = '<table><tr><td><ol><li value="9999">marker content</li></ol></td></tr></table>'
+CSV_TABLE = '```csv\nName,Value\nExample,42\n```'
+
 # Random messages: tokens renderMd treats specially, with numbered marker words.
 # Address tokens end with a space so a marker never joins an address.
 FUZZ_TOKENS = [
@@ -330,6 +333,49 @@ def _check_wide_table(browser, token):
     return failures
 
 
+def _check_table_list_marker(browser, token):
+    failures = []
+    for width in (390, 1280):
+        ctx = browser.new_context(base_url=BASE, viewport={"width": width, "height": 800})
+        try:
+            page = ctx.new_page()
+            page.goto(f"/share/{token}", wait_until="domcontentloaded")
+            item = page.locator('.share-message-body table li[value="9999"]')
+            item.wait_for(timeout=10000)
+            metrics = item.evaluate("""item => {
+                const clip = item.closest('.share-table-scroll');
+                const text = document.createRange();
+                text.selectNodeContents(item);
+                const start = text.getClientRects()[0].left;
+                const marker = getComputedStyle(item, '::marker');
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                context.font = marker.font || getComputedStyle(item).font;
+                const markerWidth = context.measureText('9999. ').width;
+                return { position: getComputedStyle(item).listStylePosition,
+                    markerLeft: start - markerWidth, clipLeft: clip.getBoundingClientRect().left };
+            }""")
+            print(f"table list marker at {width}px: {metrics}")
+            if metrics["markerLeft"] < metrics["clipLeft"] - 1:
+                failures.append(f"table list marker at {width}px is clipped by its scroll container")
+        finally:
+            ctx.close()
+    return failures
+
+
+def _check_csv_table(browser, token):
+    ctx = browser.new_context(base_url=BASE, viewport={"width": 390, "height": 800})
+    try:
+        page = ctx.new_page()
+        page.goto(f"/share/{token}", wait_until="domcontentloaded")
+        table = page.locator('.share-message-body .csv-table-wrap table')
+        table.wait_for(timeout=10000)
+        nested = table.evaluate("table => Boolean(table.closest('.share-table-scroll'))")
+        return ["CSV table has a redundant share-table scroll container"] if nested else []
+    finally:
+        ctx.close()
+
+
 def main():
     try:
         from playwright.sync_api import sync_playwright
@@ -365,6 +411,8 @@ def main():
             {"title": "hiding", "messages": [{"role": "assistant", "content": c} for c in HIDING]},
             {"title": "ordinary", "messages": [{"role": "assistant", "content": c} for c in ORDINARY]},
             {"title": "wide table", "messages": [{"role": "assistant", "content": WIDE_TABLE}]},
+            {"title": "list in table", "messages": [{"role": "assistant", "content": TABLE_LIST}]},
+            {"title": "CSV table", "messages": [{"role": "assistant", "content": CSV_TABLE}]},
         ]
         fuzz = []
         for seed in seeds:
@@ -399,7 +447,11 @@ def main():
 
             failures += _check_wide_table(browser, tokens[2])
 
-            for seed, cases, token in zip(seeds, fuzz, tokens[3:], strict=True):
+            failures += _check_table_list_marker(browser, tokens[3])
+
+            failures += _check_csv_table(browser, tokens[4])
+
+            for seed, cases, token in zip(seeds, fuzz, tokens[5:], strict=True):
                 rows, errors = _read_share(browser, token, len(cases))
                 failures += [f"fuzz {seed} page error: {e}" for e in errors]
                 if len(rows) != len(cases):

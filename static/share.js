@@ -297,6 +297,7 @@ function _shareRenderMessages(messages){
     const body=row.querySelector('.share-message-body');
     if(body&&_shareMissingWords(source,body).length) _shareShowPlainText(body,source);
     if(body) body.querySelectorAll('table').forEach(table=>{
+      if(table.closest('.csv-table-wrap')) return;
       const scroll=document.createElement('div');
       scroll.className='share-table-scroll';
       scroll.tabIndex=0;
