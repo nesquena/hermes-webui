@@ -1474,7 +1474,11 @@ class IdempotencyStore:
             # sweeps below change records and tombstones, and their failed
             # durable write must roll back to exactly this state — record
             # LRU order included, and retained tombstones the sweep's own
-            # bound eviction displaced.
+            # bound eviction displaced. When the sweep's own append
+            # SUCCEEDS the snapshot is re-taken below (the sweep is then
+            # durable and must not be rolled back by a later failure);
+            # this pre-sweep capture only ever serves a sweep that never
+            # reached disk.
             state_before = self._snapshot_state_locked()
             # Expire first so a tombstone is raised before the lookup below.
             # Any tombstone this sweep just minted must reach disk BEFORE we
@@ -1509,6 +1513,20 @@ class IdempotencyStore:
                     self._restore_state_locked(state_before)
                     raise
                 _tombstones_before.update(k for k, _ in minted)
+                # #7782 P1 (greptile-apps[bot] 2026-11-26, thread anchored
+                # at the claim-append rollback below): the sweep append
+                # just SUCCEEDED, so the eviction, every tombstone it
+                # minted and the bound's displacement of the oldest
+                # retained tombstone are DURABLE. ``state_before`` still
+                # predates all of it; if the claim append below (or the
+                # cap eviction feeding it) fails, restoring that stale
+                # snapshot would undo the committed expiry changes in
+                # memory — and a later compaction would save those older
+                # maps under the CURRENT sequence watermark, so a restart
+                # skips the expiry entries that already reached disk and
+                # re-admits the key. Re-snapshot AFTER the durable sweep
+                # so a failed new claim can only ever roll back itself.
+                state_before = self._snapshot_state_locked()
             existing = self._records.get(stored_key)
             # #7782 contract call 5: a key whose record completed and then
             # EXPIRED leaves the map but stays remembered in
@@ -1566,10 +1584,14 @@ class IdempotencyStore:
                     # that the next process restart would resurrect
                     # from disk (or fail to, depending on whether
                     # the file write raced with the rename).
-                    # Restore the COMPLETE ordered state: the new
-                    # record, every cap-evicted record in its original
-                    # LRU position, and every retained tombstone
-                    # (including one displaced by the tombstone bound).
+                    # Restore the COMPLETE ordered state as of the last
+                    # DURABLE write: the new record, every cap-evicted
+                    # record in its original LRU position, and every
+                    # retained tombstone (including one displaced by the
+                    # tombstone bound). When the sweep above already
+                    # committed, that snapshot is the POST-sweep one — the
+                    # failed claim rolls back to the durable state, not to
+                    # a pre-sweep state whose expiry changes are on disk.
                     self._restore_state_locked(state_before)
                     raise
                 self._maybe_compact_locked()
