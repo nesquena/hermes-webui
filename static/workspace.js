@@ -1072,7 +1072,11 @@ async function loadDir(path, opts={}){
       _wsTreeCacheEpoch+=1;
       _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
-    S.currentDir=path||'.';
+    // The breadcrumb and the cache key in renderFileTree() both read S.currentDir, so
+    // it may only name a folder once this load's listing is actually shown. Setting it
+    // before the await left it naming a folder whose listing never rendered when the
+    // response was dropped by the session check or the request failed (#9356).
+    const pendingDir=path||'.';
     const data=await api(
       _workspaceRouteForPath(path, 'list') ||
       `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path||'.')}`
@@ -1098,6 +1102,7 @@ async function loadDir(path, opts={}){
     // must not replace it (see _wsTreeLoadSeq). It still fills expanded folders below.
     if(loadSeq>=_wsTreeEntriesSeq){
       _wsTreeEntriesSeq=loadSeq;
+      S.currentDir=pendingDir;
       if(refillsExpanded) refill={};
       S.entries=data.entries||[];renderBreadcrumb();renderFileTree({partial:refill,scope:treeScope});
       // #2673 — refresh Artifacts tab when its source data (the file tree) updates.
@@ -1134,7 +1139,11 @@ async function loadDir(path, opts={}){
       }
       if(expanded.size>0)renderFileTree({completesRefill:refill,scope:treeScope});
     }
-    if(!preservePreview&&typeof clearPreview==='function'){
+    // The preview clear below belongs to the listing this load is showing. An older
+    // load that finishes late — its render skipped by the seq guard above — must not
+    // clear (or prompt about) a preview the newer load already decided to show (#9356).
+    const ownsShownListing=loadSeq>=_wsTreeEntriesSeq;
+    if(!preservePreview&&typeof clearPreview==='function'&&ownsShownListing){
       const hiddenEdits=typeof _previewHasUnsavedEdits==='function'&&_previewHasUnsavedEdits();
       // #8514 (review): a hidden editor can still hold real unsaved text. Inside
       // the same session, keep the preview instead of prompting or clearing —
