@@ -156,6 +156,64 @@ def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CH
     return sanitize_git_diagnostic(output, limit=limit)
 
 
+# ``run_network_command_windows`` records best-effort Job Object teardown
+# diagnostics as ``add_note`` entries on the error it re-raises. Only notes with
+# this prefix belong to the update diagnostics: the exception text (and its
+# argv) must never reach the user.
+_WINDOWS_JOB_CLEANUP_NOTE_PREFIX = 'windows job cleanup:'
+# The success-path teardown failure: the command itself finished, only the job
+# close could not be confirmed (#9138).
+_WINDOWS_JOB_CLOSE_UNCONFIRMED = 'job close unconfirmed after a successful command'
+# First line of the success-shaped result ``_run_git`` returns for that case, so
+# a caller can tell it apart from real command output.
+_WINDOWS_JOB_CLEANUP_UNCONFIRMED = (
+    'The git command finished, but the Windows job cleanup could not be confirmed'
+)
+
+
+def _windows_job_cleanup_notes(exc) -> str:
+    """Return the sanitized Windows job cleanup notes carried by ``exc`` (#9138).
+
+    ``run_network_command_windows`` attaches its teardown diagnostics with
+    ``add_note`` — on the exception it re-raises on the timeout path (the
+    caller's ``TimeoutExpired`` gets it through ``__cause__``) and on the
+    ``OSError`` raised when a successful command's job close stays unconfirmed.
+    Only notes that start with ``windows job cleanup:`` are collected, so the
+    exception text, its argv and any traceback stay out of user-facing output,
+    and every note goes through the git credential scrub and the diagnostic
+    length cap.
+    """
+    notes: list[str] = []
+    for holder in (exc, getattr(exc, '__cause__', None)):
+        for note in getattr(holder, '__notes__', None) or ():
+            text = str(note).strip()
+            if text.startswith(_WINDOWS_JOB_CLEANUP_NOTE_PREFIX) and text not in notes:
+                notes.append(text)
+    return '\n'.join(
+        _sanitize_git_diagnostic(note, limit=_GIT_DIAGNOSTIC_MAX_CHARS)
+        for note in notes
+    )
+
+
+def _is_windows_job_close_unconfirmed(exc) -> bool:
+    """Return whether ``exc`` is the success-path job teardown failure (#9138)."""
+    return str(exc).strip() == _WINDOWS_JOB_CLOSE_UNCONFIRMED
+
+
+def _windows_job_cleanup_warning(output: str) -> str:
+    """Return the cleanup warning ``_run_git`` reports in place of output (#9138).
+
+    A command that finished while the Windows job teardown stayed unconfirmed
+    comes back as a success whose first output line is
+    ``_WINDOWS_JOB_CLEANUP_UNCONFIRMED``; the apply path appends it to its
+    success message instead of reporting a failed start.
+    """
+    text = (output or '').strip()
+    if text.startswith(_WINDOWS_JOB_CLEANUP_UNCONFIRMED):
+        return text
+    return ''
+
+
 def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
     """Return the apply-path fetch failure message for the given stderr.
 
@@ -655,11 +713,50 @@ def _run_git(args, cwd, timeout=10):
         deadline = _sanitize_git_diagnostic(
             f"git {' '.join(args)} timed out after {timeout}s", limit=sys.maxsize,
         )
-        return f'{deadline}\n{detail}' if detail else deadline, False
+        output = f'{deadline}\n{detail}' if detail else deadline
+        # Job teardown diagnostics travel as ``add_note`` entries (#9138).
+        # ``str(exc)``/``repr(exc)`` embed the process argv, which can carry a
+        # ``-c credential.<url>.helper=...`` config, so only the notes are read.
+        cleanup = _windows_job_cleanup_notes(exc)
+        if cleanup:
+            logger.warning(
+                'git command timed out after %ss; %s', timeout, cleanup,
+            )
+            output = f'{output}\n{cleanup}'
+        return output, False
     except FileNotFoundError:
         return 'git executable not found', False
     except OSError as exc:
-        return f'git failed to start: {exc}', False
+        cleanup = _windows_job_cleanup_notes(exc)
+        if _is_windows_job_close_unconfirmed(exc):
+            returncode = getattr(exc, 'returncode', None)
+            if returncode == 0:
+                # The command itself finished successfully; only the Windows job
+                # teardown is unconfirmed, so this is a success with a cleanup
+                # warning, not a failed start (#9138).
+                logger.warning(
+                    'git finished but the Windows job cleanup was not confirmed: %s',
+                    cleanup or 'no cleanup detail',
+                )
+                return (
+                    f'{_WINDOWS_JOB_CLEANUP_UNCONFIRMED}\n{cleanup}'
+                    if cleanup else _WINDOWS_JOB_CLEANUP_UNCONFIRMED
+                ), True
+            # Non-zero or missing returncode counts as failure (fail-closed, #9141).
+            raw_stdout = getattr(exc, 'stdout', '') or ''
+            stdout = raw_stdout if '-z' in args else raw_stdout.strip()
+            stderr = (getattr(exc, 'stderr', '') or '').strip()
+            detail = stderr or stdout or f"git exited with status {returncode}"
+            if cleanup:
+                logger.warning(
+                    'git command failed with status %s and unconfirmed Windows job cleanup: %s',
+                    returncode, cleanup,
+                )
+            return f'{detail}\n{cleanup}' if cleanup else detail, False
+        if cleanup:
+            logger.warning('git failed to start; %s', cleanup)
+        message = f'git failed to start: {exc}'
+        return f'{message}\n{cleanup}' if cleanup else message, False
 
 
 def _is_git_lock_error(output: str) -> bool:
@@ -3195,6 +3292,10 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
     else:
         pull_args.extend(['origin', compare_ref])
     pull_out, pull_ok = _run_git(pull_args, path, timeout=_GIT_NETWORK_TIMEOUT)
+    # A pull that finished while the Windows job teardown stayed unconfirmed
+    # comes back as success with this warning as its output (#9138): the update
+    # is done, so surface the warning instead of failing it.
+    pull_cleanup_warning = _windows_job_cleanup_warning(pull_out) if pull_ok else ''
     if not pull_ok:
         # Every pull-failure message below interpolates git's own output, and
         # git echoes the remote URL (token included) when a pull dies. Scrub
@@ -3364,6 +3465,7 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                     'git -C ' + str(path) + ' stash show -p. To re-apply: '
                     'git -C ' + str(path) + ' stash apply, then resolve '
                     'conflicts. Drop the stash after you are satisfied.'
+                    + (f' {pull_cleanup_warning}' if pull_cleanup_warning else '')
                 ),
                 'target': target,
                 'restart_scheduled': True,
@@ -3402,6 +3504,8 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
             '. Local modifications were restored, but the temporary stash '
             'entry may still be present because git stash drop failed.'
         )
+    if pull_cleanup_warning:
+        message += f'. {pull_cleanup_warning}'
 
     response = {
         'ok': True,

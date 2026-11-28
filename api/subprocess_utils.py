@@ -133,8 +133,9 @@ def _windows_close_job(kernel32, job, cleanup):
 def _windows_abort_drain(process):
     """Close the gate and reap the bootstrap after job termination.
 
-    Returns ``(stdout, stderr, note)``. The gate has not been (successfully)
-    delivered in any failure path, so closing stdin makes an unassigned
+    Returns ``(stdout, stderr, note)``. A failure cannot undo a delivery that
+    already happened: a timeout can interrupt ``communicate(input="1")`` after
+    the gate byte was written. Closing stdin still makes an unassigned
     bootstrap exit without starting Git, and the bounded ``communicate`` then
     drains whatever was written and reaps the direct child. When the drain
     still fails, a writer is alive against our reader ends: closing the text
@@ -148,8 +149,9 @@ def _windows_abort_drain(process):
     if process is None:
         return None, None, ""
     notes = []
-    # The gate has not been (successfully) delivered in any failure path;
-    # closing stdin makes an unassigned bootstrap exit without starting Git.
+    # A failure cannot undo a gate delivery that already happened (a stalled
+    # ``communicate`` may have written the byte before the deadline); closing
+    # stdin still makes an unassigned bootstrap exit without starting Git.
     if process.stdin is not None and not process.stdin.closed:
         try:
             process.stdin.close()
@@ -192,10 +194,14 @@ def run_network_command_windows(argv, *, cwd, env, timeout):
     ``sys.executable`` is ``venvlauncher.exe``, whose real-interpreter child
     would be spawned before the assignment — and a frozen runtime or an
     unusable base path fails closed with OSError before any kernel or spawn
-    work. Every
-    failure fails closed before the gate: the tree is terminated and the job
-    handle closed BEFORE the pipes are touched, a stuck unassigned bootstrap is
-    killed and reaped, and the original error propagates. Cleanup steps are
+    work. Kernel, spawn and assignment failures fail closed before the gate:
+    the tree is terminated and the job handle closed BEFORE the pipes are
+    touched, a stuck unassigned bootstrap is killed and reaped, and the
+    original error propagates. A timeout is not one of those: it can arrive
+    after ``communicate(input="1")`` already wrote the gate byte, so the
+    timeout path does not claim the command never started — it terminates the
+    job and closes the handle before the pipes are touched, drains the partial
+    output, and re-raises the deadline. Cleanup steps are
     independent — a raise or false return at any step is captured as a
     diagnostic on the original error and cleanup still advances — and the job
     handle is dropped only on a confirmed close, otherwise one bounded final
@@ -301,6 +307,9 @@ def run_network_command_windows(argv, *, cwd, env, timeout):
         if _windows_close_job(kernel32, job, cleanup):
             cleanup.append("final CloseHandle confirmed after terminate")
         error = OSError("job close unconfirmed after a successful command")
+        error.returncode = process.returncode
+        error.stdout = stdout
+        error.stderr = stderr
         error.add_note("windows job cleanup: " + "; ".join(cleanup))
         raise error
     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
