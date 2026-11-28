@@ -64,7 +64,10 @@ def isolated_sessions(tmp_path, monkeypatch):
     attachments = tmp_path / "attachments"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(upload, "_attachment_root", lambda: attachments.resolve())
+    # #8786: uploads resolve the inbox through the startup-trusted root, which
+    # reads HERMES_WEBUI_ATTACHMENT_DIR (not the by-name _attachment_root
+    # helper), so isolate the inbox through the env var the server configures.
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachments))
     monkeypatch.setattr(upload, "resolve_trusted_workspace", lambda *_a, **_k: workspace.resolve())
     return directory, cache, attachments, workspace
 

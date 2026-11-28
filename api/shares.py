@@ -1062,8 +1062,8 @@ def build_share_snapshot(session) -> dict:
     # write could plant a symlink redirecting it (#8590).
     _trusted_roots: tuple[Path, ...] = ()
     try:
-        from api.upload import _share_attachment_root
-        _trusted_roots = tuple(r for r in (_share_attachment_root(),) if r is not None)
+        from api.upload import _trusted_attachment_root
+        _trusted_roots = tuple(r for r in (_trusted_attachment_root(),) if r is not None)
     except Exception:
         pass
     _allowed_roots_tuple: tuple[Path, ...] = tuple(_allowed_roots)
