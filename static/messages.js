@@ -1699,16 +1699,21 @@ async function send(){
       if(!S.session){await newSession();}
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
-      // /queue, /terminal, /goal, /yolo, or /stop while the agent is running and have
-      // them execute immediately.
+      // /queue, /terminal, /goal, /yolo, /stop, or /background while the agent is
+      // running and have them execute immediately.
       // Without this intercept they fall through to the queue and execute after
       // the current turn ends — by which point there is no active stream and
       // cmdSteer / cmdInterrupt say "No active task to stop."
       // /stop must cancel the active run immediately instead of being steered
-      // or queued as the literal text "/stop" (#6951).
+      // or queued as the literal text "/stop" (#6951). /background is an
+      // action-only command too: queued, it would reach the agent as the
+      // literal "/background …" text instead of running its own path (#6597).
+      // /btw is deliberately not intercepted while busy, because the side question
+      // cannot own its own stream while the parent stream is live (the route answers
+      // 409), so it keeps normal routing until the server supports it.
       if(text.startsWith('/')&&!literalSlash){
         const _pc=typeof parseCommand==='function'&&parseCommand(text);
-        if(_pc&&['steer','interrupt','queue','terminal','goal','yolo','stop'].includes(_pc.name)){
+        if(_pc&&['steer','interrupt','queue','terminal','goal','yolo','stop','background'].includes(_pc.name)){
           const _bc=COMMANDS.find(c=>c.name===_pc.name);
           if(_bc){
             $('msg').value='';autoResize();

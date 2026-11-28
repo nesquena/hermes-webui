@@ -913,13 +913,19 @@ def test_commands_and_messages_evaluate_in_one_shared_classic_script_realm():
 
 def test_busy_path_intercepts_stop_before_mode_routing():
     """#6951: while busy, /stop must cancel the active run immediately instead
-    of being steered/queued as the literal text '/stop'."""
+    of being steered/queued as the literal text '/stop'. #6597: the same
+    intercept also carries the action-only /background. /btw is deliberately
+    absent: /api/btw answers 409 while the parent stream is live (re-review
+    2026-11-23), so it keeps normal routing until it can own its own stream."""
     busy_idx = MESSAGES_JS.find("Busy-control slash commands must be intercepted")
     assert busy_idx != -1
     mode_idx = MESSAGES_JS.find("const defaultMessageMode=", busy_idx)
     assert mode_idx != -1
     busy_block = MESSAGES_JS[busy_idx:mode_idx]
-    assert "['steer','interrupt','queue','terminal','goal','yolo','stop']" in busy_block
+    assert (
+        "['steer','interrupt','queue','terminal','goal','yolo','stop','background']"
+        in busy_block
+    )
     assert "cmdStop" in busy_block or "COMMANDS.find(c=>c.name===_pc.name)" in busy_block
 
 
