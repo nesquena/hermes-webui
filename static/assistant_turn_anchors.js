@@ -1039,6 +1039,10 @@
     }
     const rows=(Array.isArray(anchor.activity_events)?anchor.activity_events:[])
       .map((event,index)=>_activitySceneRow(event,index,mode));
+    return _activitySceneFromRows(anchor,mode,rows);
+  }
+
+  function _activitySceneFromRows(anchor,mode,rows){
     const lifecycle=_copyObject(anchor.lifecycle);
     const content=anchor.content&&typeof anchor.content==='object'?anchor.content:{};
     return Object.freeze({
@@ -1059,6 +1063,89 @@
         payload:Object.freeze(_copyObject(_own(event,'payload'))),
       }))),
     });
+  }
+
+  // Opt-in live attachment state. The public projector above stays uncached:
+  // arbitrary callers may mutate public event payloads without a notification.
+  // No private properties are installed on registry, events, or scene snapshots.
+  function createAssistantTurnAnchorActivityProjector(registry){
+    let owner=registry;
+    let anchor=_registryAnchor(owner);
+    let events=null, rows=null, sources=[], mode=null, identity=null, expectedLength=0;
+    const dirty=new Map();
+    const rowIds=new Map();
+    let ambiguous=false;
+    const stats={sourceRowsInspected:0,projectedRowsRebuilt:0,fullFallbacks:0};
+    function identityKey(){
+      const id=anchor&&anchor.identity||{};
+      return JSON.stringify([id.session_id,id.turn_id,id.run_id,id.stream_id]);
+    }
+    function invalidate(){ rows=null; sources=[]; expectedLength=0; dirty.clear(); rowIds.clear(); ambiguous=false; }
+    function append(start){
+      if(!owner||!rows) return;
+      if(events!==anchor.activity_events||start!==expectedLength||events.length<start){invalidate();return;}
+      expectedLength=events.length;
+      for(let i=start;i<expectedLength;i++) dirty.set(i,null);
+    }
+    function replace(index,before,after){
+      if(!owner||!rows) return;
+      const expected=dirty.has(index)?dirty.get(index):sources[index];
+      if(events!==anchor.activity_events||index<0||index>=expectedLength||(expected!==null&&expected!==before)){ invalidate(); return; }
+      dirty.set(index,after);
+    }
+    function project(options){
+      try{
+        return projectCurrent(options);
+      }catch(error){
+        // Never publish an old row array under a partially advanced identity.
+        invalidate();
+        throw error;
+      }
+    }
+    function projectCurrent(options){
+      if(!owner) return null;
+      const nextMode=_activityDisplayMode(_cleanString(_own(options,'mode')));
+      const nextAnchor=_registryAnchor(owner);
+      if(nextAnchor!==anchor){ anchor=nextAnchor; invalidate(); }
+      if(!anchor) return projectAssistantTurnAnchorActivityScene(owner,options);
+      const nextEvents=Array.isArray(anchor.activity_events)?anchor.activity_events:[];
+      const nextIdentity=identityKey();
+      if(!rows||ambiguous||events!==nextEvents||mode!==nextMode||identity!==nextIdentity||nextEvents.length!==expectedLength){
+        stats.fullFallbacks++;
+        events=nextEvents;mode=nextMode;identity=nextIdentity;
+        sources=events.slice();
+        expectedLength=sources.length;
+        stats.sourceRowsInspected+=sources.length;
+        rows=sources.map((event,index)=>{stats.projectedRowsRebuilt++;return _activitySceneRow(event,index,mode);});
+        rowIds.clear();ambiguous=false;
+        rows.forEach((row,index)=>{
+          if(rowIds.has(row.row_id)) ambiguous=true;
+          rowIds.set(row.row_id,index);
+        });
+        dirty.clear();
+      }else if(dirty.size){
+        rows=rows.slice();
+        for(const [index,expected] of dirty){
+          const event=events[index];stats.sourceRowsInspected++;
+          if(expected!==null&&event!==expected){invalidate();return project(options);}
+          const id=_activityRowId(event,index);
+          const previous=rows[index];
+          if((previous&&(previous.row_id!==id||_activityRowText(event).length<previous.text.length))||
+            (rowIds.has(id)&&rowIds.get(id)!==index)){
+            invalidate();return project(options);
+          }
+          sources[index]=event;
+          rowIds.set(id,index);
+          stats.projectedRowsRebuilt++;
+          rows[index]=_activitySceneRow(event,index,mode);
+        }
+        dirty.clear();
+      }
+      return _activitySceneFromRows(anchor,mode,rows);
+    }
+    function dispose(){invalidate();owner=null;anchor=null;events=null;identity=null;}
+    return Object.freeze({project,replace,append,invalidate,dispose,
+      metrics:()=>Object.freeze({...stats,retainedRows:sources.length,dirtyRows:dirty.size})});
   }
 
   function projectAssistantTurnAnchorHistoricalTranscriptScene(input, options){
@@ -1706,6 +1793,7 @@
     createAssistantTurnAnchorShadowSnapshot,
     projectAssistantTurnAnchorSettledMessageFinalAnswer,
     projectAssistantTurnAnchorActivityScene,
+    createAssistantTurnAnchorActivityProjector,
     projectAssistantTurnAnchorHistoricalTranscriptScene,
     reconcileAssistantTurnAnchorActivityScene,
     createAssistantTurnAnchorRendererSnapshot,
