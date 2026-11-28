@@ -429,6 +429,8 @@ WebUI answers a Runs API approval with the Gateway's fenced body: `request_id`, 
 
 The fenced-body decision is made once, when the card is created, and it is the same decision for both card origins: the Runs API relay and the default `/v1/chat/completions` stream. A card from either origin carries the gateway's own prompt identity and generation when the gateway published them for that prompt, and answers with the fenced body; a card whose gateway published no canonical prompt id — including one where WebUI could only mint a local fallback id — answers with the legacy body. The choice is never made at click time, and a locally generated id is never promoted to a canonical identity.
 
+Runs API clarify prompts work the same way. A `clarify.request` frame on the run's event stream becomes a WebUI clarify card (question, choices, multi-select flag, and the Gateway's `timeout_s` when it sent one), recorded in the run journal like any other clarify event. Answering the card posts `{request_id, execution_generation, answer}` to `POST /v1/runs/{run_id}/clarify`; an empty answer is the Gateway's skip. The Gateway's `clarify.settled` frame, a `stale_generation` / `approval_not_pending` / `not_found` / `invalid_params` refusal, or the run ending retires the card. Sequential prompts in one run queue in order.
+
 When YOLO is enabled for a gateway-backed browser session, WebUI approves every
 approval already parked for that session: Runs API prompts are relayed by their
 exact `run_id` and mirror token, and local/no-run waiters are all released. It

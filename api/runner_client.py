@@ -139,9 +139,34 @@ class HttpRunnerClient:
             payload,
         )
 
-    def respond_clarify(self, run_id: str, clarify_id: str, response: str) -> dict[str, Any]:
+    def respond_clarify(
+        self,
+        run_id: str,
+        clarify_id: str,
+        response: str,
+        *,
+        execution_generation: int | None = None,
+    ) -> dict[str, Any]:
+        """Answer one pending run clarify prompt.
+
+        With the ``execution_generation`` the Gateway published in its
+        ``clarify.request`` this posts the canonical Runs API body
+        ``{request_id, execution_generation, answer}`` to
+        ``/v1/runs/{run_id}/clarify`` (an empty answer is the Gateway's
+        documented skip). Without one, the legacy runner route is kept.
+        """
+        quoted_run = urllib.parse.quote(str(run_id), safe='')
+        if execution_generation is not None:
+            return self._post(
+                f"/v1/runs/{quoted_run}/clarify",
+                {
+                    "request_id": str(clarify_id),
+                    "execution_generation": execution_generation,
+                    "answer": str(response),
+                },
+            )
         return self._post(
-            f"/v1/runs/{urllib.parse.quote(str(run_id), safe='')}/clarifications/{urllib.parse.quote(str(clarify_id), safe='')}/respond",
+            f"/v1/runs/{quoted_run}/clarifications/{urllib.parse.quote(str(clarify_id), safe='')}/respond",
             {"response": response},
         )
 

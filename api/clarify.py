@@ -28,13 +28,16 @@ _clarify_sse_subscribers: dict[str, list[queue.Queue]] = {}
 class _ClarifyEntry:
     """One pending clarify request inside a session."""
 
-    __slots__ = ("event", "data", "result", "clarify_id")
+    __slots__ = ("event", "data", "result", "clarify_id", "gateway_owner")
 
     def __init__(self, data: dict):
         self.event = threading.Event()
         self.data = data
         self.result: Optional[str] = None
         self.clarify_id: str = data.get("clarify_id", "") or uuid.uuid4().hex[:12]
+        # Server-owned (base_url, api_key) of the Gateway that parked a Runs
+        # API prompt. Never part of ``data``, which is serialised to clients.
+        self.gateway_owner: tuple[str, str] | None = None
 
 
 def register_gateway_notify(session_key: str, cb) -> None:
@@ -130,7 +133,9 @@ def sse_unsubscribe(session_id: str, q: queue.Queue) -> None:
                 _clarify_sse_subscribers.pop(session_id, None)
 
 
-def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
+def submit_pending(
+    session_key: str, data: dict, gateway_owner: tuple[str, str] | None = None,
+) -> _ClarifyEntry:
     """Queue a pending clarify request and notify the UI callback if registered."""
     data = _with_timeout_metadata(data)
     with _lock:
@@ -146,6 +151,8 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
                 and (not data.get("clarify_id") or data["clarify_id"] == last.clarify_id)
             ):
                 entry = last
+                if entry.gateway_owner is None and gateway_owner:
+                    entry.gateway_owner = gateway_owner
                 # Dedup re-uses the existing entry with its original clarify_id.
                 # If a future caller pre-populates clarify_id in data, it is
                 # silently discarded here — the original entry's id wins.
@@ -165,6 +172,8 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
                 return entry
 
         entry = _ClarifyEntry(data)
+        # Owner is bound before the entry is visible to readers or subscribers.
+        entry.gateway_owner = gateway_owner
         # Ensure clarify_id is present in the serialised data the frontend receives.
         entry.data["clarify_id"] = entry.clarify_id
         gw_queue.append(entry)
@@ -254,3 +263,124 @@ def resolve_clarify_by_id(session_key: str, clarify_id: str, response: str) -> b
                 entry.event.set()
                 return True
         return False
+
+
+# ── Gateway Runs API clarify mirrors ─────────────────────────────────────
+# A Runs API clarify prompt is owned by the Gateway run that parked it: the
+# WebUI entry is only a presentation mirror. It carries the run id, the
+# Gateway prompt id and the integer execution generation so
+# /api/clarify/respond can answer POST /v1/runs/{run_id}/clarify, and so the
+# run's clarify.settled frame or terminal end can retire exactly its cards.
+
+GATEWAY_RUN_CLARIFY_PREFIX = "gw-run:"
+
+
+def gateway_run_clarify_id(run_id: str, prompt_id: str, execution_generation: int) -> str:
+    """Stable WebUI clarify id for one Gateway run prompt at one generation."""
+    return f"{GATEWAY_RUN_CLARIFY_PREFIX}{run_id}:{execution_generation}:{prompt_id}"
+
+
+def submit_gateway_run_pending(
+    session_key: str, data: dict, owner: tuple[str, str] | None = None,
+) -> tuple[dict | None, int]:
+    """Mirror one Gateway run clarify prompt; a replay of a mirrored id is a no-op.
+
+    ``owner`` is the (base_url, api_key) of the Gateway the prompt was read
+    from. It is kept on the server-side entry only, so an answer can be
+    delivered to exactly that Gateway. Returns ``(head, total)``.
+    """
+    clarify_id = str(data.get("clarify_id") or "")
+    with _lock:
+        q = _gateway_queues.get(session_key) or []
+        if any(entry.clarify_id == clarify_id for entry in q):
+            return dict(q[0].data), len(q)
+    gateway_owner = None
+    if owner and str(owner[0] or "").strip():
+        gateway_owner = (str(owner[0]), str(owner[1] or ""))
+    submit_pending(session_key, data, gateway_owner=gateway_owner)
+    with _lock:
+        q = _gateway_queues.get(session_key) or []
+        return (dict(q[0].data) if q else None), len(q)
+
+
+def gateway_run_pending(session_key: str, clarify_id: str) -> dict | None:
+    """The Gateway-run-backed pending entry with this id, or None."""
+    if not str(clarify_id or "").startswith(GATEWAY_RUN_CLARIFY_PREFIX):
+        return None
+    with _lock:
+        for entry in _gateway_queues.get(session_key) or []:
+            if entry.clarify_id == clarify_id and entry.data.get("_gateway_run_id"):
+                return dict(entry.data)
+    return None
+
+
+def gateway_run_owner(session_key: str, clarify_id: str) -> tuple[str, str] | None:
+    """(base_url, api_key) of the Gateway that parked this prompt, or None.
+
+    None means ownership cannot be established; callers must fail closed and
+    never substitute a default or process-wide Gateway.
+    """
+    if not str(clarify_id or "").startswith(GATEWAY_RUN_CLARIFY_PREFIX):
+        return None
+    with _lock:
+        for entry in _gateway_queues.get(session_key) or []:
+            if entry.clarify_id == clarify_id and entry.data.get("_gateway_run_id"):
+                return entry.gateway_owner
+    return None
+
+
+def gateway_run_prompt_ids(session_key: str, run_id: str) -> set[str]:
+    """Gateway prompt ids of the run's clarify mirrors still queued for this session."""
+    with _lock:
+        return {
+            str(entry.data.get("_gateway_prompt_id") or "")
+            for entry in _gateway_queues.get(session_key) or []
+            if str(entry.data.get("_gateway_run_id") or "") == str(run_id or "")
+        }
+
+
+def gateway_run_prompt_keys(session_key: str, run_id: str) -> set[tuple[str, object]]:
+    """``(prompt_id, execution_generation)`` of the run's clarify mirrors still queued."""
+    with _lock:
+        return {
+            (str(entry.data.get("_gateway_prompt_id") or ""), entry.data.get("_gateway_execution_generation"))
+            for entry in _gateway_queues.get(session_key) or []
+            if str(entry.data.get("_gateway_run_id") or "") == str(run_id or "")
+        }
+
+
+def settle_gateway_run_pending(
+    session_key: str, run_id: str, prompt_id: str | None = None, *, generation: object = None,
+) -> int:
+    """Retire the Gateway run's clarify mirrors (one prompt, or all of the run's).
+
+    Notifies clarify SSE subscribers so the visible card is taken down.
+    Local (in-process) clarify entries are never touched.
+    """
+    run_id = str(run_id or "").strip()
+    if not run_id:
+        return 0
+    with _lock:
+        q = _gateway_queues.get(session_key)
+        if not q:
+            return 0
+        targets = [
+            entry for entry in q
+            if str(entry.data.get("_gateway_run_id") or "") == run_id
+            and (prompt_id is None or str(entry.data.get("_gateway_prompt_id") or "") == str(prompt_id))
+            and (generation is None or entry.data.get("_gateway_execution_generation") == generation)
+        ]
+        if not targets:
+            return 0
+        remaining = [entry for entry in q if entry not in targets]
+        if remaining:
+            _gateway_queues[session_key] = remaining
+            _pending[session_key] = remaining[0].data
+            _clarify_sse_notify(session_key, dict(remaining[0].data), len(remaining))
+        else:
+            _clear_queue_locked(session_key)
+            _clarify_sse_notify(session_key, None, 0)
+    publish_session_list_changed("attention_resolved")
+    for entry in targets:
+        entry.event.set()
+    return len(targets)

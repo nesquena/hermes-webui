@@ -956,6 +956,100 @@ def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, 
     return True
 
 
+_GATEWAY_CLARIFY_REQUEST_EVENTS = frozenset({"clarify.request", "hermes.clarify.request"})
+_GATEWAY_CLARIFY_SETTLED_EVENTS = frozenset({"clarify.settled", "hermes.clarify.settled"})
+
+
+def _gateway_runs_clarify_event(payload: dict, run_id: str) -> dict | None:
+    """Map a Runs API ``clarify.request`` payload to the WebUI clarify contract.
+
+    The Gateway answers only ``{request_id, execution_generation, answer}``
+    fenced to the exact prompt, so a payload without a prompt id or an integer
+    generation cannot be answered and is rejected here.
+    """
+    if not isinstance(payload, dict) or not run_id:
+        return None
+    prompt_id = _gateway_prompt_identity(payload)
+    generation = payload.get("execution_generation")
+    if not prompt_id or type(generation) is not int:
+        return None
+    from api.clarify import gateway_run_clarify_id
+
+    raw_choices = payload.get("choices")
+    choices = raw_choices if isinstance(raw_choices, list) else []
+    timeout_s = payload.get("timeout_s")
+    # No Gateway timeout means the Gateway owns expiry: render no countdown.
+    timeout_seconds = int(timeout_s) if isinstance(timeout_s, (int, float)) and not isinstance(timeout_s, bool) else 0
+    return {
+        "clarify_id": gateway_run_clarify_id(run_id, prompt_id, generation),
+        "question": str(payload.get("question") or ""),
+        "choices_offered": [str(choice) for choice in choices],
+        "multi_select": bool(payload.get("multi_select")),
+        "kind": "clarify",
+        "run_id": run_id,
+        "timeout_seconds": timeout_seconds,
+        "_gateway_run_id": run_id,
+        "_gateway_prompt_id": prompt_id,
+        "_gateway_execution_generation": generation,
+    }
+
+
+def _relay_gateway_run_clarify(session_id, run_id, payload, base_url, api_key, *, put_gateway_event) -> bool:
+    """Surface one Runs API clarify prompt as a WebUI clarify card.
+
+    ``base_url``/``api_key`` identify the Gateway this prompt was read from; the
+    answer is delivered only there (bound server-side, never in the card data).
+    """
+    clarify_data = _gateway_runs_clarify_event(payload, run_id)
+    if not clarify_data:
+        logger.debug("Ignoring malformed gateway clarify payload for run %s", run_id)
+        return False
+    from api.clarify import submit_gateway_run_pending
+
+    head, total = submit_gateway_run_pending(session_id, clarify_data, owner=(base_url, api_key))
+    put_gateway_event("clarify", {**(head or clarify_data), "pending_count": total})
+    return True
+
+
+def _sync_gateway_run_clarify_from_status(session_id, run_id, status, base_url, api_key, *, put_gateway_event) -> None:
+    """Mirror exactly the clarify prompts a durable run status still has parked.
+
+    The Gateway's ``pending_controls`` is the only authority for which clarify
+    prompts are live: answers and ``clarify.settled`` write no journal row, so
+    the journal cannot tell a parked prompt from a settled one across a WebUI
+    restart. Surfaces parked prompts the queue lacks and retires mirrors the
+    Gateway no longer lists. A status without ``pending_controls`` proves
+    nothing and changes nothing.
+    """
+    controls = status.get("pending_controls") if isinstance(status, dict) else None
+    if not isinstance(controls, list):
+        return
+    parked = [c for c in controls if isinstance(c, dict) and c.get("kind") == "clarify"]
+    # A prompt's identity is (id, generation): a republished generation replaces the old card.
+    live = {(_gateway_prompt_identity(c), c.get("execution_generation")) for c in parked}
+    from api.clarify import gateway_run_prompt_keys
+
+    queued = gateway_run_prompt_keys(session_id, run_id)
+    for prompt_id, generation in queued - live:
+        _settle_gateway_run_clarify(session_id, run_id, prompt_id, generation=generation)
+    for control in parked:
+        if (_gateway_prompt_identity(control), control.get("execution_generation")) not in queued:
+            _relay_gateway_run_clarify(
+                session_id, run_id, control, base_url, api_key, put_gateway_event=put_gateway_event,
+            )
+
+
+def _settle_gateway_run_clarify(session_id, run_id, prompt_id=None, *, generation=None) -> int:
+    """Retire a Gateway run's clarify cards (one prompt, or every one on run end)."""
+    try:
+        from api.clarify import settle_gateway_run_pending
+
+        return settle_gateway_run_pending(session_id, run_id, prompt_id, generation=generation)
+    except Exception:
+        logger.debug("Failed to settle gateway clarify mirrors for run %s", run_id, exc_info=True)
+        return 0
+
+
 def _seed_gateway_stream_text(stream_id: str) -> str:
     """Seed a relay connection's local text carrier from the stream's shared partial buffer.
 
@@ -1184,6 +1278,18 @@ def _relay_gateway_run_events(
             commit()
             sse_event = "message"
             continue
+        if payload_event in _GATEWAY_CLARIFY_REQUEST_EVENTS:
+            _relay_gateway_run_clarify(session_id, run_id, payload, base_url, api_key, put_gateway_event=emit)
+            commit()
+            sse_event = "message"
+            continue
+        if payload_event in _GATEWAY_CLARIFY_SETTLED_EVENTS:
+            prompt_id = _gateway_prompt_identity(payload)
+            if prompt_id:
+                _settle_gateway_run_clarify(session_id, run_id, prompt_id)
+            commit()
+            sse_event = "message"
+            continue
         if payload_event in {"tool.started", "tool.completed", "reasoning.available"}:
             translated = _gateway_tool_progress_event(payload)
             if translated:
@@ -1211,6 +1317,7 @@ def _relay_gateway_run_events(
                 run_id,
                 reason="Gateway run completed before approval resolution",
             )
+            _settle_gateway_run_clarify(session_id, run_id)
             if payload.get("error"):
                 raise RuntimeError(str(payload["error"]))
             output = str(payload.get("output") or "")
@@ -1237,6 +1344,7 @@ def _relay_gateway_run_events(
                 run_id,
                 reason="Gateway run failed before approval resolution",
             )
+            _settle_gateway_run_clarify(session_id, run_id)
             raise RuntimeError(str(payload.get("error") or "Gateway run failed"))
         if payload_event == "run.cancelled":
             _relay_gateway_pending_steer(session_id, payload, put_gateway_event)
@@ -1246,6 +1354,7 @@ def _relay_gateway_run_events(
                 run_id,
                 reason="Gateway run was cancelled before approval resolution",
             )
+            _settle_gateway_run_clarify(session_id, run_id)
             put_gateway_event("cancel", {"message": "Cancelled by gateway"})
             return None, usage, "ended", False
         reasoning_delta = _gateway_sse_reasoning_delta(payload)
@@ -1521,6 +1630,7 @@ def _run_gateway_runs_api_streaming(
             run_id,
             reason=f"Gateway run {state} before approval resolution",
         )
+        _settle_gateway_run_clarify(session_id, run_id)
         if state in ("cancelled", "interrupted"):
             return "cancel", None
         if state != "completed":
@@ -1740,6 +1850,11 @@ def _run_gateway_runs_api_streaming(
         # not terminal, so the settle below returns "continue" and the loop
         # reconnects /events with the card already up.
         _surface_status_approval(status)
+        # Same clarify reconciliation as cold reattach: the status's pending_controls
+        # is the live authority when /events cannot deliver the clarify.request.
+        _sync_gateway_run_clarify_from_status(
+            session_id, run_id, status, base_url, api_key, put_gateway_event=put_gateway_event,
+        )
         action, value = _settle_by_status(status)
         if action == "continue":
             # Still running: reconnect and resume from the last seen event id,
@@ -2100,9 +2215,15 @@ def _await_gateway_run_result(
             continue
         state = str(status.get("status") or "").strip().lower()
         surface_parked_approval(status)
+        # Clarify prompts relayed before the restart sit behind the replay cursor and the
+        # new process's queue is empty; the status projection is their only live record.
+        _sync_gateway_run_clarify_from_status(
+            session_id, run_id, status, base_url, api_key, put_gateway_event=put_gateway_event,
+        )
         if state in _GATEWAY_RUN_TERMINAL_STATUSES:
             _relay_gateway_pending_steer(session_id, status, put_gateway_event)
             settle_gateway_pending_run(session_id, run_id, reason=f"Gateway run {state} before approval resolution")
+            _settle_gateway_run_clarify(session_id, run_id)
             if state == "cancelled":
                 # Persist before emit (same round-3 should-fix as the
                 # streaming watchdog's status lane): the browser refetches on
@@ -3115,6 +3236,7 @@ def settle_gateway_stream_approvals(session_id: str, stream_id: str, *, reason: 
     if not session_id or not run_id:
         return
     settle_gateway_pending_run(session_id, run_id, reason=reason)
+    _settle_gateway_run_clarify(session_id, run_id)
 
 
 def _submit_stream_approval_mirror(session_id: str, approval_data: dict, cancel_event) -> tuple[dict | None, int]:
