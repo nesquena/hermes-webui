@@ -13598,10 +13598,95 @@ async function checkUpdatesNow(channelOverride){
     // just switched) so the check cannot race the debounced settings autosave
     // and answer for the previous channel. Omit otherwise → server uses the
     // saved setting. (Fable UX gate.)
+    let _effectiveChannel=null;
+    if(channelOverride==='stable'||channelOverride==='experimental'){
+      _effectiveChannel=channelOverride;
+    }else if(typeof _confirmedUpdateChannel!=='undefined'&&(_confirmedUpdateChannel==='stable'||_confirmedUpdateChannel==='experimental')){
+      _effectiveChannel=_confirmedUpdateChannel;
+    }else{
+      const _chEl=$('settingsUpdateChannel');
+      const _chVal=_chEl?_chEl.value:null;
+      if(_chVal==='stable'||_chVal==='experimental') _effectiveChannel=_chVal;
+    }
+
+    let _effectiveIncludeAgent=null;
+    const _ignoreAgentEl=$('settingsIgnoreAgentUpdates');
+    if(_ignoreAgentEl){
+      _effectiveIncludeAgent=_ignoreAgentEl.checked?'0':'1';
+    }
+
     const _checkBody={force:true};
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
     const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
-    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
+    // #9056 gate RED: a fixed twelve-reply window abandoned legitimate slow
+    // work. The worker's Git fetch allowance plus queued keys outlive it, so
+    // the panel kept "Checking…" with no observer and never fired the banner.
+    // Observation now follows the work with a growing interval, and a check
+    // that is still running when the bound is reached leaves a retrievable
+    // continuation in window._pendingUpdatePollUrl: the next press of
+    // "Check now" fetches that completed result (a cache-only GET) instead of
+    // starting new Git work.
+    const _observeMaxReplies=240;
+    const _observeBaseMs=1500;
+    const _observeCapMs=5000;
+    let _pendingUrl=window._pendingUpdatePollUrl;
+
+    // #9056 continuation defects:
+    // 1. Key mismatch (channel/include-agent): bypass and clear stale continuation, forcing fresh POST.
+    // 2. Expired continuation: {"disabled": true} GET fallthrough to forced POST.
+    let _continuationMatches=true;
+    if(_pendingUrl){
+      try{
+        const _parsedUrl=new URL(_pendingUrl,'http://localhost');
+        const _parsedChannel=_parsedUrl.searchParams.get('channel');
+        const _parsedIncludeAgent=_parsedUrl.searchParams.get('include_agent');
+        if(_effectiveChannel!==null&&_parsedChannel!==_effectiveChannel){
+          _continuationMatches=false;
+        }else if(_effectiveIncludeAgent!==null&&_parsedIncludeAgent!==_effectiveIncludeAgent){
+          _continuationMatches=false;
+        }
+      }catch(_err){
+        if(_effectiveChannel!==null) _continuationMatches=false;
+      }
+    }
+    if(!_continuationMatches){
+      _pendingUrl=null;
+      window._pendingUpdatePollUrl=null;
+    }
+
+    let data=null;
+    let pollUrl=null;
+    if(_pendingUrl){
+      try{ data=await api(_pendingUrl,{method:'GET'}); }catch(_continuation){ data=null; }
+      if(data&&data.disabled===true){
+        data=null;
+        _pendingUrl=null;
+        window._pendingUpdatePollUrl=null;
+      }else if(data&&data.pending===true){
+        pollUrl=_pendingUrl;
+      }
+    }
+    if(!data||data.pending===true){
+      if(!pollUrl){
+        data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
+        if(data&&data.pending===true){
+          const pollChannel=encodeURIComponent(data.channel||(_effectiveChannel==='experimental'?'experimental':'stable'));
+          const pollIncludeAgent=data.include_agent===false?'0':'1';
+          pollUrl=`/api/updates/check?channel=${pollChannel}&include_agent=${pollIncludeAgent}`;
+        }
+      }
+      for(let attempt=0;pollUrl&&attempt<_observeMaxReplies;attempt++){
+        if(!data||data.pending!==true) break;
+        await new Promise(r=>setTimeout(r,Math.min(_observeBaseMs+attempt*250,_observeCapMs)));
+        data=await api(pollUrl,{method:'GET'});
+      }
+    }
+    if(data&&data.pending===true){
+      window._pendingUpdatePollUrl=pollUrl||_pendingUrl||null;
+      if(status){status.textContent=t('settings_checking');status.style.color='var(--muted)';}
+      return;
+    }
+    window._pendingUpdatePollUrl=null;
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
