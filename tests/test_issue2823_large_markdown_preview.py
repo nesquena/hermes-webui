@@ -137,7 +137,23 @@ def test_save_updates_cached_raw_content_for_force_render():
     saved text, not the stale pre-edit fetch."""
     save_idx = WORKSPACE_JS.find("const saved=await api(_previewSaveRoute||'/api/file/save'")
     assert save_idx != -1, "file save call not found"
-    save_block = WORKSPACE_JS[save_idx:save_idx + 1500]
+    fn_start = WORKSPACE_JS.rfind("function ", 0, save_idx)
+    assert fn_start != -1, "enclosing function not found"
+    if WORKSPACE_JS[max(0, fn_start - 6) : fn_start] == "async ":
+        fn_start -= 6
+    brace = WORKSPACE_JS.index("{", fn_start)
+    depth = 0
+    end = brace
+    for idx in range(brace, len(WORKSPACE_JS)):
+        ch = WORKSPACE_JS[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = idx + 1
+                break
+    save_block = WORKSPACE_JS[fn_start:end]
     assert "const savedContent=saved&&typeof saved.content==='string'?saved.content:content;" in save_block
     assert "_previewRawContent = savedContent" in save_block
     assert "_previewRawContentPath = _previewCurrentPath" in save_block
