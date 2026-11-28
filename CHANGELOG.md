@@ -47,6 +47,8 @@
 
 ### Fixed
 
+- **The System health disk gauge now measures the disk that holds WebUI's state (#9178, related: #9167).** It used to measure the root filesystem (`/`). In a container that's the image filesystem, so a nearly full state volume could show close to 0%. If the state directory can't be measured, the disk metric is reported as unavailable instead of falling back to `/`. Thanks @angelusbr.
+
 - **The dialog-binding browser tests run with service workers blocked, and a failed share-row wait now says why (#9407).** In `tests/test_dialog_actions_bind_their_conversation_browser.py`, the page fixture now opens its browser context with service workers blocked. Playwright's request interception (`page.route`, which the tests use to hold the sidebar list refresh) doesn't reliably see requests a service worker handles, and nothing in this file needs one. If the wait for a shared row's token still times out, the failure now reports the held-request count, the share posts and statuses, whether a service worker controls the page, and the row's state. This hardens the test against the one-off timeout seen in master's CI; it is not a proven root-cause fix.
 
 - **The WebUI updater now stamps its autostash with a UTC time (#9387, part of #9377).** When an update needs to set local changes aside, WebUI now names the stash `hermes-update-autostash-YYYYMMDD-HHMMSS` (UTC), the same form the Agent's updater writes. The Agent's orphaned-autostash warning only recognises that stamped form, so a stash WebUI leaves behind can now be reported. Existing unstamped `hermes-update-autostash` entries are not touched and still aren't reported; #9377 stays open for those. Thanks @shu-chen-dot-ca.
