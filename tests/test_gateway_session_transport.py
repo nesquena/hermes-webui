@@ -26,6 +26,70 @@ def test_config_does_not_grant_unsupported_sources_write_access(shape):
     assert not sessions.configured(shape, {"webui_gateway_session_transport": "local"})
 
 
+@pytest.mark.parametrize("transport", ["local", "unix"])
+def test_email_continuation_requires_explicit_delivery_opt_in(transport, monkeypatch):
+    from api.helpers import public_session_projection
+    from api import gateway_sessions
+
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
+    email = {"session_source": "messaging", "raw_source": "email", "profile": "default"}
+    config = {"webui_gateway_session_transport": transport}
+    assert sessions.external_session(email)
+    assert not sessions.configured(email, config)
+    assert not sessions.configured(email, {**config, "webui_gateway_email_delivery": "true"})
+    enabled = {**config, "webui_gateway_email_delivery": True}
+    assert sessions.configured(email, enabled)
+    assert not sessions.configured(email, {"webui_gateway_email_delivery": True})
+    assert not sessions.configured({**email, "session_source": "fork"}, enabled)
+    assert sessions.configured({"source_tag": "telegram"}, config)
+    assert sessions.configured({"source_tag": "cli"}, config)
+
+    monkeypatch.setattr(gateway_sessions, "config_for_session", lambda _: enabled)
+    projected = public_session_projection({**email, "chat_delivery_notice": "untrusted notice"})
+    assert projected["chat_via_gateway_session"] is True
+    assert projected["chat_delivery_notice"] == "WebUI replies may also be emailed to the original sender."
+    monkeypatch.setattr(gateway_sessions, "config_for_session", lambda _: config)
+    disabled = public_session_projection(email)
+    assert not disabled.get("chat_via_gateway_session")
+    assert not disabled.get("chat_delivery_notice")
+    assert disabled["chat_read_only_reason"] == "Read-only in WebUI. Continue in Email."
+
+
+@pytest.mark.parametrize("root_source,tip_source,expected", [
+    ("email", "email", True),
+    ("email", "telegram", False),
+    ("telegram", "email", False),
+    ("telegram", "telegram", True),
+])
+def test_compressed_email_continuation_checks_owning_source(tmp_path, monkeypatch, root_source, tip_source, expected):
+    home = tmp_path / "profile"
+    home.mkdir()
+    (home / "state.db").touch()
+
+    class Store:
+        def __init__(self, path, read_only):
+            assert path == home / "state.db" and read_only is True
+        def get_compression_lineage(self, sid):
+            assert sid == "tip"
+            return ["owner", "tip"]
+        def get_compression_tip(self, sid):
+            assert sid == "owner"
+            return "tip"
+        def get_session(self, sid):
+            return {"source": tip_source if sid == "tip" else root_source, "session_key": "email:sender",
+                    "profile_name": "default", "end_reason": "idle_timeout" if sid == "owner" else None,
+                    "ended_at": None}
+        def close(self):
+            pass
+
+    # The lineage decision belongs to WebUI; a fake read-only store keeps this
+    # security check active even in CI without an Agent checkout.
+    hermes_state = ModuleType("hermes_state")
+    hermes_state.__dict__["SessionDB"] = Store
+    monkeypatch.setitem(sys.modules, "hermes_state", hermes_state)
+    assert sessions._verified_messaging_owner(home, "tip", "owner") is expected
+
+
 @pytest.mark.parametrize("stored", [None, "", "unknown"])
 def test_messaging_without_model_accepts_implicit_browser_default(stored):
     from types import SimpleNamespace
