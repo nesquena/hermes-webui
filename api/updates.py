@@ -1745,8 +1745,11 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
     A DIVERGED stable checkout (HEAD neither contains the latest tag nor can
     fast-forward to it) is NOT one of those "already on the stable line"
     states: it is the opposite, so it must not report "no update" either.
-    Applying ``latest_tag`` would fail fast-forward, so the apply side takes
-    the same branch comparison the check side reports. See #8556.
+    The release target is the stable channel's answer for a diverged checkout,
+    and only the two genuinely up-to-date states produce ``None``. Returning
+    ``latest_tag`` ensures updates and force updates target the release rather
+    than falling through to ``origin/master``. The experimental channel and the
+    AGENT repo keep their branch fallthrough. See #8556.
     """
     channel = _normalize_channel(channel)
     suppress_stable_fallthrough = (channel == 'stable' and target == 'webui')
@@ -1778,11 +1781,14 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
             pass
         elif behind > 0 and not _can_fast_forward_to(path, latest_tag):
             # Diverged local branch: HEAD is OFF the stable line — it neither
-            # contains the latest tag nor can fast-forward to it. That is the
-            # opposite of the two up-to-date conditions above, so the stable
-            # suppression must not claim "no update" here either, and applying
-            # the tag would fail fast-forward. Take the same branch comparison
-            # as the check side (#8556).
+            # contains the latest tag nor can fast-forward to it. Falling through
+            # to the branch comparison would advance a stable install onto
+            # origin/master (the experimental firehose), so return the latest
+            # stable tag when suppress_stable_fallthrough is true. The
+            # experimental channel and the AGENT repo keep their branch
+            # fallthrough (#8556).
+            if suppress_stable_fallthrough:
+                return latest_tag
             pass
         else:
             return latest_tag
@@ -1824,7 +1830,16 @@ def _channel_up_to_date_info(path, name, channel, current_tag, latest_tag=None):
 
 
 def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
-    """Check if a git repo is behind its latest published channel release tag."""
+    """Check if a git repo is behind its latest published channel release tag.
+
+    The release payload is the stable channel's answer for a diverged checkout,
+    and only the two genuinely up-to-date states produce None. When HEAD is
+    diverged (neither contains the latest tag nor can fast-forward to it),
+    stable WebUI falls through to the release-based payload below so the install
+    keeps the stable release target rather than falling through to
+    ``origin/master``. The experimental channel and the AGENT repo return None
+    to preserve their historical branch fallthrough.
+    """
     channel = _normalize_channel(channel)
     tags = _release_tags(path, channel)
     if not tags:
@@ -1920,14 +1935,15 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     #
     # Unlike conditions 1-2 ("HEAD is on/past/contains the stable line", where
     # "up to date" is truthful), this condition means HEAD is OFF that line: it
-    # neither contains the latest tag nor can fast-forward to it. Suppressing
-    # the fallthrough here would report "Up to date" and hide every missing
-    # commit, on a checkout that cannot apply the advertised tag anyway — the
-    # exact opposite of an up-to-date state. Fall through to the branch
-    # comparison for the stable channel too; the apply side mirrors this
-    # (#8556).
+    # neither contains the latest tag nor can fast-forward to it. For the
+    # experimental channel and the AGENT repo, return None to fall through to
+    # the branch comparison. For stable WebUI, the release payload is the
+    # channel's answer: do not return None, but fall through to the release
+    # payload below so the install keeps the stable release target instead of
+    # advertising origin/master (#8556).
     if behind > 0 and not _can_fast_forward_to(path, latest_tag):
-        return None
+        if not suppress_stable_fallthrough:
+            return None
 
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
     remote_url = _normalize_remote_url(remote_url)
