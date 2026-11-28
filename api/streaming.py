@@ -6920,7 +6920,17 @@ def _title_structured_output_rejected(exc) -> bool:
     return any(k in err for k in _TITLE_UNSUPPORTED_PARAM_MARKERS)
 
 
-def _send_title_request(send):
+# (provider, model) pairs whose endpoint refused the structured-output
+# schema with an HTTP 400/422 that named it unsupported. Process-lifetime
+# memory for the agent's Chat Completions title route, which otherwise
+# resends the schema into the same refusal on every title (#9154); the
+# Agent's auxiliary client keeps its own per-process memory for the
+# auxiliary route, so that route passes no key here.
+_TITLE_SCHEMA_REFUSALS = set()
+_TITLE_SCHEMA_REFUSALS_LOCK = threading.Lock()
+
+
+def _send_title_request(send, provider=None, model=None, *, base_url=None, profile_home=None):
     """Call ``send(response_format)`` asking for a strict ``{"title"}`` object.
 
     Used by the auxiliary title route and the agent's Chat Completions route;
@@ -6931,17 +6941,29 @@ def _send_title_request(send):
 
     A request whose HTTP 400/422 error names the structured-output field as
     unsupported is resent once without the schema. Every other error
-    propagates unchanged to the caller's existing retry and error path. This
-    layer caches nothing, but the Agent's auxiliary client may remember a
-    rejection and drop the schema itself on later auxiliary requests. Each
-    send gets its own copy of the schema, so an adapter that edits the
-    request cannot change the module constant.
+    propagates unchanged to the caller's existing retry and error path. When
+    the caller passes both a ``provider`` and a ``model``, a refusal is
+    remembered per (provider, model, endpoint, profile home) for the process
+    lifetime. Another model, endpoint or profile does not inherit it (#9154).
+    The Agent's auxiliary client keeps its own per-process memory for the
+    auxiliary route, which passes neither here. Each send gets its own copy of
+    the schema, so an adapter that edits the request cannot change the module
+    constant.
     """
+    refusal_key = (provider, model, base_url, profile_home) if provider is not None and model is not None else None
+    if refusal_key is not None:
+        with _TITLE_SCHEMA_REFUSALS_LOCK:
+            remembered = refusal_key in _TITLE_SCHEMA_REFUSALS
+        if remembered:
+            return send(None)
     try:
         return send(copy.deepcopy(_TITLE_RESPONSE_FORMAT))
     except Exception as exc:
         if not _title_structured_output_rejected(exc):
             raise
+        if refusal_key is not None:
+            with _TITLE_SCHEMA_REFUSALS_LOCK:
+                _TITLE_SCHEMA_REFUSALS.add(refusal_key)
         return send(None)
 
 
@@ -7080,13 +7102,26 @@ def generate_title_raw_via_aux(
         return None, 'llm_error_aux'
 
 
-def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, pinned_language: Optional[str] = None) -> tuple[Optional[str], str]:
+def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, pinned_language: Optional[str] = None, profile_home: Optional[str] = None) -> tuple[Optional[str], str]:
     """Return (raw_text, status) via active-agent route."""
     if not user_text or not assistant_text:
         return None, 'missing_exchange'
     if agent is None:
         return None, 'missing_agent'
 
+    from api.config import _thread_ctx
+    from api.profiles import get_hermes_home_for_profile
+
+    # Capability memo ownership (#9245 re-gate): the caller that owns the title
+    # request passes the session's captured profile home. When it does not, only
+    # the thread-local context counts; a default-profile worker (whose profile
+    # env context is a no-op) resolves to the default home. The process-wide
+    # os.environ HERMES_HOME mirror is never proof of ownership: another
+    # profile's concurrent background worker can be holding it.
+    if profile_home is None:
+        thread_env = getattr(_thread_ctx, "env", {})
+        thread_home = thread_env.get("HERMES_HOME") if isinstance(thread_env, dict) else None
+        profile_home = str(thread_home or get_hermes_home_for_profile("default"))
     qa, prompts = _title_prompts(user_text, assistant_text, pinned_language)
     base_max_tokens = _title_completion_budget(
         getattr(agent, 'provider', ''),
@@ -7169,7 +7204,13 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
                             if response_format:
                                 kwargs['response_format'] = response_format
                             return client.chat.completions.create(**kwargs)
-                        resp = _send_title_request(_send)
+                        resp = _send_title_request(
+                            _send,
+                            getattr(agent, 'provider', '') or None,
+                            getattr(agent, 'model', '') or None,
+                            base_url=str(getattr(client, 'base_url', None) or getattr(agent, 'base_url', '') or ''),
+                            profile_home=profile_home,
+                        )
                         raw, empty_status = _extract_title_response(resp)
                     raw = str(raw or '').strip()
                     if raw:
@@ -7207,13 +7248,13 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
         agent.reasoning_config = prev_reasoning
 
 
-def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str, str]:
+def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text: str, *, profile_home: Optional[str] = None) -> tuple[Optional[str], str, str]:
     """Generate a title via active-agent route, then sanitize/validate result."""
     # One snapshot drives both the prompt and validation: when a resolvable
     # language is pinned, the prompt asks for it and validation checks the
     # title against the pinned script instead of the conversation start.
     pinned_language = _configured_title_language()
-    raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text, pinned_language=pinned_language)
+    raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text, pinned_language=pinned_language, profile_home=profile_home)
     if not raw:
         return None, status, ''
     title = _sanitize_generated_title(raw)
@@ -7484,13 +7525,17 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
         from api import profiles as profiles_api
 
         with profiles_api.profile_env_for_background_worker(s, "background title", logger_override=logger):
+            # Captured owning-profile identity for the schema-refusal memo.
+            # Resolve it from the session, never from the process-wide
+            # HERMES_HOME mirror another profile's worker may be holding.
+            title_profile_home = session_profile_home_or_empty(s)
             if not _aux_title_generation_enabled():
                 _put_title_status(put_event, session_id, 'skipped', 'title_generation_disabled', current)
                 return
             aux_title_configured = _aux_title_configured()
             rejected_model_output = False
             if agent and not aux_title_configured:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text, profile_home=title_profile_home)
                 rejected_model_output = llm_status in ('llm_invalid', 'llm_language_mismatch')
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
@@ -7499,7 +7544,7 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
                 rejected_model_output = llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux')
                 if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                    next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text, profile_home=title_profile_home)
                     rejected_model_output = rejected_model_output or llm_status in ('llm_invalid', 'llm_language_mismatch')
             source = llm_status
             # An invalid response is different from an unavailable title model:
@@ -7633,18 +7678,20 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
         from api import profiles as profiles_api
 
         with profiles_api.profile_env_for_background_worker(s, "background title", logger_override=logger):
+            # Same captured owning-profile identity as the update path.
+            title_profile_home = session_profile_home_or_empty(s)
             if not _aux_title_generation_enabled():
                 _put_title_status(put_event, session_id, 'refresh_skipped', 'title_generation_disabled', effective)
                 return
             aux_title_configured = _aux_title_configured()
             if agent and not aux_title_configured:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text, profile_home=title_profile_home)
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
             else:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
                 if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                    next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text, profile_home=title_profile_home)
         if not next_title:
             _put_title_status(put_event, session_id, 'refresh_skipped', llm_status or 'empty', effective, raw_preview)
             return
