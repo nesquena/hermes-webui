@@ -802,6 +802,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 - [`docs/workspace-git.md`](docs/workspace-git.md) — the workspace Git controls
 - [`docs/kanban.md`](docs/kanban.md) — the Kanban board's status flow: who may set which column, how tasks enter and leave Scheduled, and the parent re-gating on Scheduled/Blocked → Ready
 - [`docs/scripts-panel.md`](docs/scripts-panel.md) — the Tasks panel's Scripts subtab: where the profile's `~/.hermes/scripts/` directory comes from, the read-only endpoints, and the containment rules
+- [`docs/provider-quota.md`](docs/provider-quota.md) — `/api/provider/quota`: the aggregate `account_limits` field vs the per-credential `credentials` array, when probes run, the 60 s cache, and how a failed probe is reported
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — administrator-controlled WebUI extension injection
 
 **Deploying & operating**

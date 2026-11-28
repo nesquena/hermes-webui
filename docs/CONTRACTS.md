@@ -28,6 +28,12 @@ contributor guidance; it does not change runtime behavior or CI gates.
   matching, overflow promotion, routed fallback, and selected-row rendering.
   Start here before changing model-picker deduplication, restoration, or live
   catalog merging.
+- [`docs/provider-quota.md`](provider-quota.md):
+  runtime behaviour of `/api/provider/quota` — the aggregate `account_limits`
+  window versus the per-credential `credentials` array, which providers get
+  probed, the per-credential 60 s cache (profile-scoped, refresh-bypassing), the
+  shared request deadline, and how a failed probe appears. Read before changing
+  quota probing, its caches, or the quota payload shape.
 - [`docs/remote-workspaces.md`](remote-workspaces.md):
   architecture contract for remote terminal workspaces (SSH/Docker), target-side
   POSIX path preservation against macOS synthetic firmlink expansion, and
