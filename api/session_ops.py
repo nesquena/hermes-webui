@@ -749,6 +749,74 @@ def _context_prefix_before_last_user(context_messages):
     return []
 
 
+# Set by api.gateway_chat on rows adopted from the Agent's compacted transcript.
+_GATEWAY_COMPACTION_ADOPTED_KEY = '_gateway_compaction_adopted'
+
+
+def _adopted_compaction_context_for_keep(context_messages, full_messages, keep):
+    """Cut a context that leads with adopted compaction rows at display prefix ``keep``.
+
+    The adopted rows are model-only: together they stand for every display row
+    before the first turn appended after them, so they do not align row-for-row
+    with the display. Only a prefix that keeps a turn written after the
+    compaction keeps the adopted rows (and cuts the aligned tail); any shorter
+    prefix — including exactly the covered rows — cannot be expressed in
+    compacted rows, so the selected display rows themselves become the context
+    (the display prefix is the authority, as when nothing was compacted).
+
+    Returns None when the context holds no adopted rows (callers keep their
+    ordinary alignment).
+    """
+    ctx = context_messages if isinstance(context_messages, list) else []
+    last_adopted = None
+    for i in range(len(ctx) - 1, -1, -1):
+        if isinstance(ctx[i], dict) and ctx[i].get(_GATEWAY_COMPACTION_ADOPTED_KEY):
+            last_adopted = i
+            break
+    if last_adopted is None:
+        return None
+    msgs = full_messages if isinstance(full_messages, list) else []
+    keep = max(0, min(int(keep), len(msgs)))
+    tail = ctx[last_adopted + 1:]
+    covered = len(msgs) - len(tail)
+    if covered >= 0 and keep > covered and (not tail or _same_turn_row(tail[0], msgs[covered])):
+        return ctx[:last_adopted + 1] + truncate_context_for_display_keep(
+            tail, msgs[covered:], keep - covered,
+        )
+    return copy.deepcopy(msgs[:keep])
+
+
+def _same_turn_row(context_row, display_row):
+    """True when a context row is the display row's own turn (id, else role + text)."""
+    if not isinstance(context_row, dict) or not isinstance(display_row, dict):
+        return False
+    context_id = context_row.get('id') or context_row.get('message_id')
+    display_id = display_row.get('id') or display_row.get('message_id')
+    if context_id is not None and display_id is not None:
+        return context_id == display_id
+    return (
+        context_row.get('role') == display_row.get('role')
+        and _extract_text(context_row.get('content', '')) == _extract_text(display_row.get('content', ''))
+    )
+
+
+def _context_before_display_index(context_messages, history, user_index):
+    """Model context for display prefix ``history[:user_index]`` (retry/undo)."""
+    adopted = _adopted_compaction_context_for_keep(context_messages, history, user_index)
+    if adopted is not None:
+        return adopted
+    truncated = _truncate_context_before_row(context_messages, history[user_index])
+    if truncated is not None:
+        return truncated
+    # The selected visible human turn is not in model context any more (e.g. a
+    # manual compression stored sanitized id-less copies and re-stamped fresh
+    # timestamps). Cut before the context's own last user row — hidden rows
+    # included — so the removed suffix (a hidden delegation handoff + reply)
+    # cannot reach the next send while earlier summary context survives
+    # (gate review finding 2, #7882 re-gate).
+    return _context_prefix_before_last_user(context_messages)
+
+
 def _truncation_watermark_for(messages):
     history = list(messages or [])
     if not history:
@@ -788,6 +856,9 @@ def truncate_context_for_display_keep(
         return _result([])
     if len(msgs) == 0:
         return _result([])
+    adopted = _adopted_compaction_context_for_keep(ctx, msgs, keep)
+    if adopted is not None:
+        return _result(adopted, len(adopted) - 1 if adopted else None)
     # Only the perfectly-parallel case (display and context row-for-row) can be
     # sliced at the raw display index. When the two arrays differ in length —
     # in EITHER direction — they have diverged and need alignment:
@@ -1162,25 +1233,9 @@ def retry_last(session_id: str) -> dict[str, Any]:
             # can distinguish legitimate prefix from deleted suffix.
             s.truncation_boundary = s.truncation_watermark
             if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
-                truncated_context = _truncate_context_before_row(
-                    s.context_messages, history[last_user_idx]
+                s.context_messages = _context_before_display_index(
+                    s.context_messages, history, last_user_idx
                 )
-                if truncated_context is not None:
-                    s.context_messages = truncated_context
-                else:
-                    # The selected visible human turn is not in model context
-                    # any more (e.g. a manual compression stored sanitized
-                    # id-less copies and re-stamped fresh timestamps, and
-                    # nothing matched). Cutting only at the context's own last
-                    # user row would LEAVE the hidden delegation handoff and
-                    # its reply in context while the display transcript lost
-                    # them (gate review finding 2). Cut before the context's
-                    # own last user row — hidden rows included — so the removed
-                    # suffix (handoff + reply) cannot reach the next send while
-                    # the earlier summary context survives (#7882 re-gate).
-                    s.context_messages = _context_prefix_before_last_user(
-                        s.context_messages
-                    )
         s.save()
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
@@ -1227,21 +1282,9 @@ def undo_last(session_id: str) -> dict[str, Any]:
             # Persist the original truncate cutoff.
             s.truncation_boundary = s.truncation_watermark
             if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
-                truncated_context = _truncate_context_before_row(
-                    s.context_messages, history[last_user_idx]
+                s.context_messages = _context_before_display_index(
+                    s.context_messages, history, last_user_idx
                 )
-                if truncated_context is not None:
-                    s.context_messages = truncated_context
-                else:
-                    # Same compressed-history fallback as retry_last: the
-                    # removed visible turn cannot be proved present in model
-                    # context, so cutting before the context's own last user
-                    # row — hidden rows included — is the way to keep the
-                    # hidden delegation handoff out of the next send without
-                    # discarding the surviving summary context (#7882 re-gate).
-                    s.context_messages = _context_prefix_before_last_user(
-                        s.context_messages
-                    )
         s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
     preview = (removed_text[:40] + '...') if len(removed_text) > 40 else removed_text
     return {
