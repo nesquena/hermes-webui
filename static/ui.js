@@ -18487,6 +18487,39 @@ function _anchorSceneToolRenderSignature(row, opts){
   return JSON.stringify([row,opts||{},document.documentElement.lang,
     typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling()]);
 }
+function _liveSceneIncrementalEnabled(){ return window._liveSceneIncremental!==false; }
+function _anchorSceneRenderKeyPart(value){
+  try{
+    // Complete input identity is authoritative: sampled string ends collide on
+    // same-length corrections and would incorrectly authorize stale DOM reuse.
+    return JSON.stringify(value);
+  }catch(_){ return null; }
+}
+function _anchorSceneLiveProseFadePolicy(){
+  if(typeof window.__anchorProseIncrementalNode!=='function') return false;
+  const reduced=typeof window.matchMedia==='function'&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  return !reduced&&(window._fadeTextEffect===true||(typeof isTransparentStream==='function'&&isTransparentStream()));
+}
+function _anchorSceneRowRenderPrefs(opts){
+  // Timestamp visibility is reconciled in place by the transparent renderer.
+  // Excluding it keeps content identity stable across preference-only updates,
+  // preserving expanded details, connected nodes, and reader text selection.
+  // The prose producer also keys its parser by effective fade policy. Keep the
+  // same resolved inputs in row identity so unchanged text reaches that producer.
+  return {opts:opts||{},language:document.documentElement.lang,showThinking:window._showThinking,
+    simplified:typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling(),detailsExpanded:window._worklogDetailsExpandedByDefault===true,mode:typeof chatActivityMode==='function'?chatActivityMode():'',sessionId:S.session&&S.session.session_id,proseIncremental:typeof window.__anchorProseIncrementalNode==='function',proseFade:_anchorSceneLiveProseFadePolicy()};
+}
+function _anchorSceneRowRenderKey(row, prefs){
+  if(!row) return null;
+  try{
+    // Positional reconciliation metadata changes when rows are coalesced. Neither
+    // live renderer reads order_index when constructing the row, so exclude it;
+    // every other row field participates in the key to fail toward a rebuild.
+    const rowForKey=Object.assign({},row);
+    delete rowForKey.order_index;
+    return _anchorSceneRenderKeyPart([rowForKey,prefs]);
+  }catch(_){ return null; }
+}
 function _anchorSceneDataRowKey(row, streamId){
   const id=String(row.row_id||row.local_id||'').trim();
   if(!id) return '';
@@ -18511,6 +18544,8 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
     if(key) existing.set(key,node);
   });
   const children=[];
+  const incremental=typeof _liveSceneIncrementalEnabled==='function'&&_liveSceneIncrementalEnabled();
+  const rowRenderPrefs=incremental?_anchorSceneRowRenderPrefs(opts):null;
   let currentTools=null;
   let toolNodes=[];
   const flushTools=()=>{
@@ -18526,10 +18561,13 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   for(const row of rows){
     const key=_anchorSceneDataRowKey(row,'');
     const previous=key?existing.get(key):null;
-    const signature=_anchorSceneToolRenderSignature(row,opts);
-    const node=signature&&previous&&previous._anchorToolRenderSignature===signature
+    const renderKey=incremental ? _anchorSceneRowRenderKey(row,rowRenderPrefs) : null;
+    const signature=incremental ? null : _anchorSceneToolRenderSignature(row,opts);
+    const node=renderKey&&previous&&previous._anchorSceneRowRenderKey===renderKey
+      ? previous : signature&&previous&&previous._anchorToolRenderSignature===signature
       ? previous : _anchorSceneNodeForRow(row,opts);
     if(!node) continue;
+    if(renderKey) node._anchorSceneRowRenderKey=renderKey;
     if(signature) node._anchorToolRenderSignature=signature;
     if(row.role==='tool'){
       if(!currentTools){
@@ -18894,6 +18932,8 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   });
   const liveFooter=blocks.querySelector('#liveRunStatus');
   const renderedRows=[];
+  const incremental=typeof _liveSceneIncrementalEnabled==='function'&&_liveSceneIncrementalEnabled();
+  const rowRenderPrefs=incremental?_anchorSceneRowRenderPrefs({live:true,settled:false,streamId:streamId||S.activeStreamId||'',sessionId:S.session&&S.session.session_id}):null;
   for(const row of rows){
     const rowEventTs=typeof _anchorSceneRowTimestampSeconds==='function'?_anchorSceneRowTimestampSeconds(row):null;
     const rowOpts={
@@ -18902,9 +18942,16 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
       streamId:streamId||S.activeStreamId||'',
       sessionId:S.session&&S.session.session_id,
     };
-    const signature=_anchorSceneToolRenderSignature(row,rowOpts);
+    const renderKey=incremental ? _anchorSceneRowRenderKey(row,rowRenderPrefs) : null;
+    const signature=incremental ? null : _anchorSceneToolRenderSignature(row,rowOpts);
     const dataKey=_anchorSceneDataRowKey(row,activeStreamId);
     const cached=dataKey?preserveByKey.get(dataKey):null;
+    if(renderKey&&cached&&cached._anchorSceneRowRenderKey===renderKey){
+      _syncTransparentEventTimestampVisibility(cached);
+      preserveByKey.delete(dataKey);
+      renderedRows.push(cached);
+      continue;
+    }
     if(signature&&cached&&cached._anchorToolRenderSignature===signature){
       // Timestamp visibility is presentation state, independent of tool content.
       // Reconcile it in place so toggles preserve disclosure and text selection.
@@ -18924,6 +18971,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
       : node;
     if(existing) preserveByKey.delete(key);
     if(!renderedNode) continue;
+    if(renderKey) renderedNode._anchorSceneRowRenderKey=renderKey;
     if(signature) renderedNode._anchorToolRenderSignature=signature;
     renderedRows.push(renderedNode);
   }
