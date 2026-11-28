@@ -420,3 +420,29 @@ class TestHandlerReuseAcrossKeepAliveRequests:
         assert out.get("body") == b"PNGDATA", (
             f"stale /api/static path changed the static response: {out.get('body')!r}"
         )
+
+
+# -- env key names are case-sensitive ----------------------------------------
+
+
+def test_env_key_delete_uses_the_original_case_name(monkeypatch):
+    """#7870: the folded path must not leak into a case-sensitive key name.
+
+    The server lowercases the path before dispatch, so `DELETE
+    /api/env/keys/MY_API_KEY` used to arrive as `my_api_key`: the uppercase key
+    survived while the handler reported success, or a lowercase key with that
+    name was deleted instead.
+    """
+    from api import env_keys
+
+    seen: list[str] = []
+
+    def _capture(handler, name, parsed=None):
+        seen.append(name)
+        return True
+
+    monkeypatch.setattr(env_keys, "handle_env_key_delete", _capture)
+    handler, parsed = _dispatch("/api/env/keys/MY_API_KEY")
+
+    assert handle_delete(handler, parsed) is True
+    assert seen == ["MY_API_KEY"], seen
