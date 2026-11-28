@@ -209,7 +209,10 @@ def shares(server):
 
 @pytest.fixture
 def page(browser, shares):
-    ctx = browser.new_context(viewport={"width": 1400, "height": 900}, base_url=shares["base"])
+    # No service worker: page.route does not reliably see requests a service worker
+    # takes part in, and _hold must see every request it is asked to hold.
+    ctx = browser.new_context(viewport={"width": 1400, "height": 900}, base_url=shares["base"],
+                              service_workers="block")
     ctx.add_init_script(_INIT)
     pg = ctx.new_page()
     pg.share_posts = []
@@ -649,6 +652,30 @@ def test_clipboard_copy_rejects_when_the_fallback_copy_also_fails(browser, share
 
 # ── a dialog opened while a switch is still in flight ────────────────────────
 
+_DRAFT = "an unsent draft"
+
+
+def _draft_post_for(sid, text):
+    """Selects a draft save of ``text`` for ``sid``."""
+    def select(request):
+        if request.method != "POST":
+            return False
+        body = json.loads(request.post_data or "{}")
+        return body.get("session_id") == sid and body.get("text") == text
+    return select
+
+
+def _type_draft_and_let_it_save(page, sid, text):
+    """Type an unsent draft, then wait until its debounced autosave has been answered,
+    so no save of it is still scheduled or in flight when a test holds draft saves."""
+    is_autosave = _draft_post_for(sid, text)
+    with page.expect_response(
+            lambda resp: resp.url.endswith("/api/session/draft") and is_autosave(resp.request),
+            timeout=WAIT_MS):
+        page.fill("#msg", text)
+    _wait_until(page, "(sid) => !_composerDraftPostPromisesBySid.has(sid)", sid)
+
+
 @pytest.mark.parametrize("action", ["clear", "file-delete"])
 def test_dialog_opened_during_a_pending_switch_never_acts_on_the_next_conversation(page, server, action):
     tag = f"{action}-{int(time.time() * 1000)}"
@@ -662,30 +689,31 @@ def test_dialog_opened_during_a_pending_switch_never_acts_on_the_next_conversati
         sids.append(_import(server, f"Pending {tag} {name}", workspace))
     first, second = sids
     _open_after(page, first, second)
-    page.fill("#msg", "an unsent draft")
+    _type_draft_and_let_it_save(page, second, _DRAFT)
     page.click(".rail-btn[data-panel='settings']")
     page.wait_for_selector("#btnClearConvModal", state="visible", timeout=WAIT_MS)
-    held = []
-    page.route("**/api/session/draft", lambda route: held.append(route))
-    # Back to the first conversation: the switch waits for the draft save of the second.
+    _track(page, "clearConversation" if action == "clear" else "deleteWorkspaceFile")
+    # Back to the first conversation: the switch first saves the second's draft,
+    # held here (the only draft save, since the autosave has already been answered).
+    held, release = _hold(page, "**/api/session/draft", _draft_post_for(second, _DRAFT))
     _history_go(page, first)
-    deadline = time.time() + 10
-    while not held and time.time() < deadline:
-        page.wait_for_timeout(50)
-    assert held, "the draft save was not held"
-    assert page.evaluate(_STATE_JS)["sid"] == second
+    _wait_held(page, held, "the switch's draft save")
+    state = page.evaluate("() => ({sid: S.session && S.session.session_id, loading: _loadingSessionId})")
+    assert state == {"sid": second, "loading": first}, state
     if action == "clear":
         page.click("#btnClearConvModal")
     else:
         page.evaluate("() => { deleteWorkspaceFile('notes.txt', 'notes.txt'); return true; }")
     _wait_until(page, "() => _isAppDialogOpen()")
-    held.pop().continue_()
-    page.unroute("**/api/session/draft")
-    _active(page, first)
-    page.wait_for_timeout(300)
-    if page.evaluate("() => _isAppDialogOpen()"):
-        page.click("#appDialogConfirm")
-    page.wait_for_timeout(SETTLE_MS)
+    assert len(held) == 1, f"{len(held)} draft saves held, expected the switch's own"
+    release()
+    # The switch has finished (``_loadingSessionId`` cleared), not just swapped S.session:
+    # answering mid-load would hit the loading check instead of the identity check.
+    _wait_until(page, "(sid) => !!S.session && S.session.session_id === sid && !_loadingSessionId", first)
+    # The user's next click if the dialog is still on screen (checked and clicked in
+    # one step), then wait for the dialog's action to settle.
+    page.evaluate("() => { if (_isAppDialogOpen()) document.querySelector('#appDialogConfirm').click(); return true; }")
+    assert _outcome(page)["done"], "the dialog's action did not settle"
     outcome = {
         "writes": page.writes,
         "messages": [_message_count(server, first), _message_count(server, second)],
@@ -702,15 +730,31 @@ def test_dialog_opened_during_a_pending_switch_never_acts_on_the_next_conversati
 # does): the dialog stays open, and is answered while the switch is still pending
 # (its metadata read held) or after it has completed.
 
-def _hold(page, matcher):
-    """Hold the requests ``matcher`` selects until ``release()``."""
+def _hold(page, matcher, select=None):
+    """Hold the requests ``matcher`` selects (only those ``select(request)`` accepts,
+    when given; the others go on) until ``release()``.
+
+    ``release()`` never unroutes. Removing the page's last route turns Playwright's
+    request interception off, and a request the page issues at that moment can be
+    stranded: the switch's next fetch never reached the server, and the test timed out
+    waiting for the conversation to change. After release the handler passes every
+    request on, so interception stays on and nothing is in flight while routes change.
+    """
     held = []
-    page.route(matcher, lambda route: held.append(route))
+    released = False
+
+    def handler(route):
+        if not released and (select is None or select(route.request)):
+            held.append(route)
+        else:
+            route.fallback()
+    page.route(matcher, handler)
 
     def release():
+        nonlocal released
+        released = True  # a request matched from here on goes straight through
         while held:
             held.pop(0).continue_()
-        page.unroute(matcher)  # also lets through a request matched since the loop
     return held, release
 
 
@@ -869,15 +913,32 @@ def test_panel_share_dialog_answered_after_another_conversation_opened_writes_no
 # next list refresh. The tests share the row from its menu and hold the list
 # refresh, so the row keeps knowing for the whole test.
 
+# What a failed wait for the row's share token reports: a held list refresh keeps
+# the token, an unheld one (or a service worker in the way) drops it.
+_SHARE_ROW_STATE_JS = """(sid) => {
+  const row = _allSessions.find(s => s.session_id === sid);
+  return {sw_controller: !!(navigator.serviceWorker && navigator.serviceWorker.controller),
+          row_in_list: !!row, row_share_token: !!(row && row.share_token)};
+}"""
+
+
 def _share_row_from_its_menu(page, sid):
     """Share ``sid`` from its sidebar menu (it asks nothing yet) and keep the sidebar
     list from refreshing. Returns the function that lets it refresh again."""
     def is_list(url):
         return urllib.parse.urlsplit(url).path.endswith("/api/sessions")
-    _held, release = _hold(page, is_list)
+    held, release = _hold(page, is_list)
     _open_sidebar_action(page, sid, "share_session")
     _wait_until(page, "() => window.__opened.length > 0")
-    _wait_until(page, "(sid) => !!(_allSessions.find(s => s.session_id === sid) || {}).share_token", sid)
+    try:
+        _wait_until(page, "(sid) => !!(_allSessions.find(s => s.session_id === sid) || {}).share_token", sid)
+    except AssertionError as exc:
+        try:
+            state = page.evaluate(_SHARE_ROW_STATE_JS, sid)
+        except Exception as probe_exc:  # keep the original timeout as the failure
+            state = f"unavailable ({type(probe_exc).__name__})"
+        raise AssertionError(f"{exc}; held={len(held)} share_posts={page.share_posts} "
+                             f"share_statuses={page.share_statuses} page={state}") from exc
     page.share_posts.clear()
     page.share_statuses.clear()
     page.evaluate("() => { window.__opened = []; window.__copied = []; return true; }")

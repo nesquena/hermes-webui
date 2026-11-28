@@ -3196,7 +3196,11 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
         }
     stashed = False
     if status_out:
-        _, ok = _run_git(['stash', 'push', '-m', 'hermes-update-autostash'], path)
+        # hermes-agent's orphaned-autostash warning only recognises this prefix
+        # followed by a UTC YYYYMMDD-HHMMSS stamp, the name its own updater
+        # writes; an unstamped entry is never surfaced again (#9377).
+        stash_name = time.strftime('hermes-update-autostash-%Y%m%d-%H%M%S', time.gmtime())
+        _, ok = _run_git(['stash', 'push', '-m', stash_name], path)
         if not ok:
             return {'ok': False, 'message': 'Failed to stash local changes'}
         stashed = True
