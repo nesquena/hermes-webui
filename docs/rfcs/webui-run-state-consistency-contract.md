@@ -211,6 +211,41 @@ Only deduplicate a saved prefix also represented in the selected display/context
 view. Newer visible history does not authorize dropping rows from older
 model-facing context. Content-only similarity at different timestamps cannot
 prove a mirror: a legitimate new identical turn has the same legacy shape.
+The synchronous `POST /api/chat` settle persists the identity-deduped model
+context, applying the same ownership rules as the streaming settle: before the
+dedup, each content group's distinct occurrences are identified across its whole
+ownership group, rows that already carry a valid ownership id included, and a
+distinct unowned occurrence receives its own collision-free id, while an unowned
+replay of an already-owned exact key reconciles onto that owner's id instead of
+being split into a second survivor. The display transcript and the model context
+therefore retain one ownership set on both chat surfaces.
+The current-turn protection is explicit, never inferred from the presence of any
+`_active_turn_token`: a historical token is not necessarily the current-turn
+token, because a previous turn's user row keeps its own token forever. Only a
+row the settle can PROVE it owns is protected - the row whose token equals the
+token this settle minted, or the row whose content is this turn's submitted
+prompt. Every other token-bearing row is a historical owner: it is counted in
+its occurrence group and keeps its own id and token, and a token-bearing row
+never has a synthetic id minted for it nor reconciles onto another owner's id.
+With no current-turn authority in hand no row can be proven, so the conservative
+behaviour keeps every token-bearing row protected. Occurrence identity combines
+the exact content+clock+source+attachments key with the turn token, so two
+independently owned turns repeating one prompt inside a single timestamp bucket
+stay distinct owners. When an incoming owner already holds a retained slot, that
+slot is resolved and updated in place before any exact-key replacement may
+overwrite a different invalid or id-less occupant; with no retained owner the
+legacy exact-key replacement is preserved unchanged. An exact key may hold
+several independent owners: when the row occupying the key's indexed slot
+carries no durable id but the key already holds a different durable owner,
+that occupant is a second owner of the key and the incoming owner is admitted
+as its own owner instead of replacing it. A row whose own exact key is already
+occupied by another row is a duplicate of that occurrence: its owner is
+already retained, so it collapses rather than taking a second slot or
+rewriting the owner's clock backwards. The clock rewrite is what made an
+adjacent assistant pair look like a cancelled-history splice to the
+Agent-replay projection - the sent projection kept the pair apart while the
+settle proof merged it, the strict prefix proof failed, and the settle dropped
+the current exchange from the persisted context.
 Consume each saved successor only with shared valid message/positive row identity
 or an exact non-null timestamp, plus compatible provider content. Cancelled
 consumers opt into private SQLite row IDs so newly accepted successors retain
