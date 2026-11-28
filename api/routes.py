@@ -9404,6 +9404,32 @@ def _context_lookup_origin(url: object) -> str:
         if ":" not in host:
             host = host.lower()
         port = parts.port or (80 if parts.scheme == "http" else 443)
+        # #8922: two spellings of one host are one credential origin only when the Agent's metadata client
+        # puts the same request authority on the wire for both. That holds for an IDN spelling and its
+        # A-label: httpx 0.28 rewrites a non-ASCII host with ``idna.encode`` before the request is built, so
+        # both spellings carry the same Host header and SNI (measured on this machine). It does not hold for
+        # the other spellings this helper used to fold, and folding them sent a key to a request its source
+        # never named: an IPv6 address written expanded vs compressed keeps its spelling on the wire
+        # (``Host: [0:0:0:0:0:0:0:1]:443`` vs ``Host: [::1]:443`` against a loopback listener), and a DNS
+        # name keeps its trailing dot in the Host header — on a resolver with a search list the two names
+        # need not even resolve alike. Those stay distinct origins, so such a key is dropped (fail closed)
+        # exactly as before #8922. ``idna`` is optional (WebUI does not depend on it): without it today's
+        # compare stands and the IDN spelling drops its key. Never the built-in ``str.encode("idna")``: it
+        # is IDNA 2003 and folds sharp-s to ss and final-sigma to sigma, hosts the wire never sees.
+        if not host.isascii():
+            try:
+                import idna
+
+                # Keep the root label the wire keeps: ``idna.encode`` drops a trailing dot itself, which
+                # would fold ``bücher.test.`` onto the dotless host the client never asks for.
+                if host.endswith(".."):
+                    raise ValueError("multiple trailing dots")
+                body = host[:-1] if host.endswith(".") else host
+                if not body:
+                    raise ValueError("empty host")
+                host = idna.encode(body.lower()).decode("ascii") + ("." if host.endswith(".") else "")
+            except Exception:
+                pass
     except ValueError:
         return ""
     return f"{host}:{port}" if host else ""
