@@ -308,7 +308,11 @@ class SessionRelay:
                 del self.clarifications[local_id]
 
     def approval(self, payload, generation):
-        from api.gateway_chat import _gateway_runs_approval_event, _settle_gateway_run_approval
+        from api.gateway_chat import (
+            _gateway_runs_approval_event,
+            _recover_gateway_consent_markers,
+            _settle_gateway_run_approval,
+        )
         prompt_id = payload.get("prompt_id")
         if not prompt_id or self.approvals.get(prompt_id) == generation:
             return
@@ -320,6 +324,8 @@ class SessionRelay:
         data = _gateway_runs_approval_event({**payload, "approval_id": prompt_id})
         if data is None:
             data = {"approval_id": prompt_id, "description": "Gateway tool approval", "choices": ["once", "deny"]}
+        else:
+            data = _recover_gateway_consent_markers(self.session_id, data)
         data.update(run_id=self.run_id, _gateway_agent_identity_v1=True)
         # Reuse the existing session-YOLO handoff and exact-owner mirror. This
         # runs off the socket loop because approval settlement can RPC back to it.

@@ -144,8 +144,8 @@ def test_card_yolo_drains_all_already_parked_local_approvals(monkeypatch):
 
     sid = "webui-card-yolo-drain-local"
     approvals = [
-        {"approval_id": "approval-local-1", "command": "first"},
-        {"approval_id": "approval-local-2", "command": "second"},
+        {"approval_id": "approval-local-1", "command": "first", "pattern_key": "command", "pattern_keys": ["command"]},
+        {"approval_id": "approval-local-2", "command": "second", "pattern_key": "command", "pattern_keys": ["command"]},
     ]
     entries = [_ApprovalEntry(dict(approval)) for approval in approvals]
     response = {}
@@ -201,16 +201,20 @@ def test_card_yolo_drains_all_run_backed_and_local_approvals(monkeypatch):
             "approval_id": "approval-run-1",
             "run_id": "run-drain-1",
             "command": "remote first",
+            "pattern_key": "command",
+            "pattern_keys": ["command"],
             "_gateway_agent_identity_v1": True,
         },
         {
             "approval_id": "approval-run-2",
             "run_id": "run-drain-2",
             "command": "remote second",
+            "pattern_key": "command",
+            "pattern_keys": ["command"],
             "_gateway_agent_identity_v1": True,
         },
     ]
-    local_approval = {"approval_id": "approval-local", "command": "local third"}
+    local_approval = {"approval_id": "approval-local", "command": "local third", "pattern_key": "command", "pattern_keys": ["command"]}
     local_entry = _ApprovalEntry(dict(local_approval))
     response = {}
     relays = []
@@ -303,6 +307,8 @@ def test_stale_card_run_owner_cannot_rebind_to_current_run(monkeypatch, enable_y
 
     current = {
         "command": "current command",
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "approval_id": approval_id,
         "run_id": current_run_id,
         "_gateway_agent_identity_v1": True,
@@ -549,9 +555,9 @@ def _run_with_approval_events(monkeypatch, *, yolo_enabled, auto_error=None):
 
     event_lines = [
         b'event: approval.request\n',
-        b'data: {"event":"approval.request","approval_id":"approval-1","tool":"terminal","command":"one"}\n',
+        b'data: {"event":"approval.request","approval_id":"approval-1","tool":"terminal","command":"one","pattern_key":"command","pattern_keys":["command"]}\n',
         b'event: approval.request\n',
-        b'data: {"event":"approval.request","approval_id":"approval-2","tool":"terminal","command":"two"}\n',
+        b'data: {"event":"approval.request","approval_id":"approval-2","tool":"terminal","command":"two","pattern_key":"command","pattern_keys":["command"]}\n',
         b'event: run.completed\n',
         b'data: {"event":"run.completed","output":"done"}\n',
     ]
@@ -715,6 +721,8 @@ def test_card_yolo_uses_plain_runs_approval_and_rolls_back_on_failure(monkeypatc
 
     approval = {
         "command": "touch /tmp/webui-yolo-test",
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "description": "test",
         "approval_id": "approval-route",
         "run_id": run_id,
@@ -776,6 +784,8 @@ def test_failed_relay_does_not_undo_concurrent_explicit_yolo_enable(monkeypatch)
     gateway_chat._STREAM_RUN_IDS[stream_id] = run_id
     route_approvals.submit_gateway_pending_mirror(sid, {
         "command": "touch /tmp/webui-yolo-test",
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "description": "test",
         "approval_id": "approval-route-concurrent",
         "run_id": run_id,
@@ -847,6 +857,8 @@ def test_successful_relay_reports_concurrent_explicit_yolo_disable(monkeypatch):
     gateway_chat._STREAM_RUN_IDS[stream_id] = run_id
     route_approvals.submit_gateway_pending_mirror(sid, {
         "command": "touch /tmp/webui-yolo-test",
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "description": "test",
         "approval_id": "approval-route-concurrent-disable",
         "run_id": run_id,
@@ -913,6 +925,8 @@ def test_yolo_post_without_local_card_relays_run_backed_approval(monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
     route_approvals.submit_gateway_pending_mirror(sid, {
         "command": "touch /tmp/webui-yolo-test",
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "description": "test",
         "approval_id": "approval-yolo-post",
         "run_id": run_id,
@@ -980,6 +994,8 @@ def test_yolo_post_preserves_mirror_while_owned_relay_fails(monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
     route_approvals.submit_gateway_pending_mirror(sid, {
         "command": "touch /tmp/webui-yolo-test",
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "description": "test",
         "approval_id": approval_id,
         "run_id": run_id,
@@ -1042,6 +1058,8 @@ def test_yolo_post_keeps_transition_unconfirmed_until_second_mirror_check(monkey
     response = {}
     mirror = {
         "command": "touch /tmp/webui-yolo-test",
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "description": "test",
         "approval_id": "approval-transition-window",
         "run_id": "run-transition-window",
@@ -1177,6 +1195,8 @@ def test_yolo_post_serializes_post_snapshot_gateway_approval(monkeypatch):
     workers = []
     auto_approved = []
     approval = {
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "command": "touch /tmp/webui-yolo-test",
         "description": "test",
         "approval_id": "approval-post-snapshot",
@@ -1257,8 +1277,8 @@ def test_yolo_drain_serializes_post_drain_local_approval(monkeypatch):
     worker_results = []
     worker_errors = []
     workers = []
-    initial = _ApprovalEntry({"approval_id": "approval-initial", "command": "initial"})
-    late = _ApprovalEntry({"command": "late"})
+    initial = _ApprovalEntry({"approval_id": "approval-initial", "command": "initial", "pattern_key": "command", "pattern_keys": ["command"]})
+    late = _ApprovalEntry({"command": "late", "pattern_key": "command", "pattern_keys": ["command"]})
 
     class NotifyingLock:
         def __init__(self):
@@ -1358,6 +1378,8 @@ def test_yolo_disable_linearizes_after_selected_gateway_autoapproval(monkeypatch
     worker_results = []
     response = {}
     approval = {
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "approval_id": "approval-disable-race",
         "run_id": "run-disable-race",
         "_gateway_agent_identity_v1": True,
@@ -1437,7 +1459,7 @@ def test_disable_that_wins_handoff_precedes_enable_drain(monkeypatch):
     allow_enable_handoff = threading.Event()
     responses = {}
     worker_errors = []
-    entry = _ApprovalEntry({"approval_id": "approval-after-disable", "command": "late enable"})
+    entry = _ApprovalEntry({"approval_id": "approval-after-disable", "command": "late enable", "pattern_key": "command", "pattern_keys": ["command"]})
 
     @contextmanager
     def ordered_handoff(_session_key):
@@ -1525,6 +1547,8 @@ def test_yolo_post_first_relay_serializes_next_gateway_approval(monkeypatch):
     stream_workers = []
     auto_approved = []
     approval_a = {
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "command": "touch /tmp/webui-yolo-a",
         "description": "first",
         "approval_id": "approval-first",
@@ -1533,6 +1557,8 @@ def test_yolo_post_first_relay_serializes_next_gateway_approval(monkeypatch):
         "_gateway_agent_identity_v1": True,
     }
     approval_b = {
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "command": "touch /tmp/webui-yolo-b",
         "description": "second",
         "approval_id": "approval-second",
@@ -1628,6 +1654,8 @@ def test_card_yolo_first_relay_serializes_next_gateway_approval(monkeypatch, rel
     stream_workers = []
     auto_approved = []
     approval_a = {
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "command": "touch /tmp/webui-yolo-a",
         "description": "first",
         "approval_id": "approval-card-first",
@@ -1636,6 +1664,8 @@ def test_card_yolo_first_relay_serializes_next_gateway_approval(monkeypatch, rel
         "_gateway_agent_identity_v1": True,
     }
     approval_b = {
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
         "command": "touch /tmp/webui-yolo-b",
         "description": "second",
         "approval_id": "approval-card-second",

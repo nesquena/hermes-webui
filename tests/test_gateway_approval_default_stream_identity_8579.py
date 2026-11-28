@@ -61,6 +61,8 @@ def _canonical_payload(**overrides):
         "execution_generation": 7,
         "tool": "shell",
         "command": "rm -rf /tmp/x",
+        "pattern_key": "recursive delete",
+        "pattern_keys": ["recursive delete"],
         "description": "delete temp dir",
         "choices": ["once", "deny"],
     }
@@ -76,6 +78,8 @@ def _legacy_payload(**overrides):
         "approval_id": "appr-8579-legacy",
         "tool": "shell",
         "command": "rm -rf /tmp/x",
+        "pattern_key": "recursive delete",
+        "pattern_keys": ["recursive delete"],
         "description": "delete temp dir",
         "choices": ["once", "deny"],
     }
@@ -328,6 +332,8 @@ class TestSharedIdentityDecision:
             "event": "approval.request",
             "run_id": RUN_ID,
             "command": "rm -rf /tmp/x",
+            "pattern_key": "recursive delete",
+            "pattern_keys": ["recursive delete"],
             "description": "no id at all",
         })
         assert approval is not None
@@ -339,6 +345,8 @@ class TestSharedIdentityDecision:
     def test_no_generation_and_no_raw_id_stays_legacy(self):
         approval = _gateway_runs_approval_event({
             "command": "rm -rf /tmp/x",
+            "pattern_key": "recursive delete",
+            "pattern_keys": ["recursive delete"],
             "description": "no id, no generation",
         })
         assert approval is not None
@@ -706,6 +714,8 @@ class TestRunsApiOriginUnchanged:
             "event": "approval.request",
             "run_id": RUN_ID,
             "command": "echo hi",
+            "pattern_key": "command",
+            "pattern_keys": ["command"],
             "description": "no id at all",
         }
         events = self._relay(payload, caps=True)
@@ -737,6 +747,8 @@ class TestStatusOriginSharesTheDecision:
             "execution_generation": 7,
             "tool": "shell",
             "command": "rm -rf /tmp/x",
+            "pattern_key": "recursive delete",
+            "pattern_keys": ["recursive delete"],
             "description": "delete temp dir",
             "choices": ["once", "deny"],
         }
@@ -756,6 +768,8 @@ class TestStatusOriginSharesTheDecision:
             "approval_id": "appr-8579-status-legacy",
             "tool": "shell",
             "command": "rm -rf /tmp/x",
+            "pattern_key": "recursive delete",
+            "pattern_keys": ["recursive delete"],
             "description": "delete temp dir",
         }
         with patch("api.config.gateway_supports_approval_identity_v1", return_value=False):

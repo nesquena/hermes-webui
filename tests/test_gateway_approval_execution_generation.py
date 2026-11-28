@@ -42,6 +42,10 @@ def _canonical_payload(**overrides):
         "command": "rm -rf /tmp/x",
         "description": "delete temp dir",
         "choices": ["once", "deny"],
+        # An ordinary command approval states its classification; an
+        # unclassified prompt is parked for a manual answer (#9108).
+        "pattern_key": "command",
+        "pattern_keys": ["command"],
     }
     payload.update(overrides)
     return payload

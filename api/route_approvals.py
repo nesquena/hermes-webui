@@ -152,6 +152,15 @@ _pending = getattr(_agent_approval, "_pending", None)
 if not isinstance(_pending, dict):
     _pending = {}
 
+# A prompt auto-answered the instant it arrived never entered the queue, yet the
+# Gateway can describe the same prompt again through its ``pending_controls``
+# projection. The event's consent markers are kept here for the very same
+# prompt — same session, run, identity and generation — so that second
+# description stays classifiable instead of being parked as unclassified.
+# Nothing is inferred from a miss: an unknown prompt stays unclassified.
+_answered_approval_markers: dict[tuple[str, str, str, int], tuple[list[str], str]] = {}
+_ANSWERED_APPROVAL_MARKERS_MAX = 32
+
 APPROVAL_BRIDGE = {
     "agent": _agent_approval is not None,
     "available": not any(n in _missing_agent_names for n in _BRIDGE_CRITICAL_NAMES),
@@ -458,6 +467,245 @@ def _gateway_mirror_entry_token(entry) -> str | None:
 
 def _is_gateway_mirror_entry(entry: dict | None) -> bool:
     return isinstance(entry, dict) and bool(entry.get(_GATEWAY_MIRROR_FLAG))
+
+
+#: Pattern keys the Agent stamps on a consent prompt. ``mcp_elicitation``
+#: is the one the Agent's ``request_elicitation_consent`` writes for an MCP
+#: trust/spend gate, a vault payment confirmation and a plugin's publish
+#: consent. The others are the namespaced keys the Agent gives the consent
+#: prompts that are not elicitations: a plugin's own approval rule (the
+#: "ask before an outbound send / a public post / a money change" gate) and
+#: the guard on writes to a protected instruction file.
+_PROTECTED_PATTERN_KEYS = frozenset({
+    "mcp_elicitation",
+    "elicitation",
+    "protected_instruction_file",
+})
+
+#: Prefixes of the namespaced consent pattern keys. A plugin rule is
+#: ``plugin_rule:<rule_key>`` (the rule key is the plugin's own), and a
+#: computer-use action is ``cua:<action>:<mode>`` — both ask a person to
+#: confirm an action the agent would otherwise take on its own.
+_PROTECTED_PATTERN_KEY_PREFIXES = ("plugin_rule:", "cua:")
+
+#: Approval surfaces that carry a consent prompt rather than a command. The
+#: Agent names the surface of a consent ask ``mcp-elicitation``,
+#: ``mcp-trust/<server>`` (a per-chat MCP spend limit) or ``vault-payment``
+#: (filling a saved card); ``publish`` is the consent surface the Agent's
+#: publish-style plugins use. A surface prefix match covers the
+#: ``mcp-trust/<server>`` form, where the server name is part of the value.
+_PROTECTED_SURFACES = frozenset({"publish", "mcp-elicitation", "vault-payment"})
+_PROTECTED_SURFACE_PREFIXES = ("mcp-elicitation", "mcp-trust/", "vault-payment")
+
+
+def _is_protected_pattern_key(key: str) -> bool:
+    """True for a pattern key the Agent uses for a consent prompt."""
+    if not key:
+        return False
+    if key in _PROTECTED_PATTERN_KEYS:
+        return True
+    return key.startswith(_PROTECTED_PATTERN_KEY_PREFIXES)
+
+
+def _is_protected_surface(surface: str) -> bool:
+    """True for a consent surface name (exact match or a known prefix)."""
+    if not surface:
+        return False
+    if surface in _PROTECTED_SURFACES:
+        return True
+    return surface.startswith(_PROTECTED_SURFACE_PREFIXES)
+
+
+def is_protected_approval(approval) -> bool:
+    """True for a consent prompt that session YOLO must never answer (#9108).
+
+    An MCP elicitation (``pattern_key: "mcp_elicitation"``, also carried in
+    ``pattern_keys``), a plugin's own approval rule
+    (``plugin_rule:<rule_key>``) and any approval raised on a consent surface
+    are consent prompts for an outbound send, a public post, a money change or
+    a destructive action. YOLO is a statement about *command* approvals only,
+    so both settle paths and the YOLO enable/release path must leave these to
+    an explicit answer.
+
+    The consent marker matters because a Gateway may describe the very same
+    consent prompt by its surface instead of its pattern key, and a Gateway
+    that projects a pending prompt without the pattern key (the
+    ``pending_controls`` authority projection carries no ``pattern_key`` at
+    all) would otherwise leave the prompt unprotectable.
+    """
+    if not isinstance(approval, dict):
+        return False
+    keys = [str(approval.get("pattern_key") or "")] + [
+        str(k) for k in (approval.get("pattern_keys") or [])
+    ]
+    if any(_is_protected_pattern_key(key) for key in keys):
+        return True
+    return _is_protected_surface(str(approval.get("surface") or "").strip())
+
+
+def is_classified_approval(approval) -> bool:
+    """True when the payload states WHICH kind of gate this prompt is.
+
+    A consent prompt and an ordinary command approval are told apart by the
+    Agent's own marker (``pattern_key`` / ``pattern_keys``) or by the consent
+    surface. A payload carrying none of them cannot be classified at all:
+    the canonical Gateway producer rebuilds a pending approval from kind,
+    prompt id, generation, command, description and choices, and its
+    ``pending_controls`` projection has no marker either (#9108).
+
+    Missing classification is NOT evidence that the prompt is an ordinary
+    command, so it must not buy an automatic answer; callers park the prompt
+    as a card instead.
+    """
+    if not isinstance(approval, dict):
+        return False
+    keys = [str(approval.get("pattern_key") or "")] + [
+        str(k) for k in (approval.get("pattern_keys") or [])
+    ]
+    if any(key.strip() for key in keys):
+        return True
+    return bool(str(approval.get("surface") or "").strip())
+
+
+def may_auto_answer_approval(approval) -> bool:
+    """True only for a CLASSIFIED, non-consent approval.
+
+    Session YOLO may answer this one automatically. Everything else is left to
+    an explicit answer: a consent prompt because YOLO never covers consent, and
+    an unclassified prompt because nothing in the payload proves it is not one.
+    """
+    return is_classified_approval(approval) and not is_protected_approval(approval)
+
+
+def remember_answered_approval_markers(session_key: str, approval: dict) -> None:
+    """Remember the consent markers of a prompt WebUI just settled.
+
+    The Gateway describes one prompt twice: an ``approval.request`` event that
+    carries the Agent's marker, and a ``pending_controls`` projection that may
+    carry none. When the event is answered before the projection arrives, the
+    queue entry is gone and the projection would look unclassified, so the
+    markers are remembered against the prompt itself — same session, run,
+    identity and execution generation — and dropped oldest-first once the
+    bound is reached.
+    """
+    if not isinstance(approval, dict):
+        return
+    prompt_id = str(
+        approval.get("prompt_id") or approval.get("approval_id") or ""
+    ).strip()
+    run_id = str(approval.get("run_id") or "").strip()
+    generation = approval.get(_GATEWAY_EXECUTION_GENERATION)
+    if not prompt_id or not run_id or type(generation) is not int:
+        return
+    keys = [str(approval.get("pattern_key") or "")] + [
+        str(k) for k in (approval.get("pattern_keys") or [])
+    ]
+    keys = [key.strip() for key in keys if key.strip()]
+    surface = str(approval.get("surface") or "").strip()
+    if not keys and not surface:
+        return
+    with _lock:
+        _answered_approval_markers[(session_key, run_id, prompt_id, generation)] = (
+            keys,
+            surface,
+        )
+        while len(_answered_approval_markers) > _ANSWERED_APPROVAL_MARKERS_MAX:
+            _answered_approval_markers.pop(next(iter(_answered_approval_markers)))
+
+
+def known_approval_consent_markers(
+    session_key: str,
+    *identifiers: str,
+    execution_generation: int | None = None,
+    run_id: str = "",
+) -> tuple[list[str], str]:
+    """The consent markers WebUI already knows for one parked approval.
+
+    A Gateway may re-describe a prompt that WebUI has already seen: the
+    ``approval.request`` event carries the Agent's ``pattern_key``, while the
+    ``pending_controls`` authority projection carries the same prompt without
+    one. When the projection arrives for a prompt whose event WebUI already
+    mirrored, the consent markers are still on that mirror, and dropping them
+    would let session YOLO answer a consent prompt that the event path
+    protects.
+
+    A prompt id alone is not enough to call it the same prompt: the Gateway
+    may re-publish one id at a newer execution generation, and the newer
+    generation can describe a DIFFERENT command. Copying the older
+    generation's consent markers onto it would park an ordinary command for a
+    manual answer. The markers are therefore recovered only for the same
+    run AND the same execution generation, and never for a prompt whose
+    generation is unknown on either side.
+
+    Returns ``(pattern_keys, surface)`` — the pattern keys and the surface
+    this session already recorded for a prompt matching any of *identifiers*
+    (the approval id, the prompt id or the request id). Both are empty when
+    nothing matches, so the caller keeps the payload's own values.
+    """
+    wanted = {str(identifier or "").strip() for identifier in identifiers}
+    wanted.discard("")
+    if not wanted:
+        return [], ""
+    wanted_run_id = str(run_id or "").strip()
+    pattern_keys: list[str] = []
+    surface = ""
+    with _lock:
+        queue = _pending.get(session_key)
+        entries = queue if isinstance(queue, list) else [queue] if queue else []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            ids = {
+                str(entry.get("approval_id") or "").strip(),
+                str(entry.get("prompt_id") or "").strip(),
+                str(entry.get("request_id") or "").strip(),
+            }
+            if not (ids & wanted):
+                continue
+            # The same prompt id may describe a different command at a newer
+            # execution generation, so the markers are only recoverable for the
+            # very same prompt: same run, same generation, and a generation
+            # this side knows on both.
+            if wanted_run_id:
+                entry_run_id = str(entry.get("run_id") or "").strip()
+                if entry_run_id and entry_run_id != wanted_run_id:
+                    continue
+            if type(execution_generation) is int:
+                entry_generation = entry.get(_GATEWAY_EXECUTION_GENERATION)
+                if type(entry_generation) is not int:
+                    continue
+                if entry_generation != execution_generation:
+                    continue
+            else:
+                # An unknown generation cannot be proven to be the same
+                # prompt, and a newer generation may be a different command.
+                if entry.get(_GATEWAY_EXECUTION_GENERATION) is not None:
+                    continue
+            for key in entry.get("pattern_keys") or []:
+                key = str(key or "").strip()
+                if key and key not in pattern_keys:
+                    pattern_keys.append(key)
+            if not pattern_keys:
+                single = str(entry.get("pattern_key") or "").strip()
+                if single:
+                    pattern_keys.append(single)
+            surface = surface or str(entry.get("surface") or "").strip()
+        if (
+            not pattern_keys
+            and not surface
+            and wanted_run_id
+            and type(execution_generation) is int
+        ):
+            # The prompt may have been settled before this projection arrived;
+            # the markers then live in the answered-prompt table, not the queue.
+            for identifier in wanted:
+                cached = _answered_approval_markers.get(
+                    (session_key, wanted_run_id, identifier, execution_generation)
+                )
+                if cached is not None:
+                    pattern_keys, surface = list(cached[0]), cached[1]
+                    break
+    return pattern_keys, surface
 
 
 def _normalize_pending_queue_locked(session_key: str) -> list[dict]:
@@ -1205,7 +1453,13 @@ def resolve_gateway_pending_local_all(
     choice: str,
     reason: str | None = None,
 ) -> tuple[int, dict | None, int]:
-    """Resolve every parked local/no-run approval without touching remote runs."""
+    """Resolve every parked local/no-run approval without touching remote runs.
+
+    Protected consent prompts (elicitation / publish, ``is_protected_approval``)
+    are retained unpublished-for-answer instead of drained: the YOLO auto-answer
+    behind this drain must not sweep one up, whichever ordinary command
+    triggered the drain (#9108).
+    """
     targets = []
     removed_pending = False
     with _lock:
@@ -1215,7 +1469,7 @@ def resolve_gateway_pending_local_all(
         retained_gateway_queue = []
         for entry in gateway_queue:
             data = getattr(entry, "data", None) or {}
-            if str(data.get("run_id") or "").strip():
+            if str(data.get("run_id") or "").strip() or is_protected_approval(data):
                 retained_gateway_queue.append(entry)
             else:
                 targets.append(entry)
@@ -1229,8 +1483,11 @@ def resolve_gateway_pending_local_all(
         retained_pending = [
             entry
             for entry in entries
-            if _is_gateway_mirror_entry(entry)
-            and str(entry.get("run_id") or "").strip()
+            if (
+                _is_gateway_mirror_entry(entry)
+                and str(entry.get("run_id") or "").strip()
+            )
+            or is_protected_approval(entry)
         ]
         removed_pending = len(retained_pending) != len(entries)
         if retained_pending:
@@ -1261,7 +1518,7 @@ def settle_gateway_pending_local_notification(
     """
     with gateway_yolo_handoff(session_key):
         run_id = str((approval or {}).get("run_id") or "").strip()
-        if not run_id and is_session_yolo_enabled(session_key):
+        if not run_id and may_auto_answer_approval(approval) and is_session_yolo_enabled(session_key):
             _resolved, head, total = resolve_gateway_pending_local_all(
                 session_key,
                 "once",
