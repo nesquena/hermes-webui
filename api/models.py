@@ -10490,17 +10490,23 @@ def import_cli_session(
     created_at=None,
     updated_at=None,
     parent_session_id=None,
+    workspace=None,
 ):
     """Create a new WebUI session populated with CLI/agent messages.
 
     Preserve parent_session_id from state.db so imported continuation segments
     keep their lineage in the WebUI store and sidebar instead of reappearing as
     detached orphan chats.
+
+    *workspace* lets a caller that already resolved the session's own directory
+    (the #8061 aged-out claim path) persist it instead of the generic
+    last-workspace fallback; it stays optional so every existing caller keeps
+    the old behaviour.
     """
     s = Session(
         session_id=session_id,
         title=title,
-        workspace=get_last_workspace(profile=profile),
+        workspace=workspace or get_last_workspace(profile=profile),
         model=model,
         messages=messages,
         profile=profile,
@@ -12741,11 +12747,11 @@ def get_cli_session_by_id(
     """Resolve one ``source_filter`` session by id, outside any recency window.
 
     The sidebar views are bounded by recency, so a session the user explicitly
-    opens can sit outside every one of them (an older one-shot run, #8265). This
-    reads exactly that row from the active profile's state.db, or from every
-    profile's when ``all_profiles`` is set, through the same projection the
-    sidebar uses, so the row carries the same profile, workspace and project
-    fields. Returns {} when no profile owns it.
+    opens can sit outside every one of them (an older one-shot run, #8265, or an
+    aged-out Desktop/TUI/CLI session, #8061). This reads exactly that row from the
+    active profile's state.db, or from every profile's when ``all_profiles`` is
+    set, through the same projection the sidebar uses, so the row carries the
+    same profile, workspace and project fields. Returns {} when no profile owns it.
     """
     sid = str(session_id or '').strip()
     source = _normalize_cli_session_source_filter(source_filter)
@@ -12765,6 +12771,7 @@ def get_cli_session_by_id(
                 source_filter=source,
                 include_claude_code=False,
                 session_ids=(sid,),
+                visible_session_limit=1,
             )
         except (OSError, sqlite3.Error):
             logger.debug("Explicit CLI session lookup skipped profile %s", ctx_profile, exc_info=True)

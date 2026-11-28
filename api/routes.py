@@ -7288,8 +7288,26 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False,
         _apply_source_meta(s)
         s.save(touch_updated_at=False)
     else:
-        # Regular CLI/agent sessions: import full message history
-        msgs = get_cli_session_messages(sid, profile=cli_meta.get("profile"))
+        # Regular CLI/agent sessions: import full message history. A local
+        # interactive source is resolved through the claim/synthesis path first,
+        # so the ownership verdict is enforced and the workspace comes from the
+        # row's own persisted cwd instead of get_last_workspace() (#8470
+        # review). Non-local families keep the plain import: cron/gateway rows
+        # are materialized for display and are not claimed here.
+        _resolved_workspace = None
+        _import_source = (
+            cli_meta.get("source_tag") or cli_meta.get("raw_source") or ""
+        ).strip().lower()
+        if _import_source in _CLI_LOOKUP_BY_ID_SOURCES:
+            synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta)
+            if reason == "not_claimable":
+                raise PermissionError("read-only imported session")
+            if reason != "materialized" or synth is None:
+                raise KeyError(sid)
+            _resolved_workspace = getattr(synth, "workspace", None)
+            msgs = list(getattr(synth, "messages", None) or [])
+        else:
+            msgs = get_cli_session_messages(sid, profile=cli_meta.get("profile"))
         if not msgs:
             raise KeyError(sid)
         s = import_cli_session(
@@ -7300,6 +7318,7 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False,
             profile=cli_meta.get("profile"),
             created_at=cli_meta.get("created_at"),
             updated_at=cli_meta.get("updated_at"),
+            workspace=_resolved_workspace,
         )
         _apply_source_meta(s)
 
@@ -11622,6 +11641,15 @@ _CLI_LOOKUP_FALLBACK_SOURCES = tuple(
     source for source in _INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES
     if source not in _BACKGROUND_CLI_SOURCES
 )
+# Local interactive sources the recency window CAPS rather than excludes: they
+# stay in the default projection, but once enough newer runs exist a session the
+# user explicitly opens sits past CLI_VISIBLE_SESSION_LIMIT and the enumeration
+# alone 404s it. Listing them here routes the by-id lookup through the exact
+# probe, which has no window at all (#8061).
+_CLI_AGED_OUT_LOOKUP_SOURCES = ("desktop", "tui", "cli", "acp")
+_CLI_LOOKUP_BY_ID_SOURCES = tuple(
+    dict.fromkeys(_CLI_LOOKUP_FALLBACK_SOURCES + _CLI_AGED_OUT_LOOKUP_SOURCES)
+)
 
 
 def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False) -> dict:
@@ -11648,7 +11676,7 @@ def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False)
         for row in get_cli_sessions(all_profiles=all_profiles):
             if row.get("session_id") == session_id:
                 return row
-        for source in _CLI_LOOKUP_FALLBACK_SOURCES:
+        for source in _CLI_LOOKUP_BY_ID_SOURCES:
             row = get_cli_session_by_id(session_id, source, all_profiles=all_profiles)
             if row:
                 return row
@@ -12110,7 +12138,7 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
             cli_meta["title"] = state_db_row["title"]
         if not cli_meta.get("model") and state_db_row.get("model"):
             cli_meta["model"] = state_db_row["model"]
-        if not cli_meta.get("workspace") and state_db_row.get("cwd"):
+        if state_db_row.get("cwd"):
             cli_meta["workspace"] = state_db_row["cwd"]
         # Map state.db timestamps to created_at/updated_at on the
         # synthesized Session.  Without this, the first POST writes
