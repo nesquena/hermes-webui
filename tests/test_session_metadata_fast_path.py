@@ -72,7 +72,8 @@ def test_boot_does_not_block_session_restore_on_model_catalog():
 
     assert "if(s.default_model){" in src
     assert "window._defaultModel=s.default_model;" in src
-    assert "const _hydrateModelDropdown=({redirectIfUnauth=null}={})=>populateModelDropdown({" in src
+    assert "const _hydrateModelDropdown=({redirectIfUnauth=null, preferProfileDefaultOnFreshBoot=false}={})" in src
+    assert "preferProfileDefaultOnFreshBoot:true" in src
     assert "window._modelDropdownReady=null;" in src
     assert "window._startBootModelDropdown=_startBootModelDropdown;" in src
     assert "window._ensureModelDropdownReady=_startModelDropdown;" in src
@@ -109,11 +110,14 @@ def test_failed_boot_model_catalog_prime_is_retryable():
     src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
     # #2726 parameterized the call: populateModelDropdown({preferProfileDefaultOnFreshBoot:true})
     # Match either signature shape — empty args (legacy) OR opts arg (post-#2726).
-    needle = "const _hydrateModelDropdown=({redirectIfUnauth=null}={})=>populateModelDropdown({"
+    needle = "const _hydrateModelDropdown=({redirectIfUnauth=null, preferProfileDefaultOnFreshBoot=false}={})=>{"
     start = src.index(needle)
     end = src.index("const _startBootModelDropdown=()=>", start)
     block = src[start:end]
 
+    # The hydration stays a parameterized catalog prime (post-#2726 shape) even
+    # though #7399 wraps it in a block to track the promise identity.
+    assert "populateModelDropdown({" in block
     assert "window._modelDropdownReady=null;" in block
     assert "throw e;" in block
 

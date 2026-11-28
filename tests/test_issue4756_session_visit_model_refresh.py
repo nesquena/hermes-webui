@@ -666,8 +666,15 @@ def test_populate_model_dropdown_accepts_session_visit_freshness_and_guards_stal
     assert "modelsUrl.searchParams.set('freshness',opts.freshness)" in body
     assert "const requestSeq=++_modelDropdownRequestSeq" in body
     assert body.count("requestSeq!==_modelDropdownRequestSeq") >= 3
-    assert "_fetchLiveModels(data.active_provider, sel, requestSeq)" in body
-    assert live_tail.count("requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq") >= 4
+    # #7399: the live fetch also receives the request's profile owner, so a
+    # reply from the previous profile cannot land on the new one.
+    assert "_fetchLiveModels(data.active_provider, sel, requestSeq, requestedProfile)" in body
+    # #7399 coalesced the live fetch behind a shared in-flight promise: the seq
+    # check runs at entry, on the cached branch and after the shared await, and
+    # both reply paths additionally compare the profile owner, so a reply from
+    # the previous profile cannot land on the new one.
+    assert live_tail.count("requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq") >= 3
+    assert live_tail.count("S.activeProfile!==currentProfile") >= 2
 
 
 def test_load_session_schedules_session_visit_model_refresh_before_message_load():

@@ -7340,7 +7340,11 @@ function _maybeReplayChatTodosRailSync(){
 }
 
 function _refreshProfileSwitchBackground(gen){
-  window._modelDropdownReady=null;
+  if (typeof window !== 'undefined' && typeof window._trackModelCatalogHydration === 'function') {
+    window._trackModelCatalogHydration(null);
+  } else {
+    window._modelDropdownReady = null;
+  }
   if (typeof window._ensureModelDropdownReady === 'function') {
     Promise.resolve(window._ensureModelDropdownReady()).catch(()=>{});
   }
@@ -7865,6 +7869,17 @@ async function switchToProfile(name) {
     if (typeof _clearEmptyComposerModelOverride === 'function') _clearEmptyComposerModelOverride();
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    // The model catalog owner is per-profile: drop the previous profile's
+    // hydration cache the instant the identity changes, so a picker opened
+    // during the awaited work below cannot join it.
+    if (typeof window !== 'undefined' && typeof window._trackModelCatalogHydration === 'function') {
+      window._trackModelCatalogHydration(null);
+    }
+    if (typeof bumpModelDropdownRequestSeq === 'function') {
+      bumpModelDropdownRequestSeq();
+    } else if (typeof window !== 'undefined' && typeof window.bumpModelDropdownRequestSeq === 'function') {
+      window.bumpModelDropdownRequestSeq();
+    }
     // The switch's optimistic chip already claims the new profile, but the
     // localStorage hidden_tabs / tab_order mirror still holds the PREVIOUS
     // profile's snapshot until _refreshProfileSwitchBackground()'s
@@ -13291,7 +13306,8 @@ function _refreshModelDropdownsAfterProviderChange(){
     // dropdown rebuild. The composer/Settings dropdowns will catch up
     // on the very next paint frame.
     if(typeof window._ensureModelDropdownReady==='function'){
-      window._modelDropdownReady=null;
+      if(typeof window!=='undefined'&&typeof window._trackModelCatalogHydration==='function') window._trackModelCatalogHydration(null);
+      else window._modelDropdownReady=null;
       Promise.resolve(window._ensureModelDropdownReady()).catch(()=>{});
     }else if(typeof populateModelDropdown==='function'){
       Promise.resolve(populateModelDropdown()).catch(()=>{});

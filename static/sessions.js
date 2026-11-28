@@ -2719,6 +2719,7 @@ async function _switchProfileForSessionLoad(profile){
     }
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
     S.activeProfile=data.active||name;
+    if(typeof window!=='undefined'&&typeof window._trackModelCatalogHydration==='function') window._trackModelCatalogHydration(null);
     S.activeProfileIsDefault=!!data.is_default;
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
@@ -3215,7 +3216,13 @@ async function loadSession(sid){
         if(!isActiveModelRefreshSession()) return undefined;
         return populateModelDropdown({freshness:'session_visit'});
       }).catch(()=>{});
-      if(typeof window!=='undefined') window._modelDropdownReady=modelRefreshPromise;
+      if(typeof window!=='undefined'){
+        if(typeof window._trackModelCatalogHydration==='function'){
+          window._trackModelCatalogHydration(modelRefreshPromise);
+        }else{
+          window._modelDropdownReady=modelRefreshPromise;
+        }
+      }
     }
   }
   if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
