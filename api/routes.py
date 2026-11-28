@@ -12730,14 +12730,74 @@ def _display_exact_owner_positions(session, messages):
     }
 
 
-def _display_projected_owner_positions(source_messages, messages, source_owners):
-    """Compose saved-to-source positions with an exact-object display projection."""
+def _display_projected_owner_positions(source_messages, messages, source_owners, aliases=None):
+    """Compose saved-to-source positions with an exact-object display projection.
+
+    ``aliases`` maps the object id of a saved row the display merge deduped
+    (kept the other source's copy) to the row that survived.  Only rows the
+    merge actually replaced are aliased: rows that were never compared are
+    not ownership, so an absent owner stays unmapped (the card is dropped).
+    """
     projected = {id(row): index for index, row in enumerate(messages)}
-    return {
-        owner: projected[id(source_messages[index])]
-        for owner, index in source_owners.items()
-        if 0 <= index < len(source_messages) and id(source_messages[index]) in projected
-    }
+    resolved = {}
+    for owner, index in source_owners.items():
+        if not 0 <= index < len(source_messages):
+            continue
+        row = source_messages[index]
+        seen = set()
+        while aliases and id(row) in aliases and id(row) not in seen:
+            seen.add(id(row))
+            row = aliases[id(row)]
+        position = projected.get(id(row))
+        if position is not None:
+            resolved[owner] = position
+    return resolved
+
+
+def _display_deduped_owner_aliases(sidecar_messages, merged_messages):
+    """Map a saved row that lost the display dedupe to the row that survived.
+
+    The CLI-dominant display merge keeps the first row per
+    ``_session_message_merge_key`` (role, content, exact timestamp,
+    tool_calls), so a shared row can survive only as the state.db copy.
+    That is duplicate correspondence, not lookalike equality: rows already
+    present by identity are skipped and only keys that survived in the
+    merged list are aliased.
+    """
+    present = {id(row) for row in merged_messages}
+    survivor_by_key = {}
+    for row in merged_messages:
+        if isinstance(row, dict):
+            survivor_by_key.setdefault(_session_message_merge_key(row), row)
+    aliases = {}
+    for row in sidecar_messages:
+        if not isinstance(row, dict) or id(row) in present:
+            continue
+        survivor = survivor_by_key.get(_session_message_merge_key(row))
+        if survivor is not None and id(survivor) != id(row):
+            aliases[id(row)] = survivor
+    return aliases
+
+
+def _display_messaging_owner_positions(session, merged_messages):
+    """Saved-row positions for the messaging display merge.
+
+    The lineage composition supplies saved-to-sidecar positions and the
+    duplicate aliases supply the rows the merge replaced, so a nonempty
+    identity map is never treated as complete.
+    """
+    lineage_owners = {}
+    sidecar_messages = _webui_sidecar_lineage_messages_for_display(
+        session, owner_positions=lineage_owners
+    )
+    if not lineage_owners:
+        return {}
+    return _display_projected_owner_positions(
+        sidecar_messages,
+        merged_messages,
+        lineage_owners,
+        aliases=_display_deduped_owner_aliases(sidecar_messages, merged_messages),
+    )
 
 
 def _display_rebased_tool_calls(tool_calls, owner_positions):
@@ -13653,12 +13713,37 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     if cli_messages:
         if sidecar_messages and sidecar_messages != cli_messages:
             if len(sidecar_messages) >= len(cli_messages):
+                # Sidecar-dominant merge: keep the watermark-aware append-only
+                # path so deleted/edited/undone turns stay dead (#2914/#4767).
+                # The single relaxation (#6637): when the session has NO
+                # truncation watermark/boundary, state.db rows the
+                # (stale/partial) sidecar never observed must not be dropped
+                # just because their timestamp sits at-or-below the sidecar's
+                # newest row — they are legitimate CLI-origin messages that
+                # were visible during prompt execution and must survive turn
+                # completion.  They are inserted chronologically by the merge.
+                # However, the messaging caller cannot supply the journal
+                # proof (incoming_provenance / cancelled_journal_owner_messages),
+                # so the relaxed path is disabled whenever the session carries
+                # cancelled-journal state (#6638).
                 return merge_session_messages_append_only(
                     sidecar_messages,
                     cli_messages,
                     truncation_watermark=getattr(session, "truncation_watermark", None),
                     truncation_boundary=getattr(session, "truncation_boundary", None),
+                    keep_state_rows_missing_from_sidecar=(
+                        getattr(session, "truncation_watermark", None) in (None, "")
+                        and getattr(session, "truncation_boundary", None) in (None, "")
+                        and _cancelled_journal_turn_owner(
+                            getattr(session, "messages", None) or [],
+                            include_live_partial=True,
+                        )
+                        is None
+                    ),
                 )
+            # CLI-dominant merge: state.db has rows the sidecar has not caught
+            # up to yet.  Chronological order keeps CLI lineage interleaved
+            # with sidecar rows instead of rendering it after the sidecar tail.
             merged_messages = []
             seen_message_keys = set()
             for msg in sorted(list(cli_messages) + list(sidecar_messages), key=lambda m: (
@@ -13672,6 +13757,7 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                 seen_message_keys.add(key)
                 merged_messages.append(msg)
             return merged_messages
+        # One source empty or they're identical — return whichever is non-empty
         return sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
     return sidecar_messages
 
@@ -17834,6 +17920,12 @@ def _handle_session_get(handler, parsed) -> bool:
                 # different slices of the same stitched conversation, merge
                 # them chronologically and dedupe exact repeats.
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
+                _messaging_owner_positions = _display_messaging_owner_positions(s, _all_msgs)
+                if _display_owner_positions is None:
+                    if _messaging_owner_positions:
+                        _display_owner_positions = _messaging_owner_positions
+                else:
+                    _display_owner_positions.update(_messaging_owner_positions)
             elif msg_limit is not None:
                 if _display_cache_hit is not None:
                     _all_msgs = _display_cache_hit
@@ -17895,6 +17987,12 @@ def _handle_session_get(handler, parsed) -> bool:
         else:
             if is_messaging_session and cli_messages:
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
+                _messaging_owner_positions = _display_messaging_owner_positions(s, _all_msgs)
+                if _display_owner_positions is None:
+                    if _messaging_owner_positions:
+                        _display_owner_positions = _messaging_owner_positions
+                else:
+                    _display_owner_positions.update(_messaging_owner_positions)
             else:
                 if metadata_summary is None:
                     metadata_summary = _message_summary(getattr(s, "messages", []) or [])
