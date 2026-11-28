@@ -8,6 +8,7 @@ api.run_journal.SSE_RELAY_CLOSE_EVENTS.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from api.run_journal import SSE_RELAY_CLOSE_EVENTS, TERMINAL_SSE_EVENTS
@@ -36,8 +37,19 @@ def test_routes_relay_loops_import_sse_relay_close_events():
 
 def test_cancel_drop_list_allows_apperror_not_phantom_error():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
-    assert "event not in ('cancel', 'apperror')" in src
-    assert "event not in ('cancel', 'error')" not in src
+    # The exemption tuple legitimately carries more control frames than the
+    # original pair (``compressed`` joined it with the writeback-claim change),
+    # so the invariant is the membership, not one frozen literal: apperror is
+    # exempt from the cancel-drop gate and the phantom ``error`` name is not.
+    gates = [
+        {name.strip().strip("'\"") for name in body.split(",")}
+        for body in re.findall(r"event not in \(([^)]*)\)", src)
+    ]
+    assert gates, "the cancel-drop gate must exist in api/streaming.py"
+    exempt = next((gate for gate in gates if "apperror" in gate), None)
+    assert exempt is not None, "apperror must survive the cancel drop gate"
+    assert "cancel" in exempt
+    assert "error" not in exempt, "the phantom error name must not be exempted"
 
 
 def test_apperror_terminates_relay_close_predicate():
