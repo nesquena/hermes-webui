@@ -106,25 +106,102 @@ def _replace_md_file_refs(seg: str, *, image: bool) -> str:
     tail = _IMAGE_TAIL if image else _LINK_TAIL
     opener = "![" if image else "["
     out, pos, scan = [], 0, 0
+    bracket_cursor = 0
+    last_close = -1
+    opener_cursor = 0
+    next_paren = -1
     while True:
         try:
             j = seg.index("](file://", scan)
         except ValueError:
             break
-        if seg.find(")", j) == -1:
-            break
-        m = tail.match(seg, j + 2)
-        prev_close = seg.rfind("]", pos, j)
-        start = pos if prev_close == -1 else prev_close + 1
-        k = seg.find(opener, start, j) if m else -1
-        if not m or k < 0 or (not image and j == k + 1):
+        if bracket_cursor < pos:
+            bracket_cursor = pos
+            last_close = -1
+        while True:
+            nb = seg.find("]", bracket_cursor, j)
+            if nb == -1:
+                break
+            last_close = nb
+            bracket_cursor = nb + 1
+        bracket_cursor = max(bracket_cursor, j)
+        start = pos if last_close < pos else last_close + 1
+
+        search_from = max(opener_cursor, start)
+        k = seg.find(opener, search_from, j) if search_from < j else -1
+        if k < 0:
+            opener_cursor = max(opener_cursor, j)
+            last_close = j
+            bracket_cursor = max(bracket_cursor, j + 1)
             scan = j + 1
             continue
+
+        opener_cursor = k
+        if not image and j == k + 1:
+            last_close = j
+            bracket_cursor = max(bracket_cursor, j + 1)
+            opener_cursor = max(opener_cursor, j)
+            scan = j + 1
+            continue
+
+        if next_paren < j:
+            next_paren = seg.find(")", j)
+            if next_paren == -1:
+                break
+        m = tail.match(seg, j + 2)
+        if not m:
+            last_close = j
+            bracket_cursor = max(bracket_cursor, j + 1)
+            opener_cursor = max(opener_cursor, j)
+            scan = j + 1
+            continue
+
         out.append(seg[pos:k])
         out.append(_PLACEHOLDER)
         pos = scan = m.end()
+        last_close = -1
+        bracket_cursor = max(bracket_cursor, pos)
+        opener_cursor = max(opener_cursor, pos)
     out.append(seg[pos:])
     return "".join(out)
+
+
+_STASH_TOKEN_RE = re.compile(r"\x00([RMIF])(\d+)\x00")
+
+
+def _restore_stash_tokens(seg: str, tables: dict[str, list[str]]) -> str:
+    """Restore stash markers, expanding markers nested inside stashed text.
+
+    Stashing runs fences → inline code → math → raw ``<pre>``, so a later stash
+    can capture an earlier family's marker (a code span inside inline math, a
+    math span inside a raw ``<pre>``). Every entry is expanded once and
+    memoized, so the restored text never carries an internal marker and the
+    total work stays linear in the message size.
+    """
+    cache: dict[tuple[str, int], str] = {}
+
+    def expand(family: str, idx: int, depth: int = 0) -> str | None:
+        items = tables.get(family)
+        if items is None or not 0 <= idx < len(items):
+            return None
+        key = (family, idx)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        if depth > 64:  # the marker graph is a DAG ordered by stash time
+            return None
+        value = _STASH_TOKEN_RE.sub(
+            lambda inner: expand(inner[1], int(inner[2]), depth + 1) or inner[0],
+            items[idx],
+        )
+        cache[key] = value
+        return value
+
+    def replace(m: re.Match) -> str:
+        value = expand(m[1], int(m[2]))
+        return m[0] if value is None else value
+
+    return _STASH_TOKEN_RE.sub(replace, seg)
 
 
 def _strip_media_references(text: str) -> str:
@@ -374,22 +451,13 @@ def _strip_media_references(text: str) -> str:
                 seg,
             )
 
-        # (6) Restore stashed regions
-        _tables = {
-            "R": _raw_pre,
-            "M": _math,
-            "I": _inline,
-            "F": _fenced,
-        }
-
-        def _restore_stash(m: re.Match, _tables=_tables) -> str:
-            lst = _tables.get(m[1])
-            idx = int(m[2])
-            if lst is not None and 0 <= idx < len(lst):
-                return lst[idx]
-            return m[0]
-
-        seg = re.sub(r"\x00([RMIF])(\d+)\x00", _restore_stash, seg)
+        # (6) Restore stashed regions. Stashing order is fences → inline code →
+        # math → raw <pre>, so a later stash can capture an earlier family's
+        # marker; the helper expands nested markers so none survives.
+        seg = _restore_stash_tokens(
+            seg,
+            {"R": _raw_pre, "M": _math, "I": _inline, "F": _fenced},
+        )
 
         segments[k][0] = seg
 

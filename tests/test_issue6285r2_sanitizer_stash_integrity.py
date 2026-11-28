@@ -109,6 +109,25 @@ def test_restore_cost_stays_linear_in_stashed_spans():
     assert large < max(small * 10, 0.5), (small, large)
 
 
+def test_file_ref_scan_stays_linear_under_failed_candidates():
+    def _elapsed(n: int) -> tuple[float, str]:
+        text = "](file://x " * n + "[ok](file:///end)"
+        start = time.perf_counter()
+        out = _public_get(text)
+        elapsed = time.perf_counter() - start
+        return elapsed, out
+
+    _elapsed(1_500)  # warm up
+    small, _ = _elapsed(6_000)
+    large, out = _elapsed(24_000)
+    assert _PLACEHOLDER in out
+    assert "[ok]" not in out
+    assert "file:///end" not in out
+    assert out.endswith(_PLACEHOLDER)
+    assert large < 0.5, (small, large)
+    assert large < small * 10, (small, large)
+
+
 # ── 3. Inline math ───────────────────────────────────────────────────────────
 
 
@@ -134,6 +153,43 @@ def test_inline_math_preserved_on_public_get_too():
 
 
 # ── Controls: what must NOT change ───────────────────────────────────────────
+
+
+def test_nested_inline_code_inside_inline_math_is_returned_verbatim():
+    """A code span inside inline math is stashed twice; the inner token must resolve.
+
+    The renderer keeps this text inert, so the sanitizer has nothing to strip —
+    the output must be the input, not a leftover internal stash marker.
+    """
+    for text in ("$x `zqmark` y$", "\\( see `zqmark` \\)"):
+        out = _share(text)
+        assert "\x00" not in out, (text, out)
+        assert out == text, (text, out)
+
+
+def test_nested_display_math_inside_inline_math_is_returned_verbatim():
+    text = "a $b $$zqmark$$ c$ d"
+    out = _share(text)
+    assert "\x00" not in out, out
+    assert out == text, out
+
+
+def test_nested_inline_code_inside_raw_pre_is_returned_verbatim():
+    text = "<pre>a `zqmark` b</pre>"
+    out = _share(text)
+    assert "\x00" not in out, out
+    assert out == text, out
+
+
+def test_nested_markers_never_survive_the_public_get_path():
+    for text in (
+        "$x `zqmark` y$",
+        "<pre>a `zqmark` b</pre>",
+        "a $b $$zqmark$$ c$ d",
+    ):
+        out = _public_get(text)
+        assert "\x00" not in out, (text, out)
+        assert out == text, (text, out)
 
 
 def test_bare_file_url_prose_is_still_stripped():

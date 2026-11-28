@@ -77,6 +77,13 @@ _ANCHOR = '<a href="https://example.com/x y z">t</a>'
 _ALLOWED_ATTRIBUTES = {
     "src", "alt", "href", "title", "class", "loading", "target", "rel", "download",
     "id", "value", "data-katex", "data-mermaid-id", "data-raw", "data-lang",
+    # The production media chain wraps an image in a download card
+    # (`<span class="msg-artifact-image">` + link + svg icon). Its attributes
+    # are legitimate generated markup, not restored stash content: they stay
+    # allowed while the no-NUL / no-restored-markup checks keep applying.
+    "aria-label", "onclick", "aria-hidden", "viewbox", "width", "height",
+    "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin",
+    "d", "points", "x1", "y1", "x2", "y2",
 }
 
 _FORGED_OR_UNCLEANED = {
@@ -184,7 +191,9 @@ def test_autolink_href_ends_before_a_stash_token(driver_path, markdown, expected
 
 def test_bare_url_then_media_reference_keeps_the_media_after_the_link(driver_path):  # noqa: F811
     link = '<a href="https://example.com/a" target="_blank" rel="noopener">https://example.com/a</a>'
-    image = '<img class="msg-media-img" src="api/media?path=%2Ftmp%2Fa.png" alt="image" loading="lazy">'
+    image = (
+        '<span class="msg-artifact-image"><img class="msg-media-img" src="api/media?path=%2Ftmp%2Fa.png" alt="a.png" loading="lazy"><a class="msg-artifact-download" href="api/media?path=%2Ftmp%2Fa.png" download="a.png" title="Download" aria-label="Download" onclick="event.stopPropagation()"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg></a></span>'
+    )
     for separator in (" ", ""):
         html = _render(driver_path, "https://example.com/a" + separator + "MEDIA:/tmp/a.png")
         _plain_attribute_tags(html)
