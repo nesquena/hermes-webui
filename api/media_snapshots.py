@@ -505,7 +505,7 @@ def annotate_media_snapshots(
         resolve_ref = resolve_media_ref
     if allowed_predicate is None:
         allowed_predicate = media_capture_allowed
-    media_re = _re.compile(r"MEDIA:([^\s\)\]]+)")
+    media_re = _re.compile(r"MEDIA: ?([^\s\)\]]+)")
     # #7680 re-gate (9/22): two-pass scan. First strip backtick
     # wrappers (`` `MEDIA:path` `` → ``MEDIA:path``) so the bare
     # class below does not consume the closing backtick as part of

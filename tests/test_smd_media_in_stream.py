@@ -67,6 +67,8 @@ def _run_real_smd_media_cases() -> dict:
             _extract_js_function(MESSAGES_JS, "_smdMediaPrefixTail"),
             _extract_js_function(MESSAGES_JS, "_smdAppendPlainText"),
             _extract_js_function(MESSAGES_JS, "_smdMediaWriteText"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaRestoreRaw"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaProtectSpaceRuns"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailSet"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailEntryChunk"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailSameOwner"),
@@ -94,6 +96,9 @@ def _run_real_smd_media_cases() -> dict:
         "globalThis.requestAnimationFrame = cb => cb();\n"
         "const _MEDIA_TAIL_MAX = 4096;\n"
         "const _SMD_MEDIA_PREFIX = 'MEDIA:';\n"
+        "const _SMD_MEDIA_PROTECTED_SPACE = '\\u0001';\n"
+        "const _SMD_MEDIA_DEAD_MARK = '\\u0002';\n"
+        "const _SMD_MEDIA_RAW_SPACE_STATE = new WeakMap();\n"
         "const _SMD_MEDIA_TAIL = new WeakMap();\n"
         "const __SMD_PARSER_FALLBACK = {};\n"
         "const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|message:|\\/|#|\\?|\\.|api|session\\/)/i;\n"
@@ -197,7 +202,12 @@ def _run_real_smd_media_cases() -> dict:
         "  const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);\n"
         "  const parser=smd.parser(renderer);\n"
         "  _smdBindParserIdentity(renderer, parser, root);\n"
-        "  for(const chunk of chunks) smd.parser_write(parser, chunk);\n"
+        "  // Production feeds the parser through _smdWrite, which protects raw\n"
+        "  // MEDIA: space runs (U+0001 substitution) before each write; mirror\n"
+        "  // that here so the harness exercises the real tokenizer interaction.\n"
+        "  let acc='';\n"
+        "  let fedLen=0;\n"
+        "  for(const chunk of chunks){ acc+=chunk; const fed=_smdMediaProtectSpaceRuns(parser, acc, fedLen); smd.parser_write(parser, fed); fedLen=acc.length; }\n"
         "  smd.parser_end(parser);\n"
         "  _smdMediaTailFlush(parser);\n"
         "  _smdMediaTailClear(parser);\n"
@@ -261,6 +271,29 @@ def _run_real_smd_media_cases() -> dict:
         "const realParserSplitSweeps={\n"
         "  wrappedPunctuation:sweepModesWithSettled('**MEDIA:/tmp/chart.png!** '),\n"
         "};\n"
+        "const spaceTolerance={\n"
+        "  doubleSpaceSingleWrite:renderModes(['MEDIA:  /tmp/chart.png ']),\n"
+        "  doubleSpaceInProse:renderModes(['Here you go.\\n\\nMEDIA:  /tmp/chart.png\\n\\nEnjoy.']),\n"
+        "  doubleSpaceSplitBetween:renderModes(['MEDIA: ', ' /tmp/chart.png ']),\n"
+        "  doubleSpaceSplitAfter:renderModes(['MEDIA:  ', '/tmp/chart.png ']),\n"
+        "  tripleSpace:renderModes(['MEDIA:   /tmp/chart.png ']),\n"
+        "  doubleSpaceTailAcrossChunks:renderModes(['Here:\\n', 'MEDIA:  ', '/tmp/y.png ', 'done']),\n"
+        "  singleThenDouble:renderModes(['MEDIA: /tmp/good.png then MEDIA:  /tmp/bad.png done']),\n"
+        "  singleThenDoubleSplit:renderModes(['MEDIA: /tmp/good.png', ' then MEDIA:  /tmp/bad.png done']),\n"
+        "  doubleThenSingle:renderModes(['MEDIA:  /tmp/bad.png then MEDIA: /tmp/good.png done']),\n"
+        "  fencedDoubleSpaceExamples:renderModes(['```\\nMEDIA:  /tmp/a.png\\nMEDIA:  /tmp/b.png\\n```\\nthen MEDIA: /tmp/good.png done']),\n"
+        "  protectedPrefixSwallow:renderModes(['MEDIA:  MEDIA: /tmp/good.png done']),\n"
+        "  tightEmbeddedPrefix:renderModes(['MEDIA:  xMEDIA:/tmp/good.png done']),\n"
+        "  newlineJoin:renderModes(['MEDIA: \\n/tmp/good.png']),\n"
+        "  tightNewlineJoin:renderModes(['MEDIA:\\n/tmp/good.png']),\n"
+        "  tabJoin:renderModes(['MEDIA: \\t/tmp/good.png']),\n"
+        "  markerOnlyChunk:renderModes(['MEDIA:MEDIA:  ', 'y']),\n"
+        "  longRunOverflow:renderModes(['MEDIA:'+' '.repeat(4200)+'/tmp/bad.png ']),\n"
+        "  oneSpaceStillRenders:renderModes(['MEDIA: /tmp/chart.png ']),\n"
+        "  tightStillRenders:renderModes(['MEDIA:/tmp/chart.png ']),\n"
+        "  directDoubleSpace:renderDirectCallbacks(['MEDIA:  /tmp/chart.png ']),\n"
+        "  directDoubleSpaceSplit:renderDirectCallbacks(['MEDIA:  ', '/tmp/chart.png ']),\n"
+        "};\n"
         "const boundedOverflow=renderModes(['MEDIA:'+('a'.repeat(_MEDIA_TAIL_MAX))]);\n"
         "const boundaries={\n"
         "  bold:renderModes(['**MEDIA:/tmp/report.xlsx** ']),\n"
@@ -290,7 +323,7 @@ def _run_real_smd_media_cases() -> dict:
         "  remoteSuffixPunctuation.query[mark]=renderModes([`MEDIA:https://example.com/a.png?signature=value${mark} `]);\n"
         "  remoteSuffixPunctuation.fragment[mark]=renderModes([`MEDIA:https://example.com/a.png#section${mark} `]);\n"
         "}\n"
-        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent, completionBoundaries, callbackBoundaries, callbackSplitSweeps, realParserSplitSweeps, boundedOverflow, boundaries, punctuation, remoteSuffixPunctuation, literalRefs}));\n"
+        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent, completionBoundaries, callbackBoundaries, callbackSplitSweeps, realParserSplitSweeps, spaceTolerance, boundedOverflow, boundaries, punctuation, remoteSuffixPunctuation, literalRefs}));\n"
     )
     completed = subprocess.run(
         [NODE, "--input-type=module", "-e", script],
@@ -482,7 +515,7 @@ class TestSmdMediaInStream(unittest.TestCase):
         # Final parser shutdown is authoritative even when the token has no
         # trailing whitespace or other grammar delimiter.
         self.assertIn("function _smdMediaTailFlush", MESSAGES_JS)
-        self.assertIn("/^MEDIA:([^", MESSAGES_JS)
+        self.assertIn("/^MEDIA: ?([^", MESSAGES_JS)
         self.assertIn("_smdMediaTailFlush(_smdParser)", MESSAGES_JS)
 
     def test_tail_buffer_size_cap(self):
@@ -643,6 +676,141 @@ class TestSmdMediaRealParserBehaviour(unittest.TestCase):
             for mode, result in case["modes"].items():
                 with self.subTest(case=case_name, mode=mode):
                     self.assertEqual((result["ref"], result["remainder"]), expected)
+
+    def test_real_smd_parser_double_space_token_stays_literal_in_stream(self):
+        # The smd tokenizer collapses raw ``MEDIA:  <ref>`` (2+ spaces) to a
+        # single-spaced token before add_text, so the relaxed streaming grammar
+        # used to render a live card the settled renderMd (raw text) kept as
+        # prose — the preview vanished on settlement. Run protection marks the
+        # collapsed region (U+0001) before the tokenizer sees it, and the
+        # interceptor suppresses exactly the marked tokens.
+        for case_name in (
+            "doubleSpaceSingleWrite",
+            "doubleSpaceInProse",
+            "doubleSpaceSplitBetween",
+            "doubleSpaceSplitAfter",
+            "tripleSpace",
+            "doubleSpaceTailAcrossChunks",
+        ):
+            case = self.cases["spaceTolerance"][case_name]
+            for mode, result in case.items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIsNone(
+                        result["ref"],
+                        f"{case_name}/{mode}: a raw 2+-space MEDIA: run must not "
+                        "render a live card the settled render keeps as prose",
+                    )
+                    self.assertIn("MEDIA:", result["text"])
+                    self.assertNotIn("\x01", result["text"])
+
+    def test_real_smd_parser_suppression_is_per_token_in_both_orders(self):
+        # Regression guard for the first (ledger) approach: per-token evidence,
+        # not cross-token bookkeeping. A single-space token must render and a
+        # double-space token must stay literal IN EITHER ORDER, including when
+        # deltas split between them.
+        for case_name, good, bad in (
+            ("singleThenDouble", "/tmp/good.png", "/tmp/bad.png"),
+            ("singleThenDoubleSplit", "/tmp/good.png", "/tmp/bad.png"),
+            ("doubleThenSingle", "/tmp/good.png", "/tmp/bad.png"),
+        ):
+            case = self.cases["spaceTolerance"][case_name]
+            for mode, result in case.items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertEqual(
+                        result["ref"], good,
+                        f"{case_name}/{mode}: the single-space token must render",
+                    )
+                    self.assertNotIn(
+                        f'data-ref="{bad}"', result["html"],
+                        f"{case_name}/{mode}: the double-space token must stay literal",
+                    )
+
+    def test_real_smd_parser_fenced_double_space_examples_do_not_poison_later_tokens(self):
+        # Fenced code content bypasses the interceptor in fade mode; token
+        # evidence must never accumulate across tokens (the ledger approach
+        # poisoned every later legitimate card from unread examples).
+        case = self.cases["spaceTolerance"]["fencedDoubleSpaceExamples"]
+        for mode, result in case.items():
+            with self.subTest(mode=mode):
+                self.assertEqual(
+                    result["ref"], "/tmp/good.png",
+                    f"{mode}: only the legitimate single-space token renders",
+                )
+                self.assertNotIn('data-ref="/tmp/a.png"', result["html"])
+                self.assertNotIn('data-ref="/tmp/b.png"', result["html"])
+                self.assertNotIn("\x01", result["text"])
+
+    def test_real_smd_parser_space_tolerance_keeps_single_space_and_tight_forms(self):
+        for case_name in ("oneSpaceStillRenders", "tightStillRenders"):
+            case = self.cases["spaceTolerance"][case_name]
+            for mode, result in case.items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertEqual(
+                        result["ref"], "/tmp/chart.png",
+                        f"{case_name}/{mode}: the documented one-space and "
+                        "tight forms must keep rendering",
+                    )
+
+    def test_media_interceptor_without_raw_protection_rejects_double_space_grammar(self):
+        # Direct-callback callers (no real tokenizer) receive un-collapsed
+        # text; the interceptor's own grammar still rejects the two-space form
+        # because it never matches ``MEDIA: ?``.
+        for case_name in ("directDoubleSpace", "directDoubleSpaceSplit"):
+            result = self.cases["spaceTolerance"][case_name]
+            with self.subTest(case=case_name):
+                self.assertIsNone(result["ref"])
+                self.assertIn("MEDIA:  /tmp/chart.png", result["remainder"])
+
+    def test_real_smd_parser_protected_prefix_does_not_swallow_inner_token(self):
+        # A raw 2+-space run immediately followed by another MEDIA: prefix:
+        # the settled renderMd matches the INNER valid token, so the stream
+        # must render it too (the protected outer region can never match
+        # because U+0001 is excluded from every ref class).
+        for case_name in ("protectedPrefixSwallow", "tightEmbeddedPrefix"):
+            case = self.cases["spaceTolerance"][case_name]
+            for mode, result in case.items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertEqual(
+                        result["ref"], "/tmp/good.png",
+                        f"{case_name}/{mode}: the inner valid token must render",
+                    )
+                    self.assertNotIn("\x01", result["text"])
+                    self.assertIn("MEDIA:", result["text"])
+
+    def test_real_smd_parser_never_joins_ref_across_line_break_or_tab(self):
+        # The settled grammar never joins a ref across a newline/tab, but smd
+        # emits a structural break there; without the dead-mark the buffered
+        # 'MEDIA: ' tail joined the next chunk's ref into a live card. The
+        # dead-mark restores to NOTHING, so displayed text stays byte-exact
+        # with the raw source (no injected space before the break).
+        expectations = {
+            "newlineJoin": "MEDIA: /tmp/good.png",
+            "tightNewlineJoin": "MEDIA:/tmp/good.png",
+            "tabJoin": "MEDIA: \t/tmp/good.png",
+        }
+        for case_name, exact_text in expectations.items():
+            case = self.cases["spaceTolerance"][case_name]
+            for mode, result in case.items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIsNone(
+                        result["ref"],
+                        f"{case_name}/{mode}: a ref cannot join across a "
+                        "line break or tab",
+                    )
+                    self.assertIn(exact_text, result["text"])
+                    self.assertNotIn("\x01", result["text"])
+                    self.assertNotIn("\x02", result["text"])
+
+    def test_real_smd_parser_no_marker_leaks_through_fade_fallback_or_overflow(self):
+        # Marker-only chunks take the fade renderer's no-word fallback, and
+        # over-long runs overflow the tail buffer; neither may leak U+0001.
+        for case_name in ("markerOnlyChunk", "longRunOverflow"):
+            case = self.cases["spaceTolerance"][case_name]
+            for mode, result in case.items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertNotIn("\x01", result["text"])
+                    self.assertNotIn("\x01", result["html"])
+                    self.assertNotIn('data-ref="/tmp/bad.png"', result["html"])
 
     def test_media_add_text_callback_completion_matches_settled_parsing(self):
         for case_name, case in self.cases["callbackBoundaries"].items():

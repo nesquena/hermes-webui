@@ -30,7 +30,9 @@ def function_block(src: str, name: str) -> str:
     depth = 0
     in_string = None
     escape = False
-    for i in range(brace, len(src)):
+    i = brace
+    n = len(src)
+    while i < n:
         ch = src[i]
         if in_string:
             if escape:
@@ -39,9 +41,26 @@ def function_block(src: str, name: str) -> str:
                 escape = True
             elif ch == in_string:
                 in_string = None
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            # Line comment — but only outside regex literals: in /…\/\//i the
+            # "//" tail is preceded by an escape backslash, so a preceding
+            # backslash means regex content, not a comment.
+            p = i - 1
+            while p >= 0 and src[p] in " \t":
+                p -= 1
+            if p < 0 or src[p] != "\\":
+                nl = src.find("\n", i)
+                i = n if nl == -1 else nl + 1
+                continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            end = src.find("*/", i + 2)
+            i = n if end == -1 else end + 2
             continue
         if ch in "'`\"":
             in_string = ch
+            i += 1
             continue
         if ch == "{":
             depth += 1
@@ -49,6 +68,7 @@ def function_block(src: str, name: str) -> str:
             depth -= 1
             if depth == 0:
                 return src[start : i + 1]
+        i += 1
     raise AssertionError(f"{name}() closing brace not found")
 
 
