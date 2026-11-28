@@ -2810,6 +2810,32 @@
   .suggestion-grid{display:flex;flex-direction:column;gap:8px;margin-top:12px;width:100%;max-width:380px;}
   .suggestion{padding:12px 14px;background:var(--input-bg);border:1px solid var(--border);border-radius:10px;font-size:13px;color:var(--muted);cursor:pointer;transition:all .15s;text-align:left;}
   .suggestion:hover{background:var(--accent-bg);color:var(--text);border-color:var(--accent-bg);transform:translateX(2px);}
+  /* ── Inline follow-up suggestion buttons (SPEC-inline-suggestions.md) ──
+     The raw ```suggestions``` fence must never flash visible: suggestions.js
+     adds .suggestions-block-hidden to the <pre> (and its .pre-header, when
+     the static renderMd() pipeline emitted one) as early as possible. The
+     :has() rule below is a belt-and-suspenders fallback for browsers that
+     support it, scoped to the SAME validated marker class so an invalid
+     block (fail-safe) is never hidden by CSS alone. */
+  pre.suggestions-block-hidden,
+  .pre-header.suggestions-block-hidden{display:none!important;}
+  .msg-body pre:has(> code.suggestions-validated){display:none!important;}
+  .msg-body .pre-header:has(+ pre > code.suggestions-validated){display:none!important;}
+  .inline-suggestions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px;padding-left:30px;max-width:680px;}
+  .inline-suggestion-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:var(--radius-md);font-size:13px;font-family:inherit;cursor:pointer;transition:background .15s,border-color .15s,color .15s,opacity .15s;}
+  .inline-suggestion-btn.primary{background:var(--accent-bg);border:1px solid var(--accent-bg-strong);color:var(--accent-text);font-weight:600;}
+  .inline-suggestion-btn.primary:hover:not(:disabled){background:var(--accent-bg-strong);}
+  .inline-suggestion-btn.secondary{background:var(--surface);border:1px solid var(--border);color:var(--text);}
+  .inline-suggestion-btn.secondary:hover:not(:disabled){background:var(--accent-bg);border-color:var(--accent-bg-strong);}
+  .inline-suggestion-btn:disabled,
+  .inline-suggestion-btn[aria-disabled="true"]{opacity:.5;cursor:default;}
+  .inline-suggestion-btn:focus-visible{outline:none;box-shadow:0 0 0 2px var(--focus-ring);}
+  /* Alte Antworten sind keine gültige Antwort mehr — der Tastatur-Hinweis dort lügt. */
+  .inline-suggestions-stale .inline-suggestion-kbd{display:none;}
+  .inline-suggestion-kbd{display:inline-flex;align-items:center;justify-content:center;padding:1px 5px;border-radius:var(--radius-sm);font-size:10px;font-family:inherit;background:var(--surface-subtle);border:1px solid var(--border-subtle);color:inherit;opacity:.75;line-height:1.4;}
+  @media (hover:none) and (pointer:coarse){
+    .inline-suggestion-kbd{display:none;}
+  }
   /* ── Composer ── */
   .composer-wrap{padding:12px 20px 16px;background:var(--bg);flex-shrink:0;}
   .composer-box{max-width:clamp(780px,60vw,1100px);margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}

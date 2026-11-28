@@ -161,6 +161,7 @@ COMPOSER_DRAFT_HELPERS_SRC = "\n".join(
         "_composerDraftHasPayload",
         "_sessionComposerDraftHasPayload",
         "_rememberComposerDraftPayloadState",
+        "_flushForeignComposerDraftSave",
         "_saveComposerDraftNow",
         "_restoreComposerDraft",
         "_switchProfileForSessionLoad",
@@ -428,6 +429,7 @@ let _draftSaveTimer = null;
 let _draftSaveTimerSid = null;
 let _draftSaveTimerPayload = null;
 let _draftSaveTimerRev = 0;
+let _draftSaveFlush = null;
 const _composerDraftRevBySid = new Map();
 const _composerDraftLastPayloadBySid = new Map();
 const _DRAFT_SAVE_DELAY_MS = 400;

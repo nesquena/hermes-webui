@@ -39,6 +39,10 @@ let _draftSaveTimer = null;
 let _draftSaveTimerSid = null;
 let _draftSaveTimerPayload = null;
 let _draftSaveTimerRev = 0;
+// Fires the currently pending debounced save right away. Kept so a save for
+// ANOTHER chat can flush the pending one instead of dropping it: the 400 ms
+// timer is shared, and cancelling it blindly lost the other chat's autosave.
+let _draftSaveFlush = null;
 const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 const _composerDraftKnownPayloadSessions = new Set();
@@ -78,6 +82,18 @@ function _setComposerDraftLocalIntent(sid, text, files) {
 function _forgetComposerDraftLocalFallback(sid) {
   _composerDraftLatestIntentSequenceBySid.set(sid, ++_composerDraftIntentSequence);
   _composerDraftLocalFallbackBySid.delete(sid);
+}
+
+// Runs the pending debounced save now when it belongs to a DIFFERENT chat than
+// the one about to schedule/save. Without this the shared timer's clearTimeout
+// silently dropped the other chat's autosave (click a suggestion in chat A,
+// switch to B, type there, and A's late _saveComposerDraft cancelled B's save).
+function _flushForeignComposerDraftSave(sid) {
+  if (!_draftSaveTimer || _draftSaveTimerSid === sid) return;
+  const flush = _draftSaveFlush;
+  _draftSaveFlush = null;
+  if (typeof flush !== 'function') return;
+  try { flush(); } catch (_) {}
 }
 
 function _composerDraftFileSignature(file) {
@@ -257,7 +273,10 @@ async function _restoreRememberedNewChatDraftSession() {
 
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
+  _flushForeignComposerDraftSave(sid);
   clearTimeout(_draftSaveTimer);
+  _draftSaveTimer = null;
+  _draftSaveFlush = null;
   const normalizedText = String(text || '');
   const liveFiles = Array.isArray(files) ? files.filter(Boolean).slice() : [];
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -284,7 +303,12 @@ function _saveComposerDraft(sid, text, files) {
   const _restoredCont = (typeof _peekRestoredGoalContinuationDraft === 'function')
     ? _peekRestoredGoalContinuationDraft()
     : null;
-  _draftSaveTimer = setTimeout(() => {
+  // The timer callback is also kept in _draftSaveFlush so a save for a
+  // DIFFERENT chat can run it immediately instead of silently cancelling it.
+  _draftSaveTimer = setTimeout(_draftSaveFlush = () => {
+    clearTimeout(_draftSaveTimer);
+    _draftSaveTimer = null;
+    _draftSaveFlush = null;
     let _autosaveContId = '';
     if (_restoredCont && _restoredCont.id
         && String(_restoredCont.text || '').trim() === String(normalizedText || '').trim()) {
@@ -479,7 +503,10 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 // Immediate save used before session switches.
 function _saveComposerDraftNow(sid, text, files, goalContinuationId) {
   if (!sid) return Promise.resolve();
+  _flushForeignComposerDraftSave(sid);
   clearTimeout(_draftSaveTimer);
+  _draftSaveTimer = null;
+  _draftSaveFlush = null;
   const normalizedText = String(text || '');
   const liveFiles = Array.isArray(files) ? files.filter(Boolean).slice() : [];
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -601,7 +628,11 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
 function _clearComposerDraft(sid, text, files) {
   if (!sid) return;
   // The pending debounced save may belong to another session (e.g. after New Chat).
-  if (_draftSaveTimerSid === sid) clearTimeout(_draftSaveTimer);
+  if (_draftSaveTimerSid === sid) {
+    clearTimeout(_draftSaveTimer);
+    _draftSaveTimer = null;
+    _draftSaveFlush = null;
+  }
   _clearRememberedNewChatDraftSession(sid);
   if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
   else _suppressComposerDraftRestoreAfterSubmit(sid);
@@ -627,7 +658,11 @@ function _clearComposerDraft(sid, text, files) {
 function _clearComposerDraftIfUnchanged(sid, text, files, maxRev) {
   if (!sid) return Promise.resolve(false);
   if (_draftSaveTimerSid === sid && _draftSaveTimerRev <= Number(maxRev)
-      && _draftSaveTimerPayload === _composerDraftPayloadSignature(text, files)) clearTimeout(_draftSaveTimer);
+      && _draftSaveTimerPayload === _composerDraftPayloadSignature(text, files)) {
+    clearTimeout(_draftSaveTimer);
+    _draftSaveTimer = null;
+    _draftSaveFlush = null;
+  }
   const ifFiles = _composerDraftFilesForPersist(files);
   const ifSig = _composerDraftPayloadSignature(String(text || ''), ifFiles);
   // Join the per-session draft write chain so an earlier queued save cannot

@@ -29,7 +29,7 @@ class Server:
         if path == "/":
             html = (ROOT / "static/index.html").read_text(encoding="utf-8")
             html = (html.replace("__MAX_UPLOAD_BYTES__", "20971520").replace("__CSRF_TOKEN_JSON__", '""')
-                    .replace("__CSP_IMG_EXTRA_JSON__", "[]"))
+                    .replace("__CSP_IMG_EXTRA_JSON__", "[]").replace("__SUGGESTIONS_ENABLED__", "true"))
             r.fulfill(body=html, content_type="text/html")
         elif path == "/static/pwa-startup.js":
             r.fulfill(body="", content_type="application/javascript")
