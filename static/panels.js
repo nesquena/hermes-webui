@@ -3362,24 +3362,44 @@ function _kanbanStartEventStream(){
 
 let _kanbanRefreshScheduled = false;
 let _kanbanRefreshPendingTaskIds = new Set();
+let _kanbanRefreshInFlight = false;
+let _kanbanRefreshRerunPending = false;
 function _scheduleKanbanRefresh(events){
-  for (const ev of events) {
+  for (const ev of (events || [])) {
     if (ev && ev.task_id) _kanbanRefreshPendingTaskIds.add(ev.task_id);
+  }
+  if (_kanbanRefreshInFlight) {
+    _kanbanRefreshRerunPending = true;
+    return;
   }
   if (_kanbanRefreshScheduled) return;
   _kanbanRefreshScheduled = true;
   // 250ms debounce — keeps a burst of N events from triggering N reloads.
   setTimeout(async () => {
     _kanbanRefreshScheduled = false;
-    const taskIds = Array.from(_kanbanRefreshPendingTaskIds);
-    _kanbanRefreshPendingTaskIds.clear();
-    if (_currentPanel !== 'kanban') return;
+    if (_kanbanRefreshInFlight) {
+      _kanbanRefreshRerunPending = true;
+      return;
+    }
+    _kanbanRefreshInFlight = true;
     try {
-      await loadKanban(true);
-      if (_kanbanCurrentTaskId && taskIds.includes(_kanbanCurrentTaskId)) {
-        await loadKanbanTask(_kanbanCurrentTaskId);
+      while (true) {
+        _kanbanRefreshRerunPending = false;
+        const taskIds = Array.from(_kanbanRefreshPendingTaskIds);
+        _kanbanRefreshPendingTaskIds.clear();
+        if (_currentPanel !== 'kanban') break;
+        const animate = !(_kanbanBoard && Array.isArray(_kanbanBoard.columns) && _kanbanBoard.columns.length);
+        try {
+          await loadKanban(animate);
+          if (_kanbanCurrentTaskId && taskIds.includes(_kanbanCurrentTaskId)) {
+            await loadKanbanTask(_kanbanCurrentTaskId);
+          }
+        } catch(_) { /* swallow — SSE refresh shouldn't toast */ }
+        if (_currentPanel !== 'kanban' || !_kanbanRefreshRerunPending) break;
       }
-    } catch(_) { /* swallow — SSE refresh shouldn't toast */ }
+    } finally {
+      _kanbanRefreshInFlight = false;
+    }
   }, 250);
 }
 
@@ -7312,6 +7332,14 @@ function _openProfileDropdownShell(){
   if(chip && _profileDropdownTrigger===chip) chip.classList.add('active');
   const tbtn=$('titlebarProfileBtn');
   if(tbtn && _profileDropdownTrigger===tbtn) tbtn.classList.add('active');
+}
+
+function _restartVisiblePanelLoadForResolvedProfile(resolvedProfile){
+  if (!resolvedProfile || resolvedProfile === 'default' || typeof _profileSwitchPanelLoad !== 'function') {
+    return false;
+  }
+  Promise.resolve(_profileSwitchPanelLoad()).catch(()=>{});
+  return true;
 }
 
 async function _profileSwitchPanelLoad(){

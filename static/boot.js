@@ -4438,6 +4438,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if (activeProfileState.status === 'recovery-redirect') return;
   S.activeProfile = activeProfileState.profile;
   S.activeProfileIsDefault = activeProfileState.isDefault;
+  if (typeof _restartVisiblePanelLoadForResolvedProfile === 'function') {
+    _restartVisiblePanelLoadForResolvedProfile(S.activeProfile);
+  }
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
