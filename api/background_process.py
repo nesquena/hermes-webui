@@ -1112,6 +1112,16 @@ def _reaper_loop() -> None:
             from api.run_journal import maybe_sweep_run_journal
 
             maybe_sweep_run_journal()
+
+            # Targeted zombie reaping for gateway-restart children (#6145): poll
+            # only the ``Popen`` objects this process registered, so exit codes of
+            # unrelated children stay available to their synchronous callers.
+            try:
+                from api.gateway_restart import reap_stray_restart_processes
+
+                reap_stray_restart_processes()
+            except Exception:
+                pass
         except Exception:
             logger.warning("SessionChannel reaper iteration failed", exc_info=True)
         # Wait but wake up promptly on stop.
