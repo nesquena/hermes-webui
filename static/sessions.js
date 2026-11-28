@@ -2859,6 +2859,7 @@ async function loadSession(sid){
   if (currentSid !== sid && typeof _messageUserUnpinned !== 'undefined') {
     _messageUserUnpinned = false;
     _scrollPinned = true;
+    _messageFollowIntentCache = true;
   }
   stopApprovalPolling();hideApprovalCard(forceReload);
   if(typeof stopSessionStream==='function') stopSessionStream();
@@ -5556,6 +5557,7 @@ async function _loadOlderMessages() {
       }
     }
     _scrollPinned = false;
+    _messageFollowIntentCache = false;
   } catch(e) {
     console.warn('_loadOlderMessages failed:', e);
   } finally {
