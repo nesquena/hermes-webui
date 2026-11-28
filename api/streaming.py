@@ -14306,6 +14306,81 @@ def _terminal_backend_identity(runtime_env: dict | None = None) -> tuple[str, ..
     return tuple(identity)
 
 
+def _terminal_environment_creator_identity(env_obj: object) -> tuple[str, ...] | None:
+    """Return the identity tuple the environment object was created with, or None."""
+    try:
+        if env_obj is None:
+            return None
+        env_type = getattr(env_obj, 'env_type', None)
+        if not isinstance(env_type, str) or not env_type:
+            return None
+
+        env_dict: dict[str, object] = {'TERMINAL_ENV': env_type}
+        if env_type == 'ssh':
+            host = getattr(env_obj, 'host', None)
+            if host is not None:
+                env_dict['TERMINAL_SSH_HOST'] = host
+            user = getattr(env_obj, 'user', None)
+            if user is not None:
+                env_dict['TERMINAL_SSH_USER'] = user
+            port = getattr(env_obj, 'port', None)
+            if port is not None:
+                env_dict['TERMINAL_SSH_PORT'] = port
+            key_path = getattr(env_obj, 'key_path', None)
+            if key_path is not None:
+                env_dict['TERMINAL_SSH_KEY'] = key_path
+        elif env_type == 'docker':
+            image = getattr(env_obj, '_image', None)
+            if image is not None:
+                env_dict['TERMINAL_DOCKER_IMAGE'] = image
+        elif env_type == 'modal':
+            image = getattr(env_obj, '_image', None)
+            if image is not None:
+                env_dict['TERMINAL_MODAL_IMAGE'] = image
+        elif env_type == 'local':
+            pass
+
+        return _terminal_backend_identity(env_dict)
+    except Exception:
+        return None
+
+
+def _terminal_environment_creator_state(
+    env_obj: object, identity: tuple[str, ...] | dict | None
+) -> str:
+    """Compare creation evidence against the requesting identity slot by slot."""
+    try:
+        creator_id = _terminal_environment_creator_identity(env_obj)
+        if creator_id is None:
+            return 'unknown'
+
+        if isinstance(identity, dict):
+            req_id = _terminal_backend_identity(identity)
+        elif isinstance(identity, tuple):
+            req_id = identity
+        else:
+            return 'unknown'
+
+        if len(creator_id) != len(req_id):
+            return 'unknown'
+
+        has_unknown = False
+        for c_val, r_val in zip(creator_id, req_id, strict=True):
+            if r_val == '':
+                continue
+            if c_val != '':
+                if c_val != r_val:
+                    return 'mismatch'
+            else:
+                has_unknown = True
+
+        if has_unknown:
+            return 'unknown'
+        return 'match'
+    except Exception:
+        return 'unknown'
+
+
 def _terminal_tool_module():
     """Resolve the Agent terminal tool module, or None if unavailable."""
     try:
@@ -14361,13 +14436,15 @@ def _invalidate_stale_terminal_environments(identity: tuple[str, ...] | dict | N
                     recorded_env, recorded_identity = None, None
 
                 if recorded_env is None:
-                    # Pending expectation: the environment that appeared under this key was created
-                    # by the backend that displaced the previous one. Bind it to that backend only;
-                    # anything else found here is unverified and must be invalidated, never adopted.
-                    if recorded_identity == identity and active_envs.get(key) is inspected:
+                    # Decide ownership from creator evidence rather than request expectation (#9386 round 3).
+                    creator_state = _terminal_environment_creator_state(inspected, identity)
+                    if (
+                        (creator_state == 'match' or (creator_state == 'unknown' and recorded_identity == identity))
+                        and active_envs.get(key) is inspected
+                    ):
                         _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (inspected, identity)
                         continue
-                    # Otherwise the object belongs to another unverified backend and must be evicted.
+                    # Otherwise the object belongs to another backend or remains unverified; evict it.
                 elif recorded_env is inspected and recorded_identity == identity:
                     continue
 
