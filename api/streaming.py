@@ -14267,6 +14267,277 @@ def _agent_cache_api_key_sig(resolved_api_key, credential_pool) -> str:
     return _hashlib.sha256((resolved_api_key or '').encode()).hexdigest()[:16]
 
 
+# Terminal backend identity and environment cache synchronization (#6175, PR #6321).
+# The agent cache and terminal environment cache must share one fingerprint
+# so backend switches (e.g. SSH endpoint or container image) invalidate both;
+# rebuilding the agent alone would otherwise reuse the stale process-global backend.
+_TERMINAL_BACKEND_IDENTITY_FIELDS: tuple[str, ...] = (
+    'TERMINAL_ENV',
+    'TERMINAL_SSH_HOST',
+    'TERMINAL_SSH_USER',
+    'TERMINAL_SSH_PORT',
+    'TERMINAL_SSH_KEY',
+    'TERMINAL_DOCKER_IMAGE',
+    'TERMINAL_SINGULARITY_IMAGE',
+    'TERMINAL_MODAL_IMAGE',
+    'TERMINAL_DAYTONA_IMAGE',
+)
+_TERMINAL_BACKEND_IDENTITY_DEFAULTS: dict[str, str] = {
+    'TERMINAL_SSH_PORT': '22',
+}
+
+_TERMINAL_ENV_IDENTITY_BY_KEY: dict[
+    str,
+    tuple[object | None, tuple[str, ...] | None]
+    | tuple[object | None, tuple[str, ...] | None, tuple[tuple[str, ...], ...]],
+] = {}
+# Record format: (exact_environment_object_or_None, identity_or_None, claims_tuple).
+# A None object slot represents a pending expectation for the backend that last displaced
+# an environment under that cache key, awaiting binding upon recreation.
+_TERMINAL_ENV_IDENTITY_LOCK = threading.Lock()
+_TERMINAL_ENV_CACHE_KEYS: tuple[str, ...] = ('default', 'host-local-default')
+
+
+def _terminal_backend_identity(runtime_env: dict | None = None) -> tuple[str, ...]:
+    """Return a canonical hashable tuple of terminal backend identity fields."""
+    _env = runtime_env if isinstance(runtime_env, dict) else {}
+    identity: list[str] = []
+    for field in _TERMINAL_BACKEND_IDENTITY_FIELDS:
+        val = _env.get(field)
+        if val is None or val == '':
+            identity.append('')
+        elif isinstance(val, str):
+            identity.append(val)
+        else:
+            identity.append(str(val))
+    return tuple(identity)
+
+
+def _terminal_environment_creator_identity(env_obj: object) -> tuple[str, ...] | None:
+    """Return the identity tuple the environment object was created with, or None."""
+    try:
+        if env_obj is None:
+            return None
+        env_type = getattr(env_obj, 'env_type', None)
+        if not isinstance(env_type, str) or not env_type:
+            return None
+
+        env_dict: dict[str, object] = {'TERMINAL_ENV': env_type}
+        if env_type == 'ssh':
+            host = getattr(env_obj, 'host', None)
+            if host is not None:
+                env_dict['TERMINAL_SSH_HOST'] = host
+            user = getattr(env_obj, 'user', None)
+            if user is not None:
+                env_dict['TERMINAL_SSH_USER'] = user
+            port = getattr(env_obj, 'port', None)
+            if port is not None:
+                env_dict['TERMINAL_SSH_PORT'] = port
+            key_path = getattr(env_obj, 'key_path', None)
+            if key_path is not None:
+                env_dict['TERMINAL_SSH_KEY'] = key_path
+        elif env_type == 'docker':
+            image = getattr(env_obj, '_image', None)
+            if image is not None:
+                env_dict['TERMINAL_DOCKER_IMAGE'] = image
+        elif env_type == 'modal':
+            image = getattr(env_obj, '_image', None)
+            if image is not None:
+                env_dict['TERMINAL_MODAL_IMAGE'] = image
+        elif env_type == 'local':
+            pass
+
+        return _terminal_backend_identity(env_dict)
+    except Exception:
+        return None
+
+
+def _terminal_environment_creator_state(
+    env_obj: object, identity: tuple[str, ...] | dict | None
+) -> str:
+    """Compare creation evidence against the requesting identity slot by slot."""
+    try:
+        creator_id = _terminal_environment_creator_identity(env_obj)
+        if creator_id is None:
+            return 'unknown'
+
+        if isinstance(identity, dict):
+            req_id = _terminal_backend_identity(identity)
+        elif isinstance(identity, tuple):
+            req_id = identity
+        else:
+            return 'unknown'
+
+        if len(creator_id) != len(req_id) or len(creator_id) != len(_TERMINAL_BACKEND_IDENTITY_FIELDS):
+            return 'unknown'
+
+        has_unknown = False
+        for field, c_val, r_val in zip(_TERMINAL_BACKEND_IDENTITY_FIELDS, creator_id, req_id, strict=True):
+            if r_val == '':
+                effective_default = _TERMINAL_BACKEND_IDENTITY_DEFAULTS.get(field, '')
+                if effective_default != '' and c_val != '':
+                    if c_val != effective_default:
+                        return 'mismatch'
+                continue
+            if c_val != '':
+                if c_val != r_val:
+                    return 'mismatch'
+            else:
+                has_unknown = True
+
+        if has_unknown:
+            return 'unknown'
+        return 'match'
+    except Exception:
+        return 'unknown'
+
+
+def _terminal_tool_module():
+    """Resolve the Agent terminal tool module, or None if unavailable."""
+    try:
+        import hermes_cli.tools.terminal_tool as _mod
+        return _mod
+    except ImportError:
+        pass
+    try:
+        import tools.terminal_tool as _mod
+        return _mod
+    except ImportError:
+        pass
+    return None
+
+
+def _invalidate_stale_terminal_environments(identity: tuple[str, ...] | dict | None) -> list[str]:
+    """Evict cached terminal environments when the backend identity changes."""
+    if identity is None:
+        return []
+    if isinstance(identity, dict):
+        if not identity:
+            return []
+        identity = _terminal_backend_identity(identity)
+    try:
+        tool_mod = _terminal_tool_module()
+        if tool_mod is None:
+            return []
+        active_envs = getattr(tool_mod, '_active_environments', None)
+        env_lock = getattr(tool_mod, '_env_lock', None)
+        if not isinstance(active_envs, dict) or env_lock is None:
+            return []
+
+        candidates: list[tuple[str, object]] = []
+        for key in _TERMINAL_ENV_CACHE_KEYS:
+            inspected = active_envs.get(key)
+            if inspected is None:
+                # An absent cache entry leaves a pending expectation for the requesting backend
+                # so its own next creation can be bound without falling back to first-sight adoption.
+                with _TERMINAL_ENV_IDENTITY_LOCK:
+                    entry = _TERMINAL_ENV_IDENTITY_BY_KEY.get(key)
+                    if isinstance(entry, tuple) and len(entry) >= 2 and entry[0] is not None:
+                        claims = (identity,)
+                    else:
+                        if isinstance(entry, tuple) and len(entry) >= 3 and isinstance(entry[2], (tuple, list)):
+                            prev_claims = tuple(entry[2])
+                        elif isinstance(entry, tuple) and len(entry) >= 2 and entry[1] is not None:
+                            prev_claims = (entry[1],)
+                        else:
+                            prev_claims = ()
+                        new_claims = list(prev_claims)
+                        if identity not in new_claims:
+                            new_claims.append(identity)
+                        claims = tuple(new_claims)
+                    _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (None, identity, claims)
+                continue
+
+            with _TERMINAL_ENV_IDENTITY_LOCK:
+                if key not in _TERMINAL_ENV_IDENTITY_BY_KEY:
+                    # Adopting the current identity on first sight preserves any pre-existing
+                    # environment already running for the active backend while establishing a baseline.
+                    _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (inspected, identity, ())
+                    continue
+                entry = _TERMINAL_ENV_IDENTITY_BY_KEY[key]
+                if isinstance(entry, tuple) and len(entry) >= 2:
+                    recorded_env = entry[0]
+                    recorded_identity = entry[1]
+                    if len(entry) >= 3 and isinstance(entry[2], (tuple, list)):
+                        claims = tuple(entry[2])
+                    elif recorded_identity is not None:
+                        claims = (recorded_identity,)
+                    else:
+                        claims = ()
+                else:
+                    recorded_env, recorded_identity, claims = None, None, ()
+
+                if recorded_env is None:
+                    # Decide ownership from creator evidence rather than request expectation (#9386 round 3 & 4).
+                    creator_state = _terminal_environment_creator_state(inspected, identity)
+                    if creator_state == 'match':
+                        if active_envs.get(key) is inspected:
+                            _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (inspected, identity, ())
+                            continue
+                    elif creator_state == 'mismatch':
+                        pass
+                    elif creator_state == 'unknown':
+                        if (
+                            len(claims) == 1
+                            and claims[0] == identity
+                            and active_envs.get(key) is inspected
+                        ):
+                            _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (inspected, identity, ())
+                            continue
+                    # Otherwise the object belongs to another backend or remains unverified; evict it.
+                elif recorded_env is inspected and recorded_identity == identity:
+                    continue
+
+            candidates.append((key, inspected))
+
+        if not candidates:
+            return []
+
+        evicted_keys: list[str] = []
+        removed_objects: list[object] = []
+
+        for key, inspected in candidates:
+            with env_lock:
+                current = active_envs.get(key)
+                if current is inspected:
+                    active_envs.pop(key, None)
+                    evicted_keys.append(key)
+                    removed_objects.append(inspected)
+                    with _TERMINAL_ENV_IDENTITY_LOCK:
+                        _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (None, identity, (identity,))
+                else:
+                    with _TERMINAL_ENV_IDENTITY_LOCK:
+                        if current is None:
+                            _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (None, identity, (identity,))
+                        else:
+                            _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (current, None, ())
+
+        # Cleanup runs outside all locks to prevent blocking concurrent turns or deadlocking with teardown.
+        cleaned_ids: set[int] = set()
+        for env_obj in removed_objects:
+            obj_id = id(env_obj)
+            if obj_id in cleaned_ids:
+                continue
+            cleaned_ids.add(obj_id)
+            try:
+                cleanup_fn = getattr(env_obj, 'cleanup', None)
+                stop_fn = getattr(env_obj, 'stop', None)
+                term_fn = getattr(env_obj, 'terminate', None)
+                if callable(cleanup_fn):
+                    cleanup_fn()
+                elif callable(stop_fn):
+                    stop_fn()
+                elif callable(term_fn):
+                    term_fn()
+            except Exception:
+                logger.debug('[webui] Terminal environment teardown failed', exc_info=True)
+
+        return evicted_keys
+    except Exception:
+        logger.debug('[webui] Terminal environment invalidation failed', exc_info=True)
+        return []
+
+
 def _compute_agent_cache_signature(
     resolved_model: str | None,
     resolved_api_key: str | None,
@@ -14310,9 +14581,7 @@ def _compute_agent_cache_signature(
         provider_routing_kwargs or {},
         _public_prefill_context_status(prefill_context),
         profile_home or '',
-        _env.get('TERMINAL_ENV', '') or '',
-        _env.get('TERMINAL_SSH_HOST', '') or '',
-        _env.get('TERMINAL_SSH_USER', '') or '',
+        _terminal_backend_identity(_env),
     ], sort_keys=True)
     return _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
 
@@ -16592,6 +16861,9 @@ def _run_agent_streaming(
             # injectionFrequency: "first-turn" actually suppresses after turn 1.
             _cache_new_agent = False
             if ephemeral:
+                _invalidate_stale_terminal_environments(
+                    _terminal_backend_identity(_safe_profile_runtime_env) if _safe_profile_runtime_env else None
+                )
                 agent, _ = construct_profile_scoped_agent(
                     _AIAgent, _agent_kwargs, profile_home=_profile_home,
                     agent_params=_agent_params, session_id=session_id,
@@ -16722,6 +16994,9 @@ def _run_agent_streaming(
                         agent._interrupt_message = None
                 else:
                     # #8517: memory bound to this session's profile, else not cached.
+                    _invalidate_stale_terminal_environments(
+                        _terminal_backend_identity(_safe_profile_runtime_env) if _safe_profile_runtime_env else None
+                    )
                     agent, _cache_new_agent = construct_profile_scoped_agent(
                         _AIAgent, _agent_kwargs, profile_home=_profile_home,
                         agent_params=_agent_params, session_id=session_id,
