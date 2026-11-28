@@ -3846,8 +3846,34 @@ def delete_profile_api(name: str) -> dict:
             raise ValueError(f"Profile '{name}' does not exist.")
 
     _drop_profile_models_cache(name)
-    # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
-    invalidate_profile_skills_stats()
-    _invalidate_list_profiles_cache()
-    _invalidate_root_profile_cache()
-    return {'ok': True, 'name': name}
+    # The pin store lives outside the profile home; a same-name recreate must
+    # not resurrect the deleted profile's pins (#8622).  The delete has already
+    # happened at this point, so a cleanup failure is a PARTIAL success: report
+    # it as a warning instead of failing the delete.  Raising here told the user
+    # the profile still exists when it does not (the route maps PermissionError
+    # to 403 and PreferencesError to 400) and skipped the cache refreshes below,
+    # leaving the deleted profile listed until the cache expired.  Refusing to
+    # traverse a linked store stays a refusal — the target is never deleted —
+    # and is reported the same way; only the expected cleanup failures are
+    # caught, anything else still propagates.
+    from api import model_preferences as _model_preferences
+    warning = None
+    try:
+        _model_preferences.delete_profile_store(name)
+    except (_model_preferences.PreferencesError, OSError) as exc:
+        logger.warning(
+            "Deleted profile %s but its pinned-model store survived: %s",
+            name, exc, exc_info=True,
+        )
+        warning = 'Pinned models for this profile could not be removed.'
+    finally:
+        # Drop cached root-profile-name lookup — list_profiles_api() shape
+        # changed.  These run even when the cleanup failed so the deleted
+        # profile disappears from the list immediately.
+        invalidate_profile_skills_stats()
+        _invalidate_list_profiles_cache()
+        _invalidate_root_profile_cache()
+    result = {'ok': True, 'name': name}
+    if warning:
+        result['warning'] = warning
+    return result

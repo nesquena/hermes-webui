@@ -7603,11 +7603,14 @@ async function deleteCurrentProfile(){
   const _ok = await showConfirmDialog({title:t('profile_delete_confirm_title',name),message:t('profile_delete_confirm_message'),confirmLabel:t('delete_title'),danger:true,focusCancel:true});
   if(!_ok) return;
   try {
-    await api('/api/profile/delete', { method: 'POST', body: JSON.stringify({ name }) });
+    // A pin-store cleanup failure after a successful delete answers 200 with a
+    // warning: the profile IS gone, so show the partial success rather than the
+    // plain deleted toast (#8622).
+    const _res = await api('/api/profile/delete', { method: 'POST', body: JSON.stringify({ name }) });
     _invalidateKanbanProfileCache();
     _clearProfileDetail();
     await loadProfilesPanel();
-    showToast(t('profile_deleted', name));
+    showToast(_res && _res.warning ? t('profile_delete_pin_cleanup_failed', name) : t('profile_deleted', name));
   } catch (e) { showToast(t('delete_failed') + e.message); }
 }
 
@@ -8309,10 +8312,12 @@ async function deleteProfile(name) {
   const _delProf=await showConfirmDialog({title:t('profile_delete_confirm_title',name),message:t('profile_delete_confirm_message'),confirmLabel:t('delete_title'),danger:true,focusCancel:true});
   if(!_delProf) return;
   try {
-    await api('/api/profile/delete', { method: 'POST', body: JSON.stringify({ name }) });
+    // Same partial-success contract as deleteCurrentProfile: a survived pin
+    // store is a warning on an already-completed delete (#8622).
+    const _res = await api('/api/profile/delete', { method: 'POST', body: JSON.stringify({ name }) });
     _invalidateKanbanProfileCache();
     await loadProfilesPanel();
-    showToast(t('profile_deleted', name));
+    showToast(_res && _res.warning ? t('profile_delete_pin_cleanup_failed', name) : t('profile_deleted', name));
   } catch (e) { showToast(t('delete_failed') + e.message); }
 }
 
