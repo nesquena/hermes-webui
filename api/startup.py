@@ -337,11 +337,24 @@ def _trusted_agent_dir(agent_dir: Path) -> bool:
 # staged copy. It names the Agent the stage was copied from (resolved path) and
 # the sha256 of that Agent's install inputs at copy time ('-' when absent).
 _STAGE_MANIFEST = '.hermes-webui-stage-source'
-_STAGE_INPUTS = ('pyproject.toml', 'requirements.txt')
+# Every name here is also a file pip may read from the stage, so each one must
+# pass `_trusted_install_inputs`. `setup.py` belongs here as well: setuptools
+# executes it when this directory is the build root, and the fast-restart repair
+# (`secure_stage_install_inputs`) makes an existing staged copy private without
+# comparing its contents — recording its digest is what stops an edited copy
+# from becoming trusted once it is no longer group/world-writable (#8501).
+_STAGE_INPUTS = ('pyproject.toml', 'requirements.txt', 'setup.py')
 
 
 def _install_inputs(directory: Path) -> dict[str, str]:
-    """sha256 of each file auto-install reads from ``directory``, '-' when absent."""
+    """sha256 of each file auto-install reads from ``directory``, '-' when absent.
+
+    ``setup.py`` is included: the restart repair makes a staged copy private
+    without comparing its contents (#8501), so a peer-writable setup.py that
+    was edited in the old stage would otherwise be trusted by
+    ``_stage_matches_agent``. Recording its digest makes an edited copy
+    detectable exactly like the other install inputs.
+    """
     digests = {}
     for name in _STAGE_INPUTS:
         path = directory / name
@@ -376,6 +389,39 @@ def _stage_matches_agent(staged: Path, agent_dir: Path) -> bool:
         return False
 
 
+def _trusted_install_inputs(directory: Path) -> bool:
+    """True when every install input in ``directory`` is a safe, private file.
+
+    ``_trusted_agent_dir`` proves the *directory* is ours, but not the files
+    inside it: a world-writable ``requirements.txt`` in a valid stage passes
+    validation and its contents can change before pip reads it (#8472). Each
+    input pip will read must be a regular file (no symlinks — a link can be
+    repointed after validation), owned by the current user, and not group- or
+    world-writable.
+
+    ``setup.py`` is checked like the other inputs: setuptools executes it when
+    this directory is the build root, and the manifest records its digest so an
+    edited copy is rejected even after the restart repair makes it private
+    (#8501).
+    """
+    try:
+        for name in _STAGE_INPUTS:
+            path = directory / name
+            try:
+                st = path.lstat()
+            except FileNotFoundError:
+                continue  # absent input: pip never reads it
+            if not stat.S_ISREG(st.st_mode):
+                return False
+            if hasattr(os, 'getuid') and st.st_uid != os.getuid():
+                return False
+            if stat.S_IMODE(st.st_mode) & 0o022:
+                return False
+        return True
+    except OSError:
+        return False
+
+
 def _agent_install_dir(agent_dir: Path) -> Path:
     """Resolve the directory auto-install should actually install *from*.
 
@@ -387,10 +433,13 @@ def _agent_install_dir(agent_dir: Path) -> Path:
     recovery path installs from the staged tree instead of the read-only mount.
 
     Falls back to ``agent_dir`` whenever the staged path is unset, missing,
-    fails the same ownership/permission trust check that guards the mount, or
-    is not a current copy of ``agent_dir`` (see ``_stage_matches_agent``) —
-    an attacker-controlled env var must never redirect the install, and a
-    trusted-but-unrelated or stale directory must not either.
+    fails the same ownership/permission trust check that guards the mount
+    (applied to the stage directory and, via ``_trusted_install_inputs``, to
+    the install inputs inside it — ``pyproject.toml``, ``requirements.txt``,
+    and ``setup.py``), or is not a current copy of
+    ``agent_dir`` (see ``_stage_matches_agent``) — an attacker-controlled env
+    var must never redirect the install, and a trusted-but-unrelated or stale
+    directory must not either.
     """
     raw = os.environ.get('HERMES_WEBUI_AGENT_STAGE_DIR', '').strip()
     if raw:
@@ -407,9 +456,12 @@ def _agent_install_dir(agent_dir: Path) -> Path:
             # Missing, unresolvable or `~unknown-user`: never fatal at startup.
             return agent_dir
         if staged.is_dir() and _trusted_agent_dir(staged) and _trusted_ancestry(staged):
-            if _stage_matches_agent(staged, agent_dir):
+            if not _trusted_install_inputs(staged):
+                print(f'[!!] Ignoring staged agent copy {staged}: an install input failed the private-regular-file check.', flush=True)
+            elif _stage_matches_agent(staged, agent_dir):
                 return staged
-            print(f'[!!] Ignoring staged agent copy {staged}: it is not a current copy of {agent_dir}.', flush=True)
+            else:
+                print(f'[!!] Ignoring staged agent copy {staged}: it is not a current copy of {agent_dir}.', flush=True)
     return agent_dir
 
 
