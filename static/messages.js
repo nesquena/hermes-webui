@@ -8528,12 +8528,36 @@ function scheduleComposerAutoResize(){
 // keyed by WebUI session_id, in memory only (a server restart clears it).
 // This tab keeps ONE cached answer for it, keyed by the session it belongs to
 // (#9101):
-//   _yoloView = {sid, enabled, gen, seq}
+//   _yoloView = {sid, enabled, gen, seq, rev, epoch}
 //     sid     — the session this answer is about
 //     enabled — the server's answer for that session
 //     gen     — the _loadSessionGeneration it was applied under
 //     seq     — monotonic count of applied explicit writes (/yolo, the pill,
 //               the approval card); a read issued before a write is stale
+//     rev     — the per-session revision the answer was computed under
+//               (every /api/session/yolo answer carries yolo_revision, #9193)
+//     epoch   — the server run (process) that produced the answer
+//               (yolo_epoch); _yoloKnownRuns remembers every run this tab has
+//               confirmed, so a late answer from an older run is recognised
+let _yoloView = {sid: null, enabled: false, gen: 0, seq: 0, rev: 0, epoch: null, reqGen: 0};
+// Server runs (yolo_epoch values) this tab has confirmed through an applied
+// answer. A restart starts a run no answer has named yet.
+let _yoloKnownRuns = new Set();
+// The generation of the YOLO REQUEST an answer belongs to. Every YOLO
+// request (read or write) takes the next number when it is SENT, and the
+// answer carries it back. The order of the REQUESTS is what decides which
+// answer is current — the order of the ANSWERS is not: two requests sent
+// around a server restart can be delivered in any order, and the answer of
+// the request sent FIRST is the older one even when it lands last (#9101
+// review round 9). The counter is the tab's own and survives a restart.
+let _yoloReqGen = 0;
+// The next generation of a YOLO REQUEST. Every request (read or write) takes
+// one when it is SENT, so its answer can be ordered against the other
+// answers. Writers outside this file (the /yolo command, the pill's disable)
+// take one too.
+function _nextYoloReqGen() {
+  return ++_yoloReqGen;
+}
 // Every writer goes through _applyYoloState(); the pill renders only when the
 // view is about the open session. Lifecycle:
 //   • Session install (any loadSession branch, boot restore, reload, refresh):
@@ -8543,7 +8567,6 @@ function scheduleComposerAutoResize(){
 //   • Cross-tab: NOT synced. Another tab's change shows here on the next read
 //     (install, send, /goal, /yolo). The pill only ever disables, so a stale
 //     pill cannot turn YOLO on.
-let _yoloView = {sid: null, enabled: false, gen: 0, seq: 0};
 // Compatibility mirror of _yoloView.enabled for the session the view is about
 // (read by the approval toast and by tests). Written only by _applyYoloState.
 let _yoloEnabled = false;
@@ -8554,16 +8577,26 @@ let _yoloEnabled = false;
 //     about `sid` (same-session refresh) is kept until the install re-reads.
 //   gen        — the _loadSessionGeneration the answer was requested under.
 //   readSeq    — set for GET reads: _yoloView.seq when the read was issued.
+//   rev/epoch  — the answer's yolo_revision / yolo_epoch, when the server
+//                sent them (#9193). Ordering rules (same run: an older
+//                revision never overrides a newer one; another run: only a
+//                run this tab has not confirmed is current) are enforced
+//                below; answers without the fields keep master's rules.
 // A non-reset answer is dropped when it is not for the open session, when a
 // newer load started since it was requested (or a load for another session
 // is in flight), or — for reads — when an explicit write was applied after
-// the read was issued. Returns true when the view was updated.
+// the read was issued. An applied explicit write is followed by a
+// fire-and-forget confirmation read: the write's answer was computed when the
+// server handled it, and another client may have moved the flag since, so
+// the view is re-confirmed against the server's current state. Returns true
+// when the view was updated.
 function _applyYoloState(sid, enabled, meta) {
   const m = meta || {};
   if (!sid || typeof enabled !== 'boolean') return false;
   if (m.reset) {
     if (_yoloView.sid !== sid) {
-      _yoloView = {sid, enabled, gen: _loadSessionGeneration, seq: _yoloView.seq};
+      // A new session's flag starts unread; the run this tab confirmed stays.
+      _yoloView = {sid, enabled, gen: _loadSessionGeneration, seq: _yoloView.seq, rev: 0, epoch: _yoloView.epoch, reqGen: _yoloView.reqGen};
       _yoloEnabled = enabled;
     }
     _updateYoloPill();
@@ -8577,9 +8610,54 @@ function _applyYoloState(sid, enabled, meta) {
   // an explicit write's answer is not: the open session really changed.
   if (isRead && _loadingSessionId && _loadingSessionId !== sid) return false;
   if (isRead && m.readSeq !== _yoloView.seq) return false;
-  _yoloView = {sid, enabled, gen, seq: _yoloView.seq + (isRead ? 0 : 1)};
+  // #9101 revision/epoch gate (#9193 server side): answers carry the
+  // per-session revision and the server run they were computed under.
+  const aRun = typeof m.epoch === 'string' ? m.epoch : null;
+  const aReq = typeof m.reqGen === 'number' ? m.reqGen : null;
+  // A rejected WRITE still has to confirm the server's state: the write
+  // settled, so the flag may have moved on since the answer was computed
+  // (another client, a later change). Dropping the answer must not skip the
+  // confirmation read — otherwise the view stays on the revision it had
+  // before the write while the server is further ahead (#9101 review
+  // round 10). A rejected READ needs no confirmation: it asked for the
+  // state and the answer is simply stale.
+  const rejectAnswer = () => {
+    if (!isRead && typeof _fetchYoloState === 'function') _fetchYoloState(sid, {gen});
+    return false;
+  };
+  if (aRun && _yoloView.epoch !== aRun) {
+    // The answer is from another run than the view holds. Which run is
+    // CURRENT is decided by the order of the REQUESTS, not by the order of
+    // the answers: the answer of the request sent FIRST is the older one
+    // even when it lands last. A request sent before a restart belongs to
+    // the run that was alive then, so its late answer must not take the view
+    // back to the dead process (#9101 review round 9).
+    if (aReq !== null && _yoloView.reqGen > 0 && aReq < _yoloView.reqGen) {
+      // The answer belongs to a request sent BEFORE the one the view holds:
+      // it is a leftover of the previous run.
+      _yoloKnownRuns.add(aRun);
+      return rejectAnswer();
+    }
+    // A run this tab already confirmed and moved past is an older one: its
+    // late answer must not override what the current run answered.
+    if (_yoloKnownRuns.has(aRun)) return rejectAnswer();
+  }
+  const aRev = typeof m.rev === 'number' ? m.rev : null;
+  // Same run: an answer computed at an older revision than the view holds is
+  // a late answer and must not roll the flag back. This holds for reads AND
+  // for writes AND for the 409 payload that carries the current state: the
+  // confirmation read that follows a write repairs a stale view only when it
+  // succeeds, so it cannot be the only guard against a rollback.
+  if (aRun && _yoloView.epoch === aRun && aRev !== null && aRev < _yoloView.rev) return rejectAnswer();
+  _yoloView = {sid, enabled, gen, seq: _yoloView.seq + (isRead ? 0 : 1),
+               rev: aRev !== null ? aRev : _yoloView.rev, epoch: aRun || _yoloView.epoch,
+               reqGen: aReq !== null ? aReq : _yoloView.reqGen};
+  if (aRun) _yoloKnownRuns.add(aRun);
   _yoloEnabled = enabled;
   _updateYoloPill();
+  // An explicit write's answer is only as fresh as the moment the server
+  // computed it: confirm the flag against the server's current state.
+  if (!isRead && typeof _fetchYoloState === 'function') _fetchYoloState(sid, {gen});
   return true;
 }
 
@@ -8594,10 +8672,15 @@ async function _fetchYoloState(sid, opts) {
     const meta = {
       gen: opts && typeof opts.gen === 'number' ? opts.gen : _loadSessionGeneration,
       readSeq: _yoloView.seq,
+      reqGen: ++_yoloReqGen,
     };
     const data = await api('/api/session/yolo?session_id=' + encodeURIComponent(sid));
     // A malformed answer leaves the view unchanged (as the POST paths do).
-    if (data && typeof data.yolo_enabled === 'boolean') _applyYoloState(sid, data.yolo_enabled, meta);
+    if (data && typeof data.yolo_enabled === 'boolean') {
+      meta.rev = typeof data.yolo_revision === 'number' ? data.yolo_revision : null;
+      meta.epoch = typeof data.yolo_epoch === 'string' ? data.yolo_epoch : null;
+      _applyYoloState(sid, data.yolo_enabled, meta);
+    }
   } catch (_) { /* ignore: fire-and-forget, must never reject */ }
 }
 
@@ -9203,10 +9286,17 @@ async function _handleGatewayUnavailable(owner, errMsg) {
   return false;
 }
 
-function _applyApprovalYoloProjection(result, owner) {
+function _applyApprovalYoloProjection(result, owner, reqGen) {
   if (!result || typeof result.yolo_enabled !== "boolean") return;
   if (!owner || !owner.sid) return;
-  _applyYoloState(owner.sid, result.yolo_enabled, {gen: owner.generation});
+  _applyYoloState(owner.sid, result.yolo_enabled, {
+    gen: owner.generation,
+    rev: typeof result.yolo_revision === "number" ? result.yolo_revision : null,
+    epoch: typeof result.yolo_epoch === "string" ? result.yolo_epoch : null,
+    // The card's answer belongs to the request that was just sent, so it
+    // orders like any other YOLO answer (#9101 review round 9).
+    reqGen: typeof reqGen === "number" ? reqGen : null,
+  });
 }
 
 function toggleApprovalCardCollapsed(forceCollapsed) {
@@ -9251,6 +9341,9 @@ async function respondApproval(choice, options = {}) {
     _setApprovalControlsDisabled(null, false);
     return false;
   }
+  // The YOLO request's generation is taken when the request is SENT, so its
+  // answer orders against the other YOLO answers (#9101 review round 9).
+  const reqGen=options.yolo&&typeof _nextYoloReqGen==='function'?_nextYoloReqGen():null;
   try {
     // The reconcile may have advanced owner.approvalId to the head's transport
     // id; the POST must carry the authoritative value, not the stale capture.
@@ -9272,7 +9365,7 @@ async function respondApproval(choice, options = {}) {
     }
     if (result && result.ok) {
       _releaseApprovalResponseOwner(owner);
-      if (options.yolo) _applyApprovalYoloProjection(result, owner);
+      if (options.yolo) _applyApprovalYoloProjection(result, owner, reqGen);
       const pendingEntry = _approvalPendingBySession.get(sid);
       const pendingOwner = _approvalMirrorOwnerFor(sid, approvalId);
       const samePending = !!(
@@ -9324,7 +9417,7 @@ async function respondApproval(choice, options = {}) {
       _releaseApprovalResponseOwner(owner);
       return false;
     }
-    if (options.yolo) _applyApprovalYoloProjection(errorPayload, owner);
+    if (options.yolo) _applyApprovalYoloProjection(errorPayload, owner, reqGen);
     // A retired gateway run cannot be answered; re-sync to the head so a live
     // successor stays actionable and only a true orphan is cleared.
     if (_isGatewayUnavailableOrphan(owner, errorPayload)) {

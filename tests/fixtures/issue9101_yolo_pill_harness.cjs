@@ -124,6 +124,11 @@ function createTab(server, name, overrides = null, extraSrc = []) {
     calls.push({ tab: name, method, path: p, body });
     const answer = server.handle(method, p, body);
     if (server.shouldHold && server.shouldHold(name, method, p)) {
+      // A held rejection (a 409, a failed relay) must not surface as an
+      // unhandled rejection while its delivery is deferred: the handler only
+      // keeps the promise from crashing the driver; release() still delivers
+      // the rejection to the caller.
+      if (answer && typeof answer.catch === 'function') answer.catch(() => {});
       return new Promise(resolve => held.push({ tab: name, method, path: p, answer, release: () => resolve(answer) }));
     }
     return answer;
@@ -158,7 +163,11 @@ function createTab(server, name, overrides = null, extraSrc = []) {
     'function __state(){ const pill=$("yoloPill"); return {sid: S.session && S.session.session_id, yolo: _yoloEnabled,',
     '  pillVisible: pill.style.display !== "none" && !pill.classList.contains("composer-control-hidden"),',
     '  pillSession: pill.getAttribute("data-yolo-session"),',
-    '  gen: _loadSessionGeneration, loading: _loadingSessionId}; }',
+    '  gen: _loadSessionGeneration, loading: _loadingSessionId,',
+    // The view\'s own ordering state: which server run it holds, at which
+    // revision, and which runs this tab has confirmed.
+    '  epoch: _yoloView.epoch, rev: _yoloView.rev, reqGen: _yoloView.reqGen,',
+    '  knownRuns: Array.from(_yoloKnownRuns).slice().sort()}; }',
     ...extraSrc,
   ].join('\n');
   vm.runInContext(src, ctx, { filename: name + '-harness.js' });
@@ -1215,6 +1224,242 @@ const scenarios = {
     const out = { beforeAnswer, afterAnswer, afterOld2, after: tab.state(), server: server.state('B'),
       recovery: recovery && recovery.answer, posts: posts(tab), toasts: tab.toasts };
     check(synced(tab, server, 'B'), 'older OFF reads around /yolo hid the pill while the server is ON', out);
+    return out;
+  },
+
+  // (r22) review round 9 (Greptile P1 "Current server answers stay blocked"):
+  // the FIRST sync of a tab overlaps a server restart. The NEW process's
+  // answer lands first and is applied (its epoch is the server's current
+  // one). The OLD process's delayed answer then lands: the tab has never
+  // confirmed that old run, so the answer is accepted and the view is rolled
+  // BACK to the dead process. The new process is now a run the tab
+  // "confirmed", so every later answer of the CURRENT process is rejected and
+  // the pill stays wrong until the page reloads.
+  //
+  // Expected: the old process's late answer must not change the current
+  // state, and a later answer from the current process must still be applied.
+  async r22_late_old_process_answer_never_blocks_the_current_process() {
+    const server = createServer({ B: {} });
+    const tab = createTab(server, 'tab1');
+    const fetchB = () => vm.runInContext('_fetchYoloState("B")', tab.ctx);
+    // The install read of the OLD process is held; its answer is late.
+    server.shouldHold = yoloGet('B');
+    await tab.loadSession('B'); await tick();
+    const oldRead = tab.held.shift();
+    check(!!oldRead, 'precondition: the old process\'s install read is in flight', tab.calls);
+    // The server restarts; the NEW process answers a read sent now.
+    server.restart(); server.yolo.B = true;
+    const fresh = fetchB(); await tick();
+    const newRead = tab.held.shift();
+    check(!!newRead && newRead.answer.yolo_epoch === server.epoch && newRead.answer.yolo_enabled === true,
+      'precondition: the new process answered ON', tab.calls);
+    // The new process's answer lands first: it is the server's current state.
+    server.shouldHold = null;
+    newRead.release(); await fresh; await tick();
+    const afterNew = tab.state();
+    check(afterNew.pillVisible === true && afterNew.epoch === server.epoch,
+      'precondition: the current process\'s answer is shown', afterNew);
+    // Now the OLD process's delayed answer lands. It must not roll the view
+    // back to the dead process.
+    oldRead.release(); await tick(20);
+    const afterOld = tab.state();
+    const out = { afterNew, afterOld, server: server.state('B') };
+    check(afterOld.epoch === server.epoch && afterOld.pillVisible === true && afterOld.rev === afterNew.rev,
+      'the old process\'s late answer replaced the current process\'s state', out);
+    // The current process must still be able to update the indicator.
+    server.yolo.B = false;
+    await fetchB(); await tick(20);
+    const afterCurrent = tab.state();
+    out.afterCurrent = afterCurrent;
+    check(afterCurrent.epoch === server.epoch && afterCurrent.pillVisible === false && afterCurrent.rev > afterNew.rev,
+      'the current process\'s later answer was rejected after the old process\'s late answer', out);
+    check(synced(tab, server, 'B'), 'the pill does not match the server', out);
+    return out;
+  },
+
+  // (r23) review round 9 (Greptile P1 "Older answers hide the warning"):
+  // inside ONE server run, a read confirms revision N (ON). A WRITE answer
+  // computed at an OLDER revision (N-1, OFF) lands afterwards and overwrites
+  // the confirmed state: the warning (the ON pill) disappears while YOLO is
+  // still on. The confirmation read that follows a write cannot repair it
+  // when it fails, and it is not the only guard against a rollback.
+  //
+  // Expected: no answer (read, write, or a 409 carrying the current state)
+  // may roll the confirmed revision back.
+  async r23_older_write_answer_never_rolls_back_a_confirmed_revision() {
+    const server = createServer({ B: {} });
+    const tab = createTab(server, 'tab1');
+    const fetchB = () => vm.runInContext('_fetchYoloState("B")', tab.ctx);
+    // The server is ON at revision 3: three changes already happened.
+    server.yolo.B = true;
+    server.counter = 3;
+    server.recorded.B = { rev: 3, enabled: true };
+    await tab.loadSession('B'); await tick();
+    const before = tab.state();
+    check(before.pillVisible === true && before.rev === 3, 'precondition: the read confirmed ON at revision 3', before);
+    const confirmedRev = before.rev;
+    // A write answer computed at an OLDER revision (OFF, revision 2) lands
+    // late: the write was issued when the server was at revision 2. The
+    // answer is computed when the request is sent, so the server is patched
+    // BEFORE the write goes out.
+    const staleAnswer = { ok: true, yolo_enabled: false, yolo_revision: confirmedRev - 1, yolo_epoch: server.epoch };
+    const realHandle = server.handle;
+    server.handle = (m, p, b) => (m === 'POST' && p === '/api/session/yolo' ? staleAnswer : realHandle(m, p, b));
+    server.shouldHold = (name, method, p) => method === 'POST' && p === '/api/session/yolo';
+    const cmd = tab.cmdYolo(); await tick();
+    const write = tab.held.shift();
+    check(!!write, 'precondition: the write answer is in flight', tab.calls);
+    server.shouldHold = null;
+    // The confirmation read that follows the write FAILS: it cannot repair
+    // the rollback, so the write answer itself must not roll the view back.
+    server.failGet = true;
+    write.release(); await cmd; await tick(20);
+    const afterWrite = tab.state();
+    const out = { before, afterWrite, staleAnswer, server: server.state('B') };
+    check(afterWrite.rev === confirmedRev && afterWrite.pillVisible === true,
+      'the older write answer rolled the confirmed revision back', out);
+    // A later read that succeeds still confirms the same state.
+    server.failGet = false;
+    await fetchB(); await tick(20);
+    const afterRead = tab.state();
+    out.afterRead = afterRead;
+    check(afterRead.rev === confirmedRev && afterRead.pillVisible === true,
+      'the confirmed state did not survive', out);
+    return out;
+  },
+
+  // (r24) review round 10 (Greptile P1 "Dropped writes skip refresh"):
+  // rejecting an older WRITE answer must not skip the confirmation read that
+  // follows the write. Scenario: this tab's /yolo enable is answered ON at
+  // revision 1 but lands late. Another tab disables YOLO (revision 2), this
+  // tab reads OFF at revision 2, and the other tab enables it again
+  // (revision 3). When the revision-1 answer arrives it is rejected — the
+  // confirmed revision must not roll back — but the write settled, so the
+  // server's state must still be confirmed. Without that read the pill stays
+  // on the stale revision 2 while the server is at revision 3.
+  //
+  // Expected: the old answer is dropped AND the server's current state is
+  // read afterwards, so the view ends on the server's revision.
+  async r24_rejected_older_write_answer_still_confirms_the_server_state() {
+    const server = createServer({ B: {} });
+    const tab1 = createTab(server, 'tab1');
+    const tab2 = createTab(server, 'tab2');
+    const fetchB1 = () => vm.runInContext('_fetchYoloState("B")', tab1.ctx);
+    await tab1.loadSession('B'); await tab2.loadSession('B'); await tick();
+    // tab1's /yolo enable is answered ON at revision 1 and held: it lands
+    // late, after the other tab moved the flag twice.
+    server.shouldHold = (name, method, p) => name === 'tab1' && method === 'POST' && p === '/api/session/yolo';
+    const cmd = tab1.cmdYolo(); await tick();
+    const lateEnable = tab1.held.shift();
+    check(!!lateEnable && lateEnable.answer.yolo_enabled === true, 'precondition: tab1 enable (ON) held', tab1.calls);
+    server.shouldHold = null;
+    // The other tab disables (revision 2).
+    await tab2.cmdYolo(); await tick();
+    check(server.yolo.B === false && server.state('B').yolo_revision === 2, 'precondition: the other tab disabled (revision 2)', server.state('B'));
+    // This tab's read is sent NOW (the server is at revision 2) and held.
+    server.shouldHold = (name, method, p) => name === 'tab1' && method === 'GET' && p === '/api/session/yolo?session_id=B';
+    const pendingRead = fetchB1(); await tick();
+    const staleRead = tab1.held.shift();
+    check(!!staleRead && staleRead.answer.yolo_revision === 2, 'precondition: tab1 read (revision 2) held', tab1.calls);
+    // The other tab enables again (revision 3) while tab1's answers are held.
+    server.shouldHold = null;
+    await tab2.cmdYolo(); await tick();
+    check(server.yolo.B === true && server.state('B').yolo_revision === 3, 'precondition: the other tab enabled again (revision 3)', server.state('B'));
+    // The revision-2 answer lands: the view confirms OFF at revision 2.
+    staleRead.release(); await pendingRead; await tick(20);
+    const afterRead = tab1.state();
+    check(afterRead.rev === 2 && afterRead.pillVisible === false, 'precondition: revision 2 (OFF) confirmed', afterRead);
+    // Now the late revision-1 enable answer lands. It must be rejected...
+    const readsBefore = yoloReads(tab1, 'B');
+    lateEnable.release(); await cmd; await tick(40);
+    const afterLate = tab1.state();
+    const extraReads = yoloReads(tab1, 'B') - readsBefore;
+    const out = { afterRead, afterLate, extraReads, server: server.state('B') };
+    // ...the confirmed revision must not roll back to 1...
+    check(afterLate.rev >= 2, 'the late revision-1 write answer rolled the confirmed revision back', out);
+    // ...and the write must still have confirmed the server's current state,
+    // so the view ends on the server's revision 3 (ON).
+    check(extraReads >= 1, 'the rejected write answer skipped its confirmation read', out);
+    check(afterLate.rev === server.state('B').yolo_revision && afterLate.pillVisible === true,
+      'the view did not reach the server\'s current revision after the rejected write answer', out);
+    check(synced(tab1, server, 'B'), 'the pill does not match the server', out);
+    return out;
+  },
+
+  // (r25) review round 10 (Greptile P1 "A delayed /yolo 409 hides the ON
+  // indicator"): the tab starts WITHOUT a seeded YOLO view (its install read
+  // never lands, so it has not confirmed the OLD run). /yolo reads ON from
+  // the OLD process and sends its conditional disable. Another write moves
+  // the flag (OFF, revision 2), so the disable is answered 409 yolo_changed
+  // carrying that state; its delivery is held. The server then restarts and a
+  // later GET confirms the NEW process is ON. The old 409 lands last: the
+  // catch used to allocate a FRESH request generation, which made the old
+  // answer look newer than the requests sent after it, so it was applied —
+  // the view went back to the dead process's OFF and that run became
+  // "confirmed". The NEW process was then a run this tab had confirmed, so
+  // both the automatic confirmation and later live reads of the CURRENT
+  // process were rejected. The pill stayed hidden while the server was ON.
+  //
+  // Expected: the generation captured when the write is SENT is reused on
+  // BOTH paths, so the late 409 is a leftover of an older request: the live
+  // epoch stays, the pill shows ON, and a later live read is still applied.
+  async r25_first_sync_late_conflict_never_hides_the_current_on() {
+    const server = createServer({ B: {} });
+    server.yolo.B = true; server.counter = 1; server.recorded.B = { rev: 1, enabled: true };
+    const tab = createTab(server, 'tab1');
+    const fetchB = () => vm.runInContext('_fetchYoloState("B")', tab.ctx);
+    // The install read is held and never delivered: the tab starts without a
+    // confirmed YOLO view, so it has never confirmed the OLD run.
+    server.shouldHold = yoloGet('B');
+    await tab.loadSession('B'); await tick();
+    const installRead = tab.held.shift();
+    check(!!installRead && installRead.answer && installRead.answer.yolo_enabled === true,
+      'precondition: the install read (ON) is held and never delivered', tab.calls);
+    // /yolo's own status read is answered ON (revision 1) and held, so another
+    // write can move the flag before the conditional disable is sent.
+    const cmd = tab.cmdYolo(); await tick();
+    const statusRead = tab.held.shift();
+    check(!!statusRead && statusRead.answer && statusRead.answer.yolo_enabled === true,
+      'precondition: the /yolo status read (ON) is held', tab.calls);
+    // Another client disables it (revision 2) before the toggle is computed.
+    server.yolo.B = false; server.snapshot('B');
+    check(server.state('B').yolo_revision === 2,
+      'precondition: another write moved the flag (revision 2)', server.state('B'));
+    // Deliver the status read; the conditional disable is then answered with
+    // the 409 yolo_changed and its delivery is held.
+    server.shouldHold = (name, method, p) => name === 'tab1' && method === 'POST' && p === '/api/session/yolo';
+    statusRead.release(); await tick();
+    const conflict = tab.held.shift();
+    check(!!conflict && conflict.method === 'POST',
+      'precondition: the conditional disable\'s 409 answer is held', tab.calls);
+    // The server restarts; the NEW process is ON.
+    server.restart(); server.yolo.B = true;
+    server.shouldHold = yoloGet('B');
+    const fresh = fetchB(); await tick();
+    const newRead = tab.held.shift();
+    check(!!newRead && newRead.answer.yolo_epoch === server.epoch && newRead.answer.yolo_enabled === true,
+      'precondition: the new process answered ON', tab.calls);
+    server.shouldHold = null;
+    newRead.release(); await fresh; await tick(20);
+    const afterNew = tab.state();
+    check(afterNew.epoch === server.epoch && afterNew.pillVisible === true,
+      'precondition: the current process\'s answer is shown', afterNew);
+    // Now the OLD process's delayed 409 lands. It must not replace the view.
+    conflict.release(); await cmd; await tick(40);
+    const afterConflict = tab.state();
+    const out = { afterNew, afterConflict, server: server.state('B') };
+    check(afterConflict.epoch === server.epoch && afterConflict.pillVisible === true
+      && afterConflict.rev === afterNew.rev,
+      'the delayed 409 replaced the current process\'s ON with the dead process\'s OFF', out);
+    // ...and a later live read of the CURRENT process must still be applied.
+    server.yolo.B = false; server.snapshot('B');
+    await fetchB(); await tick(20);
+    const afterLater = tab.state();
+    out.afterLater = afterLater;
+    check(afterLater.epoch === server.epoch && afterLater.pillVisible === false
+      && afterLater.rev === server.state('B').yolo_revision,
+      'a later live read of the current process was rejected after the delayed 409', out);
+    check(synced(tab, server, 'B'), 'the pill does not match the server', out);
     return out;
   },
 
