@@ -1854,6 +1854,30 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
                                generations cannot overwrite the winning transcript.
                                Missing authority never creates an automatic refetch
                                loop.
+                               Display-only compaction-handoff cleanup (#8748): on `GET /api/session` a folded compaction
+                               handoff no longer renders as a chat turn — the synthetic envelope (the `[prior context`
+                               header and the `[end of prior context` delimiter that bracket the authentic retained text,
+                               plus the summary after the delimiter) is removed from
+                               the `messages` copy only, while stored state.db/sidecar rows and the history the agent replays
+                               keep the full envelope. Owner: `project_compaction_carrier_for_display()`
+                               (`api/compression_anchor.py:275`) and `project_compaction_carriers_for_display()`
+                               (`api/compression_anchor.py:354`), called from `_handle_session_get` at
+                               `api/routes.py:18002` (main path, before windowing) and `api/routes.py:18350` (fallback,
+                               where `message_count` still reads the raw rows). The projection is 1:1 over the message list,
+                               so array coordinates survive, and it targets only `user` and `assistant` rows
+                               (`api/compression_anchor.py:289`); tool, system and role-less rows come back identical.
+                               `_compaction_carrier_envelope_decision()` (`api/compression_anchor.py:218`) and its browser
+                               mirror `_isContextCompactionText()` (`static/ui.js:20597`) require positive envelope evidence,
+                               so a missing or malformed envelope leaves the row unchanged and standalone
+                               `[context compaction ...]` cards stay as they are. Authentic text and tool links survive:
+                               only `content` is rewritten, while `tool_calls`, `tool_call_id`, attachments, status cards and
+                               reasoning stay untouched (`api/compression_anchor.py:299`, `api/compression_anchor.py:329`).
+                               A proven pure carrier projects to empty content and takes the display-only marker
+                               `_pure_compaction_carrier`, never persisted; the window predicate
+                               `_message_counts_as_renderable_for_window()` (`api/routes.py:12464`) defers to
+                               `is_proven_pure_synthetic_carrier()` (`api/compression_anchor.py:361`), so an emptied carrier
+                               spends no `msg_limit` slot while a row that keeps tools, attachments, reasoning or non-text
+                               blocks still counts.
     /api/sessions              List of all session compact() dicts, sorted by updated_at
     /api/list                  ?session_id=X&path=. -> directory listing for session workspace
     /api/file                  ?session_id=X&path=rel -> file content (text, 200KB limit)

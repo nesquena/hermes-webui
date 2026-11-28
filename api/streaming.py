@@ -77,7 +77,12 @@ from api.helpers import (
     _is_client_disconnect_error,
     _as_client_disconnect,
 )
-from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
+from api.compression_anchor import (
+    is_context_compression_marker,
+    is_folded_compaction_carrier,
+    is_standalone_compaction_card,
+    visible_messages_for_anchor,
+)
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.gateway_chat import WEBUI_LOCAL_CHAT_BACKEND
 from api.metering import meter
@@ -9704,7 +9709,11 @@ def _deduplicate_context_messages(messages, protected_rows=None):
             if marker_key in seen:
                 continue
             seen.add(marker_key)
-            if isinstance(msg, dict) and msg.get('role') != 'assistant':
+            if (
+                isinstance(msg, dict)
+                and msg.get('role') != 'assistant'
+                and not is_folded_compaction_carrier(msg)
+            ):
                 msg = copy.deepcopy(msg)
                 msg['role'] = 'assistant'
             deduped.append(msg)
@@ -11327,6 +11336,10 @@ def _is_context_compression_marker(msg):
     return is_context_compression_marker(msg)
 
 
+def _is_standalone_compaction_card(msg):
+    return is_standalone_compaction_card(msg)
+
+
 def _compact_summary_text(raw_text: str | None) -> str | None:
     """Normalize a text blob used in compression summary cards."""
     if not isinstance(raw_text, str):
@@ -12038,9 +12051,11 @@ def _merge_display_messages_after_agent_result(
     the current user turn onward. Synthetic compaction/reference markers remain
     internal recovery material and must not become visible user/assistant turns.
     """
+    # Folded compaction carriers with authentic text must not be dropped here;
+    # only standalone cards and textless carriers are dropped (#8748).
     previous_display = [
         m for m in list(previous_display or [])
-        if not _is_context_compression_marker(m)
+        if not _is_standalone_compaction_card(m)
         and not _is_compressed_context_tool_result_summary_message(m)
     ]
     # Drop Hermes Agent internal verify-loop scaffolding (synthetic "premature
@@ -12396,13 +12411,13 @@ def _merge_display_messages_after_agent_result(
             _active_turn_identity, msg_text, source
         )
         insert_at = 0
-        while insert_at < len(candidates) and _is_context_compression_marker(candidates[insert_at]):
+        while insert_at < len(candidates) and _is_standalone_compaction_card(candidates[insert_at]):
             insert_at += 1
         candidates = candidates[:insert_at] + [current_user_msg] + candidates[insert_at:]
 
     for msg in candidates:
         if (
-            _is_context_compression_marker(msg)
+            _is_standalone_compaction_card(msg)
             or _is_compressed_context_tool_result_summary_message(msg)
         ):
             continue
