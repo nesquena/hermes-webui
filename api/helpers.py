@@ -1288,6 +1288,300 @@ def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
     return _redact_fn_cached(text)
 
 
+# ── #8901: redaction for live & replayed SSE token deltas ──────────────────
+# put('token', {'text': text}) (api/streaming.py) and the gateway delta
+# sites (api/gateway_chat.py) bypassed _redact_text entirely: only the done
+# and error payloads were redacted, so a secret of any shape (built-in or
+# plugin-registered) streamed mid-turn reached the browser raw, and a journal
+# replay after reconnect re-sent the same raw delta.
+#
+# Per-delta redaction is not enough. A provider can split a secret across
+# consecutive deltas ("sk-" + "abc…"), so no single delta carries a
+# redactable token — and redacting each delta alone would emit "sk-" before
+# the rest arrives, leaving the browser holding the secret's prefix.
+#
+# StreamDeltaRedactor therefore keeps a raw tail window per stream and only
+# releases text once no secret pattern can still span the cut: the longest
+# trailing run that could still grow into a marker (down to the marker's
+# first character) is held back, and every position where a redactable
+# secret could start pins the cut at or before itself — until its mask
+# proves the secret complete (however long it runs) or its window proves a
+# false positive. Released chunks still go through _redact_text, so all
+# masking rules stay in one place; because the redacted text is what enters
+# the run journal, a replay is safe by construction.
+
+# Longest secret a pattern can match in practice: covers API keys, JWT-ish
+# tokens and connection strings. PEM private-key blocks get a larger window
+# because they run to kilobytes.
+_STREAM_DELTA_WINDOW = 1024
+_STREAM_DELTA_PEM_WINDOW = 16384
+# A mask product sitting exactly at the buffer end means the secret it masks
+# is still growing. The local fallback (no Agent installed) keeps six leading
+# and four trailing characters visible — ``abcdef...wxyz`` — so the mask ends
+# in the segment's own tail. The Agent's masks end in ``***``/a bracketed tag,
+# which the tail-difference check below already handles.
+_MASK_PRODUCT_AT_END_RE = _re.compile(r"(?:\*\*\*|\S{6}\.\.\.\S{4})$")
+# KEY=value shapes (env/API assignments): the key name is where the secret
+# starts, well before the "=" that the value regexes anchor on.
+_STREAM_ENV_KEY_NAME_RE = _re.compile(
+    r"[A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50}"
+)
+# The literal markers whose PREFIX can arrive before the rest of the marker.
+# Only these need the tail window: a pattern-shaped secret (the regexes above)
+# is recognised by its whole shape, so a partial arrival is not yet a secret
+# and must not be held back — holding it would split ordinary text.
+_STREAM_MARKER_PREFIXES = tuple(
+    marker for marker in (
+        _SENSITIVE_CASE_MARKERS + _SENSITIVE_LOWER_MARKERS
+    ) if isinstance(marker, str) and marker
+)
+
+
+def _stream_secret_starts(text: str) -> tuple[list[int], set[int]]:
+    """Positions in *text* where a redactable secret could start.
+
+    A conservative superset of the real secret starts: a false positive only
+    delays output (the cut is pinned), while a false negative would leak a
+    split secret — so the scan errs toward holding text back. Sources:
+    WebUI's fixed markers (the same ones _might_contain_sensitive_text
+    uses), the env KEY=value key-name shape, the PEM private-key header, and
+    the agent policy's _PREFIX_RE / _PREFIX_SUBSTRINGS, which include any
+    pattern a plugin registered at runtime.
+
+    Returns ``(starts, pem_starts)``; *pem_starts* is the subset opening a
+    multi-kilobyte PEM block, which pins the cut for longer.
+    """
+    starts: list[int] = []
+    pem: set[int] = set()
+    lower = text.lower()
+    for marker in _SENSITIVE_CASE_MARKERS:
+        idx = text.find(marker)
+        while idx != -1:
+            starts.append(idx)
+            idx = text.find(marker, idx + 1)
+    for marker in _SENSITIVE_LOWER_MARKERS:
+        idx = lower.find(marker)
+        while idx != -1:
+            starts.append(idx)
+            idx = lower.find(marker, idx + 1)
+    for pattern in (
+        _SENSITIVE_TELEGRAM_MARKER_RE,
+        _SENSITIVE_DISCORD_MARKER_RE,
+        _SENSITIVE_PHONE_MARKER_RE,
+        _STREAM_ENV_KEY_NAME_RE,
+    ):
+        starts.extend(m.start() for m in pattern.finditer(text))
+    idx = lower.find("-----begin")
+    while idx != -1:
+        starts.append(idx)
+        pem.add(idx)
+        idx = lower.find("-----begin", idx + 1)
+    try:
+        policy = _current_redaction_policy()
+    except Exception:  # pragma: no cover - policy read must never break streaming
+        policy = None
+    if policy is not None:
+        prefix_re = policy[2]
+        if prefix_re is not None:
+            try:
+                starts.extend(m.start() for m in prefix_re.finditer(text))
+            except Exception:  # pragma: no cover - defensive: odd agent regex
+                pass
+        for substring in policy[3] or ():
+            if not substring:
+                continue
+            idx = text.find(substring)
+            while idx != -1:
+                starts.append(idx)
+                idx = text.find(substring, idx + 1)
+    return starts, pem
+
+
+class StreamDeltaRedactor:
+    """Redact secrets across streamed SSE token deltas (#8901).
+
+    One instance per stream, created where the SSE worker is set up, driven
+    by the token callbacks and flushed when the stream settles. Not
+    thread-safe by design: the streaming contract has a single writer per
+    stream, the same one that owns STREAM_PARTIAL_TEXT.
+    """
+
+    def __init__(self):
+        from api.config import load_settings
+        self._enabled = bool(load_settings().get("api_redact_enabled", True))
+        self._tail = ""
+
+    @property
+    def enabled(self) -> bool:
+        """The effective api_redact_enabled snapshot taken at stream start."""
+        return self._enabled
+
+    def _stream_marker_prefix_tail(self, text: str) -> str:
+        """Return the trailing part of *text* that could still grow into a marker.
+
+        A marker only matters when the text already contains one in full — the
+        redaction pass handles that case. What the tail window has to protect is
+        the OTHER case: a marker that has only partially arrived, so its prefix is
+        at the very END of the text and the rest arrives with the next delta.
+
+        So the held tail is exactly the longest suffix of *text* that is a
+        proper prefix of some marker. Ordinary text has no such suffix, so
+        nothing is held back and the delta is emitted verbatim — which is what
+        keeps a non-secret message from being split in the middle across two
+        frames.
+
+        A ONE-character suffix is held too, even though it splits ordinary
+        words ending in a marker's first letter ("this", "check"). The split
+        is frame-level only — the client concatenates token frames into one
+        prose row, and process-row matching is prefix-based, so nothing visible
+        changes. The alternative is a silent leak: a marker whose first
+        character arrives alone ("s" then "k-…") would already be released,
+        and the key's body would reach the browser with no marker left for
+        _redact_text to recognise. Security wins over frame atomicity.
+        """
+        if not text:
+            return ""
+        best = ""
+        for marker in _STREAM_MARKER_PREFIXES:
+            upper = len(marker) - 1
+            for size in range(min(upper, len(text)), 0, -1):
+                candidate = text[-size:]
+                if marker.startswith(candidate):
+                    if size > len(best):
+                        best = candidate
+                    break
+        return best
+
+    def _mask_runs_to_buffer_end(self, buf: str, start: int) -> bool:
+        """True when the secret opening at *start* continues to the buffer end.
+
+        The window-expiry check must tell a false-positive start (no secret
+        ever forms there — an ordinary "Bearer" with no token, a bare key
+        name) from a real secret that is simply LONGER than the window.
+        ``_redact_text`` masks whole shapes, so masking the text from *start*
+        answers it directly: a secret still running leaves the masked text
+        ending exactly where the buffer ends (the pattern matched greedily
+        through the last character), while a completed secret leaves
+        ordinary text after the mask inside the same buffer.
+        """
+        segment = buf[start:]
+        masked = _redact_text(segment, _enabled=True)
+        if masked == segment:
+            return False  # nothing masked here: the start never became a secret
+        # The fallback mask KEEPS the last four characters visible, so "the
+        # masked text still ends in the segment's own tail" is exactly what a
+        # growing secret looks like — not proof that it finished. Trusting the
+        # tail comparison alone calls a long JWT complete at the window edge
+        # and strands its tail in the buffer, header-less, for every later
+        # release. A completed secret always leaves ordinary text after its
+        # mask, so the mask product no longer touches the end.
+        if _MASK_PRODUCT_AT_END_RE.search(masked):
+            return True
+        shared = 0
+        limit = min(len(masked), len(segment))
+        while (
+            shared < limit
+            and masked[len(masked) - 1 - shared] == segment[len(segment) - 1 - shared]
+        ):
+            shared += 1
+        return shared == 0
+
+    def feed(self, delta: str) -> str:
+        """Consume one delta; return the redacted text safe to emit now.
+
+        The return value may be shorter than *delta* (or empty): anything
+        that could still grow into a secret with the next delta is held in
+        the tail window and released by a later feed() or by flush().
+        """
+        if not self._enabled:
+            return delta
+        if not isinstance(delta, str) or not delta:
+            return ""
+        buf = self._tail + delta
+        starts, pem = _stream_secret_starts(buf)
+        # A marker already present in the buffer is redacted in full, so the
+        # buffer can be cut right before it. A marker that has only partially
+        # arrived lives at the very end and is held by the prefix tail below.
+        cut = len(buf)
+        for start in sorted(starts):
+            if start >= cut:
+                continue
+            window = (
+                _STREAM_DELTA_PEM_WINDOW if start in pem else _STREAM_DELTA_WINDOW
+            )
+            # Window expiry releases a start that never became a secret — an
+            # ordinary "Bearer" with no token, a bare key name. It must NOT
+            # release one that did: _redact_text masks whole shapes, so a
+            # secret longer than the window (a long JWT, a multi-kilobyte
+            # PEM block) is masked only up to the cut, and the remaining
+            # value would leave the buffer without the header its pattern
+            # anchors on — escaping every later release, live and replayed.
+            # A secret whose mask still runs to the buffer end therefore
+            # keeps its pin past the window.
+            if start + window <= cut and not self._mask_runs_to_buffer_end(buf, start):
+                continue
+            cut = start
+            break
+        # Hold back only the trailing run that could still become a marker.
+        # Retaining a prefix may only REDUCE the cut: the loop above may have
+        # pinned it at a secret start, and a marker-shaped suffix of the whole
+        # buffer ("SG" ahead of "SG.") must not drag the cut forward past that
+        # pin — that would release the secret's opening characters unmasked
+        # while the prefix check only ever saw the prefix.
+        held = self._stream_marker_prefix_tail(buf)
+        if held:
+            cut = min(cut, len(buf) - len(held))
+        if cut <= 0:
+            self._tail = buf
+            return ""
+        emitted = _redact_text(buf[:cut], _enabled=True)
+        self._tail = buf[cut:]
+        return emitted
+
+    def flush(self) -> str:
+        """Release the held tail when the stream settles (done/apperror/end)."""
+        tail, self._tail = self._tail, ""
+        if not self._enabled or not tail:
+            return tail
+        return _redact_text(tail, _enabled=True)
+
+
+def flush_stream_delta_tail(delta_redactor, put) -> bool:
+    """Release the redactor's held tail as a token frame before a boundary.
+
+    The tail window holds text that belongs to the paragraph that produced it.
+    A paragraph boundary (``interim_assistant``) and every terminal event
+    (``done`` / ``stream_end`` / ``apperror``, plus the gateway's failed runs)
+    must release it BEFORE the boundary frame — otherwise the held character
+    run is appended to the next paragraph, and a replay reconstructs it there.
+
+    Returns True when a token frame was emitted.
+    """
+    held = delta_redactor.flush()
+    if not held:
+        return False
+    put('token', {'text': held})
+    return True
+
+
+def redact_stream_boundary_text(text: str, *, enabled: bool | None = None) -> str:
+    """Redact a whole segment before it is re-sent as a boundary frame.
+
+    ``interim_assistant`` carries the segment text again (the browser uses it
+    as a completed prose boundary), so it must obey the same redaction
+    contract as the token deltas that streamed that segment — including the
+    ``api_redact_enabled`` opt-out: with redaction off, the deltas and the
+    saved-session projection carry the segment verbatim, and masking the
+    boundary frame alone would make the live view diverge from both.
+    *enabled* defaults to the configured setting; the streaming bridge
+    passes the owning redactor's snapshot so the two agree even if the
+    setting changes mid-run.
+    """
+    if not text:
+        return text
+    return _redact_text(text, _enabled=enabled)
+
+
 _RASTER_IMAGE_DATA_URI_PREFIXES = (
     ("data:image/png;base64,", "png"),
     ("data:image/jpeg;base64,", "jpeg"),
