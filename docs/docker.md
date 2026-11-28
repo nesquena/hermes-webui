@@ -62,6 +62,14 @@ For multi-tenant or hostile-container environments, rebuild with your own runtim
 and supervisor assumptions. Development images that need package-manager convenience should add
 those tools in a dev-only Dockerfile instead of reintroducing passwordless sudo to production.
 
+## docker_init.bash edit rule
+
+Pointer source: AGENTS.md (headroom pointer pass, 2026-11-05); moved verbatim from
+`AGENTS.md`.
+
+- Docker `docker_init.bash`: mirror directory exclusions in both `rsync` and `cp -a`
+  paths (`/opt/hermes` may hold restricted-permission subdirs, e.g. `.playwright/`).
+
 ## 5-minute quickstart (single container)
 
 ```bash
