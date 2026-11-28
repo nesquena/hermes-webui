@@ -38,7 +38,15 @@ class TestGeneratedTitleSanitization(unittest.TestCase):
             '',
         )
 
-    def test_unresolved_title_uses_latest_completed_exchange_after_warmup(self):
+    def test_unresolved_title_keeps_the_opening_exchange_after_a_warmup(self):
+        """The opening exchange stays the title source; the real request is context.
+
+        The old contract handed a warm-up opener's title to the LATEST exchange,
+        which named long sessions after a trailing refinement. The real request
+        now reaches the prompt as labelled context instead (#9388).
+        """
+        from api.streaming import _title_context_samples
+
         messages = [
             {"role": "user", "content": "Hello world, now you're on GLM 5.3 buddy."},
             {"role": "assistant", "content": "It feels fast."},
@@ -47,10 +55,11 @@ class TestGeneratedTitleSanitization(unittest.TestCase):
         ]
         self.assertEqual(
             _title_exchange_for_unresolved_title(messages),
-            (
-                "Make the workspace selector respect the configured order.",
-                "I will trace the workspace ordering path.",
-            ),
+            ("Hello world, now you're on GLM 5.3 buddy.", "It feels fast."),
+        )
+        self.assertEqual(
+            _title_context_samples(messages),
+            ["Make the workspace selector respect the configured order."],
         )
 
     def test_first_exchange_skips_empty_assistant_tool_call_placeholder(self):

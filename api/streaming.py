@@ -5676,7 +5676,7 @@ def _first_exchange_snippets(messages, *, scan_past_consecutive_users: bool = Fa
             continue
         role = m.get('role')
         if role == 'user':
-            candidate = _strip_thinking_markup(_title_exchange_input_text(m.get('content')))
+            candidate = _title_user_request_text(m)
             if candidate and not user_text:
                 user_text = candidate
             elif user_text and candidate and not scan_past_consecutive_users:
@@ -5734,18 +5734,175 @@ def _latest_exchange_snippets(messages):
     return user_text[:500], asst_text[:500]
 
 
-def _title_exchange_for_unresolved_title(messages):
-    """Pick the best completed exchange while an automatic title is unresolved.
+# Rows the WebUI appends to a turn on the user's behalf. They arrive as
+# role='user' but carry no request, so they must never name a session (#9388).
+# Two independent signals, because the durable row shape varies by path:
+#   * ``_source`` / ``display_kind`` — the structured stamps that
+#     ``stamp_message_source`` and the /steer row writer set on the rows they
+#     persist. These are authoritative: they survive content edits.
+#   * the rendered text prefixes — the fallback for rows that reach the
+#     selector without a stamp (replayed or hand-built history).
+# Every prefix here is one a real formatter emits: see
+# ``api/background_process.format_wakeup_prompt`` (completion, watch_match,
+# watch_disabled, watch_overflow_*), the agent-side
+# ``tools.process_registry_notifications.format_process_notification``
+# (heartbeat, async delegation single/batch/task-failed, the multi-process
+# batch header), and the ``[OUT-OF-BAND USER MESSAGE]`` steer frame.
+_TITLE_INTERNAL_SOURCES = frozenset({
+    'process_wakeup',
+    'delegation_wakeup',
+    'async_delegation',
+    'async_delegation_complete',
+    'async_delegation_work_closeout',
+})
 
-    The first exchange is normally the right title source.  If its model output
-    was rejected, however, retrying that same opener on every later turn cannot
-    recover a session that starts with a warm-up message.  Use the latest
-    completed exchange once another user turn exists, while leaving successful
-    titles and configured periodic refreshes untouched.
+_TITLE_INTERNAL_DISPLAY_KINDS = frozenset({
+    'steer',
+    'async_delegation_complete',
+    'hidden',
+})
+
+_TITLE_INTERNAL_USER_PREFIXES = (
+    '[IMPORTANT: ',
+    '[Background process ',
+    '[ASYNC DELEGATION ',
+    '[OUT-OF-BAND USER MESSAGE',
+    '[SYSTEM NOTICE',
+    '[CONTEXT SUMMARY]:',
+    '[END OF PRIOR CONTEXT',
+)
+
+# The drain path can glue notifications onto the front of a real request
+# (``notifications + "\n\n" + msg_text``). Inside a notification the formatter
+# uses single newlines; the separator between blocks, and between the last
+# block and the human's text, is a blank line. That difference is the only
+# reliable split, so a control block with no blank-line separator is treated as
+# a whole notification (and dropped) rather than having its body mistaken for a
+# request — the body is full of lines like "Status: completed".
+_TITLE_BLOCK_SEPARATOR_RE = re.compile(r'\n[ \t]*\n')
+
+
+def _title_row_is_internal_user(msg) -> bool:
+    """True when *msg* is a user row the WebUI injected, not a human request.
+
+    Prefers the structured stamps over the text, so a completion notice whose
+    prose happens to read like a request is still excluded, and a genuine
+    request that merely quotes a marker is still kept.
     """
-    if _count_exchanges(messages) > 1:
-        return _latest_exchange_snippets(messages)
-    return _first_exchange_snippets(messages)
+    if not isinstance(msg, dict) or msg.get('role') != 'user':
+        return False
+    source = str(msg.get('_source') or '').strip().lower()
+    if source in _TITLE_INTERNAL_SOURCES:
+        return True
+    kind = str(msg.get('display_kind') or '').strip().lower()
+    if kind in _TITLE_INTERNAL_DISPLAY_KINDS:
+        return True
+    return False
+
+
+def _title_is_internal_user_text(text) -> bool:
+    """True when *text* is (or starts with) an injected control block."""
+    stripped = str(text or '').lstrip()
+    if not stripped:
+        return False
+    return any(stripped.startswith(prefix) for prefix in _TITLE_INTERNAL_USER_PREFIXES)
+
+
+def _title_strip_control_head(text) -> str:
+    """Return the human request glued after leading control blocks, else ''.
+
+    The drain path prepends process/delegation notifications to the user's own
+    message, so discarding such a row outright would lose the request. Blocks
+    are separated from each other and from the request by a blank line; a
+    control block with no blank-line separator is a whole notification, and its
+    body ("Status: completed", "Output: ...") is not a request. Repeated blocks
+    are peeled off (a wakeup turn can carry a batch header plus per-process
+    blocks).
+    """
+    value = str(text or '').strip()
+    for _ in range(8):
+        parts = _TITLE_BLOCK_SEPARATOR_RE.split(value, maxsplit=1)
+        if len(parts) < 2:
+            return ''
+        value = parts[1].strip()
+        if not _title_is_internal_user_text(value):
+            return value
+    return ''
+
+
+def _title_user_request_text(msg):
+    """Return the human request text carried by *msg*, or '' when it has none.
+
+    Combines the structured exclusion with the text-level one: an injected row
+    contributes nothing, and a row that glues a control block onto a real
+    request contributes only the request.
+    """
+    if not isinstance(msg, dict) or msg.get('role') != 'user':
+        return ''
+    raw = _title_exchange_input_text(msg.get('content'))
+    if not str(raw or '').strip():
+        return ''
+    if _title_row_is_internal_user(msg):
+        return ''
+    # Peel control blocks off the RAW text, before any whitespace normalisation:
+    # the blank line separating a block from the real request is the only
+    # reliable split point, and both ``_strip_thinking_markup`` and ``split()``
+    # collapse it away.
+    if _title_is_internal_user_text(raw):
+        raw = _title_strip_control_head(raw)
+        if not raw:
+            return ''
+    return ' '.join(str(_strip_thinking_markup(raw)).split()).strip()
+
+
+def _title_exchange_for_unresolved_title(messages):
+    """Return the OPENING exchange for an automatic title, always.
+
+    The opening exchange is the only pair that states the session's task. Later
+    user turns refine it ("continue", "answer in Korean this time", "search for
+    similar issues") and read as instructions, so titling from them named long
+    sessions after whatever the last turn happened to ask. A session that
+    continues another one (compaction rotation, fork) starts with the copied
+    opener, so the same rule names it correctly on its very first attempt —
+    where the old latest-exchange branch fired immediately because the copied
+    history already held several exchanges.
+
+    ``scan_past_consecutive_users`` keeps a queued opening turn from yielding an
+    empty assistant snippet (#7543). The default-off behaviour used to double as
+    the "not yet eligible" signal for the stream teardown; that job now belongs
+    to ``_background_title_generation_inputs`` explicitly, which is the honest
+    place for it.
+    """
+    return _first_exchange_snippets(messages, scan_past_consecutive_users=True)
+
+
+def _title_context_samples(messages, *, limit: int = 2, chars: int = 200, exclude_text: str = '') -> list:
+    """Return up to *limit* recent real user requests, oldest first.
+
+    These are prompt CONTEXT, never a title source: the opening exchange names
+    the session, and these rows only tell the model what the work became when
+    the opener was a warm-up ("can you take a look at this"). Injected rows are
+    excluded, and the request already used as the title source is never
+    repeated here — on the ``prefer_latest`` path the newest request IS the
+    source, and listing it again would feed the model the same text twice.
+    """
+    if limit <= 0:
+        return []
+    requests = []
+    for m in messages or []:
+        text = _title_user_request_text(m)
+        if text:
+            requests.append(text)
+    candidates = requests[1:]
+    source = ' '.join(str(exclude_text or '').split())
+    if source:
+        def _is_the_source(candidate):
+            candidate_norm = ' '.join(str(candidate or '').split())
+            if not candidate_norm:
+                return False
+            return candidate_norm.startswith(source) or source.startswith(candidate_norm)
+        candidates = [t for t in candidates if not _is_the_source(t)]
+    return [t[:chars] for t in candidates[-limit:]]
 
 
 def _count_exchanges(messages):
@@ -5826,17 +5983,20 @@ def _background_title_generation_eligible(session):
 def _background_title_generation_inputs(session):
     """Return (user_text, assistant_text) title inputs when eligible, else None.
 
-    Exchange selection: normally the first completed exchange names the
-    session; if its model output was rejected, retrying the same warm-up
-    opener forever cannot recover, so a later completed exchange is used
-    instead once one exists.
+    Exchange selection is the opening exchange, always (#9388). The "both
+    snippets non-empty" gate below is what keeps an unanswered opening turn from
+    being titled: the selector now scans past consecutive opening user rows
+    (#7543), so a queued opener still reaches the model once it has an answer,
+    but a question with no answer anywhere must not mint a title from itself.
     """
     if not _background_title_generation_eligible(session):
         return None
     user_text, assistant_text = _title_exchange_for_unresolved_title(
         getattr(session, 'messages', None) or []
     )
-    return (user_text, assistant_text) if user_text and assistant_text else None
+    if not user_text or not assistant_text:
+        return None
+    return (user_text, assistant_text)
 
 
 def _detect_title_language(text: str) -> str:
@@ -6617,13 +6777,51 @@ def _generated_title_language_mismatch(user_text: str, title: str, pinned_langua
     return _title_language_mismatch(user_text, title)
 
 
-def _title_prompts(user_text: str, assistant_text: str, pinned_language: Optional[str] = None) -> tuple[str, list[str]]:
+def _call_title_route(route, *args, recent_user_texts=None, **kwargs):
+    """Call a title route, passing ``recent_user_texts`` only when there is one.
+
+    The samples are an opt-in extra: every caller without them keeps the exact
+    call shape it had before #9388. That matters beyond tidiness — the routes
+    are patched by tests and by alternate runtimes, and an unconditional new
+    keyword would break every such stand-in for a feature it never asked for.
+    """
+    if recent_user_texts:
+        kwargs['recent_user_texts'] = recent_user_texts
+    return route(*args, **kwargs)
+
+
+def _title_prompts(user_text: str, assistant_text: str, pinned_language: Optional[str] = None, recent_user_texts: Optional[list] = None) -> tuple[str, list[str]]:
     qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
+    # Later requests ride along as labelled CONTEXT so a warm-up opener can
+    # still be anchored by what the work became. The label is load-bearing: an
+    # unlabelled block reads as a second title source and the model starts
+    # titling from the newest instruction, which is the bug this path fixes.
+    # No samples means no block and no extra instruction — the periodic refresh
+    # path deliberately titles from the latest exchange, so a standing "never
+    # title from a later request" line would contradict its own inputs.
+    samples = ''
+    if recent_user_texts:
+        rendered = "\n".join(
+            f"- {str(t)[:200]}" for t in recent_user_texts if str(t or '').strip()
+        )
+        if rendered:
+            samples = (
+                "\n\nLater requests in this same session (context only — they refine"
+                " the opening task, they are NOT the session topic):\n"
+                f"{rendered}"
+            )
+    qa += samples
     language_rule = _title_prompt_language_rule(user_text, pinned_language)
+    scope_rule = (
+        "Name the session's overall topic from the opening exchange; the later"
+        " requests above are supporting context, never the title.\n"
+        if samples else ''
+    )
     prompts = [
         (
             "Generate a short session title from this conversation start.\n"
             "Use BOTH the user's question and the assistant's visible answer.\n"
+            f"{scope_rule}"
             f"{language_rule}"
             "Return only the title text, 3-8 words, as a topic label.\n"
             "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
@@ -6636,7 +6834,12 @@ def _title_prompts(user_text: str, assistant_text: str, pinned_language: Optiona
         (
             "Rewrite this conversation start as a concise noun-phrase title.\n"
             "Use the actual topic, not the task outcome.\n"
-            f"{language_rule}"
+            + (
+                "When later requests are listed, treat them as supporting context:"
+                " title the work, not the last instruction.\n"
+                if samples else ''
+            )
+            + f"{language_rule}"
             "Return title text only.\n"
             "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
             "Never output acknowledgements, completion status, or meta commentary."
@@ -6993,11 +7196,12 @@ def generate_title_raw_via_aux(
     base_url: str = '',
     *,
     pinned_language: Optional[str] = None,
+    recent_user_texts: Optional[list] = None,
 ) -> tuple[Optional[str], str]:
     """Return (raw_text, status) via auxiliary LLM route."""
     if not user_text or not assistant_text:
         return None, 'missing_exchange'
-    qa, prompts = _title_prompts(user_text, assistant_text, pinned_language)
+    qa, prompts = _title_prompts(user_text, assistant_text, pinned_language, recent_user_texts)
     configured = _get_aux_title_config()
     caller_supplied_route = bool(provider or model or base_url)
     provider = provider or configured.get('provider', '') or ''
@@ -7080,14 +7284,14 @@ def generate_title_raw_via_aux(
         return None, 'llm_error_aux'
 
 
-def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, pinned_language: Optional[str] = None) -> tuple[Optional[str], str]:
+def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, pinned_language: Optional[str] = None, recent_user_texts: Optional[list] = None) -> tuple[Optional[str], str]:
     """Return (raw_text, status) via active-agent route."""
     if not user_text or not assistant_text:
         return None, 'missing_exchange'
     if agent is None:
         return None, 'missing_agent'
 
-    qa, prompts = _title_prompts(user_text, assistant_text, pinned_language)
+    qa, prompts = _title_prompts(user_text, assistant_text, pinned_language, recent_user_texts)
     base_max_tokens = _title_completion_budget(
         getattr(agent, 'provider', ''),
         getattr(agent, 'model', ''),
@@ -7207,13 +7411,20 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
         agent.reasoning_config = prev_reasoning
 
 
-def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str, str]:
+def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text: str, recent_user_texts: Optional[list] = None) -> tuple[Optional[str], str, str]:
     """Generate a title via active-agent route, then sanitize/validate result."""
     # One snapshot drives both the prompt and validation: when a resolvable
     # language is pinned, the prompt asks for it and validation checks the
     # title against the pinned script instead of the conversation start.
     pinned_language = _configured_title_language()
-    raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text, pinned_language=pinned_language)
+    raw, status = _call_title_route(
+        generate_title_raw_via_agent,
+        agent,
+        user_text,
+        assistant_text,
+        pinned_language=pinned_language,
+        recent_user_texts=recent_user_texts,
+    )
     if not raw:
         return None, status, ''
     title = _sanitize_generated_title(raw)
@@ -7224,7 +7435,7 @@ def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text:
     return None, 'llm_invalid', str(raw)[:120]
 
 
-def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, agent=None, *, use_agent_model: bool = False, conversation_id: str = '') -> tuple[Optional[str], str, str]:
+def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, agent=None, *, use_agent_model: bool = False, conversation_id: str = '', recent_user_texts: Optional[list] = None) -> tuple[Optional[str], str, str]:
     """Generate a title via dedicated auxiliary LLM route, then sanitize/validate result.
 
     When use_agent_model is False (default), the auxiliary client resolves
@@ -7261,13 +7472,15 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
             # (previous behaviour) rather than failing title generation.
             ctx_token = None
     try:
-        raw, status = generate_title_raw_via_aux(
+        raw, status = _call_title_route(
+            generate_title_raw_via_aux,
             user_text,
             assistant_text,
             provider=provider,
             model=model,
             base_url=base_url,
             pinned_language=pinned_language,
+            recent_user_texts=recent_user_texts,
         )
     finally:
         if ctx_token is not None:
@@ -7434,7 +7647,7 @@ def _human_title_failure_reason(status) -> str:
 _TITLE_RECOVERY_MAX_EXCHANGES = 3
 
 
-def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None, stream_owner_id: str = None):
+def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None, stream_owner_id: str = None, recent_user_texts: Optional[list] = None):
     """Generate and publish a better title after `done`, then end the stream.
 
     ``session_id`` is the title target (the canonical/continuation session the
@@ -7490,16 +7703,34 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             aux_title_configured = _aux_title_configured()
             rejected_model_output = False
             if agent and not aux_title_configured:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                next_title, llm_status, raw_preview = _call_title_route(
+                    _generate_llm_session_title_for_agent,
+                    agent, user_text, assistant_text,
+                    recent_user_texts=recent_user_texts,
+                )
                 rejected_model_output = llm_status in ('llm_invalid', 'llm_language_mismatch')
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
+                    next_title, llm_status, raw_preview = _call_title_route(
+                        _generate_llm_session_title_via_aux,
+                        user_text, assistant_text,
+                        agent=agent, use_agent_model=True, conversation_id=session_id,
+                        recent_user_texts=recent_user_texts,
+                    )
                     rejected_model_output = rejected_model_output or llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux')
             else:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
+                next_title, llm_status, raw_preview = _call_title_route(
+                    _generate_llm_session_title_via_aux,
+                    user_text, assistant_text,
+                    conversation_id=session_id,
+                    recent_user_texts=recent_user_texts,
+                )
                 rejected_model_output = llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux')
                 if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                    next_title, llm_status, raw_preview = _call_title_route(
+                        _generate_llm_session_title_for_agent,
+                        agent, user_text, assistant_text,
+                        recent_user_texts=recent_user_texts,
+                    )
                     rejected_model_output = rejected_model_output or llm_status in ('llm_invalid', 'llm_language_mismatch')
             source = llm_status
             # An invalid response is different from an unavailable title model:
@@ -7701,8 +7932,11 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
         # rows to the first complete user+assistant pair, so a transcript that
         # opens with queued user turns still reaches the aux LLM instead of
         # silently persisting the local fallback. The automatic in-stream path
-        # keeps the default (no scan-past) so its stream teardown is unchanged.
+        # reaches the same opening pair through
+        # ``_title_exchange_for_unresolved_title``, so manual and automatic
+        # titles share one scope (#9388).
         user_text, assistant_text = _first_exchange_snippets(messages, scan_past_consecutive_users=True)
+    recent_user_texts = _title_context_samples(messages, exclude_text=user_text)
     if not user_text:
         return None, 'empty_user_message', ''
     from api import profiles as profiles_api
@@ -7710,7 +7944,13 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     with profiles_api.profile_env_for_background_worker(session, "manual title regeneration", logger_override=logger):
         if not _aux_title_generation_enabled():
             return None, 'title_generation_disabled', ''
-        next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, conversation_id=getattr(session, 'session_id', '') or '')
+        next_title, llm_status, raw_preview = _call_title_route(
+            _generate_llm_session_title_via_aux,
+            user_text, assistant_text,
+            agent=agent,
+            conversation_id=getattr(session, 'session_id', '') or '',
+            recent_user_texts=recent_user_texts,
+        )
     if next_title:
         return next_title, llm_status, raw_preview
     fallback_title = _fallback_title_from_exchange(user_text, assistant_text)
@@ -18042,10 +18282,18 @@ def _run_agent_streaming(
                 if s.title == 'Untitled' or s.title == 'New Chat' or not s.title:
                     s.title = title_from(s.messages, s.title)
                 _bg_title_inputs = None
+                _bg_title_samples = None
                 if _background_title_generation_eligible(s):
                     _u0, _a0 = _title_exchange_for_unresolved_title(s.messages)
                     if _u0 and _a0:
                         _bg_title_inputs = (_u0, _a0)
+                        # Later real requests ride along as prompt context only:
+                        # the opening exchange still names the session, but a
+                        # warm-up opener ("can you take a look at this") gets
+                        # anchored by what the work actually became (#9388).
+                        _bg_title_samples = _title_context_samples(
+                            s.messages, exclude_text=_u0
+                        )
                 # Read token/cost usage from the agent object (if available).
                 # Per-turn overwrite (#1857): replace cumulative session totals with the
                 # agent's most recent values, which already represent the current turn's
@@ -18883,7 +19131,7 @@ def _run_agent_streaming(
                 threading.Thread(
                     target=_run_background_title_update,
                     args=(s.session_id, *_bg_title_inputs, str(s.title or '').strip(), put, agent),
-                    kwargs={'stream_owner_id': session_id},
+                    kwargs={'stream_owner_id': session_id, 'recent_user_texts': _bg_title_samples},
                     daemon=True,
                 ).start()
             else:
