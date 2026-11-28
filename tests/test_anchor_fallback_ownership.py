@@ -418,6 +418,15 @@ def _render_messages_harness() -> str:
     # evaluated with it. The shim's createElement() returns no template `content`, so the
     # helper takes its insertAdjacentHTML fallback here, exactly as before.
     insert_block_source = _function_source(ui, "_insertSegmentBlock")
+    # The mid-stream rebuild section drives renderMessages()'s #3877 preserve
+    # branch (INFLIGHT + activeStreamId set), which calls these helpers.
+    preserve_helpers_source = "\n".join(
+        _function_source(ui, name)
+        for name in ("_normalizeTransferredLiveProse", "_liveAssistantSegmentTextLength")
+    )
+    steer_source = ui[ui.index("const _STEER_OOB_OPEN_RE"):ui.index("\nfunction setStatus", ui.index("const _STEER_OOB_OPEN_RE"))]
+    commands = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+    live_steer_source = _function_source(commands, "_showSteerIndicator")
     sessions_js = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
     # renderMessages() delegates to these on every settled worklog pass.
     evals = "".join(f"eval({json.dumps(_function_source(src, n))});" for src, n in (
@@ -450,9 +459,17 @@ def _render_messages_harness() -> str:
             this.className = '';
             this.id = '';
             this.hidden = false;
-            this.innerHTML = '';
+            this._innerHTML = '';
             this.style = {{}};
             this.classList = new FakeClassList(this);
+          }}
+          get innerHTML() {{ return this._innerHTML; }}
+          set innerHTML(value) {{
+            this._innerHTML = String(value == null ? '' : value);
+            if (this._innerHTML === '') {{
+              for (const child of this.children) child.parentElement = null;
+              this.children = [];
+            }}
           }}
           appendChild(child) {{
             child.parentElement = this;
@@ -475,6 +492,14 @@ def _render_messages_harness() -> str:
             if (!this.parentElement) return;
             const idx = this.parentElement.children.indexOf(this);
             if (idx >= 0) this.parentElement.children.splice(idx, 1);
+            this.parentElement = null;
+          }}
+          replaceWith(other) {{
+            if (!this.parentElement) return;
+            const parent = this.parentElement;
+            const idx = parent.children.indexOf(this);
+            other.parentElement = parent;
+            parent.children.splice(idx, 1, other);
             this.parentElement = null;
           }}
           setAttribute(name, value) {{
@@ -558,7 +583,20 @@ def _render_messages_harness() -> str:
         global.window = {{}};
         global.document = {{
           createElement: (tag) => new FakeElement(tag),
-          getElementById: (id) => elements[id] || null,
+          getElementById: (id) => {{
+            if (id === 'liveAssistantTurn') {{
+              const visit = (node) => {{
+                if (node.id === id) return node;
+                for (const child of node.children) {{
+                  const found = visit(child);
+                  if (found) return found;
+                }}
+                return null;
+              }};
+              return visit(elements.msgInner);
+            }}
+            return elements[id] || null;
+          }},
         }};
         global.performance = {{ now: () => 1 }};
         global.requestAnimationFrame = (fn) => fn();
@@ -720,6 +758,9 @@ def _render_messages_harness() -> str:
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
         eval({json.dumps(insert_block_source)});
+        eval({json.dumps(preserve_helpers_source)});
+        eval({json.dumps(steer_source)});
+        eval({json.dumps(live_steer_source)});
         {evals}
 """
 
@@ -864,12 +905,72 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           sToolCalls: S.toolCalls.length,
         }};
 
+        // Drive the real live-row helper after a rendered tool turn, then drive
+        // the real settled renderer with a typed Steer at the consumption boundary.
+        // Reload uses fresh DOM and the same persisted message list.
+        elements.msgInner = new FakeElement('div');
+        legacyCards = [];
+        S = {{
+          session: {{ session_id:'steer-order' }},
+          messages: [{{role:'user',content:'run'}}, {{role:'assistant',content:'first token',
+            tool_calls:[{{id:'call1',function:{{name:'terminal',arguments:'{{}}'}}}}]}},
+            {{role:'tool',tool_call_id:'call1',content:'tool result'}}],
+          toolCalls: [], busy: true,
+        }};
+        renderMessages();
+        const liveTurns = elements.msgInner.querySelectorAll('.assistant-turn');
+        elements.liveAssistantTurn = liveTurns[liveTurns.length-1];
+        elements.liveAssistantTurn.id='liveAssistantTurn';
+        const liveBody=new FakeElement('div');
+        liveBody.className='msg-body';
+        liveBody.textContent='first token';
+        elements.liveAssistantTurn.appendChild(liveBody);
+        _showSteerIndicator('use B',[]);
+        _showSteerIndicator('then C',[]);
+        const liveSteerRows=elements.msgInner.querySelectorAll('.steer-row-live').length;
+        const childIdx=(el)=>Array.prototype.indexOf.call(elements.msgInner.children,el);
+        const liveRows=elements.msgInner.querySelectorAll('.steer-row-live');
+        const liveRowAfterTurn=liveRows.length===2&&liveRows.every(row=>!!(row&&elements.liveAssistantTurn
+          &&childIdx(row)>childIdx(elements.liveAssistantTurn)));
+        // Mid-stream rebuild (#8559 review item 3): every accepted live Steer
+        // row must survive the REAL innerHTML='' wipe below, in submission order,
+        // after the live assistant turn. The FakeElement setter detaches children.
+        S.activeStreamId='steer-stream-1';
+        INFLIGHT['steer-order']={{}};
+        renderMessages();
+        const rebuiltRows=elements.msgInner.querySelectorAll('.steer-row-live');
+        const rebuiltLiveTurn=elements.msgInner.children.find(el=>el===elements.liveAssistantTurn)||null;
+        const steerRowsAfterRebuild=rebuiltRows.length;
+        const steerTextsAfterRebuild=rebuiltRows.map(row=>row.dataset.rawText);
+        // Require the live turn to exist in the rebuilt child tree. A detached
+        // pre-wipe reference would make childIdx()=-1 and position checks vacuous.
+        const steerAfterTurnAfterRebuild=steerRowsAfterRebuild===2&&!!rebuiltLiveTurn
+          &&rebuiltRows.every(row=>!!row&&childIdx(row)>childIdx(rebuiltLiveTurn));
+        S.activeStreamId=null;
+        delete INFLIGHT['steer-order'];
+        const settledMessages=[...S.messages,
+          {{role:'user',display_kind:'steer',content:'use B'}},
+          {{role:'assistant',content:'final after steer'}}];
+        const orderedRows=()=>elements.msgInner.children.map(el=>el.dataset.role==='steer'?'steer':
+          el.classList.contains('assistant-turn')?'assistant':el.dataset.role||el.className);
+        S.messages=settledMessages;
+        S.busy=false;
+        elements.msgInner=new FakeElement('div');
+        renderMessages();
+        const settledOrder=orderedRows();
+        const settledSteerRows=elements.msgInner.querySelectorAll('.steer-row').length;
+        elements.msgInner=new FakeElement('div');
+        renderMessages();
+        const reloadOrder=orderedRows();
+        const reloadSteerRows=elements.msgInner.querySelectorAll('.steer-row').length;
+
         console.log(JSON.stringify({{
           selectorSanity,
           anchorSummary,
           historicalSummary,
           rawHistoricalSummary,
           duplicateReferenceSummary,
+          steerOrder:{{liveSteerRows,liveRowAfterTurn,rebuiltLiveTurnPresent:!!rebuiltLiveTurn,steerRowsAfterRebuild,steerTextsAfterRebuild,steerAfterTurnAfterRebuild,settledOrder,settledSteerRows,reloadOrder,reloadSteerRows}},
         }}));
         """
     )
@@ -916,6 +1017,17 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
     assert {card["tid"] for card in duplicate_cards} == {"toolu_hist_dup"}
     assert "toolu_anchor_dup" not in {card["tid"] for card in duplicate_cards}
     assert duplicate_cards[0]["snippet"] == "historical persisted result"
+
+    order = result["steerOrder"]
+    assert order["liveSteerRows"] == 2
+    assert order["liveRowAfterTurn"] is True
+    assert order["steerRowsAfterRebuild"] == 2
+    assert order["steerTextsAfterRebuild"] == ["use B", "then C"]
+    assert order["steerAfterTurnAfterRebuild"] is True
+    assert order["settledOrder"] == ["user", "assistant", "steer", "assistant"]
+    assert order["settledSteerRows"] == 1
+    assert order["reloadOrder"] == order["settledOrder"]
+    assert order["reloadSteerRows"] == 1
 
 
 def test_settled_legacy_tool_rebuild_excludes_anchor_owned_turns():
