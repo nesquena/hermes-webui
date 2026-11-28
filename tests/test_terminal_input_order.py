@@ -43,7 +43,7 @@ global.cancelAnimationFrame=()=>{};
 global.setTimeout=()=>1;
 global.clearTimeout=()=>{};
 global.S={session:{session_id:'s1',workspace:'/tmp/ws'}};
-global.t=(key)=>key;
+global.t=(key,...args)=>args.length?`${key}(${args.join(',')})`:key;
 const toasts=[];
 global.showToast=(msg)=>toasts.push(msg);
 global.syncTerminalButton=()=>{};
@@ -243,7 +243,8 @@ def test_input_is_sent_in_pieces_within_the_server_limit(result):
 
 def test_a_single_paste_over_the_limit_is_refused_whole(result):
     assert result["oversized_sent"] == ["k", "l"]
-    assert result["oversized_toasts"] == ["terminal_input_failedinput too large"]
+    # A whole translated sentence naming the limit, not English glued onto a prefix.
+    assert result["oversized_toasts"] == ["terminal_input_too_large(8192)"]
 
 
 def test_the_paste_limit_counts_code_points_like_the_server(result):
@@ -274,3 +275,31 @@ def test_a_closed_shells_failure_keeps_the_new_shells_keys(result):
 def test_sessions_do_not_wait_for_each_other(result):
     assert result["other_session"] == [["s1", "s"], ["s2", "t"]]
     assert result["queues_left"] == 0
+
+
+def test_every_locale_names_the_paste_limit():
+    if NODE is None:
+        pytest.skip("node not on PATH")
+    script = r"""
+const vm=require('vm'),fs=require('fs');
+const ctx={window:{},navigator:{language:'en'},
+  localStorage:{getItem(){return null;},setItem(){}},
+  document:{documentElement:{},addEventListener(){},querySelectorAll(){return [];}}};
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(process.argv[1],'utf8')+';globalThis.__L=LOCALES;',ctx);
+const out={};
+for(const [loc,strings] of Object.entries(ctx.__L)){
+  const fn=strings.terminal_input_too_large;
+  out[loc]=typeof fn==='function'?fn(8192):null;
+}
+console.log(JSON.stringify(out));
+"""
+    proc = subprocess.run(
+        [NODE, "-e", script, str(REPO / "static" / "i18n.js")],
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+    messages = json.loads(proc.stdout)
+    assert len(messages) >= 15
+    for loc, message in messages.items():
+        assert message and "8192" in message, loc
+        assert "input too large" not in message, loc
