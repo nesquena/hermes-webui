@@ -375,7 +375,9 @@ running Gateway; it does not start one.
 For eligible Desktop, CLI/TUI and messaging sessions, text follow-ups then resume
 the **same conversation** through native authorization. The Gateway owns admission,
 model/tool configuration, execution and history. WebUI translates its events and
-controls into the existing browser stream and approval/clarification cards. Stop
+controls into the existing browser stream and approval/clarification cards. A personality selected in the WebUI applies to WebUI-side turns; the native
+`prompt.submit` this transport uses carries no system-prompt field, so it does not
+travel with a Gateway session-transport turn. Stop
 targets only the WebUI admission or its execution generation. The existing WebUI
 session-YOLO switch answers individual approvals while enabled; it does not change
 the Gateway's own persisted YOLO setting.

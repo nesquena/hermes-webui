@@ -543,6 +543,14 @@ def run_session(session, stream_id, text, *, emit, cancel, record, saved=None):
         raise SessionTransportError("Gateway session transport is not configured.")
     if saved and saved.get("session_connection", {"mode": "local"}) != binding:
         raise SessionTransportError("Gateway connection changed; refusing to replay this turn.")
+    # The session transport speaks the Agent's native prompt.submit, whose
+    # accepted parameters are session_id / input_id / text (plus display_* and
+    # image paths on the Agent side). It has no system-prompt or personality
+    # field, so the WebUI-side ephemeral personality prompt built for the
+    # runs-API path (#8641) cannot be injected here: a personality selected in
+    # the browser does not apply to Gateway session-transport turns until the
+    # Agent exposes that parameter. Do NOT smuggle it into `text` — that would
+    # persist it into the conversation history.
     request = (saved or {}).get("session_request") or {
         "session_id": session.session_id, "input_id": "webui:" + stream_id, "text": text,
     }
