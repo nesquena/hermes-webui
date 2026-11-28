@@ -4050,13 +4050,32 @@ def _resolve_custom_record_key(
     raw_api_key: object,
     raw_key_env: object,
     provider_hint: object = None,
+    raw_api_key_env: object = None,
 ) -> str | None:
     """Static credential declared by ONE custom record.
 
-    Accepts a literal key, a ``${ENV_VAR}`` reference or a ``key_env`` env-var
-    hint, then falls back to the ``CUSTOM_<SLUG>_API_KEY`` convention. Reading
-    every form from the SAME record is what keeps an endpoint and a credential
-    from being resolved out of two different authorities.
+    Accepts a literal key, a ``${ENV_VAR}`` reference, a ``key_env`` env-var
+    hint or the ``api_key_env`` spelling of the same hint, then falls back to
+    the ``CUSTOM_<SLUG>_API_KEY`` convention. Reading every form from the SAME
+    record is what keeps an endpoint and a credential from being resolved out
+    of two different authorities.
+
+    ``key_env`` is the primary spelling and ``api_key_env`` its compatibility
+    synonym: the synonym takes over only when the primary FIELD is absent or
+    blank, which is the Agent's own order
+    (``runtime_provider_custom._key_env_secret`` reads
+    ``entry.get("key_env") or entry.get("api_key_env")`` — it picks the NAME
+    first, then reads that one variable) and the order
+    ``_normalized_raw_provider_record`` applies to ``providers.<id>`` records.
+    Legacy ``custom_providers[]`` entries reach this ladder directly, without
+    that normalisation, so the ``api_key_env`` spelling has to be read here too
+    (#8959).
+
+    The FIELD is chosen before its value is read. A declared ``key_env`` whose
+    variable is unset or empty stays this record's credential source: it does
+    NOT hand the record to the ``api_key_env`` variable, because that would
+    send a different account's key to the endpoint ``key_env`` names — a
+    credential leak instead of a report of the real misconfiguration (#9225).
     """
     api_key = None
     if raw_api_key is not None:
@@ -4066,9 +4085,12 @@ def _resolve_custom_record_key(
         elif key_text:
             api_key = key_text
     if not api_key:
-        key_env = str(raw_key_env or "").strip()
-        if key_env:
-            api_key = _thread_local_env_value(key_env).strip() or None
+        # One variable name per record, decided by the DECLARED field: the
+        # primary spelling wins whenever it is declared, and the compatibility
+        # spelling is read only when the primary field is absent or blank.
+        env_name = str(raw_key_env or "").strip() or str(raw_api_key_env or "").strip()
+        if env_name:
+            api_key = _thread_local_env_value(env_name).strip() or None
     if not api_key and provider_hint:
         api_key = _lookup_custom_api_key_env(provider_hint)
     return api_key
@@ -4272,7 +4294,9 @@ def _custom_record_owns_connection(record: dict, pid: str) -> bool:
     # authority instead of surfacing the misconfiguration.
     if _custom_record_declares_credential(record, base_url, None):
         return True
-    if _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid):
+    if _resolve_custom_record_key(
+        record.get("api_key"), record.get("key_env"), pid, record.get("api_key_env")
+    ):
         return True
     if _custom_record_api_mode(record):
         return True
@@ -4981,7 +5005,9 @@ def resolve_custom_provider_connection(
         return None, None
 
     base_url = _custom_record_base_url(record)
-    api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
+    api_key = _resolve_custom_record_key(
+        record.get("api_key"), record.get("key_env"), pid, record.get("api_key_env")
+    )
     if return_provenance:
         return api_key, base_url, is_exact
     return api_key, base_url
@@ -5156,11 +5182,12 @@ def _custom_record_declares_credential(
     endpoint and hides the real cause.
 
     So the question asked here is declaration, not resolution: the RAW
-    ``api_key`` (literal or ``${ENV}``), ``key_env``, ``key_cmd``, a configured
-    ``credential_pool``, a pool that actually resolved for this endpoint, and a
-    host-gated env credential the runtime would accept for it.
+    ``api_key`` (literal or ``${ENV}``), ``key_env``, ``api_key_env``,
+    ``key_cmd``, a configured ``credential_pool``, a pool that actually
+    resolved for this endpoint, and a host-gated env credential the runtime
+    would accept for it.
     """
-    for field in ("api_key", "key_env", "key_cmd"):
+    for field in ("api_key", "key_env", "api_key_env", "key_cmd"):
         if str(record.get(field) or "").strip():
             return True
     # A configured pool is a declaration even when empty or exhausted: the user
@@ -5333,7 +5360,9 @@ def resolve_custom_provider_bundle(
             owned["credential_pool"] = pool_runtime.get("credential_pool")
 
     if not api_key:
-        api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
+        api_key = _resolve_custom_record_key(
+            record.get("api_key"), record.get("key_env"), pid, record.get("api_key_env")
+        )
     if not api_key and not lookup_only:
         api_key = _host_gated_env_key(base_url)
 
@@ -10951,6 +10980,56 @@ def _read_visible_codex_cache_model_ids() -> list[str]:
     return ordered
 
 
+def _probe_url_origin(url: object) -> tuple[str, str, int] | None:
+    """Origin of a probe URL as ``(scheme, host, port)``; ``None`` when unusable.
+
+    The origin — not the full URL — is the unit a credential is bound to: a
+    record declares an endpoint's origin, and a credential that record
+    declares may reach that origin and nowhere else.
+    """
+    text = str(url or "").strip()
+    if not text:
+        return None
+    try:
+        parts = urlparse(text if "://" in text else f"http://{text}")
+        scheme = (parts.scheme or "").lower()
+        host = (parts.hostname or "").lower()
+        port = parts.port or {"https": 443, "http": 80}.get(scheme)
+    except ValueError:
+        return None
+    return (scheme, host, port) if scheme and host and port else None
+
+
+class _OriginBoundRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow same-origin redirects; refuse cross-origin ones on credentialed probes.
+
+    urllib's default redirect handling replays the request headers —
+    ``Authorization`` included — to the redirect target, another host included.
+    A ``/v1/models`` probe that 3xx-redirects off the record's own origin would
+    deliver that record's credential to an endpoint no record declared
+    (#9225). A cross-origin 3xx surfaces as an ``HTTPError`` instead; a
+    same-origin redirect keeps the credential inside the origin the record
+    declared. Same philosophy as the quota probes' no-redirect opener
+    (``api/providers._NoRedirectHandler``) and the extension sidecar proxy's
+    same-origin opener (``api/routes._extension_sidecar_proxy_same_origin_opener``).
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _probe_url_origin(newurl) != _probe_url_origin(req.full_url):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_CUSTOM_PROBE_OPENER = urllib.request.build_opener(_OriginBoundRedirectHandler())
+# Installed as this process's default opener so EVERY urllib request the WebUI
+# makes — the credential-bearing model-catalog probe included — refuses a
+# cross-origin 3xx instead of replaying its Authorization header to a host no
+# record declared (#9225). Same-origin redirects are followed unchanged.
+# Callers that patch ``urllib.request.urlopen`` (the test suite's seam) bypass
+# the opener entirely and are unaffected.
+urllib.request.install_opener(_CUSTOM_PROBE_OPENER)
+
+
 def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = False) -> dict:
     """
     Return available models grouped by provider.
@@ -11925,7 +12004,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
                 _cp_base_url = str(_cp.get("base_url") or "").strip()
                 _cp_api_key = _resolve_custom_record_key(
-                    _cp.get("api_key"), _cp.get("key_env"), _slug,
+                    _cp.get("api_key"), _cp.get("key_env"), _slug, _cp.get("api_key_env"),
                 ) or ""
                 # Fallback: check credential pool for both api_key and base_url
                 if (not _cp_api_key or not _cp_base_url) and _slug:
@@ -11938,10 +12017,23 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             if _pool:
                                 _entry = _pool.select()
                                 if _entry:
-                                    if not _cp_api_key:
-                                        _cp_api_key = getattr(_entry, "runtime_api_key", "") or ""
-                                    if not _cp_base_url:
-                                        _cp_base_url = str(getattr(_entry, "base_url", "") or "").strip()
+                                    # The pool owns BOTH halves of the pair. When
+                                    # the endpoint would come from the pool (the
+                                    # record declared no base_url), the credential
+                                    # must come from that same pool entry: pairing
+                                    # the record's key with the pool's URL sends a
+                                    # key the record declared for ANOTHER
+                                    # authority's endpoint. The compatibility
+                                    # ``api_key_env`` spelling (#8959) made that
+                                    # path newly reachable, so the pairing is
+                                    # enforced here (#9225).
+                                    _pool_key = getattr(_entry, "runtime_api_key", "") or ""
+                                    _pool_url = str(getattr(_entry, "base_url", "") or "").strip()
+                                    if not _cp_base_url and _pool_url:
+                                        _cp_base_url = _pool_url
+                                        _cp_api_key = _pool_key
+                                    elif not _cp_api_key:
+                                        _cp_api_key = _pool_key
                     except ImportError:
                         pass
 
