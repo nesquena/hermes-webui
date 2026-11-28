@@ -602,4 +602,9 @@ class TestCmdModelFullCatalogWiring:
     def test_injects_option_for_extras_only_winner(self, commands_src):
         # An extras-only match isn't a rendered <option>; cmdModel must inject it
         # (with provider) before selecting, or sel.value=match silently no-ops.
-        assert "_ensureModelOptionInDropdown(match,sel,matchProvider)" in commands_src
+        # #7777 SHOULD-FIX 3: the call also passes `allowExcludedForActiveSession`
+        # so an explicit `/model` pick bypasses the picker-exclude policy, and
+        # `explicitModelCommand` marks the intent.
+        assert "_ensureModelOptionInDropdown(match,sel,matchProvider," in commands_src
+        assert "allowExcludedForActiveSession" in commands_src
+        assert "explicitModelCommand:true" in commands_src
