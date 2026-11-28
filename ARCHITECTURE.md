@@ -1103,6 +1103,18 @@ Step-by-step trace of what happens when you type a message and press Send:
     POST /api/approval/respond -> server pops _pending, calls approve_*
     Agent retries the command (now is_approved() returns True) and continues
 
+Live token rendering yields to composer-local typing for up to 250 ms after the
+last `input`/`keydown`, with a 1 s catch-up ceiling for continuous typing. This
+deferral does not delay transcript ownership or finalization: forced tool and
+interim segment flushes still paint immediately, and terminal/dispose paths
+still own the final answer. The stream's `_pendingRafHandle` identifies either
+kind of scheduled callback, including the typing retry's actual timeout ID;
+`false` means no retry was scheduled. Cancellation clears that exact handle and
+its pending bit, so a forced flush cannot later repaint through an abandoned
+retry or block the next token. Ordering, coalescing, stream/session guards, and
+the 1 s ceiling are independent of whether a retry, rAF, or throttle timeout is
+currently pending.
+
 ---
 
 ## 7. Dependency Map
