@@ -2028,10 +2028,36 @@ def test_model_and_reasoning_controls_live_in_mobile_overflow_panel():
         "reasoning dropdown positioning/click handling must know the mobile reasoning action"
 
     mobile_css = _composer_phone_media_block()
-    assert ".composer-left > .composer-model-wrap" in mobile_css, \
-        "phone width must hide the footer model chip behind overflow"
-    assert ".composer-left > .composer-reasoning-wrap" in mobile_css, \
-        "phone width must hide the footer reasoning chip behind overflow"
+    flat_css = mobile_css.replace(" ", "")
+    assert _rule_body(mobile_css, ".composer-left > .composer-toolsets-wrap").strip() == "display:none!important;", \
+        "phone width must still fold the toolsets into the overflow panel"
+    assert ".composer-model-wrap{display:none" not in flat_css, \
+        "phone width must keep the model chip in the composer"
+    for selector, reason in (
+        (".composer-footer:not(.cf-burger) .composer-left > .composer-model-wrap:not(.composer-control-hidden)",
+         "the model chip must stay in the phone row, except in the burger stage and when the user hid it"),
+        (".composer-footer:not(.cf-burger) .composer-left > .composer-reasoning-wrap.is-available:not(.composer-control-hidden)",
+         "the reasoning chip must stay in the phone row, keyed on the model's capability and the user's setting"),
+    ):
+        assert _rule_body(mobile_css, selector).strip() == "display:inline-flex!important;", reason
+    # A re-show rule that outranks `.composer-control-hidden{display:none!important}` (one
+    # class) would put a control the user switched off back on the phone row; the burger
+    # stage folds both chips into the config panel, so the rule must not apply there either.
+    assert ".cf-burger .composer-left > .composer-model-wrap{display:inline-flex" not in flat_css, \
+        "no unscoped or burger-stage re-show rule for the model chip"
+    assert ".composer-footer .composer-left > .composer-model-wrap," not in flat_css, \
+        "the re-show rule must not match a hidden chip"
+    assert ".composer-reasoning-wrap.is-available" in flat_css, \
+        "the phone reasoning chip must key on the model's own capability class"
+    # What folded to make room: the two controls that are advanced or duplicated.
+    for selector in ("#profileChipWrap", ".composer-left > .provider-quota-chip"):
+        assert _rule_body(mobile_css, selector).strip() == "display:none!important;", \
+            f"phone width must fold {selector} to fit the steering chips"
+    assert ".composer-ws-wrap{display:none" not in flat_css, \
+        ("the workspace switch must stay focusable at phone width: the drawer's close "
+         "hands focus back to #btnWorkspacePanelToggle, and a hidden invoker strands it")
+    assert "is-available" in ui_js, \
+        "ui.js must set the capability class the phone reasoning chip keys on"
     assert ".composer-mobile-config-action" in mobile_css, \
         "mobile overflow panel must size the model/reasoning actions"
 

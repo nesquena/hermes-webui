@@ -3484,9 +3484,36 @@
     .composer-workspace-group{box-sizing:border-box;flex:0 0 44px;width:44px;min-width:44px;max-width:44px;min-height:44px;overflow:hidden;border:none;background:transparent;border-radius:8px;}
     .composer-workspace-files-btn{box-sizing:border-box;width:44px;min-width:44px;max-width:44px;padding:0;border-radius:8px;}
     .composer-workspace-chip{display:none!important;}
-    .composer-left > .composer-model-wrap,
-    .composer-left > .composer-reasoning-wrap,
+    /* Phone width keeps the two steering controls in the composer instead of
+       folding them into the mobile config panel: the model chip and the
+       reasoning chip render as icon-only 44px buttons (their labels and
+       chevrons are already hidden above) because switching model or thinking
+       is the thing a live conversation is steered by, and it should not sit
+       behind a tap. Only toolsets — the least reached of the three — still
+       fold. The reasoning chip follows `.is-available`, which ui.js sets from
+       the model's own capabilities, so a model without a thinking toggle
+       never grows a dead button here. */
     .composer-left > .composer-toolsets-wrap{display:none!important;}
+    /* The inline quota pill moves into the same panel it already duplicates here:
+       with the model and reasoning chips back in the row, keeping all three inline
+       pushed the left cluster past its box at 390px (measured 368px of content in a
+       302px cluster, so the leading controls scrolled out of sight). */
+    .composer-left > .provider-quota-chip{display:none!important;}
+    /* The profile switcher folds too. Seven 44px controls plus their gaps
+       need 368px and the phone cluster is 302px, so the row can only hold six:
+       the two chips a live conversation is steered by stay, the inline quota pill
+       folds (it has a panel action), and so does this one — an advanced,
+       per-session setting. The workspace switch deliberately does NOT fold: the
+       drawer it opens owns an a11y contract (its close returns focus to
+       #btnWorkspacePanelToggle), and a hidden invoker strands focus on <body>. */
+    #profileChipWrap{display:none!important;}
+    .composer-left{gap:4px;}
+    /* Scoped to the non-burger footer and to controls the user has not hidden
+       in Settings: `.composer-control-hidden` carries display:none!important
+       from a non-media rule, so an unscoped `!important` here would resurrect a
+       control the user switched off. */
+    .composer-footer:not(.cf-burger) .composer-left > .composer-model-wrap:not(.composer-control-hidden){display:inline-flex!important;}
+    .composer-footer:not(.cf-burger) .composer-left > .composer-reasoning-wrap.is-available:not(.composer-control-hidden){display:inline-flex!important;}
     /* Saved prompts is a desktop-only composer affordance — too much for the
        narrow mobile composer (Nathan 2026-06-09). Hide the button + popup. */
     #btnSavedPrompts,.saved-prompts-popup{display:none!important;}
