@@ -400,22 +400,21 @@ def test_percent_encoded_addresses_match_plain_ones(call):
 
 
 def test_a_list_number_counts_only_where_the_browser_shows_it(call):
-    # A numbered list shows its item's number in full up to four digits.
     assert _missing(call, '<ol><li value="3">item</li></ol>', ["ol", {}, ["li", {"value": "3"}, "item"]]) == []
     assert _missing(call, "2023. Launched\n2024. Grew",
                     ["ol", {}, ["li", {"value": "2023"}, "Launched"], ["li", {"value": "2024"}, "Grew"]]) == []
-    # Outside an <ol>, past four digits (a phone cuts the leading digits), or inside a block that
-    # clips the margin where the number is drawn, the number is not shown in full.
+    assert _missing(call, "12345. item", ["ol", {}, ["li", {"value": "12345"}, "item"]]) == []
+    for kind in ("katex-block", "mermaid-block"):
+        src = f'<div class="{kind}"><ol><li value="42">x</li></ol></div>'
+        dom = ["div", {"class": kind}, ["ol", {}, ["li", {"value": "42"}, "x"]]]
+        assert _missing(call, src, dom) == []
+    # Unordered lists, values outside the browser counter range, and lists in
+    # preformatted content still require the plain-text fallback.
     cases = [
         ("731337", '<ul><li value="731337">item</li></ul>', ["ul", {}, ["li", {"value": "731337"}, "item"]]),
         ("731338", '<li value="731338">item</li>', ["li", {"value": "731338"}, "item"]),
         ("99999999999", '<ol><li value="99999999999">item</li></ol>',
          ["ol", {}, ["li", {"value": "99999999999"}, "item"]]),
-        ("12345", "12345. item", ["ol", {}, ["li", {"value": "12345"}, "item"]]),
-        ("42", '<div class="katex-block"><ol><li value="42">x</li></ol></div>',
-         ["div", {"class": "katex-block"}, ["ol", {}, ["li", {"value": "42"}, "x"]]]),
-        ("123", '<div class="mermaid-block"><ol><li value="123">x</li></ol></div>',
-         ["div", {"class": "mermaid-block"}, ["ol", {}, ["li", {"value": "123"}, "x"]]]),
         ("4321", '<pre><ol><li value="4321">x</li></ol></pre>',
          ["pre", {}, ["ol", {}, ["li", {"value": "4321"}, "x"]]]),
     ]

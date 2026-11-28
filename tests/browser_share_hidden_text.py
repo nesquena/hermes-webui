@@ -89,10 +89,6 @@ HIDING = [
     '<li value="731338">item</li>',
     '- one\n<li value="731339">two</li>',
     '<ol><li value="99999999999">item</li></ol>',
-    # ...and not in full past four digits, or inside a block that clips the margin.
-    "12345. item",
-    '<div class="katex-block"><ol><li value="42">x</li></ol></div>',
-    '<div class="mermaid-block"><ol><li value="123">x</li></ol></div>',
     '<pre><ol><li value="4321">x</li></ol></pre>',
     # A raw anchor whose address the renderer drops, with an encoded label; other attributes of an
     # address-labelled anchor.
@@ -123,6 +119,12 @@ HIDING = [
 ]
 
 # Realistic content that must keep its formatting.
+NUMBERED_LISTS = {
+    12345: "12345. item",
+    42: '<div class="katex-block"><ol><li value="42">x</li></ol></div>',
+    123: '<div class="mermaid-block"><ol><li value="123">x</li></ol></div>',
+}
+
 ORDINARY = [
     "Plain prose with **bold**, _italic_, ~~struck~~ and `inline code`.",
     "## Setup\n\n1. Install the package\n2. Run `make test`\n   - on CI too\n3. Done\n\n> Note: this takes a minute.",
@@ -278,6 +280,28 @@ def _read_share(browser, token, expected):
     return rows, errors
 
 
+def _check_numbered_list_markers(browser, token):
+    failures = []
+    for width in (390, 1280):
+        ctx = browser.new_context(base_url=BASE, viewport={"width": width, "height": 800})
+        try:
+            page = ctx.new_page()
+            page.goto(f"/share/{token}", wait_until="domcontentloaded")
+            page.locator(".share-message").last.wait_for()
+            for value in NUMBERED_LISTS:
+                item = page.locator(f'.share-message-body ol > li[value="{value}"]')
+                if item.count() != 1 or not item.evaluate("""item => {
+                    const text = document.createRange();
+                    text.selectNodeContents(item.firstChild);
+                    return getComputedStyle(item).listStylePosition === 'inside'
+                        && text.getBoundingClientRect().left > item.getBoundingClientRect().left;
+                }"""):
+                    failures.append(f"Marker {value} is not drawn inside its list item at {width}px")
+        finally:
+            ctx.close()
+    return failures
+
+
 def main():
     try:
         from playwright.sync_api import sync_playwright
@@ -312,6 +336,9 @@ def main():
         convs = [
             {"title": "hiding", "messages": [{"role": "assistant", "content": c} for c in HIDING]},
             {"title": "ordinary", "messages": [{"role": "assistant", "content": c} for c in ORDINARY]},
+            {"title": "numbered lists", "messages": [
+                {"role": "assistant", "content": c} for c in NUMBERED_LISTS.values()
+            ]},
         ]
         fuzz = []
         for seed in seeds:
@@ -344,7 +371,8 @@ def main():
                     failures.append(f"ordinary shown as plain text: {content!r}")
             print(f"ordinary: {sum(not r['plain'] for r in rows)}/{len(ORDINARY)} keep their formatting")
 
-            for seed, cases, token in zip(seeds, fuzz, tokens[2:], strict=True):
+            failures += _check_numbered_list_markers(browser, tokens[2])
+            for seed, cases, token in zip(seeds, fuzz, tokens[3:], strict=True):
                 rows, errors = _read_share(browser, token, len(cases))
                 failures += [f"fuzz {seed} page error: {e}" for e in errors]
                 if len(rows) != len(cases):
