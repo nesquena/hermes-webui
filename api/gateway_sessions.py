@@ -35,8 +35,18 @@ def external_session(session):
     return session.get("session_source") != "fork" and source in _LOCAL_SOURCES | _MESSAGING_SOURCES
 
 
-def display_history(snapshot):
-    """Canonical display projections use text; WebUI transcript rows use content."""
+def display_history(snapshot, turn_token=None, turn_text=None, previous=None):
+    """Canonical display projections use text; WebUI transcript rows use content.
+
+    `turn_token` re-stamps the just-settled turn's prompt row, which the Gateway stores without it;
+    tokens of earlier turns in `previous` carry over by the Gateway's native row identity.
+    """
+    carried = {}
+    for row in previous or []:
+        if isinstance(row, dict) and row.get("_active_turn_token") and row.get("role") == "user":
+            for key in ("row_id", "message_uid"):
+                if row.get(key) is not None:
+                    carried[(key, row[key])] = row["_active_turn_token"]
     rows = []
     for row in snapshot.get("display_messages", snapshot.get("messages", [])):
         if not isinstance(row, dict) or row.get("role") not in {"user", "assistant"}:
@@ -44,7 +54,17 @@ def display_history(snapshot):
         item = {**row, "content": row.get("text", row.get("content", ""))}
         # Retain the Gateway's row_id and timestamp. Do not invent a WebUI id:
         # the existing state.db reader merges these rows by their native identity.
+        if item["role"] == "user" and not item.get("_active_turn_token"):
+            token = next((carried[(k, item[k])] for k in ("row_id", "message_uid")
+                          if item.get(k) is not None and (k, item[k]) in carried), None)
+            if token:
+                item["_active_turn_token"] = token
         rows.append(item)
+    if turn_token:
+        from api.streaming import _active_turn_user_text_matches
+        users = [r for r in rows if r["role"] == "user" and r.get("display_kind") != "steer"]
+        if users and _active_turn_user_text_matches(users[-1], turn_text):
+            users[-1]["_active_turn_token"] = turn_token
     return rows
 
 

@@ -3754,7 +3754,8 @@ def _run_gateway_chat_streaming(
                 canonical_messages = canonical_snapshot.get("messages") or []
                 s.context_messages = list(canonical_messages)
                 from api.gateway_sessions import display_history
-                s.messages = display_history(canonical_snapshot)
+                s.messages = display_history(canonical_snapshot, active_turn_identity.get("token"), msg_text,
+                                             previous=s.messages)
                 info = canonical_snapshot.get("info") or {}
                 persisted_model = info.get("model") or s.model
                 persisted_model_provider = info.get("provider") or s.model_provider

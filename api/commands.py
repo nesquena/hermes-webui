@@ -28,7 +28,7 @@ _AGENT_COMMAND_ALIASES = {
     'reload_skills': 'reload-skills',
     'codex_runtime': 'codex-runtime',
 }
-_ALLOWED_AGENT_COMMANDS = frozenset({'reload-mcp', 'reload-skills', 'codex-runtime', 'credits'})
+_ALLOWED_AGENT_COMMANDS = frozenset({'reload-mcp', 'reload-skills', 'codex-runtime', 'credits', 'loop'})
 _RELOAD_MCP_LOCK = threading.Lock()
 _RELOAD_SKILLS_LOCK = threading.Lock()
 _CODEX_RUNTIME_LOCK = threading.Lock()
