@@ -8413,6 +8413,11 @@ let _extensionsActiveTab = 'gallery';
 let _settingsSearchDismissListenerRegistered = false;
 let _settingsAppearanceAutosaveTimer = null;
 let _settingsAppearanceAutosaveRetryPayload = null;
+let _appearanceSaveGeneration = 0;
+// Generation of each scheduled appearance payload, so a queued response for an
+// older payload cannot overwrite a newer local choice (destructive opt-ins must
+// not fail open). Keyed by the payload object: the retry path reuses it.
+const _appearanceSaveGenerationByPayload = new WeakMap();
 let _settingsPreferencesAutosaveTimer = null;
 let _settingsPreferencesAutosaveRetryPayload = null;
 
@@ -9476,6 +9481,7 @@ function _appearancePayloadFromUi(){
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
     auto_scroll_follow: !!($('settingsAutoScrollFollow')||{}).checked,
     render_user_markdown: !!($('settingsRenderUserMarkdown')||{}).checked,
+    skip_delete_confirm: !!($('settingsSkipDeleteConfirm')||{}).checked,
     large_text_paste_as_attachment: !!($('settingsLargeTextPasteAsAttachment')||{}).checked,
     project_quick_create_buttons: !!($('settingsProjectQuickCreate')||{}).checked,
     ..._structuredCodeViewFromUi(),
@@ -9563,6 +9569,7 @@ function _rememberAppearanceSaved(payload){
 
 function _scheduleAppearanceAutosave(){
   const payload=_appearancePayloadFromUi();
+  _appearanceSaveGenerationByPayload.set(payload,++_appearanceSaveGeneration);
   // Keep discard/close behavior aligned with the new mental model: appearance
   // changes are committed immediately instead of treated as preview-only edits.
   _rememberAppearanceSaved(payload);
@@ -9573,6 +9580,7 @@ function _scheduleAppearanceAutosave(){
 }
 
 async function _autosaveAppearanceSettings(payload){
+  const generation=_appearanceSaveGenerationByPayload.get(payload);
   try{
     const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
     _settingsAppearanceAutosaveRetryPayload=null;
@@ -9605,6 +9613,9 @@ async function _autosaveAppearanceSettings(payload){
       _persistAutoScrollFollow(saved.auto_scroll_follow);
     }
     window._largeTextPasteAsAttachment=!saved||saved.large_text_paste_as_attachment!==false;
+    if(generation===undefined||generation===_appearanceSaveGeneration){
+      window._skipDeleteConfirm=!!(saved&&saved.skip_delete_confirm);
+    }
     window._projectQuickCreate=!!(saved&&saved.project_quick_create_buttons);
     if(saved&&Object.prototype.hasOwnProperty.call(saved,'structured_code_default_view')){
       // Re-sync from the server-validated/clamped values so the UI and runtime
@@ -10379,6 +10390,15 @@ async function loadSettingsPanel(){
         window._renderUserMarkdown=this.checked;
         if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
         if(typeof renderMessages==='function') renderMessages();
+        _scheduleAppearanceAutosave();
+      };
+    }
+    const skipDeleteConfirmCb=$('settingsSkipDeleteConfirm');
+    if(skipDeleteConfirmCb){
+      skipDeleteConfirmCb.checked=!!settings.skip_delete_confirm;
+      window._skipDeleteConfirm=skipDeleteConfirmCb.checked;
+      skipDeleteConfirmCb.onchange=function(){
+        window._skipDeleteConfirm=this.checked;
         _scheduleAppearanceAutosave();
       };
     }
