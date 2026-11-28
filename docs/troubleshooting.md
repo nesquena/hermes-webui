@@ -26,6 +26,45 @@ WebUI HTTP server. Investigate cron outcomes in the gateway's logs and the
 active Hermes home's `cron/executions.db`; WebUI access records show HTTP cron
 management requests, not every scheduled execution.
 
+## The Checkpoints card is always empty
+
+The **Checkpoints** card in a Space's detail view lists the filesystem snapshots
+the agent took for that workspace, and the rollback controls restore them. It
+stays empty in two different situations that look identical:
+
+**1. Checkpointing is off for the profile.** Checkpoints are opt-in and default
+to off (`most users never use /rollback`), so a profile that never enabled them
+takes no snapshots at all. Turn them on in the profile's `config.yaml`:
+
+```yaml
+checkpoints:
+  enabled: true
+```
+
+Then start a new turn — the value is read when a WebUI agent is created, and
+changing it invalidates a cached agent so an already-open chat picks it up on
+its next message. The other fields (`max_snapshots`, `max_total_size_mb`,
+`max_file_size_mb`) keep the agent defaults. A snapshot is taken on the first
+`write_file`/`patch` of each turn (and before destructive `terminal` commands),
+so a workspace that has only been read has nothing to list yet.
+
+**2. The agent never wrote a snapshot for this workspace.** Check the store
+directly — the panel reads it, so if it is empty here too, there is nothing to
+show:
+
+```bash
+hermes checkpoints status
+```
+
+That prints every project the agent has snapshotted, with a commit count and
+last-touch time. A workspace showing `0` commits has no restore points. Projects
+appear there as soon as the agent snapshots them, whether the session started in
+the WebUI, the TUI, or a messaging gateway — the Card is not WebUI-only state.
+
+If the card stays empty while `hermes checkpoints status` shows commits for the
+workspace, that is a bug in the panel's reader: please file it with the output
+of that command and the WebUI version.
+
 ## "AIAgent not available -- check that hermes-agent is on sys.path"
 
 **Symptom.** WebUI starts, shows the chat interface, but every chat request fails immediately with this error in the response or the server log. As of v0.51.6 the error includes a diagnostic block with the running Python interpreter, the relevant `sys.path` entries, and the most-common fix; on older versions the message is bare.

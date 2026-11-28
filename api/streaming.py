@@ -1915,6 +1915,58 @@ def _load_prefill_messages_script(config_data: dict) -> dict:
     return {"status": "loaded", "source": "script", "label": label, "messages": messages, "message_count": len(messages)}
 
 
+def _resolve_checkpoints_enabled(config_data: Optional[dict] = None) -> bool:
+    """Return the profile's ``checkpoints.enabled`` for a WebUI-created agent.
+
+    ``AIAgent`` defaults ``checkpoints_enabled`` to False — the agent ships
+    filesystem checkpointing as an opt-in ("most users never use /rollback") —
+    and the WebUI never passed the flag, so browser-originated sessions took no
+    snapshots even when the operator had enabled checkpoints in config.yaml.
+    The TUI and messaging gateways both resolve the flag from config; this path
+    did not.
+
+    Mirrors ``tui_gateway.checkpoints._load_checkpoints_enabled``: an absent or
+    malformed section stays False, so a profile that never opted in is
+    unaffected, and the legacy ``checkpoints: true`` scalar form still works.
+    """
+    if not isinstance(config_data, dict):
+        return False
+    cp_cfg = config_data.get("checkpoints", {})
+    if isinstance(cp_cfg, bool):
+        # Legacy ``checkpoints: true`` scalar form.
+        return cp_cfg
+    if not isinstance(cp_cfg, dict):
+        return False
+    return _checkpoint_flag_value(cp_cfg.get("enabled"))
+
+
+# The project's shared truthy string set (utils.is_truthy_value in the agent):
+# these spellings mean on; everything else is off. Kept local because this module
+# must not import the agent package at request time.
+_CHECKPOINT_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _checkpoint_flag_value(value) -> bool:
+    """Coerce a checkpoint ``enabled`` value to bool, unknown → off.
+
+    YAML already gives real booleans for `enabled: true`, but a hand-written or
+    template-rendered config can carry a quoted string. Plain ``bool("false")``
+    is True, which would switch checkpointing ON for someone who wrote
+    ``enabled: "false"`` — the opposite of intent. Only the project's truthy
+    spellings count as on; anything unrecognised stays off so a typo cannot
+    silently start writing snapshots.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in _CHECKPOINT_TRUTHY
+    if isinstance(value, (int, float)):
+        return value == 1
+    return False
+
+
 def _load_webui_prefill_context(
     config_data: Optional[dict] = None,
 ) -> dict:
@@ -14284,6 +14336,7 @@ def _compute_agent_cache_signature(
     prefill_context=None,
     profile_home: str | None = None,
     safe_profile_runtime_env: dict | None = None,
+    checkpoints_enabled: bool = False,
 ) -> str:
     """Return the SHA256 signature identifying an agent's constructor routing state."""
     import hashlib as _hashlib
@@ -14303,6 +14356,7 @@ def _compute_agent_cache_signature(
         bool(_credential_pool),
         max_iterations_cfg or '',
         max_tokens_cfg or '',
+        bool(checkpoints_enabled),
         fallback_resolved or {},
         sorted(toolsets) if toolsets else [],
         reasoning_config or {},
@@ -16557,6 +16611,19 @@ def _run_agent_streaming(
                 _agent_kwargs['max_iterations'] = _max_iterations_cfg
             if 'max_tokens' in _agent_params and _max_tokens_cfg is not None:
                 _agent_kwargs['max_tokens'] = _max_tokens_cfg
+            # Other worker settings honour ambient overrides. Snapshot opt-in
+            # belongs to this session's profile and defaults off on read failure.
+            try:
+                _checkpoint_cfg = (
+                    _get_config_for_home(_profile_home, isolate_config_override=True)
+                    if _profile_home else {}
+                )
+            except Exception:
+                logger.warning("Could not read profile checkpoint settings", exc_info=True)
+                _checkpoint_cfg = {}
+            _checkpoints_enabled = _resolve_checkpoints_enabled(_checkpoint_cfg)
+            if 'checkpoints_enabled' in _agent_params:
+                _agent_kwargs['checkpoints_enabled'] = _checkpoints_enabled
             if 'request_overrides' in _agent_params and _main_request_overrides:
                 _agent_kwargs['request_overrides'] = _main_request_overrides
             # Params added in newer hermes-agent — skip if not supported.
@@ -16619,6 +16686,7 @@ def _run_agent_streaming(
                     prefill_context=_prefill_context,
                     profile_home=_profile_home,
                     safe_profile_runtime_env=_safe_profile_runtime_env,
+                    checkpoints_enabled=_checkpoints_enabled,
                 )
 
                 agent = None
@@ -17605,6 +17673,7 @@ def _run_agent_streaming(
                                 prefill_context=_prefill_context,
                                 profile_home=_profile_home,
                                 safe_profile_runtime_env=_safe_profile_runtime_env,
+                                checkpoints_enabled=_checkpoints_enabled,
                             )
                             if not _heal_cacheable:
                                 _agent_sig = None  # #8517: memory scope failed; never cache it
@@ -19177,6 +19246,7 @@ def _run_agent_streaming(
                         prefill_context=_prefill_context,
                         profile_home=_profile_home,
                         safe_profile_runtime_env=_safe_profile_runtime_env,
+                        checkpoints_enabled=_checkpoints_enabled,
                     )
                     if not _heal_cacheable:
                         _agent_sig = None  # #8517: memory scope failed; never cache it
