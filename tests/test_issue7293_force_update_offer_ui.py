@@ -14,6 +14,7 @@ post-update reload are stubbed.
 """
 
 import json
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -37,7 +38,17 @@ _FUNCTIONS = (
     ("function", "_renderActiveRunsForceOffer"),
     ("async function", "applyClearUpdateLock"),
     ("async function", "forceUpdate"),
+    # #7679: the destructive POST is bound to the grant that armed the
+    # button. _showUpdateError() mints that grant, so the harness has to
+    # run the real minter rather than conjure a grant by hand.
+    ("function", "_grantForceUpdate"),
 )
+
+# #7679: the grant and the check epoch are module-level bindings in
+# static/ui.js. forceUpdate() and _grantForceUpdate() close over them, so
+# the harness snippet has to carry the real declarations -- otherwise the
+# grant can never be minted and the destructive path is unreachable.
+_GRANT_BINDINGS = ("_updateCheckEpoch", "_forceUpdateGrant")
 
 _HARNESS = r"""
 const fs = require('fs');
@@ -127,6 +138,11 @@ const ctx = {
   api: async (url, opts) => {
     apiCalls.push({ url, body: JSON.parse(opts.body) });
     if (!responses.length) throw new Error('unexpected extra api call to ' + url);
+    // #7679 (greptile P1): let a scenario simulate a newer Settings check that
+    // retires the grant while this request is still in flight.
+    if (scenario.revokeGrantBeforeResponse) {
+      vm.runInContext('_forceUpdateGrant = null;', ctx);
+    }
     return responses.shift();
   },
   showConfirmDialog: async (opts) => {
@@ -166,7 +182,15 @@ function offerState() {
   const entry = {
     apply: () => ctx.applyUpdates(),
     clear_lock: () => ctx.applyClearUpdateLock(clearLockBtn),
-    force: () => ctx.forceUpdate(forceBtn),
+    // #7679: the destructive POST is bound to the grant that armed the
+    // button, so a Force button that was conjured up by hand carries no
+    // authority. Arm it the way production does: _showUpdateError() shows
+    // the button AND mints the grant. Driving forceUpdate() on a
+    // hand-built button would test a state production can never reach.
+    force: async () => {
+      ctx._showUpdateError(scenario.target, { conflict: true, message: 'conflict' });
+      return ctx.forceUpdate(forceBtn);
+    },
   }[scenario.entry];
   for (let i = 0; i < (scenario.entryRepeats || 1); i += 1) await entry();
   const afterRefusal = {
@@ -195,9 +219,24 @@ function offerState() {
 """
 
 
+def _grant_bindings(src: str) -> str:
+    """Return the real module-level ``let`` declarations the grant closes over."""
+    out = []
+    for name in _GRANT_BINDINGS:
+        match = re.search(rf"^let {re.escape(name)} = .*?;$", src, re.MULTILINE)
+        assert match, f"{name} declaration not found in static/ui.js"
+        out.append(match.group(0))
+    return "\n".join(out)
+
+
 def _ui_snippet() -> str:
     src = UI_JS.read_text(encoding="utf-8")
-    return "\n".join(extract_function(src, name, prefix=prefix) for prefix, name in _FUNCTIONS)
+    return "\n".join(
+        [
+            _grant_bindings(src),
+            *(extract_function(src, name, prefix=prefix) for prefix, name in _FUNCTIONS),
+        ]
+    )
 
 
 def _run(scenario: dict, tmp_path: Path) -> dict:
@@ -525,3 +564,33 @@ def test_webui_target_confirmation_keeps_the_webui_only_copy(tmp_path):
     message = out["confirmCalls"][0]["message"]
     assert message.startswith("2 WebUI agent runs are still working.")
     assert "Gateway" not in message
+
+
+def test_a_late_refusal_does_not_repaint_an_offer_for_a_retired_grant(tmp_path):
+    """#7679 (greptile P1): only the grant that still owns the controls may
+    publish a response.
+
+    While a Force request is pending, a newer Settings check can switch Force to
+    a dirty Agent checkout and mint its own grant. The older request then
+    returns `restart_blocked`; repainting its offer replaced the current Agent
+    control with a dead one that only reports "no longer applicable".
+    """
+    out = _run(
+        {
+            "entry": "force",
+            "target": "webui",
+            "updateData": _WEBUI_BEHIND,
+            "responses": [_refusal(2)],
+            "confirmAnswers": [True],
+            "revokeGrantBeforeResponse": True,
+        },
+        tmp_path,
+    )
+    refusal = out["afterRefusal"]
+    assert refusal["offer"]["count"] == 0, (
+        "a late refusal repainted an offer whose grant a newer check had "
+        f"already retired: {json.dumps(refusal)}"
+    )
+    # The button is restored so the user can act on the newer state.
+    assert out["applyInFlight"] is False
+
