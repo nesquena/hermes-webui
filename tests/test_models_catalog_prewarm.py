@@ -15,7 +15,18 @@ import pytest
 import api.config as config
 
 
-def _write_cache(path, built_at):
+def _fingerprint_for(profile):
+    """Fingerprint the way the real writer records it: under the owning profile."""
+    from api import profiles
+
+    profiles.set_request_profile(profile)
+    try:
+        return config._models_cache_source_fingerprint()
+    finally:
+        profiles.clear_request_profile()
+
+
+def _write_cache(path, built_at, profile="default"):
     """Write a cache the due check treats as loadable (real fingerprint)."""
     path.write_text(
         json.dumps(
@@ -23,7 +34,7 @@ def _write_cache(path, built_at):
                 "_schema_version": config._MODELS_CACHE_SCHEMA_VERSION,
                 "_webui_version": config._current_webui_version(),
                 "_built_at": built_at,
-                "_source_fingerprint": config._models_cache_source_fingerprint(),
+                "_source_fingerprint": _fingerprint_for(profile),
                 "active_provider": None,
                 "default_model": "",
                 "configured_model_badges": {},
@@ -111,7 +122,7 @@ def test_named_profile_cache_is_covered(prewarm_env):
     due_before = (
         config._SESSION_VISIT_MODELS_FRESHNESS_SECONDS - config._MODELS_PREWARM_LEAD_SECONDS
     )
-    _write_cache(named, time.time() - due_before - 1)
+    _write_cache(named, time.time() - due_before - 1, profile="personal")
 
     assert config.maybe_prewarm_models_catalog() == {"personal": "scheduled"}
     assert len(workers) == 1
@@ -262,7 +273,9 @@ def test_due_profiles_run_sequentially_in_one_worker(monkeypatch, tmp_path):
         config._SESSION_VISIT_MODELS_FRESHNESS_SECONDS - config._MODELS_PREWARM_LEAD_SECONDS
     )
     _write_cache(tmp_path / "models_cache.json", time.time() - due_before - 1)
-    _write_cache(tmp_path / "models_cache.personal.json", time.time() - due_before - 1)
+    _write_cache(
+        tmp_path / "models_cache.personal.json", time.time() - due_before - 1, profile="personal"
+    )
 
     report = config.maybe_prewarm_models_catalog()
     assert report == {"default": "scheduled", "personal": "scheduled"}
@@ -368,7 +381,7 @@ def test_unloadable_young_cache_is_due(prewarm_env):
 def test_missing_default_cache_is_swept_while_named_cache_is_fresh(prewarm_env):
     base, _calls, workers = prewarm_env
     named = base.parent / "models_cache.personal.json"
-    _write_cache(named, time.time())
+    _write_cache(named, time.time(), profile="personal")
     assert not base.exists()
 
     # A glob of existing files alone would miss the default profile entirely,
@@ -403,3 +416,61 @@ def test_claim_with_a_live_owner_is_not_reclaimed(monkeypatch):
     # An out-of-band worker can outlive the budget; age alone must not reclaim it.
     assert config._release_stale_build_claim() is False
     assert config._cache_build_in_progress is True
+
+
+def test_due_probe_validates_under_the_owning_profile(prewarm_env, monkeypatch):
+    """The maintenance thread has no request-profile binding, and
+    _is_loadable_disk_cache() compares against the ACTIVE profile's fingerprint.
+    The probe must bind the owning profile and clear it again."""
+    from api import profiles
+
+    base, _calls, _workers = prewarm_env
+    named = base.parent / "models_cache.personal.json"
+    _write_cache(named, time.time(), profile="personal")
+    profiles.clear_request_profile()
+
+    seen = []
+    real = config._is_loadable_disk_cache
+
+    def _spy(payload):
+        seen.append(profiles.get_active_profile_name())
+        return real(payload)
+
+    monkeypatch.setattr(config, "_is_loadable_disk_cache", _spy)
+    config._models_cache_due_probe(named, time.time(), "personal")
+
+    assert seen == ["personal"]
+    assert profiles.get_active_profile_name() == "default"  # restored
+
+
+def test_fresh_named_snapshot_is_not_due_without_request_context(prewarm_env):
+    """End to end through the real fingerprint producer, writer path and
+    validator: a named snapshot written under its own profile must not look
+    unloadable to the maintenance thread, which carries no binding."""
+    from api import profiles
+
+    base, _calls, workers = prewarm_env
+    _write_cache(base, time.time())
+    named = base.parent / "models_cache.personal.json"
+    _write_cache(named, time.time(), profile="personal")
+    profiles.clear_request_profile()
+
+    assert config.maybe_prewarm_models_catalog() == {}
+    assert workers == []
+
+
+def test_stale_named_snapshot_is_still_due_without_request_context(prewarm_env):
+    """Positive control for the test above: same wiring, aged snapshot."""
+    from api import profiles
+
+    base, _calls, workers = prewarm_env
+    _write_cache(base, time.time())
+    named = base.parent / "models_cache.personal.json"
+    due_before = (
+        config._SESSION_VISIT_MODELS_FRESHNESS_SECONDS - config._MODELS_PREWARM_LEAD_SECONDS
+    )
+    _write_cache(named, time.time() - due_before - 1, profile="personal")
+    profiles.clear_request_profile()
+
+    assert config.maybe_prewarm_models_catalog() == {"personal": "scheduled"}
+    assert len(workers) == 1

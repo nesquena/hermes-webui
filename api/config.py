@@ -13707,8 +13707,16 @@ def _models_cache_profiles() -> list[tuple[str, Path]]:
     return found
 
 
-def _models_cache_due_probe(path: Path, now: float) -> tuple[float | None, bool]:
-    """Return ``(age_seconds, loadable)`` for one cache file.
+def _models_cache_due_probe(path: Path, now: float, profile: str) -> tuple[float | None, bool]:
+    """Return ``(age_seconds, loadable)`` for one cache file, owned by ``profile``.
+
+    ``_is_loadable_disk_cache()`` compares the snapshot's ``_source_fingerprint``
+    against the ACTIVE profile's fingerprint, and this runs on the maintenance
+    thread, which carries no request-profile binding: without binding the owning
+    profile, a fresh named-profile snapshot is judged against the default
+    profile and rejected as unloadable, so the sweep rebuilds a catalog that is
+    seconds old. The binding is TLS-only (never the mirrored environment scope)
+    and is cleared on every exit.
 
     Stat-keyed: the age check runs every tick for every profile, and re-parsing a
     multi-MB catalog each time would both cost CPU on the reaper thread and keep
@@ -13725,15 +13733,30 @@ def _models_cache_due_probe(path: Path, now: float) -> tuple[float | None, bool]
         built_at, loadable = entry[2], entry[3]
     else:
         built_at = _models_disk_cache_built_at(path)
-        try:
-            loadable = _is_loadable_disk_cache(_read_models_cache_disk_payload(path))
-        except Exception:
-            loadable = False
+        payload = _read_models_cache_disk_payload(path)
+        loadable = _models_cache_loadable_for_profile(payload, profile)
         _clear_models_disk_payload_memo()
         _MODELS_PREWARM_PROBE_CACHE[key] = (st.st_mtime_ns, st.st_size, built_at, loadable)
     if built_at is not None:
         return max(0.0, now - built_at), loadable
     return max(0.0, now - st.st_mtime), loadable
+
+
+def _models_cache_loadable_for_profile(payload: dict | None, profile: str) -> bool:
+    """Validate a snapshot under the profile that owns it (TLS-only binding)."""
+    if payload is None:
+        return False
+    try:
+        from api.profiles import clear_request_profile, set_request_profile
+    except Exception:
+        return _is_loadable_disk_cache(payload)
+    set_request_profile(profile)
+    try:
+        return _is_loadable_disk_cache(payload)
+    except Exception:
+        return False
+    finally:
+        clear_request_profile()
 
 
 def _wait_for_catalog_idle(timeout: float) -> bool:
@@ -13877,7 +13900,7 @@ def maybe_prewarm_models_catalog(*, now: float | None = None) -> dict[str, str]:
         due: list[tuple[str, Path]] = []
         ages: dict[str, float | None] = {}
         for profile, path in _models_cache_profiles():
-            age, loadable = _models_cache_due_probe(path, tick_now)
+            age, loadable = _models_cache_due_probe(path, tick_now, profile)
             ages[profile] = age
             if loadable and age is not None and age < due_before:
                 continue
