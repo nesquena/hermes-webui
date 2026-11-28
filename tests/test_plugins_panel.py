@@ -424,6 +424,94 @@ class TestPluginAssetIsolationHardening:
         assert "_dashboard_plugin_enabled" in asset_seg
         assert "_dashboard_plugin_enabled" in page_seg
 
+    def test_plugin_page_embed_inlines_declared_assets_and_payload_behaviorally(self, tmp_path):
+        import io
+        import json
+        import api.plugins as plugins
+        import api.routes as routes
+
+        plugin_dir = tmp_path / "demo" / "dashboard"
+        dist = plugin_dir / "dist"
+        dist.mkdir(parents=True)
+        (plugin_dir / "manifest.json").write_text(json.dumps({
+            "name": "demo",
+            "label": "Demo",
+            "tab": {"path": "/demo"},
+            "css": "dist/style.css",
+            "entry": "dist/index.js",
+            "webui": {
+                "inline_payload": {
+                    "global": "window.__DEMO_PAYLOAD__",
+                    "candidates": ["payload.json"],
+                },
+                "inline_dist_assets": True,
+            },
+        }), encoding="utf-8")
+        (dist / "style.css").write_text("body { color: red; }", encoding="utf-8")
+        (dist / "index.js").write_text("window.demoLoaded = true;", encoding="utf-8")
+        (plugin_dir / "payload.json").write_text(json.dumps({"ok": True}), encoding="utf-8")
+        (dist / "index.html").write_text(
+            '''<!doctype html><html><head><link rel="stylesheet" href="style.css"></head><body><!-- window.__DEMO_PAYLOAD__= in a comment must not suppress injection --><script src="index.js"></script></body></html>''',
+            encoding="utf-8",
+        )
+
+        class Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = []
+                self.wfile = io.BytesIO()
+            def send_response(self, status):
+                self.status = status
+            def send_header(self, key, value):
+                self.headers.append((key, value))
+            def end_headers(self):
+                pass
+
+        old_manifests = dict(plugins.PLUGIN_MANIFESTS)
+        old_roots = dict(plugins._PLUGIN_STATIC_ROOTS)
+        linked_plugin_dir = tmp_path / "linked-dashboard"
+        try:
+            linked_plugin_dir.symlink_to(plugin_dir, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            linked_plugin_dir = plugin_dir
+        try:
+            plugins.PLUGIN_MANIFESTS.clear()
+            plugins._PLUGIN_STATIC_ROOTS.clear()
+            plugins.PLUGIN_MANIFESTS["demo"] = json.loads((plugin_dir / "manifest.json").read_text(encoding="utf-8"))
+            plugins._PLUGIN_STATIC_ROOTS["demo"] = linked_plugin_dir
+            handler = Handler()
+            with patch("api.routes._dashboard_plugin_enabled", return_value=True):
+                handled = routes.handle_get(handler, urlparse("/demo"))
+            body = handler.wfile.getvalue().decode("utf-8")
+        finally:
+            plugins.PLUGIN_MANIFESTS.clear()
+            plugins.PLUGIN_MANIFESTS.update(old_manifests)
+            plugins._PLUGIN_STATIC_ROOTS.clear()
+            plugins._PLUGIN_STATIC_ROOTS.update(old_roots)
+
+        assert handled is True
+        assert handler.status == 200
+        assert "<style>body { color: red; }</style>" in body
+        assert "<script>window.demoLoaded = true;</script>" in body
+        assert "window.__DEMO_PAYLOAD__={\"ok\": true};" in body
+        assert 'href="style.css"' not in body
+        assert '<script src="index.js"></script>' not in body
+
+    def test_plugin_page_embed_is_manifest_driven_not_name_special_cased(self):
+        # Sandboxed iframe plugins may opt into server-side bootstrap payloads
+        # and inline dist assets via manifest["webui"]. The route must not
+        # hard-code a Project-Cockpit plugin name to decide this behavior.
+        routes = read("api/routes.py")
+        page_seg = routes[routes.find("# ── Plugin pages"):routes.find("# ── Plugin pages") + 7000]
+        assert 'manifest.get("webui"' in page_seg
+        assert 'inline_payload' in page_seg
+        assert 'inline_dist_assets' in page_seg
+        assert '_safe_js_global' in page_seg
+        assert '<style>{style_text}</style>' in page_seg
+        assert '<script>{script_text}</script>' in page_seg
+        assert 'window.__LOCAL_PLUGIN_OVERVIEW__' not in page_seg
+        assert 'name == "local-plugin"' not in page_seg
+
 
 class TestSettingsAllowlistGuard:
     """The dashboard_plugins save path must not weaken the settings allowlist.
