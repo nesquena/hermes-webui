@@ -2307,6 +2307,39 @@ function _cronProviderForClear(prevDetail, pickerTouched) {
   return (prev.model == null) ? prev.provider : null;
 }
 
+function _cronEditChangedFields(updates, prevDetail) {
+  // #9403: the edit form is filled once, when it opens, and update_job merges
+  // the body over the stored job field by field. Re-sending a field the user
+  // left alone would revert a change made meanwhile (`hermes cron edit`, the
+  // agent's cronjob tool, another tab), and re-sending `schedule` also moves
+  // next_run_at. Keep only the fields that differ from what the form opened with.
+  const prev = prevDetail || {};
+  const opened = {
+    schedule: _cronScheduleForEdit(prev).trim(),
+    profile: prev.profile || '',
+    toast_notifications: prev.toast_notifications !== false,
+    badge_notifications: prev.badge_notifications !== false,
+    prompt: (prev.prompt || '').trim(),
+    name: (prev.name || '').trim(),
+    deliver: prev.deliver || 'local',
+  };
+  const changed = {};
+  for (const [key, value] of Object.entries(updates)) {
+    if (key === 'model' || key === 'provider') continue;
+    if (!(key in opened) || value !== opened[key]) changed[key] = value;
+  }
+  // model and provider are one choice: send both when either differs.
+  if ('model' in updates || 'provider' in updates) {
+    const model = updates.model || null;
+    const provider = updates.provider || null;
+    if (model !== (prev.model || null) || provider !== (prev.provider || null)) {
+      changed.model = model;
+      changed.provider = provider;
+    }
+  }
+  return changed;
+}
+
 async function saveCronForm(){
   const nameEl=$('cronFormName');
   const schEl=$('cronFormSchedule');
@@ -2407,7 +2440,7 @@ async function saveCronForm(){
         // else: select not yet populated — omit model/provider to preserve saved value
       }
       const editedId = _editingCronId;
-      await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
+      await api('/api/crons/update', {method:'POST', body: JSON.stringify(_cronEditChangedFields(updates, _cronPreFormDetail))});
       showToast(t('cron_job_updated'));
       const saveViewCurrent = formStillCurrent();
       if (!saveViewCurrent && _currentPanel !== 'tasks') return;
