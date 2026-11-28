@@ -1,0 +1,7 @@
+/* Skin: slate
+   Extracted verbatim from style.css (see static/skins/README.md).
+   Loaded from index.html after style.css; every selector is scoped to
+   [data-skin="slate"] so this file can never affect another skin. */
+/* ── Skin: Slate (blue-gray) ── */
+  :root[data-skin="slate"]{--accent:#475569;--accent-hover:#334155;--accent-bg:rgba(71,85,105,0.08);--accent-bg-strong:rgba(71,85,105,0.15);--accent-text:#334155;}
+:root.dark[data-skin="slate"]{--accent:#94A3B8;--accent-hover:#64748B;--accent-bg:rgba(148,163,184,0.08);--accent-bg-strong:rgba(148,163,184,0.15);--accent-text:#94A3B8;}
