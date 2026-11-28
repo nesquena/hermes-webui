@@ -33,8 +33,10 @@ def test_camera_reselection_is_collision_safe_without_changing_global_dedupe():
     assert "(${index++})" in camera
     assert "S.pendingFiles" in camera
     # Global dedupe is master's #8204 identity check (same original name, size and mtime), which this PR must not
-    # change; the old name-only `.find(p=>p.name===f.name)` it used to pin was replaced by #8204.
-    assert "S.pendingFiles.some(p=>_pendingFileOrigName(p)===f.name&&p.size===f.size&&p.lastModified===f.lastModified)" in ui
+    # change; the old name-only `.find(p=>p.name===f.name)` it used to pin was replaced by #8204. The check reads
+    # the effective pending view so a New Chat handoff measures against the destination, not the departing tray.
+    assert "pendingView.some(p=>_pendingFileOrigName(p)===f.name&&p.size===f.size&&p.lastModified===f.lastModified)" in ui
+    assert "if(S.pendingFiles.some(p=>p.name===f.name" not in ui
     assert "pendingFiles.push" not in camera
     assert "fetch(" not in camera
 

@@ -144,6 +144,18 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_new_chat_focus.py
 
+      - name: Run new-chat composer retention gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_new_chat_composer_retention.py
+
+      - name: Run first-send composer retention gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_first_send_composer_retention.py
+
+      - name: Run new-chat composer ownership gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_new_chat_composer_ownership.py
+
       - name: Run project-picker keyboard gate
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_project_picker_keyboard.py

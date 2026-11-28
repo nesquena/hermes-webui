@@ -307,6 +307,25 @@ the first message typed with no conversation open must be sent; each reads the
 session list once before that, and shows the new row once the list is released
 (#7936, #7996, #8004). Run it locally with `python tests/browser_new_chat_focus.py`.
 
+`tests/browser_new_chat_composer_retention.py` holds only `POST
+/api/session/new` and drives the composer with real keystrokes: the textarea
+must stay editable while the create is pending, and the text typed during the
+handoff must still be in the composer once the created conversation is current.
+A pending state that disables the composer, or a settle that restores the
+destination draft over live input, fails it. Run it locally with
+`python tests/browser_new_chat_composer_retention.py`.
+
+`tests/browser_first_send_composer_retention.py` covers the first Send from an
+empty pane: with the create held after "hello" was submitted, " world" typed
+during the wait must still be in the created conversation's composer, while the
+posted message stays "hello". Run it locally with
+`python tests/browser_first_send_composer_retention.py`.
+
+`tests/browser_new_chat_composer_ownership.py` is the other half: a draft typed
+before clicking New Chat must not leak into the created conversation's composer,
+and must still be the source conversation's stored draft afterwards. Run it
+locally with `python tests/browser_new_chat_composer_ownership.py`.
+
 It also runs `tests/browser_project_picker_keyboard.py`, which imports two
 conversations and creates three projects through the API and then drives both
 "Move to project" pickers. The single-conversation picker is opened from the ⋮

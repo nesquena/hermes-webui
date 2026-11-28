@@ -1213,6 +1213,13 @@ function _micToastKeyForRecognitionError(error){
   let audioChunks=[];
   let _finalText='';
   let _prefix='';
+  // The composer text THIS dictation run last committed (interim included),
+  // bound to the recording that produced it. `ta.value` is not a safe fallback
+  // while a New Chat handoff owns the composer: the textarea deliberately still
+  // shows the source chat, so an `onend` without a final result would commit
+  // that source text and erase the interim already buffered for the destination.
+  let _dictationLastContribution=null;
+  let _dictationRecordingId=0;
   let _isRecording=false;
   // #5294 salvage — mobile composer-mic dictation continuity.
   // _speechStopRequested distinguishes an intentional stop (send/toggle) from a
@@ -1250,7 +1257,7 @@ function _micToastKeyForRecognitionError(error){
     _setButtonTooltipAndKey(btn, on ? (_rawAudioMode ? 'voice_recording_active' : 'voice_dictate_active') : (_rawAudioMode ? 'voice_send_raw' : 'voice_dictate'));
     status.style.display=on?'':'none';
     if(statusText) statusText.textContent=on?'Listening':'Listening';
-    if(!on){ _finalText=''; _prefix=''; }
+    if(!on){ _finalText=''; _prefix=''; _dictationLastContribution=null; }
   }
 
   function _updateMicTooltip(){
@@ -1329,7 +1336,14 @@ function _micToastKeyForRecognitionError(error){
       // Replace mode (explicit): dictated text overwrites the composer.
       committed = clean;
     }
-    ta.value=committed;
+    // Dictation is a composer producer like any other: while a New Session
+    // handoff owns the composer the transcript is buffered for the destination
+    // instead of being painted into a textarea the settle is about to repaint.
+    if(typeof _composerCommitProducerText==='function'){
+      _composerCommitProducerText(committed,'dictation');
+    }else{
+      ta.value=committed;
+    }
     autoResize();
     if(window._micPendingSend){
       window._micPendingSend=false;
@@ -1528,26 +1542,65 @@ function _micToastKeyForRecognitionError(error){
         if(event.results[i].isFinal){ final+=t; _finalText=final; }
         else{ interim+=t; }
       }
-      ta.value=_prefix+(final||interim);
+      const contribution=_prefix+(final||interim);
+      _dictationLastContribution={text:contribution,recordingId:_dictationRecordingId};
+      if(typeof _composerCommitProducerText==='function'){
+        _composerCommitProducerText(contribution,'dictation');
+      }else{
+        ta.value=contribution;
+      }
       autoResize();
     };
 
     sr.onend=()=>{
-      const committed=_finalText
-        ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
-            ? _prefix+' '+_finalText.trimStart()
-            : _prefix+_finalText)
-        : ta.value;
-      ta.value=committed;
+      const finalText=String(_finalText||'');
+      const last=_dictationLastContribution;
+      const handoffOwnsPane=typeof _composerOwnershipTransitionOwnsVisiblePane==='function'
+        &&_composerOwnershipTransitionOwnsVisiblePane();
+      // A run can end with only interim text. During a New Chat handoff the
+      // textarea still shows the source chat, so `ta.value` must not replace the
+      // contribution this recording already routed to the composer owner that
+      // received it. Keep the recording's own last text; never substitute
+      // another producer's combined composer content. With no contribution at
+      // all there is nothing to write while the handoff owns the pane.
+      let committed=null;
+      if(finalText){
+        committed=_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
+          ? _prefix+' '+finalText.trimStart()
+          : _prefix+finalText;
+      }else if(handoffOwnsPane){
+        if(last&&last.recordingId===_dictationRecordingId&&last.text
+          &&typeof _composerPendingProducerText==='function'
+          &&_composerPendingProducerText('dictation')!==null){
+          committed=last.text;
+        }
+      }else{
+        committed=ta.value;
+      }
+      if(committed!==null){
+        if(typeof _composerCommitProducerText==='function'){
+          _composerCommitProducerText(committed,'dictation');
+        }else{
+          ta.value=committed;
+        }
+      }
       autoResize();
       // Mobile / opt-in continuity: a natural pause ends this recognition run but
       // the user is still dictating, so restart to keep the session alive. Desktop
       // (one-shot) and intentional stops (_speechStopRequested) skip this and
       // finalize. Bounded by _micMaxRestarts so a stolen audio session can't loop.
       if(_micShouldRestartDictation()){
-        _prefix=committed&&!committed.endsWith(' ')&&!committed.endsWith('\n')
-          ? committed+' '
-          : committed;
+        // A no-speech pause adds no contribution of its own, and `_prefix` is
+        // what this recording is still building on — the source chat's draft
+        // while a New Chat handoff owns the composer. Replacing it with an
+        // empty string makes the next result carry only the new words, so a
+        // rejected create would restore the draft and then lose it again as
+        // soon as speech resumes.
+        if(committed!=null){
+          _prefix=committed&&!committed.endsWith(' ')&&!committed.endsWith('\n')
+            ? committed+' '
+            : committed;
+        }
         _finalText='';
         _micRestartCount++;
         try{
@@ -1678,6 +1731,7 @@ function _micToastKeyForRecognitionError(error){
     _isRecording=true;
     _finalText='';
     _prefix=ta.value;
+    _dictationLastContribution=null;
     if(_micOriginNeedsSecureContext()){
       _isRecording=false;
       window._micPendingSend=false;
@@ -1686,6 +1740,7 @@ function _micToastKeyForRecognitionError(error){
     }
     if(recognition && !_forceMediaRecorder && !_rawAudioMode){
       _activeCaptureMode='speech';
+      _dictationRecordingId+=1;
       _speechStopRequested=false;
       _micRestartCount=0;
       // Refresh continuity gate at start so a settings/orientation change takes
@@ -2245,7 +2300,11 @@ window.renderTranscript=function(container, messages, opts){
         if(event.results[i].isFinal){ final+=txt; _finalText=final; }
         else{ interim+=txt; }
       }
-      ta.value=final||interim;
+      if(typeof _composerCommitProducerText==='function'){
+        _composerCommitProducerText(final||interim,'voice-mode');
+      }else{
+        ta.value=final||interim;
+      }
       autoResize();
 
       // Auto-send on silence after final result
@@ -2296,7 +2355,8 @@ window.renderTranscript=function(container, messages, opts){
 
   function _voiceModeSend(){
     if(!_voiceModeActive) return;
-    const text=(ta.value||'').trim();
+    const text=((typeof _composerPendingOrVisibleText==='function'
+      ? _composerPendingOrVisibleText() : ta.value)||'').trim();
     if(!text){
       ta.value='';
       setTimeout(()=>{ if(_voiceModeActive) _startListening(); },300);
@@ -2963,12 +3023,32 @@ $('modelSelect').onchange=async()=>{
 $('msg').addEventListener('input',()=>{
   updateSendBtn();
   scheduleComposerAutoResize();
+  // A keystroke during a New Session handoff is the newest unsent input: buffer
+  // it for the destination owner so the settle cannot repaint over it. The
+  // ownership layer persists both sides at settle, so also writing the live
+  // source draft here would duplicate the destination delta.
+  const bufferedTransition=typeof _composerRecordNativeText==='function'
+    && _composerRecordNativeText();
+  // An unchanged input event (for example the synthetic event a saved-prompt
+  // append dispatches while the prompt itself is buffered) returns false above.
+  // While the handoff still owns this pane, its draft save must be skipped too;
+  // otherwise the source chat would keep text already buffered for the new one.
+  const handoffOwnsPane=typeof _composerOwnershipTransitionOwnsVisiblePane==='function'
+    && _composerOwnershipTransitionOwnsVisiblePane();
   // Persist composer draft to server (debounced in _saveComposerDraft).
   const sid = S && S.session && S.session.session_id;
-  if (sid && typeof _saveComposerDraft === 'function') {
+  if (!bufferedTransition && !handoffOwnsPane && sid && typeof _saveComposerDraft === 'function') {
     _saveComposerDraft(sid, $('msg').value, S.pendingFiles ? [...S.pendingFiles] : []);
   }
   const text=$('msg').value;
+  // A draft typed while a turn was finishing holds the queue back — setBusy(false)
+  // never replaces unsent composer content. Erasing that draft must reopen the
+  // drain, or the queued turn waits for an unrelated action to restart it.
+  if(!text.trim()
+    &&!(typeof S!=='undefined'&&S&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length)
+    &&typeof _resumeQueuedSessionMessageIfComposerEmpty==='function'){
+    _resumeQueuedSessionMessageIfComposerEmpty();
+  }
   // The user edited the text, so an earlier pick/Escape no longer holds the list closed (#8050).
   if(typeof clearSlashDropdownDismissed==='function') clearSlashDropdownDismissed();
   const _slashIdx=typeof _activeSlashCommandOffset==='function'?_activeSlashCommandOffset(text):-1;

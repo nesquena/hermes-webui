@@ -141,12 +141,21 @@ def _run_continuation_restore(responses, *, attempts=1, current_sid=None,
     draft_dependencies = "\n".join([
         js[js.index("const _composerDraftLocalFallbackBySid = new Map();"):].splitlines()[0],
         js[js.index("const _composerDraftRestoreSuppressedUntilBySid = new Map();"):].splitlines()[0],
+        js[js.index("const _composerPendingFilesByOwner = new Map();"):].splitlines()[0],
         source_function("_composerDraftFileSignature"),
         source_function("_composerDraftFilesForPersist"),
         source_function("_composerDraftPayloadSignature"),
         source_function("_composerDraftHasPayload"),
         source_function("_clearComposerDraftRestoreSuppression"),
         source_function("_isComposerDraftRestoreSuppressed"),
+        # _restoreComposerDraft() now restores the owner's staged files by
+        # (session, profile), so the extractor must carry that helper set too.
+        source_function("_composerPendingFilesOwnerKey"),
+        source_function("_composerPendingFileIsLive"),
+        source_function("_rememberComposerPendingFiles"),
+        source_function("_forgetComposerPendingFiles"),
+        source_function("_peekComposerPendingFiles"),
+        source_function("_restoreComposerPendingFiles"),
     ])
     spec = json.dumps({
         "load": js[load_start:load_end],

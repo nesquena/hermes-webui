@@ -103,7 +103,7 @@ function createTab(server, name, overrides = null, extraSrc = []) {
   const toasts = [];
   const held = [];
   const base = {
-    console, Promise, JSON, Object, Array, Number, String, Boolean, Set, Map, Date, Math, Error, RegExp, URL,
+    console, Promise, JSON, Object, Array, Number, String, Boolean, Set, Map, Date, Math, Error, RegExp, URL, Symbol,
     encodeURIComponent, decodeURIComponent, setTimeout: () => 0, clearTimeout() {},
     localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
     sessionStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
@@ -289,12 +289,45 @@ const BLANK_PAGE_INSTALLERS = [
   ['ui.js', 'promptNewFile'], ['ui.js', 'promptNewFolder'],
 ];
 function blankPageInstallerSrc() {
-  return BLANK_PAGE_INSTALLERS.map(([file, fn]) => extractFunction(readStatic(file), fn));
+  // The installers now run inside the session-side context-transition queue and
+  // delegate the mint to _ensureBlankPageSession() -> newSession(), so the tab
+  // scope needs those helpers as well.
+  // Normalize CRLF so the line-anchored slices below match on any checkout.
+  const sessionsJs = readStatic('sessions.js').split(String.fromCharCode(13) + String.fromCharCode(10)).join(String.fromCharCode(10));
+  const start = sessionsJs.indexOf('let _contextTransitionGeneration=0;');
+  const end = sessionsJs.indexOf('\nconst _newSessionPendingText', start);
+  const contextTransitionSrc = start !== -1 && end > start
+    ? [sessionsJs.slice(start, end)]
+    : [];
+  const nsStart = sessionsJs.indexOf('async function newSession(');
+  const nsEnd = sessionsJs.indexOf('\n\n/**', nsStart);
+  const newSessionSrc = nsStart !== -1 && nsEnd > nsStart
+    ? [sessionsJs.slice(nsStart, nsEnd)]
+    : [];
+  const ptStart = sessionsJs.indexOf('const _newSessionPendingText');
+  const ptEnd = sessionsJs.indexOf('\nconst _emptyComposerModelOverrideHost', ptStart);
+  const pendingTextSrc = ptStart !== -1 && ptEnd > ptStart
+    ? [sessionsJs.slice(ptStart, ptEnd)]
+    : [];
+  return [
+    ...contextTransitionSrc,
+    ...pendingTextSrc,
+    extractFunction(sessionsJs, '_profileMatchesActiveProfile'),
+    extractFunction(sessionsJs, '_isRestorableNewChatDraftSession'),
+    extractFunction(sessionsJs, '_rememberNewChatDraftSession'),
+    "const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';",
+    extractFunction(sessionsJs, '_setNewSessionPending'),
+    ...newSessionSrc,
+    ...BLANK_PAGE_INSTALLERS.map(([file, fn]) => extractFunction(readStatic(file), fn)),
+  ];
 }
 const blankPageStubs = (base) => {
   base.showPromptDialog = async () => null; // the user cancels the follow-up prompt
   base.renderSessionList = async () => {};
   base._workspaceCreateTargetLabel = () => '';
+  // Session-list unread bookkeeping runs after the install and is unrelated to
+  // the pill invariant this fixture pins.
+  base._setSessionViewedCount = () => {};
 };
 
 // A pill painted for A stays on screen when the open session is dropped
@@ -316,7 +349,7 @@ async function blankPageInstallKeepsStalePill(fn) {
   await vm.runInContext(fn, tab.ctx)();
   await tick();
   const st = tab.state();
-  const out = { entry: fn, state: st, server: { ...server.yolo }, calls: tab.calls.map(c => c.method + ' ' + c.path) };
+  const out = { entry: fn, state: st, server: { ...server.yolo }, calls: tab.calls.map(c => c.method + ' ' + c.path), toasts: tab.toasts.slice() };
   check(st.sid === 'N', `precondition: ${fn} installed the new session`, out);
   check(!st.pillVisible && st.yolo === false && !server.yolo.N,
     `${fn} installed N (server yolo[N]=false) but pill visible=${st.pillVisible} (painted for ${st.pillSession}), mirror=${st.yolo}`, out);

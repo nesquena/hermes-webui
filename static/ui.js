@@ -23,6 +23,737 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // single-threaded so only one done event fires at a time in practice.
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
+let _composerOwnershipTransition=null;
+let _composerOwnershipGeneration=0;
+let _composerProducerSequence=0;
+const _composerOwnerStateByKey=new Map();
+const _composerSettledOwnersByGeneration=new Map();
+const _COMPOSER_OWNER_STATE_LIMIT=128;
+// Unsent text/files in a snapshot can be the only copy of a read-only session's
+// draft: those sessions never persist to the server, and _restoreComposerDraft()
+// reads this map when the user returns. Ordinary session churn must not evict
+// them, so payload snapshots get a separate (still bounded) budget.
+const _COMPOSER_OWNER_PAYLOAD_LIMIT=512;
+const _COMPOSER_SETTLED_GENERATION_LIMIT=64;
+
+function _composerOwnerKey(sid,profile){
+  return `${String(profile||'default').trim()||'default'}\u0000${String(sid||'')}`;
+}
+function _composerProfilesMatch(left,right){
+  const a=String(left||'default').trim()||'default';
+  const b=String(right||'default').trim()||'default';
+  return a===b;
+}
+function _composerOwnerIsVisible(sid,profile){
+  const visible=S.session||null;
+  const visibleSid=visible&&visible.session_id||null;
+  if(!sid)return !visibleSid;
+  const visibleProfile=String(
+    (visible&&visible.profile)||S.activeProfile||'default'
+  ).trim()||'default';
+  return visibleSid===sid&&_composerProfilesMatch(profile,visibleProfile);
+}
+// The text the active ownership transition has buffered for its destination:
+// what the composer will hold once a pending New Session handoff drains.
+// Programmatic producers (Voice Mode) consult this while their writes are
+// buffered and the visible textarea is still empty.
+function _composerPendingText(){
+  const tx=_composerOwnershipTransition;
+  if(!tx)return '';
+  return String(tx.destinationText||'');
+}
+// The value a pending ownership transition has buffered for one producer token.
+// `null` means no handoff currently owns the visible composer (or that producer
+// has not written yet), so callers should treat the textarea as the source of
+// truth. Dictation's no-final `onend` uses this: the textarea still shows the
+// source chat during a handoff, so falling back to it would replace the
+// recording's already-buffered interim text with empty text.
+function _composerPendingProducerText(producerToken){
+  const tx=_composerOwnershipTransition;
+  if(!tx||!_composerOwnershipTransitionOwnsVisiblePane())return null;
+  const slot=tx.destinationSlots.get(String(producerToken||''));
+  return slot?String(slot.value||''):null;
+}
+// What a producer that is about to send would be sending: the buffered
+// destination text when a handoff owns the composer, else the visible textarea.
+function _composerPendingOrVisibleText(){
+  const pending=_composerPendingText();
+  if(pending)return pending;
+  const input=$('msg');
+  return input?String(input.value||''):'';
+}
+// Programmatic composer producers (dictation, Voice Mode) own their text through
+// the same transaction as every other mutation. While a New Session handoff is
+// pending the text belongs to the destination and stays buffered there; without
+// a transition it lands in the visible textarea. `replace-all` declares the value
+// as the whole composer text rather than a segment appended after an earlier
+// producer's write.
+function _composerRecordProducerText(value, producerToken){
+  const tx=_composerOwnershipTransition;
+  if(!tx)return false;
+  const next=String(value||'');
+  const baseline=String(tx.nativeBaseline==null?'':tx.nativeBaseline);
+  // A producer that builds on the visible text (append dictation) contributes
+  // only its addition: the source chat's own draft must not follow the user
+  // into the new conversation.
+  const delta=baseline&&next.startsWith(baseline)
+    ?next.slice(baseline.length)
+    :next;
+  _composerTransitionRecord('text-set',delta,null,next,{
+    semantics:'replace-all',producerToken:String(producerToken||'producer'),
+  });
+  return true;
+}
+function _composerCommitProducerText(value, producerToken){
+  const next=String(value||'');
+  const token=String(producerToken||'producer');
+  if(_composerRecordProducerText(next,token))return false;
+  const visible=S.session||{};
+  const ownerSid=visible.session_id||null;
+  const ownerProfile=String(
+    visible.profile||S.activeProfile||'default'
+  ).trim()||'default';
+  return _composerSetText(next,next,ownerSid,token,ownerProfile,'replace-all');
+}
+// Native keystrokes/paste/IME are a composer producer too. During a handoff the
+// textarea still shows the source chat, so an edit is the newest user intent: its
+// addition is buffered for the destination with one stable token, while the text
+// that was already there stays with the source. Aborting restores the whole live
+// value. The synthetic input event `_appendComposerText()` dispatches leaves the
+// value unchanged, so it is not mistaken for a keystroke.
+function _composerOwnershipTransitionOwnsVisiblePane(){
+  const tx=_composerOwnershipTransition;
+  if(!tx)return false;
+  // Only the pane the transition actually owns may buffer. If navigation has
+  // already moved to a different owner, this textarea belongs to that owner and
+  // its own draft save is the right place for the event.
+  const visibleSid=(S.session&&S.session.session_id)||null;
+  const visibleProfile=String(
+    (S.session&&S.session.profile)||S.activeProfile||'default'
+  ).trim()||'default';
+  if(tx.sourceSid){
+    return visibleSid===tx.sourceSid&&_composerProfilesMatch(visibleProfile,tx.sourceProfile);
+  }
+  return !visibleSid;
+}
+function _composerRecordNativeText(){
+  const tx=_composerOwnershipTransition;
+  const input=$('msg');
+  if(!tx||!input)return false;
+  if(!_composerOwnershipTransitionOwnsVisiblePane())return false;
+  const value=String(input.value||'');
+  const previous=String(tx.lastNativeValue==null?'':tx.lastNativeValue);
+  if(value===previous)return false;
+  const baseline=String(tx.nativeBaseline==null?'':tx.nativeBaseline);
+  const delta=baseline&&value.startsWith(baseline)
+    ?value.slice(baseline.length)
+    :value;
+  tx.lastNativeValue=value;
+  _composerTransitionRecord('text-set',delta,null,value,{
+    semantics:'replace-all',producerToken:'native-input',
+  });
+  // A native edit is a whole-text snapshot of the live textarea. Remember its
+  // revision so abort rendering knows which painted appends this snapshot
+  // already contains and must not replay. The record above already rendered
+  // abort text with the previous boundary; re-render once with this revision.
+  tx.abortNativeRevision=tx.revision;
+  _composerRenderAbortText(tx);
+  return true;
+}
+function _rememberComposerOwnerState(sid,profile,state,generation){
+  if(!sid||!state)return null;
+  const snapshot={
+    generation:Number(generation||state.generation||0),
+    revision:Number(state.revision||0),
+    text:String(state.text||''),
+    files:[...Array.from(state.files||[]).filter(Boolean)],
+    profile:String(profile||'default').trim()||'default',
+    session_id:sid,
+  };
+  const key=_composerOwnerKey(sid,snapshot.profile);
+  if(_composerOwnerStateByKey.has(key))_composerOwnerStateByKey.delete(key);
+  _composerOwnerStateByKey.set(key,snapshot);
+  _evictComposerOwnerStates();
+  return snapshot;
+}
+function _composerOwnerStateHasPayload(snapshot){
+  return !!(snapshot&&(String(snapshot.text||'')
+    ||(Array.isArray(snapshot.files)&&snapshot.files.length)));
+}
+function _evictComposerOwnerStates(){
+  while(_composerOwnerStateByKey.size>_COMPOSER_OWNER_STATE_LIMIT){
+    const keys=[..._composerOwnerStateByKey.keys()];
+    // An unfinished producer (for example dictation that started before New
+    // Chat and resolves after it) still looks up its owner's snapshot. Keep the
+    // newest window intact so ordinary churn cannot make an empty source look
+    // disposable the moment it is saved.
+    const evictable=Math.max(0,keys.length-_COMPOSER_OWNER_STATE_LIMIT);
+    let victim=null;
+    let payloadStates=0;
+    for(let index=0;index<keys.length;index+=1){
+      const snapshot=_composerOwnerStateByKey.get(keys[index]);
+      if(_composerOwnerStateHasPayload(snapshot))payloadStates+=1;
+      else if(index<evictable)victim=keys[index];
+    }
+    if(victim===null){
+      // Every older snapshot holds unsent input. Those may be the only copy of
+      // a read-only session's draft, so they get a larger budget of their own.
+      if(payloadStates<=_COMPOSER_OWNER_PAYLOAD_LIMIT)return;
+      victim=keys[0];
+    }
+    _composerOwnerStateByKey.delete(victim);
+  }
+}
+function _composerRememberedOwnerSnapshot(sid,profile){
+  const snapshot=_composerOwnerStateByKey.get(_composerOwnerKey(sid,profile));
+  return snapshot?{...snapshot,files:[...snapshot.files]}:null;
+}
+function _releaseComposerOwnerFiles(sid){
+  if(!sid)return;
+  const suffix=`\u0000${sid}`;
+  for(const [key,snapshot] of _composerOwnerStateByKey){
+    if(key.endsWith(suffix)&&snapshot.files.length){
+      _composerOwnerStateByKey.set(key,{...snapshot,files:[]});
+    }
+  }
+}
+function _forgetComposerOwnerState(sid){
+  if(!sid)return;
+  const suffix=`\u0000${sid}`;
+  for(const key of _composerOwnerStateByKey.keys()){
+    if(key.endsWith(suffix))_composerOwnerStateByKey.delete(key);
+  }
+  for(const [generation,owners] of _composerSettledOwnersByGeneration){
+    if(owners&&(owners.sourceSid===sid||owners.destinationSid===sid)){
+      _composerSettledOwnersByGeneration.delete(generation);
+    }
+  }
+}
+function _rememberComposerSettledOwners(generation,owners){
+  _composerSettledOwnersByGeneration.set(generation,owners);
+  while(_composerSettledOwnersByGeneration.size>_COMPOSER_SETTLED_GENERATION_LIMIT){
+    const oldest=_composerSettledOwnersByGeneration.keys().next().value;
+    _composerSettledOwnersByGeneration.delete(oldest);
+  }
+}
+function _composerOwnerSnapshotIsCurrent(snapshot){
+  if(!snapshot)return false;
+  const current=_composerRememberedOwnerSnapshot(snapshot.session_id,snapshot.profile);
+  return !!current&&(
+    current.generation===snapshot.generation&&current.revision===snapshot.revision
+  );
+}
+
+function _newComposerProducerToken(prefix='producer'){
+  _composerProducerSequence+=1;
+  return `${prefix}:${_composerProducerSequence}`;
+}
+function _newComposerProducerHandle(prefix='producer'){
+  const tx=_composerOwnershipTransition;
+  const visible=S.session||{};
+  return Object.freeze({
+    producerToken:_newComposerProducerToken(prefix),
+    generation:tx?tx.generation:null,
+    ownerRole:tx?'destination':'owner',
+    ownerSid:tx?null:(visible.session_id||null),
+    ownerProfile:String((tx&&tx.destinationProfile)||visible.profile||S.activeProfile||'default').trim()||'default',
+  });
+}
+function _composerProducerContext(ownerSid,producerToken,ownerProfile){
+  if(!producerToken||typeof producerToken!=='object'){
+    return {ownerSid,producerToken,ownerProfile,drop:false};
+  }
+  const handle=producerToken;
+  let resolvedSid=ownerSid;
+  let resolvedProfile=ownerProfile||handle.ownerProfile;
+  let drop=false;
+  const tx=_composerOwnershipTransition;
+  if(resolvedSid==null&&handle.generation!=null){
+    if(tx&&tx.generation===handle.generation){
+      resolvedSid=handle.ownerRole==='source'?tx.sourceSid:null;
+      resolvedProfile=handle.ownerRole==='source'?tx.sourceProfile:tx.destinationProfile;
+    }else{
+      const settled=_composerSettledOwnersByGeneration.get(handle.generation);
+      if(settled){
+        resolvedSid=handle.ownerRole==='source'?settled.sourceSid:settled.destinationSid;
+        resolvedProfile=handle.ownerRole==='source'?settled.sourceProfile:settled.destinationProfile;
+      }else{
+        // The lifecycle belongs to an ownership generation we can no longer
+        // resolve. Dropping is safer than writing whichever composer is visible.
+        drop=true;
+      }
+    }
+  }
+  if(resolvedSid==null&&handle.generation==null)resolvedSid=handle.ownerSid;
+  return {
+    ownerSid:resolvedSid,producerToken:handle.producerToken,
+    ownerProfile:resolvedProfile,drop,
+  };
+}
+function _composerOwnerSnapshot(sid,profile){
+  const tx=_composerOwnershipTransition;
+  if(!tx||!tx.sourceSid||tx.sourceSid!==sid
+    ||!_composerProfilesMatch(profile,tx.sourceProfile))return null;
+  const state=tx.sourceState;
+  return {
+    generation:tx.generation,revision:state.revision,text:state.text,
+    files:[...state.files],profile:tx.sourceProfile,session_id:tx.sourceSid,
+  };
+}
+// The draft an immediate "save the current composer" caller must persist. While
+// a handoff owns the visible pane the textarea also carries the words already
+// buffered for the destination (native input stays visible until settle), so
+// saving the raw value would restore those words in the departing chat too.
+// `owned` marks that the visible owner is the transition's source; an empty
+// owned draft has nothing worth posting and must not clear a newer copy.
+function _composerVisibleOwnerDraftForSave(fallbackText,fallbackFiles){
+  const tx=_composerOwnershipTransition;
+  if(!tx||!_composerOwnershipTransitionOwnsVisiblePane()){
+    return {
+      text:String(fallbackText==null?'':fallbackText),
+      files:Array.isArray(fallbackFiles)?[...fallbackFiles]:[],
+      owned:false,
+    };
+  }
+  const state=tx.sourceState||{};
+  return {
+    text:String(state.text==null?'':state.text),
+    files:Array.isArray(state.files)?[...state.files]:[],
+    owned:true,
+  };
+}
+function _composerBlockJoin(current,value){
+  const base=String(current||'');
+  const addition=String(value||'');
+  if(!base.trim())return addition;
+  return `${base.replace(/\s+$/,'')}\n\n${addition}`;
+}
+function _composerRenderDestinationText(tx){
+  let text='';
+  // Every producer token owns one slot and one slot only: a later write
+  // replaces the value at that token's original position. It must never reset
+  // the whole buffer, or a keystroke that arrives after a buffered saved prompt
+  // (or transcript) would erase the earlier producer's text at settle time.
+  for(const token of tx.destinationOrder){
+    const slot=tx.destinationSlots.get(token);
+    if(!slot)continue;
+    text=slot.semantics==='block-append'
+      ? _composerBlockJoin(text,slot.value)
+      : text+String(slot.value||'');
+  }
+  tx.destinationText=text;
+  return text;
+}
+function _composerRenderAbortText(tx){
+  const slots=tx.abortTextSlots;
+  const base=String(tx.abortBaseText||'');
+  // Abort restores the source chat, so it starts from that owner's own draft.
+  // A whole-text producer (a `text-set` record) reports the entire composer
+  // text it built, never a segment: while the handoff is pending every producer
+  // still sees the source textarea, so two producers each report the source
+  // draft plus their own addition. Keeping only the last whole value (the old
+  // behaviour) dropped the other producer's words, so every slot keeps its own
+  // contribution at the position it first wrote.
+  //
+  // A value that does not build on the source draft is a whole replacement:
+  // the newest one wins and supersedes every contribution written before it.
+  // A native edit is free to rewrite or clear the composer that way.
+  let replacedAt=-1;
+  let replacement='';
+  if(base){
+    for(const token of tx.abortTextOrder){
+      const slot=slots.get(token);
+      if(!slot||slot.kind!=='text-set')continue;
+      const value=String(slot.value||'');
+      if(value.startsWith(base))continue;
+      const revision=Number(slot.revision||0);
+      if(revision>replacedAt){replacedAt=revision;replacement=value;}
+    }
+  }
+  let text=replacedAt>=0?replacement:base;
+  // A source-owned `text-append` (the rescued clarification answer) is painted
+  // into the live textarea as it is recorded. A later native edit therefore
+  // already contains it in its whole-text snapshot: replaying that append on
+  // top duplicates the answer. Destination appends (a saved prompt) are only
+  // buffered, never painted, so they must survive even when a native snapshot
+  // comes later.
+  const nativeRevision=Number(tx.abortNativeRevision||0);
+  for(const token of tx.abortTextOrder){
+    const slot=slots.get(token);
+    if(!slot)continue;
+    if(replacedAt>=0&&Number(slot.revision||0)<=replacedAt)continue;
+    if(slot.kind==='text-append'&&slot.painted
+      &&Number(slot.revision||0)<nativeRevision)continue;
+    const value=String(slot.value||'');
+    if(slot.kind==='text-set'){
+      if(value===text)continue;
+      // A whole-text producer may already include every earlier contribution
+      // (a native snapshot, or a producer that read the painted composer). Use
+      // that complete value instead of appending its delta a second time.
+      if(text&&value.startsWith(text))text=value;
+      else if(!base||value.startsWith(base))text+=value.slice(base.length);
+      else text=value;
+    }
+    else if(slot.semantics==='block-append')text=_composerBlockJoin(text,value);
+    else text+=value;
+  }
+  tx.abortState.text=text;
+  return text;
+}
+function _composerApplyRecordToState(state,record,useAbortValue=false){
+  const value=useAbortValue?record.abortValue:record.value;
+  if(record.kind==='text-set')state.text=String(value||'');
+  else if(record.kind==='text-append'){
+    state.text=record.semantics==='block-append'
+      ? _composerBlockJoin(state.text,value)
+      : state.text+String(value||'');
+  }else if(record.kind==='files-add'){
+    const additions=Array.from(value||[]).filter(Boolean);
+    state.files=[...state.files,...additions.filter(file=>!state.files.includes(file))];
+  }else if(record.kind==='files-replace')state.files=[...Array.from(value||[]).filter(Boolean)];
+  else if(record.kind==='file-remove')state.files=state.files.filter(item=>item!==value);
+  state.revision=record.revision;
+}
+function _composerControlSetDisabledReason(control,reason,active){
+  if(!control||!reason)return;
+  if(!control._composerDisabledReasons){
+    control._composerDisabledReasons=new Set();
+    control._composerDisabledBase=!!control.disabled;
+  }
+  if(active)control._composerDisabledReasons.add(reason);
+  else control._composerDisabledReasons.delete(reason);
+  control.disabled=control._composerDisabledReasons.size>0||!!control._composerDisabledBase;
+  if(!control._composerDisabledReasons.size){
+    delete control._composerDisabledReasons;
+    delete control._composerDisabledBase;
+  }
+}
+
+function _beginComposerOwnershipTransition(sourceSid,sourceProfile,options={}){
+  const profile=String(sourceProfile||'default').trim()||'default';
+  const input=$('msg');
+  const token={
+    generation:++_composerOwnershipGeneration,
+    sourceSid:sourceSid||null,
+    sourceProfile:profile,
+    persistSourceDraft:options.persistSourceDraft!==false,
+    destinationSid:null,
+    destinationProfile:profile,
+    revision:0,
+    mutations:[],
+    sourceState:{
+      text:input?String(input.value||''):'',
+      files:Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[],
+      revision:0,
+      dirty:false,
+    },
+    abortState:{
+      text:input?String(input.value||''):'',
+      files:Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[],
+      revision:0,
+    },
+    abortBaseText:input?String(input.value||''):'',
+    lastNativeValue:input?String(input.value||''):'',
+    nativeBaseline:input?String(input.value||''):'',
+    abortNativeRevision:0,
+    abortTextSlots:new Map(),
+    abortTextOrder:[],
+    destinationSlots:new Map(),
+    destinationOrder:[],
+    destinationText:'',
+  };
+  _composerOwnershipTransition=token;
+  _rememberComposerOwnerState(token.sourceSid,token.sourceProfile,token.sourceState,token.generation);
+  return token;
+}
+function _bindComposerOwnershipDestination(token,sid,profile){
+  if(!token||_composerOwnershipTransition!==token)return false;
+  token.destinationSid=sid||null;
+  token.destinationProfile=String(profile||token.sourceProfile||'default').trim()||'default';
+  for(const mutation of token.mutations){
+    if(mutation.ownerRole==='destination'){
+      mutation.session_id=token.destinationSid;
+      mutation.profile=token.destinationProfile;
+    }
+  }
+  return true;
+}
+function _composerTransitionRecord(kind,value,ownerSid,abortValue,options={}){
+  const tx=_composerOwnershipTransition;
+  if(!tx)return false;
+  const sourceOwned=!!(
+    ownerSid&&tx.sourceSid&&ownerSid===tx.sourceSid
+    &&_composerProfilesMatch(options.ownerProfile,tx.sourceProfile)
+  );
+  // An immutable producer handle from an older lifecycle can settle while a
+  // different ownership transition is active. Never absorb its explicit owner
+  // into the current destination; let the non-visible-owner path persist it.
+  if(ownerSid&&!sourceOwned)return false;
+  const semantics=options.semantics||kind;
+  const producerToken=String(options.producerToken||(
+    kind==='text-set'?'default-text-producer':_newComposerProducerToken(kind)
+  ));
+  const revision=++tx.revision;
+  const record={
+    generation:tx.generation,
+    revision,
+    producerToken,
+    semantics,
+    kind,
+    value,
+    abortValue:arguments.length>3?abortValue:value,
+    ownerRole:sourceOwned?'source':'destination',
+    profile:sourceOwned
+      ? String(options.ownerProfile||tx.sourceProfile||'default').trim()||'default'
+      : tx.destinationProfile,
+    session_id:sourceOwned?tx.sourceSid:tx.destinationSid,
+  };
+  tx.mutations.push(record);
+  if(kind.startsWith('text-')){
+    if(!tx.abortTextSlots.has(producerToken))tx.abortTextOrder.push(producerToken);
+    tx.abortTextSlots.set(producerToken,{
+      kind,semantics,revision,
+      value:String(kind==='text-set'?record.abortValue:value||''),
+      // Only a source-owned append is painted into the live textarea by the
+      // source-update block below. A destination append (saved prompt) stays
+      // buffered and is never visible, so a later native snapshot cannot
+      // contain it.
+      painted:sourceOwned&&kind==='text-append',
+    });
+    _composerRenderAbortText(tx);
+    tx.abortState.revision=record.revision;
+  }else{
+    _composerApplyRecordToState(tx.abortState,record,!sourceOwned);
+  }
+
+  if(sourceOwned){
+    const state=tx.sourceState;
+    _composerApplyRecordToState(state,record,true);
+    state.dirty=true;
+    _rememberComposerOwnerState(tx.sourceSid,tx.sourceProfile,state,tx.generation);
+    if(kind.startsWith('text-')){
+      const input=$('msg');
+      if(input){
+        // The textarea still shows the source chat while the handoff is pending,
+        // and native input is buffered for the destination instead of being
+        // folded into `sourceState.text`. Keep that live tail when the source
+        // text changes (for example a clarification answer appended on expiry):
+        // resetting the baseline to the source text alone would make the next
+        // keystroke replace the native slot with only what follows the new
+        // baseline, dropping the words typed before the source update.
+        const baseline=String(tx.nativeBaseline==null?'':tx.nativeBaseline);
+        const live=String(input.value||'');
+        // An empty source is a valid baseline: words typed while the handoff is
+        // pending are still that composer's live tail. Skipping the empty
+        // baseline repainted the textarea from the source text alone and
+        // dropped them. The equality guard keeps a value that already IS the
+        // new source text from being appended to itself.
+        const nextSourceText=String(state.text||'');
+        const tail=live!==nextSourceText&&live.startsWith(baseline)
+          ?live.slice(baseline.length)
+          :'';
+        const nextText=tail?`${nextSourceText}${tail}`:nextSourceText;
+        input.value=nextText;
+        tx.lastNativeValue=nextText;
+        tx.nativeBaseline=nextSourceText;
+      }
+    }
+    else S.pendingFiles=[...state.files];
+    return true;
+  }
+
+  if(kind==='text-set'||kind==='text-append'){
+    if(!tx.destinationSlots.has(producerToken))tx.destinationOrder.push(producerToken);
+    tx.destinationSlots.set(producerToken,{semantics,value:String(value||'')});
+    _composerRenderDestinationText(tx);
+  }
+  return true;
+}
+function _composerMutateNonVisibleOwner(kind,value,ownerSid,ownerProfile,semantics){
+  const visibleSid=(S.session&&S.session.session_id)||null;
+  const visibleProfile=String(
+    (S.session&&S.session.profile)||S.activeProfile||'default'
+  ).trim()||'default';
+  const profile=String(ownerProfile||S.activeProfile||'default').trim()||'default';
+  if(!ownerSid||(ownerSid===visibleSid&&_composerProfilesMatch(profile,visibleProfile)))return false;
+  const remembered=_composerRememberedOwnerSnapshot(ownerSid,profile);
+  // A non-visible delta is only safe when we still have that owner's complete
+  // baseline. Reconstructing from an empty fallback would turn one late file or
+  // transcript into an incomplete draft and silently discard the rest.
+  if(!remembered)return true;
+  const record={
+    kind,value,abortValue:value,semantics:semantics||kind,revision:remembered.revision+1,
+  };
+  _composerApplyRecordToState(remembered,record);
+  const current=_rememberComposerOwnerState(
+    ownerSid,profile,remembered,remembered.generation
+  );
+  if(typeof _saveComposerDraftNow==='function'){
+    try{
+      Promise.resolve(_saveComposerDraftNow(
+        ownerSid,current.text,[...current.files],'',{ownerProfile:profile}
+      )).catch(()=>{});
+    }catch(_){}
+  }
+  return true;
+}
+function _composerSetText(value,transitionValue,ownerSid,producerToken,ownerProfile,semantics){
+  const context=_composerProducerContext(ownerSid,producerToken,ownerProfile);
+  if(context.drop)return false;
+  ownerSid=context.ownerSid;producerToken=context.producerToken;ownerProfile=context.ownerProfile;
+  const next=String(value||'');
+  const buffered=arguments.length>1?String(transitionValue||''):next;
+  if(_composerTransitionRecord('text-set',buffered,ownerSid,next,{
+    semantics:semantics||'producer-set',producerToken,ownerProfile,
+  }))return false;
+  if(_composerMutateNonVisibleOwner('text-set',next,ownerSid,ownerProfile,semantics||'producer-set'))return false;
+  const input=$('msg');if(input)input.value=next;
+  return true;
+}
+function _composerAppendText(value,ownerSid,producerToken,ownerProfile,semantics='append'){
+  const context=_composerProducerContext(ownerSid,producerToken,ownerProfile);
+  if(context.drop)return false;
+  ownerSid=context.ownerSid;producerToken=context.producerToken;ownerProfile=context.ownerProfile;
+  const addition=String(value||'');
+  const normalizedSemantics=semantics==='block'?'block-append':'append';
+  if(_composerTransitionRecord('text-append',addition,ownerSid,addition,{
+    semantics:normalizedSemantics,producerToken,ownerProfile,
+  }))return false;
+  if(_composerMutateNonVisibleOwner(
+    'text-append',addition,ownerSid,ownerProfile,normalizedSemantics
+  ))return false;
+  const input=$('msg');
+  if(input)input.value=semantics==='block'
+    ? _composerBlockJoin(input.value,addition)
+    : String(input.value||'')+addition;
+  return true;
+}
+function _composerAddFiles(files,ownerSid,producerToken,ownerProfile){
+  const context=_composerProducerContext(ownerSid,producerToken,ownerProfile);
+  if(context.drop)return false;
+  ownerSid=context.ownerSid;producerToken=context.producerToken;ownerProfile=context.ownerProfile;
+  const additions=Array.from(files||[]).filter(Boolean);
+  if(_composerTransitionRecord('files-add',additions,ownerSid,additions,{
+    producerToken,ownerProfile,
+  }))return false;
+  if(_composerMutateNonVisibleOwner('files-add',additions,ownerSid,ownerProfile))return false;
+  const current=Array.isArray(S.pendingFiles)?S.pendingFiles:[];
+  S.pendingFiles=[...current,...additions.filter(file=>!current.includes(file))];
+  return true;
+}
+function _composerReplaceFiles(files,ownerSid,producerToken,ownerProfile){
+  const context=_composerProducerContext(ownerSid,producerToken,ownerProfile);
+  if(context.drop)return false;
+  ownerSid=context.ownerSid;producerToken=context.producerToken;ownerProfile=context.ownerProfile;
+  const replacement=Array.from(files||[]).filter(Boolean);
+  if(_composerTransitionRecord('files-replace',replacement,ownerSid,replacement,{
+    producerToken,ownerProfile,
+  }))return false;
+  if(_composerMutateNonVisibleOwner('files-replace',replacement,ownerSid,ownerProfile))return false;
+  S.pendingFiles=[...replacement];
+  return true;
+}
+function _composerRemoveFile(file,ownerSid,producerToken,ownerProfile){
+  const context=_composerProducerContext(ownerSid,producerToken,ownerProfile);
+  if(context.drop)return false;
+  ownerSid=context.ownerSid;producerToken=context.producerToken;ownerProfile=context.ownerProfile;
+  if(_composerTransitionRecord('file-remove',file,ownerSid,file,{
+    producerToken,ownerProfile,
+  }))return false;
+  if(_composerMutateNonVisibleOwner('file-remove',file,ownerSid,ownerProfile))return false;
+  S.pendingFiles=(Array.isArray(S.pendingFiles)?S.pendingFiles:[]).filter(item=>item!==file);
+  return true;
+}
+function _persistComposerTransitionSource(token){
+  const state=token&&token.sourceState;
+  if(!token||!token.sourceSid||!state||!state.dirty||token.persistSourceDraft===false)return;
+  if(typeof _saveComposerDraftNow==='function'){
+    try{
+      Promise.resolve(_saveComposerDraftNow(
+        token.sourceSid,state.text,[...state.files],'',{ownerProfile:token.sourceProfile}
+      )).catch(()=>{});
+    }catch(_){}
+  }
+}
+function _persistComposerTransitionAbort(token){
+  const state=token&&token.abortState;
+  if(!token||!token.sourceSid||!state||!state.revision||token.persistSourceDraft===false)return;
+  if(typeof _saveComposerDraftNow==='function'){
+    try{
+      Promise.resolve(_saveComposerDraftNow(
+        token.sourceSid,state.text,[...state.files],'',{ownerProfile:token.sourceProfile}
+      )).catch(()=>{});
+    }catch(_){}
+  }
+}
+function _drainComposerOwnershipTransition(token,aborted=false,options={}){
+  if(!token||_composerOwnershipTransition!==token)return false;
+  _rememberComposerSettledOwners(token.generation,{
+    sourceSid:token.sourceSid,sourceProfile:token.sourceProfile,
+    destinationSid:aborted?token.sourceSid:token.destinationSid,
+    destinationProfile:aborted?token.sourceProfile:token.destinationProfile,
+  });
+  _composerOwnershipTransition=null;
+  if(aborted){
+    const restoredVisible=_composerOwnerIsVisible(token.sourceSid,token.sourceProfile);
+    token.abortRestoredVisible=restoredVisible;
+    _rememberComposerOwnerState(token.sourceSid,token.sourceProfile,{
+      text:token.abortState.text,files:token.abortState.files,
+      revision:token.abortState.revision,
+    },token.generation);
+    if(restoredVisible){
+      _composerSetText(token.abortState.text);
+      _composerReplaceFiles(token.abortState.files);
+      if(typeof renderTray==='function')renderTray();
+      if(typeof autoResize==='function')autoResize();
+      if(typeof updateSendBtn==='function')updateSendBtn();
+    }
+  }else if(options&&options.hiddenDestination){
+    // A newer pane navigation won, so materialize the created session's draft
+    // without projecting it through the visible textarea/file tray.
+    const baseline=options.destinationState||{};
+    const state={
+      text:typeof baseline.text==='string'?baseline.text:'',
+      files:Array.isArray(baseline.files)?[...baseline.files]:[],
+      revision:0,
+    };
+    let destinationMutated=token.destinationSlots.size>0;
+    if(token.destinationSlots.size){
+      state.text=token.destinationText;
+    }
+    for(const mutation of token.mutations){
+      if(mutation.ownerRole==='source')continue;
+      if(mutation.kind==='files-add'
+        ||mutation.kind==='files-replace'
+        ||mutation.kind==='file-remove'){
+        destinationMutated=true;
+        _composerApplyRecordToState(state,mutation);
+      }
+    }
+    if(destinationMutated)state.revision=token.revision;
+    _rememberComposerOwnerState(token.destinationSid,token.destinationProfile,state,token.generation);
+  }else{
+    if(token.destinationSlots.size)_composerSetText(token.destinationText);
+    for(const mutation of token.mutations){
+      if(mutation.ownerRole==='source')continue;
+      if(mutation.kind==='files-add')_composerAddFiles(mutation.value);
+      else if(mutation.kind==='files-replace')_composerReplaceFiles(mutation.value);
+      else if(mutation.kind==='file-remove')_composerRemoveFile(mutation.value);
+    }
+    const input=$('msg');
+    _rememberComposerOwnerState(token.destinationSid,token.destinationProfile,{
+      text:input?String(input.value||''):'',
+      files:Array.isArray(S.pendingFiles)?S.pendingFiles:[],
+      revision:token.revision,
+    },token.generation);
+  }
+  if(aborted)_persistComposerTransitionAbort(token);
+  else _persistComposerTransitionSource(token);
+  return true;
+}
+function _abortComposerOwnershipTransition(token){
+  return !!(_drainComposerOwnershipTransition(token,true)&&token.abortRestoredVisible);
+}
 const OFFLINE_RECHECK_MS=2500;
 const OFFLINE_HEALTH_TIMEOUT_MS=10000;
 const OFFLINE_FETCH_FAILURES_BEFORE_BANNER=2;
@@ -11733,9 +12464,23 @@ function lockComposerForClarify(placeholderText){
   // so the user's draft is preserved if they switch sessions while a clarify
   // card is active (and survives page refresh / syncs across clients).
   const sid = S && S.session && S.session.session_id;
-  if (sid && typeof _saveComposerDraftNow === 'function') {
-    const saveText = String(input.value || '');
-    const saveFiles = Array.isArray(S && S.pendingFiles) ? [...S.pendingFiles] : [];
+  // While a New Chat handoff owns the composer, the textarea also shows the
+  // words already buffered for the destination chat. Persist the departing
+  // chat's own state instead, or returning to it would restore words that
+  // also went to the new chat.
+  const draft = typeof _composerVisibleOwnerDraftForSave === 'function'
+    ? _composerVisibleOwnerDraftForSave(input.value, S && S.pendingFiles)
+    : {
+        text: String(input.value || ''),
+        files: Array.isArray(S && S.pendingFiles) ? [...S.pendingFiles] : [],
+        owned: false,
+      };
+  // An empty owned draft carries nothing the server does not already have;
+  // posting it could only clear a newer copy.
+  if (sid && typeof _saveComposerDraftNow === 'function'
+      && !(draft.owned && !draft.text && !draft.files.length)) {
+    const saveText = draft.text;
+    const saveFiles = draft.files;
     // #7855: an unchanged restored goal continuation keeps its token in this save. Without it the
     // payload stores goal_continuation_id '' and the continuation sent after a reload is no longer
     // goal-related, which stops the goal loop. Edited text carries no token (round-7 rule).
@@ -11755,13 +12500,8 @@ function lockComposerForClarify(placeholderText){
       _handleComposerDraftPostFailure(error,sid,saveText,saveFiles);
     }
   }
-  if(!_composerLockState){
-    _composerLockState={
-      disabled: input.disabled,
-      placeholder: input.placeholder,
-    };
-  }
-  input.disabled=true;
+  if(!_composerLockState)_composerLockState={placeholder:input.placeholder};
+  _composerControlSetDisabledReason(input,'clarify',true);
   if(placeholderText) input.placeholder=placeholderText;
   updateSendBtn();
 }
@@ -11770,20 +12510,19 @@ function unlockComposerForClarify(){
   const input=$('msg');
   if(!input) return;
   if(_composerLockState){
-    input.disabled=!!_composerLockState.disabled;
     if(typeof _composerLockState.placeholder==='string'){
       input.placeholder=_composerLockState.placeholder;
     }
     _composerLockState=null;
-  }else{
-    input.disabled=false;
   }
+  _composerControlSetDisabledReason(input,'clarify',false);
   updateSendBtn();
 }
 
 function _composerHasContent(){
   const msg=$('msg');
-  return !!((msg&&msg.value.trim().length>0)||S.pendingFiles.length>0||(typeof window._hasPendingSelections==='function'&&window._hasPendingSelections()));
+  const pending=typeof _composerPendingText==='function'?_composerPendingText():'';
+  return !!((msg&&msg.value.trim().length>0)||String(pending||'').trim().length>0||S.pendingFiles.length>0||(typeof window._hasPendingSelections==='function'&&window._hasPendingSelections()));
 }
 
 function _getExplicitBusyCommandAction(text){
@@ -11924,7 +12663,10 @@ function updateSendBtn(){
   let _btnTitle;
   if(action==='disabled'){
     const _dmsg=$('msg');
-    if(chatReadOnlyReason) _btnTitle=chatReadOnlyReason;
+    if(_dmsg&&_dmsg._composerDisabledReasons
+      &&_dmsg._composerDisabledReasons.has('profile-switch')){
+      _btnTitle=_tt('composer_disabled_profile_switch','Switching profile…');
+    }else if(chatReadOnlyReason) _btnTitle=chatReadOnlyReason;
     else if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
   }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
@@ -11976,22 +12718,64 @@ function setBusy(v){
     updateQueueBadge(sid);
     // Drain one queued message for the finished session after UI settles
     const _isViewedSid=!S.session||sid===S.session.session_id;
-    const next=sid&&_isViewedSid?shiftQueuedSessionMessage(sid):null;
+    // Never replace an unsent composer with an automatic queue drain. This is
+    // especially important after a failed New Chat restores its source draft:
+    // the queued turn remains a chip and drains after the recovered draft has
+    // been sent, instead of overwriting and then clearing that draft.
+    const _composerHasUnsentContent=_isViewedSid&&(
+      typeof _composerHasContent==='function'
+        ? _composerHasContent()
+        : (String(($('msg')&&$('msg').value)||'').trim()
+          ||(Array.isArray(S.pendingFiles)&&S.pendingFiles.length))
+    );
+    const _sendAlreadyInProgress=typeof _sendInProgress!=='undefined'&&_sendInProgress;
+    const next=sid&&_isViewedSid&&!_composerHasUnsentContent&&!_sendAlreadyInProgress
+      &&_queueDrainPendingSid!==sid
+      ?shiftQueuedSessionMessage(sid):null;
     if(next){
+      _queueDrainPendingSid=sid;
       updateQueueBadge(sid);
       setTimeout(()=>{
+        _queueDrainPendingSid=null;
         // Guard: if the user switched away from the drain session during
         // the 120ms settle window, the queued message must NOT go to the
         // wrong chat.  Put it back into the original session's queue and
         // skip sending — it will drain when the user returns to that session
         // or when its next stream completes while it is the active view.
         if(S.session&&S.session.session_id!==sid){
-          queueSessionMessage(sid,next);
+          _getSessionQueue(sid,true).unshift(next);
+          _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
           updateQueueBadge(sid);
           return;
         }
-        $('msg').value=next.text||'';
-        S.pendingFiles=Array.isArray(next.files)?[...next.files]:[];
+        // Keep a queued turn bound to sid if a session-owner handoff started
+        // during the settle window; send() must not capture it from the destination.
+        if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight){
+          _getSessionQueue(sid,true).unshift(next);
+          _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
+          updateQueueBadge(sid);return;
+        }
+        // A file upload can keep send() in flight after the visible busy state
+        // clears. Requeue at the front instead of letting send() append this
+        // item behind newer queued turns through its concurrent-send guard.
+        if(typeof _sendInProgress!=='undefined'&&_sendInProgress){
+          _getSessionQueue(sid,true).unshift(next);
+          _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
+          updateQueueBadge(sid);return;
+        }
+        // Clearing a recovered draft only opens a drain window; text or files
+        // entered during the settle delay are newer user intent and must not be
+        // replaced by the queued turn.
+        if(typeof _composerHasContent==='function'
+          ? _composerHasContent()
+          : (String(($('msg')&&$('msg').value)||'').trim()
+            ||(Array.isArray(S.pendingFiles)&&S.pendingFiles.length))){
+          _getSessionQueue(sid,true).unshift(next);
+          _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
+          updateQueueBadge(sid);return;
+        }
+        _composerSetText(next.text||'',next.text||'',sid);
+        _composerReplaceFiles(Array.isArray(next.files)?next.files:[],sid);
         // Restore model from queued item (sent in /api/chat/start payload)
         // Note: profile is NOT restored — full profile switch requires server interaction
         if(next.model&&S.session&&next.model!==S.session.model){
@@ -12012,6 +12796,27 @@ function setBusy(v){
       },120);
     }
   }
+}
+
+let _queueDrainPendingSid=null;
+// A drain is only safe when the composer is empty. Text or files entered while
+// the settle window is open are newer user intent than the queued turn.
+function _composerHasUnsentIntent(){
+  if(typeof _composerHasContent==='function')return _composerHasContent();
+  return !!(String((($('msg')||{}).value)||'').trim()
+    ||(Array.isArray(S.pendingFiles)&&S.pendingFiles.length));
+}
+function _resumeQueuedSessionMessageIfComposerEmpty(){
+  if(S.busy
+    ||(typeof _sendInProgress!=='undefined'&&_sendInProgress)
+    ||(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight))return;
+  const sid=S.session&&S.session.session_id;
+  if(!sid||_queueDrainPendingSid===sid)return;
+  if(_composerHasUnsentIntent())return;
+  const queue=_getSessionQueue(sid,false);
+  if(!queue||!queue.length)return;
+  _queueDrainSid=sid;
+  setBusy(false);
 }
 
 // ── Queue chip display (Codex Desktop pattern) ─────────────────────────────
@@ -27924,15 +28729,28 @@ async function deleteWorkspaceFile(relPath, name){
 }
 
 async function promptNewFile(targetDir = S.currentDir || '.'){
+  const requestedTarget=arguments[0];
+  const contextIntent=arguments[1];
+  // A create action on the blank page owns the pane from click time: queued
+  // behind a held context transition it must not mint a newer claim later and
+  // displace a sidebar conversation picked while it waited (#6423 review).
+  const paneNavigationGeneration=arguments[2]!=null?arguments[2]
+    :(!contextIntent&&!S.session&&typeof _claimPaneNavigation==='function'?_claimPaneNavigation():null);
+  if(!_paneNavigationOwnerIsCurrent(paneNavigationGeneration))return;
+  targetDir=requestedTarget||S.currentDir||'.';
+  const intent=contextIntent;
+  // The dialog and the write stay outside the context-transition queue: a
+  // programmatic switch (a new chat, a background run, an extension) must not
+  // wait for a create that is still being answered or submitted. The action is
+  // bound to the conversation captured here; if that conversation is no longer
+  // on screen the follow-ups are dropped instead of painting into the new pane.
   if(!S.session){
     const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws) return;
     try{
-      // System-minted session (#6022): explicit worktree:false — creating a
-      // file from a blank page must not inherit the config worktree default.
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      await _ensureBlankPageSession(ws,intent,paneNavigationGeneration);
     }catch(e){setStatus(t('create_failed')+e.message);return;}
+    if(!_paneNavigationOwnerIsCurrent(paneNavigationGeneration))return;
   }
   const session=S.session;
   if(!session)return;
@@ -27960,15 +28778,25 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
 }
 
 async function promptNewFolder(targetDir = S.currentDir || '.'){
+  const requestedTarget=arguments[0];
+  const contextIntent=arguments[1];
+  // Same blank-page ownership rule as promptNewFile: claim at click time so a
+  // queued folder create cannot displace a newer sidebar navigation.
+  const paneNavigationGeneration=arguments[2]!=null?arguments[2]
+    :(!contextIntent&&!S.session&&typeof _claimPaneNavigation==='function'?_claimPaneNavigation():null);
+  if(!_paneNavigationOwnerIsCurrent(paneNavigationGeneration))return;
+  targetDir=requestedTarget||S.currentDir||'.';
+  const intent=contextIntent;
+  // Same as promptNewFile: the dialog and the write are not queued behind the
+  // context transitions, and the follow-ups are bound to the conversation that
+  // is on screen when the dialog is answered.
   if(!S.session){
     const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws) return;
     try{
-      // System-minted session (#6022): explicit worktree:false — creating a
-      // folder from a blank page must not inherit the config worktree default.
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      await _ensureBlankPageSession(ws,intent,paneNavigationGeneration);
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
+    if(!_paneNavigationOwnerIsCurrent(paneNavigationGeneration))return;
   }
   const session=S.session;
   if(!session)return;
@@ -28013,7 +28841,13 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
   }catch(e){setStatus(t('folder_create_failed')+e.message);}
 }
 
+function _syncComposerFiles(){
+  if(S.session&&S.session.session_id&&typeof _rememberComposerPendingFiles==='function'){
+    _rememberComposerPendingFiles(S.session.session_id,S.pendingFiles);
+  }
+}
 function renderTray(){ // non-media files use paperclip chip
+  _syncComposerFiles();
   const tray=$('attachTray');tray.innerHTML='';
   if(!S.pendingFiles.length){tray.classList.remove('has-files');updateSendBtn();return;}
   tray.classList.add('has-files');
@@ -28040,7 +28874,17 @@ function renderTray(){ // non-media files use paperclip chip
     chip.querySelector('button').onclick=()=>{
       // Revoke blob URL to avoid memory leak before removing
       if(chip.dataset.blobUrl) URL.revokeObjectURL(chip.dataset.blobUrl);
-      S.pendingFiles.splice(i,1);renderTray();
+      // Carry the visible conversation's profile: during a New Chat handoff the
+      // tray still belongs to the departing chat, and a removal without its
+      // profile is treated as a destination-role change instead of a source one.
+      _composerRemoveFile(
+        f,
+        S.session&&S.session.session_id,
+        null,
+        (S.session&&S.session.profile)||S.activeProfile||'default'
+      );
+      renderTray();
+      _resumeQueuedSessionMessageIfComposerEmpty();
     };
     tray.appendChild(chip);
   });
@@ -28058,8 +28902,13 @@ function _showUploadTooLarge(file){
 // same generic name ("image.jpg"). Dropping a file just because its name is
 // taken silently loses the second photo. Only skip a true duplicate (same
 // name, size and mtime); otherwise keep the file under a collision-free name.
-function _pendingFileUniqueName(name){
-  const taken=new Set((S.pendingFiles||[]).map(p=>p&&p.name));
+function _pendingFileUniqueName(name, alsoTaken, basePending){
+  // The base view is the tray that actually receives the file. During a New
+  // Chat / profile handoff the visible tray still belongs to the departing
+  // chat, so names already staged there are not collisions for the destination.
+  const base=Array.isArray(basePending)?basePending:(S.pendingFiles||[]);
+  const taken=new Set(base.map(p=>p&&p.name));
+  for(const p of (alsoTaken||[])) if(p&&p.name)taken.add(p.name);
   if(!taken.has(name))return name;
   // Keep compound archive extensions whole (.tar.gz etc.) so the renamed copy
   // still matches _ARCHIVE_EXTS and is extracted rather than uploaded as-is.
@@ -28074,20 +28923,70 @@ function _pendingFileUniqueName(name){
 }
 // A pending file's identity is its ORIGINAL name (before any collision rename).
 function _pendingFileOrigName(p){return (p&&p._origName)||(p&&p.name);}
+// The files an in-flight composer ownership transition has buffered for the
+// chat it is creating. While a New Chat handoff is pending the tray still
+// belongs to the departing chat, so `S.pendingFiles` cannot see an earlier
+// drop from the same handoff; addFiles() must validate both views.
+function _pendingFilesBufferedByTransition(){
+  if(typeof _composerOwnershipTransition==='undefined'||!_composerOwnershipTransition)return [];
+  const buffered=[];
+  for(const mutation of _composerOwnershipTransition.mutations||[]){
+    if(mutation.ownerRole!=='destination')continue;
+    if(mutation.kind==='files-add'){
+      for(const file of Array.from(mutation.value||[])){
+        if(file&&!buffered.includes(file))buffered.push(file);
+      }
+    }else if(mutation.kind==='files-replace'){
+      buffered.length=0;
+      for(const file of Array.from(mutation.value||[]))if(file)buffered.push(file);
+    }else if(mutation.kind==='file-remove'){
+      const index=buffered.indexOf(mutation.value);
+      if(index>=0)buffered.splice(index,1);
+    }
+  }
+  return buffered;
+}
 function addFiles(files){
+  const accepted=[];
+  // The effective pending view for the composer being mutated: the visible
+  // tray plus any batches the active New Chat handoff already buffered. Both
+  // duplicate suppression and collision naming must use this same view.
+  const buffered=_pendingFilesBufferedByTransition();
+  const handoffOwnsComposer=!!(
+    typeof _composerOwnershipTransition!=='undefined'&&_composerOwnershipTransition
+  );
+  // While a handoff owns the composer the visible tray (and `S.pendingFiles`)
+  // still belongs to the departing chat: those files stay with it. A drop in
+  // this window lands in the new chat, so it must be measured against the
+  // destination's buffered view only — otherwise dropping a file the departing
+  // chat already holds is skipped as a "duplicate" and never reaches the chat
+  // the user is creating.
+  const pendingView=handoffOwnsComposer
+    ?buffered
+    :(Array.isArray(S.pendingFiles)?S.pendingFiles:[]);
   for(const f of files){
     if(f&&f.size>MAX_UPLOAD_BYTES){_showUploadTooLarge(f);continue;}
     // True duplicate: same original name, size and mtime as ANY pending file,
     // including one already renamed to a collision-free alias.
-    if(S.pendingFiles.some(p=>_pendingFileOrigName(p)===f.name&&p.size===f.size&&p.lastModified===f.lastModified))continue;
-    if(S.pendingFiles.some(p=>p.name===f.name)){
-      const copy=new File([f],_pendingFileUniqueName(f.name),{type:f.type,lastModified:f.lastModified});
+    if(pendingView.some(p=>_pendingFileOrigName(p)===f.name&&p.size===f.size&&p.lastModified===f.lastModified))continue;
+    if(buffered.some(p=>_pendingFileOrigName(p)===f.name&&p.size===f.size&&p.lastModified===f.lastModified))continue;
+    if(accepted.some(p=>_pendingFileOrigName(p)===f.name&&p.size===f.size&&p.lastModified===f.lastModified))continue;
+    if(pendingView.some(p=>p.name===f.name)||accepted.some(p=>p.name===f.name)){
+      const copy=new File([f],_pendingFileUniqueName(f.name,[...buffered,...accepted],pendingView),{type:f.type,lastModified:f.lastModified});
       try{Object.defineProperty(copy,'_origName',{value:f.name});}catch(_){}
-      S.pendingFiles.push(copy);
+      accepted.push(copy);
       continue;
     }
-    S.pendingFiles.push(f);
+    accepted.push(f);
   }
+  // A New Chat / profile handoff owns this transition: stage the accepted
+  // batch through the composer ownership layer instead of mutating the visible
+  // tray that may already belong to a different session.
+  if(typeof _composerOwnershipTransition!=='undefined'&&_composerOwnershipTransition){
+    _composerAddFiles(accepted);
+    return;
+  }
+  for(const f of accepted) S.pendingFiles.push(f);
   renderTray();
 }
 const _uploadPendingFilesProgressBySession=new Map();
