@@ -3506,29 +3506,55 @@ async function loadSession(sid){
           const _lastMsg=S.messages.slice().reverse()
             .find(m=>m&&m.role==='assistant');
           const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
-          const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
-          if(_fresh.length){
-            const _first=_fresh[0];
+          // `_retry_migrate` marks entries a previous load could not hand to the backend: they are
+          // unsent by definition, so the "older than the last reply" staleness guard must not drop them.
+          const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst||e._retry_migrate);
+          // Entries that carry a goal continuation token, or attachments (File objects do not
+          // survive a refresh), cannot run unattended on the server: they come back as a draft.
+          const _isFile=e=>e&&Array.isArray(e.files)&&e.files.some(Boolean);
+          const _cont=_fresh.filter(e=>e&&e.goal_continuation_id);
+          const _withFiles=_fresh.filter(e=>!(e&&e.goal_continuation_id)&&_isFile(e));
+          const _plain=_fresh.filter(e=>!(e&&e.goal_continuation_id)&&!_isFile(e));
+          let _keep=[];
+          if(_plain.length&&typeof migrateLocalQueueToServer==='function'){
+            const _r=await migrateLocalQueueToServer(sid,_plain);
+            if(_r.rest.length){
+              // Partial hand-over: keep exactly the unaccepted entries (the accepted ones are
+              // already on the server and must not be re-sent or re-shown).
+              _keep=_r.rest.map(e=>({...e,_retry_migrate:true}));
+              if(typeof showToast==='function') showToast('Could not restore all queued messages yet — will retry',3500,'warning');
+            }
+            if(_r.accepted>0&&typeof showToast==='function') showToast(_r.accepted>1?`${_r.accepted} queued messages restored`:'Queued message restored',2500);
+          }
+          // Draft restore (#7855 round 5 for continuations): the ID rides on the composer element
+          // together with the exact text it was restored for.
+          const _draftEntries=[..._cont,..._withFiles];
+          if(_draftEntries.length){
+            const _first=_draftEntries[0];
             const _msg=$&&$('msg');
             if(_msg&&_first.text&&!_msg.value){
-              _msg.value=_first.text||'';
-              // #7855 (round 5): mark the restored text as an identifiable
-              // CONTINUATION DRAFT — the ID rides on the composer element
-              // together with the exact text it was restored for, and send()
-              // consumes it only while that text is still what is sent. If the
-              // user replaces or abandons the draft, the ID dies with it
-              // instead of attaching to their own message.
+              _msg.value=_draftEntries.length>1&&!_first.goal_continuation_id
+                ? _draftEntries.filter(e=>!e.goal_continuation_id).map(e=>e.text||'').filter(Boolean).join('\n\n')
+                : (_first.text||'');
               if(typeof _setRestoredGoalContinuationDraft==='function'){
-                _setRestoredGoalContinuationDraft(_first.goal_continuation_id||'',_first.text||'');
+                _setRestoredGoalContinuationDraft(_first.goal_continuation_id||'',_msg.value);
               }
               if(typeof autoResize==='function') autoResize();
-              if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
+              if(typeof showToast==='function') showToast(_withFiles.length&&!_cont.length?'Queued message restored — re-attach files, review and send when ready':'Queued message restored — review and send when ready');
             }
           }
-          if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
+          if(_keep.length){
+            // Re-persist only what the server did not take; the next load retries it.
+            if(typeof _persistSessionQueueStorage==='function') _persistSessionQueueStorage(sid,_keep);
+          } else if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
         }
-      }catch(_){if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);}
+      }catch(_e){
+        // Any failure here: never re-run stale entries (old behaviour).
+        if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
+      }
     }
+    // Backend queue is the source of truth for follow-ups: render it on every load/refresh/reconnect.
+    if(typeof syncServerQueue==='function') await syncServerQueue(sid);
 
     // Reconstruct tool calls from message metadata, or fall back to session-level summary.
     // (hasMessageToolMetadata already computed inside _ensureMessagesLoaded; S.toolCalls set there.)

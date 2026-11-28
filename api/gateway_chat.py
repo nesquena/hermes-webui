@@ -3937,3 +3937,12 @@ def _run_gateway_chat_streaming(
         # the process lifetime (compare-and-clear: only clears if still owned by
         # this stream, mirroring the local streaming teardown).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
+        # Server-side follow-up FIFO (api/followup_queue.py): the session just went
+        # idle, so start the next queued follow-up.  The Gateway backend never runs
+        # the local streaming worker's teardown, so it needs its own call here.
+        try:
+            from api.followup_queue import drain_followup_queue_for_session
+
+            drain_followup_queue_for_session(session_id)
+        except Exception:
+            logger.debug("gateway teardown follow-up drain failed for %s", session_id, exc_info=True)

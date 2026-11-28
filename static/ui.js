@@ -237,7 +237,9 @@ function _clearPersistedSessionQueue(sid){
 }
 function _persistSessionQueueStorage(sid, queue){
   if(!sid) return;
-  const q=Array.isArray(queue)?queue:[];
+  // Entries mirrored from the server FIFO (_server_id) are owned by the backend; persisting
+  // them here too would re-submit (double-run) them on the next page load.
+  const q=(Array.isArray(queue)?queue:[]).filter(e=>!(e&&e._server_id));
   if(!q.length){_clearPersistedSessionQueue(sid);return;}
   const key=_queueStorageKey(sid);
   let payload='[]';
@@ -276,8 +278,9 @@ function queueSessionMessage(sid, payload){
 }
 function shiftQueuedSessionMessage(sid){
   const q=_getSessionQueue(sid,false);
-  if(!q.length) return null;
-  const next=q.shift();
+  const idx=q.findIndex(e=>e&&!e._server_id);
+  if(idx===-1) return null;
+  const next=q.splice(idx,1)[0];
   if(!q.length){
     delete SESSION_QUEUES[sid];
     _clearPersistedSessionQueue(sid);
@@ -285,6 +288,83 @@ function shiftQueuedSessionMessage(sid){
     _persistSessionQueueStorage(sid,q);
   }
   return next;
+}
+// ── Server-side follow-up FIFO (api/followup_queue.py) ─────────────────────
+// Text follow-ups sent while a turn runs are stored and drained by the backend
+// (same behaviour as Telegram/Discord busy_input_mode=queue), so they survive
+// refresh/tab close and run in order even when no tab is open. SESSION_QUEUES
+// only mirrors them (entries tagged _server_id) for display.
+// Server entries that still WILL run. A failed entry is skipped by the backend (it waits for an
+// explicit retry), so it must not hold back browser-held work.
+function _hasServerQueueEntries(sid){
+  return _getSessionQueue(sid,false).some(e=>e&&e._server_id&&e._status!=='failed');
+}
+function _hasBrowserQueueEntries(sid){
+  return _getSessionQueue(sid,false).some(e=>e&&!e._server_id);
+}
+// One ordered sequence across both stores: a message may go to the backend FIFO only when it is
+// text-only, not a goal continuation, and no browser-held entry is waiting ahead of it.
+function _canServerQueue(sid,files,goalContinuationId){
+  return !(files&&files.length)&&!goalContinuationId&&!_hasBrowserQueueEntries(sid);
+}
+function _applyServerQueue(sid,items){
+  const local=_getSessionQueue(sid,false).filter(e=>e&&!e._server_id);
+  const mirrored=(Array.isArray(items)?items:[]).map(it=>({
+    text:it.text||'',files:[],_server_id:it.id,_status:it.status||'queued',_error:it.error||null,
+    _queued_at:Math.round((it.queued_at||0)*1000)||Date.now(),
+  }));
+  const merged=[...mirrored,...local];
+  if(merged.length) SESSION_QUEUES[sid]=merged; else delete SESSION_QUEUES[sid];
+  delete _queueRenderKeys[sid];
+  if(typeof updateQueueBadge==='function') updateQueueBadge(sid);
+  return mirrored.length;
+}
+async function syncServerQueue(sid){
+  if(!sid) return null;
+  try{
+    const r=await api('/api/chat/queue?session_id='+encodeURIComponent(sid),{timeoutToast:false,retries:1});
+    _applyServerQueue(sid,r&&r.items);
+    return r&&r.items||[];
+  }catch(_){return null;}
+}
+// Returns true when the backend accepted the message; false (never throws) otherwise.
+async function enqueueServerFollowup(sid,text,clientId){
+  try{
+    const r=await api('/api/chat/queue',{method:'POST',body:JSON.stringify({session_id:sid,text,client_id:clientId||(Date.now().toString(36)+Math.random().toString(36).slice(2,10))})});
+    _applyServerQueue(sid,r&&r.items);
+    return true;
+  }catch(e){
+    if(typeof showToast==='function') showToast('Could not queue message: '+((e&&e.message)||'server error'),4000,'error');
+    return false;
+  }
+}
+async function _serverQueueAction(sid,action,id){
+  try{
+    const r=await api('/api/chat/queue/'+action,{method:'POST',body:JSON.stringify({session_id:sid,id})});
+    _applyServerQueue(sid,r&&r.items);
+  }catch(e){
+    if(typeof showToast==='function') showToast('Queue update failed: '+((e&&e.message)||'server error'),3500,'error');
+    syncServerQueue(sid);
+  }
+}
+// Pre-server-queue browsers left entries in sessionStorage/localStorage. Hand every text-only
+// one to the backend once (idempotent client_id) instead of the old restore that kept only the
+// first and dropped the rest. Resolves to {accepted, rest}: `rest` are the entries the server did
+// NOT accept (the first failure and everything after it) so the caller can keep exactly those.
+async function migrateLocalQueueToServer(sid,entries){
+  const list=Array.isArray(entries)?entries:[];
+  let accepted=0;
+  for(let i=0;i<list.length;i++){
+    const e=list[i];
+    const text=String(e&&(e.text||e.message||e.content)||'').trim();
+    if(!text){continue;}
+    const cid='mig-'+(e._queued_at||0)+'-'+text.length+'-'+text.slice(0,16);
+    try{
+      await api('/api/chat/queue',{method:'POST',body:JSON.stringify({session_id:sid,text,client_id:cid})});
+      accepted++;
+    }catch(_){return {accepted,rest:list.slice(i)};}
+  }
+  return {accepted,rest:[]};
 }
 function getQueuedSessionCount(sid){
   return _getSessionQueue(sid,false).length;
@@ -11976,7 +12056,17 @@ function setBusy(v){
     updateQueueBadge(sid);
     // Drain one queued message for the finished session after UI settles
     const _isViewedSid=!S.session||sid===S.session.session_id;
-    const next=sid&&_isViewedSid?shiftQueuedSessionMessage(sid):null;
+    // While the backend still holds follow-ups for this session it owns the order: it starts
+    // them itself. Browser-held (attachment) entries wait until the server FIFO is empty.
+    const _serverOwns=!!sid&&_hasServerQueueEntries(sid);
+    if(sid&&_isViewedSid){
+      const _sp=syncServerQueue(sid);
+      // Hand over to browser-held entries once the backend FIFO has fully drained.
+      if(_serverOwns) _sp.then(items=>{
+        if(items&&!items.some(i=>i.status!=='failed')&&!S.busy&&S.session&&S.session.session_id===sid&&getQueuedSessionCount(sid)>0){_queueDrainSid=sid;setBusy(false);}
+      });
+    }
+    const next=sid&&_isViewedSid&&!_serverOwns?shiftQueuedSessionMessage(sid):null;
     if(next){
       updateQueueBadge(sid);
       setTimeout(()=>{
@@ -12134,8 +12224,12 @@ function _renderQueueChips(sid){
     clearBtn.title='Clear all queued messages';
     clearBtn.setAttribute('aria-label','Clear all queued messages');
     clearBtn.innerHTML=li('x',13);
-    clearBtn.onclick=()=>{q.length=0;_saveAndRefresh();};
-    actions.appendChild(mergeBtn);
+    clearBtn.onclick=()=>{
+      if(q.some(e=>e&&e._server_id)) _serverQueueAction(sid,'clear',null);
+      q.splice(0,q.length,...q.filter(e=>e&&e._server_id));  // server entries leave only once the server confirms
+      _saveAndRefresh();
+    };
+    if(!q.some(e=>e&&e._server_id)) actions.appendChild(mergeBtn);  // combining browser-held entries only
     actions.appendChild(clearBtn);
     // Hide button — collapses flyout entirely; queue pill re-shows it
     const hideBtn=document.createElement('button');
@@ -12163,7 +12257,7 @@ function _renderQueueChips(sid){
     const row=document.createElement('div');
     row.className='queue-card-row';
     row.setAttribute('role','listitem');
-    row.setAttribute('draggable','true');
+    row.setAttribute('draggable',(entry&&entry._server_id)?'false':'true');
     row.ondragstart=(e)=>{if(_entryTs==null) return;_dragTs=_entryTs;row.style.opacity='.4';e.dataTransfer.effectAllowed='move';};
     row.ondragend=()=>{row.style.opacity='';};
     row.ondragover=(e)=>{e.preventDefault();row.style.background='var(--hover-bg)';};
@@ -12184,10 +12278,21 @@ function _renderQueueChips(sid){
     // Inline-editable text
     const msgSpan=document.createElement('span');
     msgSpan.className='queue-card-text';
-    msgSpan.setAttribute('contenteditable','true');
+    const _srv=!!(entry&&entry._server_id);
+    msgSpan.setAttribute('contenteditable',_srv?'false':'true');
     msgSpan.setAttribute('role','textbox');
     msgSpan.setAttribute('aria-label','Queued message — edit in place');
     msgSpan.textContent=entryText||(_files.length?'':'—');
+    if(_srv){
+      row.setAttribute('data-queue-status',entry._status||'queued');
+      if(entry._status==='failed'||entry._status==='processing'){
+        const st=document.createElement('span');
+        st.className='queue-card-file-badge';
+        st.textContent=entry._status==='failed'?'failed':'starting…';
+        st.title=entry._error||'';
+        row._statusBadge=st;
+      }
+    }
     msgSpan.setAttribute('draggable','false');
     msgSpan.onfocus=()=>{msgSpan.style.overflow='auto';msgSpan.style.whiteSpace='pre-wrap';msgSpan.style.textOverflow='clip';};
     msgSpan.onblur=()=>{
@@ -12239,6 +12344,7 @@ function _renderQueueChips(sid){
     delBtn.title='Remove from queue';
     delBtn.innerHTML=li('x',13);
     delBtn.onclick=()=>{
+      if(entry&&entry._server_id){_serverQueueAction(sid,'remove',entry._server_id);return;}
       const liveQ=_getSessionQueue(sid,false);
       const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
       if(idx!==-1) liveQ.splice(idx,1);
@@ -12249,6 +12355,14 @@ function _renderQueueChips(sid){
     };
     row.appendChild(drag);
     row.appendChild(msgSpan);
+    if(row._statusBadge){
+      if(entry._status==='failed'){
+        row._statusBadge.style.cursor='pointer';
+        row._statusBadge.onclick=()=>_serverQueueAction(sid,'retry',entry._server_id);
+        row._statusBadge.title=(entry._error||'Failed to start')+' — click to retry';
+      }
+      badges.appendChild(row._statusBadge);
+    }
     if(badges.childNodes.length) row.appendChild(badges);
     row.appendChild(delBtn);
     inner.appendChild(row);

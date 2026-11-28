@@ -135,7 +135,7 @@ class TestSlashCommandHandlers:
         for fn_name in ("cmdQueue", "cmdInterrupt"):
             idx = COMMANDS_JS.find(f"function {fn_name}(")
             assert idx >= 0, f"{fn_name} not found"
-            body = COMMANDS_JS[idx:idx + 800]
+            body = COMMANDS_JS[idx:idx + 1800]
             assert "S.pendingFiles=[]" in body, (
                 f"{fn_name} must clear S.pendingFiles after queueSessionMessage"
             )
