@@ -45,6 +45,36 @@ helpers are genuinely shared code.
 | `runtime_gateway_provider` | `api/streaming.py` and `api/routes.py` import `hermes_cli.runtime_provider`; adapter helpers such as `agent.anthropic_adapter` are also imported for gateway normalization. | Provider resolution, runtime routing, and gateway invocation should be hermes-agent API calls. WebUI can keep request validation and display formatting, but it should not import runtime provider internals from the agent checkout. |
 | `webui_local_or_client_package` | WebUI imports `hermes_cli.auth`, `hermes_cli.config`, `hermes_cli.plugins`, `hermes_cli.profiles`, `hermes_cli.goals`, `agent.skill_utils`, `agent.credential_pool`, and `hermes_constants`. | Pure schemas, constants, and parsing helpers can move into a small versioned client/shared package. Privileged data such as credential pools, auth status, profile mutation, plugin discovery, and goal persistence need hermes-agent endpoints. UI-only formatting can remain in WebUI. |
 
+## Profile hooks in local WebUI chats
+
+Before each in-process streaming or synchronous chat turn, WebUI registers the
+session profile's `hooks:` shell scripts and outbound webhooks with the Agent's
+profile-scoped plugin manager. Registration uses a context-local Hermes home;
+it never changes the process `HERMES_HOME`. The turn retains that same home
+through tool dispatch, including the Agent's context-propagating tool workers.
+Streaming cache hits and credential self-heal remain inside this turn scope.
+
+Shell hook registration passes `accept_hooks=False`, but Hermes still honours
+its existing `HERMES_ACCEPT_HOOKS`, `hooks_auto_accept`, and process-level accept
+opt-ins. All of those must be off for consent to mean allowlist-only. WebUI does
+not enable those opt-ins. Approve hooks through Hermes' existing consent
+mechanism for that profile. An unapproved script remains unexecuted and blocks
+the turn. WebUI checks Hermes' parsed hook specs against its registration set
+for the session profile; malformed entries, missing consent, or an unreadable
+allowlist cannot silently remove the gate. When configured hooks cannot
+be registered or their turn home cannot be bound, the turn fails before running
+the Agent, with a warning identifying the profile home, registration stage and
+traceback. Profiles without configured hooks do not require hook modules.
+There is no process-startup registration; these bindings belong to each chat.
+Gateway-owned runs and tool-free auxiliary Agents use their existing execution
+paths and are outside this local chat registration boundary.
+
+Restart WebUI after any hook configuration or hook-consent change. Registration
+is additive: removing config or revoking consent does not remove an already
+registered callback. The registration key contains the profile home, event,
+matcher and command; `timeout` and `fail_closed` are not part of that key, so
+changing either also requires a restart.
+
 ## Cached in-process Agent storage lifetime
 
 `api/streaming.py` retains a live cached Agent's SessionDB and closes only the

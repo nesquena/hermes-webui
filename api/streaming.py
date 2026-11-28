@@ -16357,11 +16357,15 @@ def _run_agent_streaming(
             # explicitly so toolsets and context match the profile the session
             # actually runs under.
             from api.config import get_config_for_profile_home as _get_config_for_home
-            try:
-                _cfg = _get_config_for_home(_profile_home)
-            except Exception:
-                from api.config import get_config as _get_config
-                _cfg = _get_config()
+            _cfg = _get_config_for_home(_profile_home, isolate_config_override=True)
+            from api.config import register_profile_hooks as _register_profile_hooks
+            _register_profile_hooks(
+                _cfg, profile_home=_profile_home,
+                turn_scope_error=(
+                    "Turn profile home override is unavailable"
+                    if not _streaming_hermes_home_override_ctx[2] else ""
+                ),
+            )
             _prefill_context = _load_webui_prefill_context(_cfg)
             _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
             _prefill_messages = _normalize_prefill_messages_before_user_turn(_prefill_messages)

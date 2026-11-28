@@ -15525,6 +15525,47 @@ def get_runtime_diagnostics_snapshot() -> dict[str, dict[str, object]]:
         pass
     return result
 
+
+def register_profile_hooks(cfg: Any, profile_home: Any = None, *, turn_scope_error: str = "") -> None:
+    if not isinstance(cfg, dict) or not cfg.get("hooks"):
+        return
+    home_token = None
+    stage = "profile home binding"
+    try:
+        from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+
+        if turn_scope_error:
+            raise RuntimeError(turn_scope_error)
+        if not profile_home:
+            raise RuntimeError("Session profile home is unavailable")
+        home_token = set_hermes_home_override(profile_home)
+        stage = "shell hooks"
+        import agent.shell_hooks as shell_hooks
+
+        specs, complete = shell_hooks._parse_hooks(cfg["hooks"])
+        if not complete:
+            raise RuntimeError("Profile shell hook configuration is malformed")
+        shell_hooks.register_from_config(cfg, accept_hooks=False)
+        stage = "shell hook verification"
+        home_key = shell_hooks._home_key()
+        with shell_hooks._registered_lock:
+            missing = any(shell_hooks._key(home_key, spec) not in shell_hooks._registered for spec in specs)
+        if missing:
+            raise RuntimeError("Configured shell hooks were not registered; check this profile's hook consent")
+        stage = "outbound webhooks"
+        from agent.outbound_webhooks import register_from_config as register_outbound_webhooks
+
+        register_outbound_webhooks(cfg)
+    except Exception as exc:
+        logger.warning(
+            "Profile hook registration failed: home=%s stage=%s", profile_home, stage, exc_info=True,
+        )
+        raise RuntimeError(f"Profile hook registration failed ({stage}) for {profile_home}") from exc
+    finally:
+        if home_token is not None:
+            reset_hermes_home_override(home_token)
+
+
 # ── Profile state initialisation ────────────────────────────────────────────
 # Must run after all imports are resolved to correctly patch module-level caches
 try:
