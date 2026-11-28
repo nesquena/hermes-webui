@@ -559,6 +559,16 @@ shifts (#5513, #5542).
    result, `tests/test_live_snapshot_echo_scan_scaling.py` pins the scaling
    property (a fixed-size fixture cannot catch a per-interim rescan), and
    `tests/test_compact_echo_index.py` pins index/oracle equivalence.
+   Journal-driven repair paths (`_recover_journaled_output_and_terminal_error`)
+   are replay too. A repair that can run more than once for the same stream
+   must replay idempotently with `dedupe_existing=True`; dedupe matching is
+   identity-scoped — same-stream rows at or after the current-turn boundary for
+   assistant content, and ownership-proven anchors for untagged tool cards — so
+   reuse never consumes the current turn's recovered rows, and an ownership
+   proof failure appends rather than suppresses. The full repair identity and
+   dedupe contract is documented in
+   [`turn-journal.md`](turn-journal.md) ("Recovery repair identity and dedupe
+   contract").
 6. **Compression is not current intent.** Automatic compression summaries and
    reference cards are recovery/handoff material. They must not be treated as a
    new user request, active-turn content, or the default visible explanation for
@@ -763,6 +773,7 @@ context reconstruction, or session metadata:
 | [#4208](https://github.com/nesquena/hermes-webui/pull/4208) / [#4221](https://github.com/nesquena/hermes-webui/pull/4221) | Coarse polling or focus recovery could refresh the active transcript late or without a session id | Live stream / SSE, Sidebar/session metadata | 3, 4 |
 | [#4216](https://github.com/nesquena/hermes-webui/pull/4216) | Reconciliation could drop `state.db`-only user prompts that predate a newer sidecar tail | Visible transcript, Model context | 1 |
 | [#4213](https://github.com/nesquena/hermes-webui/pull/4213) / [#4218](https://github.com/nesquena/hermes-webui/pull/4218) | Sidebar and lineage projections could hide real TUI-origin or multi-row session history | Sidebar/session metadata, Visible transcript | 10 |
+| [PR #7167](https://github.com/nesquena/hermes-webui/pull/7167) | Repeated `get_session()` cache-miss repairs re-replayed a dead stream's run journal without dedupe, accumulating duplicate recovered rows (1, 2, 4, ..., 512) that blanked the transcript | Visible transcript, Run journal / replay | 5 |
 
 These references are evidence for the contract. This RFC does not make the
 linked implementation PRs dependent on this document, and it does not close the
