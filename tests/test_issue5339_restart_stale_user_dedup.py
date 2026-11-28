@@ -154,6 +154,17 @@ def test_content_key_strips_workspace_prefix_for_user_turns():
     assert _message_identity(prefixed) == _message_identity(bare)
 
 
+def test_content_key_strips_screenshot_annotation_for_user_turns():
+    """#6460: a [screenshot] placeholder (added when hermes-agent flattens
+    image attachments before persisting to state.db) must not defeat dedup
+    against the sidecar row, which never carries the placeholder."""
+    from api.models import _session_message_content_key
+
+    with_tag = {"role": "user", "content": "take a look [screenshot]"}
+    without_tag = {"role": "user", "content": "take a look"}
+    assert _session_message_content_key(with_tag) == _session_message_content_key(without_tag)
+
+
 def test_content_key_is_idempotent_for_bare_user_message():
     """A user message with no prefix keys identically before and after the fix."""
     from api.models import _session_message_content_key
