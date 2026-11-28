@@ -47,4 +47,11 @@ def test_load_dir_can_refresh_all_expanded_descendants_when_requested():
     assert "constrefreshExpanded=!!(opts&&opts.refreshExpanded);" in compact
     assert "if(!path||path==='.'||refreshExpanded){" in compact
     assert "constexpanded=S._expandedDirs||newSet();" in compact
-    assert "constpending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);" in compact
+    # Missing folders are fetched, and so are folders listed before the latest cache clear.
+    assert (
+        "constpending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]\n" in compact
+    )
+    assert (
+        "||(_wsTreeCacheListedAt.has(dirPath)&&_wsTreeCacheListedAt.get(dirPath)<_wsTreeCacheEpoch));"
+        in compact
+    )
