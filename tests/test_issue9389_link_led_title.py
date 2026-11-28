@@ -105,7 +105,6 @@ def test_mixed_link_opener_does_not_fall_back_to_the_raw_text():
             "https://www.reddit.com/r/SomeSub/comments/abc/s/xyz987randomid",
             "SomeSub",
         ),
-        ("https://www.example.com/x", "example"),
     ],
 )
 def test_fallback_names_the_link_topic_not_a_url_fragment(opener, expected):
@@ -166,3 +165,116 @@ def test_real_titles_are_not_refused(candidate):
     from api.streaming import _is_generic_fallback_title
 
     assert _is_generic_fallback_title(candidate) is False
+
+
+# ── review round 2: a link with no word-like segment stays unsettled ───────
+#
+# The first round used any non-noise path segment, so common links were named
+# after an opaque id or a scaffolding word (`dQw4w9WgXcQ`, `status`, `abs`,
+# `item`, a 40-character document id). Only a segment the author wrote with
+# separators reads like words; the GitHub repository and subreddit shapes keep
+# their own rules. Everything else returns None — an unsettled title is better
+# than a fragment.
+
+LINK_ONLY_CASES = [
+    ("https://youtu.be/dQw4w9WgXcQ", None),
+    ("https://x.com/someuser/status/1862345678901234567", None),
+    (
+        "https://docs.google.com/document/d/"
+        "1A2b3C4d5E6f7G8h9I0jKlMnOpQrStUvWxYz_-abcd/edit",
+        None,
+    ),
+    ("https://arxiv.org/abs/2411.01234", None),
+    ("https://news.ycombinator.com/item?id=41234567", None),
+    (
+        "https://notion.so/team/Q4-Roadmap-3f2a9c1b7d8e4f5a9b0c1d2e3f4a5b6c",
+        "Q4 Roadmap",
+    ),
+    ("https://github.com/nesquena/hermes-webui/pull/9394", "hermes-webui"),
+    (
+        "https://stackoverflow.com/questions/1234567/how-to-merge-two-dicts",
+        "how to merge two dicts",
+    ),
+]
+
+
+@pytest.mark.parametrize("opener, expected", LINK_ONLY_CASES)
+def test_link_only_fallback_uses_only_word_like_segments(opener, expected):
+    from api.streaming import _fallback_title_from_exchange
+
+    assert _fallback_title_from_exchange(opener, "") == expected
+
+
+def test_bare_domain_with_a_generic_suffix_does_not_flip_a_korean_opener():
+    """`cs.stanford.edu` is a host too: the fixed TLD list missed `.edu` and
+    left the host's Latin letters voting, so a correct Korean title was
+    rejected as a language mismatch."""
+    from api.streaming import _title_language_mismatch
+
+    opener = "cs.stanford.edu/projects/foo 이 프로젝트 어떻게 생각해?"
+    assert _title_language_mismatch(opener, "스탠포드 프로젝트 검토") is False
+
+
+# ── review round 2: the link stripper's ordering and boundaries ────────────
+
+
+def test_email_is_removed_whole_before_the_domain_rule():
+    from api.streaming import _strip_links_for_script_tally, _title_language_mismatch
+
+    opener = "longaddress@example.com 이 메일 확인해줘"
+    stripped = _strip_links_for_script_tally(opener)
+    assert "longaddress" not in stripped, f"email local part survived: {stripped!r}"
+    assert _title_language_mismatch(opener, "이 메일 확인") is False
+
+
+def test_a_long_suffix_is_not_cut_into_a_domain_fragment():
+    from api.streaming import _strip_links_for_script_tally, _fallback_title_from_exchange
+
+    stripped = _strip_links_for_script_tally("example.company/project 이거 봐줘")
+    assert "pany" not in stripped, f"partial host suffix survived: {stripped!r}"
+    assert _fallback_title_from_exchange("example.company/project", "") is None
+
+
+def test_markdown_link_does_not_eat_following_prose():
+    from api.streaming import _strip_links_for_script_tally, _title_language_mismatch
+
+    opener = "[link](https://example.com)请帮我分析这个问题"
+    stripped = _strip_links_for_script_tally(opener)
+    assert "请帮我分析这个问题" in stripped, f"the request was eaten: {stripped!r}"
+    assert _title_language_mismatch(opener, "分析这个问题") is False
+
+
+def test_agent_route_refuses_a_url_shaped_model_reply(monkeypatch):
+    """The fallback was already refused; a model reply that is a URL must be
+    refused on the generation path too, or 'Regenerate title' persists it."""
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {})
+    monkeypatch.setattr(
+        streaming,
+        "generate_title_raw_via_agent",
+        lambda *a, **k: ("https://www.example.com/x", "llm_stub"),
+    )
+
+    title, status, _ = streaming._generate_llm_session_title_for_agent(
+        object(), "hello", "hi"
+    )
+
+    assert title is None
+    assert status == "llm_invalid"
+
+
+def test_aux_route_refuses_a_url_shaped_model_reply(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {})
+    monkeypatch.setattr(
+        streaming,
+        "generate_title_raw_via_aux",
+        lambda *a, **k: ("https://www.example.com/x", "llm_stub"),
+    )
+
+    title, status, _ = streaming._generate_llm_session_title_via_aux("hello", "hi")
+
+    assert title is None
+    assert status == "llm_invalid_aux"
