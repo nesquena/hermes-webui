@@ -1542,110 +1542,9 @@ class _PickThenResumeLock:
         self.release()
 
 
-@pytest.mark.parametrize("evict_after_pick", [False, True], ids=["pick-resident", "fully-evicted"])
-def test_draft_autosave_does_not_undo_effort_pick_saved_after_eviction(
-    tmp_path, monkeypatch, evict_after_pick,
-):
-    """#7738 same-shape: a draft resolved before eviction must not save its
-    stale object over a later effort pick and turn. The effort, the draft
-    and every message must survive a cold reload.
-    """
-    session_dir = _isolate_session_store(tmp_path, monkeypatch)
-    sid = "stale-draft-effort"
-    _stub_reasoning_profile_side_effects(monkeypatch)
-
-    stale = _seed_stale_session(session_dir, sid, title="t", draft={"text": "old draft"})
-    stale.reasoning_effort = "low"
-    stale.save()
-
-    bodies = {"body": {"session_id": sid, "text": "new draft"}}
-    captured = _capture_post(monkeypatch, None)
-    monkeypatch.setattr(routes, "read_body", lambda handler: bodies["body"])
-    real_lock_factory = routes._get_session_agent_lock
-    fired = []
-
-    def _run_pick(evict):
-        if fired:
-            return
-        fired.append(True)
-        # Count-cap eviction, then a turn saved by another writer.
-        SESSIONS.pop(sid, None)
-        turn = Session.load(sid)
-        turn.messages = list(turn.messages) + [
-            {"role": "assistant", "content": "hello"},
-            {"role": "user", "content": "newer turn"},
-        ]
-        turn.save()
-        draft_body = bodies["body"]
-        bodies["body"] = {"effort": "xhigh", "session_id": sid}
-        monkeypatch.setattr(routes, "_get_session_agent_lock", real_lock_factory)
-        routes.handle_post(_FakeHandler(b"{}"), SimpleNamespace(path="/api/reasoning"))
-        assert captured["status"] == 200, f"effort pick failed: {captured}"
-        bodies["body"] = draft_body
-        if evict:
-            SESSIONS.pop(sid, None)
-
-    monkeypatch.setattr(
-        routes, "_get_session_agent_lock",
-        lambda value: _PickThenResumeLock(real_lock_factory(value), _run_pick, evict_after_pick),
-    )
-
-    handler = _FakeHandler(b"{}")
-    handler.command = "POST"
-    result = routes.handle_post(handler, SimpleNamespace(path="/api/session/draft"))
-
-    assert result is True
-    assert fired, "the effort pick must run inside the draft's window"
-    assert captured["status"] == 200, f"expected 200, got {captured}"
-    SESSIONS.clear()
-    cold = Session.load(sid)
-    assert cold.reasoning_effort == "xhigh", (
-        f"the draft save undid the accepted effort pick; got {cold.reasoning_effort!r}"
-    )
-    assert cold.composer_draft == {"text": "new draft"}
-    assert len(cold.messages) == 3, f"got {len(cold.messages)} messages"
-
-
-def test_draft_save_publishes_over_copy_cached_by_get_in_window(tmp_path, monkeypatch):
-    """A GET that caches the old copy after the draft's lock-held reload must
-    not keep the old draft in SESSIONS, or a later effort pick saves it back.
-    """
-    session_dir = _isolate_session_store(tmp_path, monkeypatch)
-    sid = "draft-get-window"
-    _stub_reasoning_profile_side_effects(monkeypatch)
-    _seed_stale_session(session_dir, sid, title="t", draft={"text": "old draft"})
-    SESSIONS.pop(sid, None)
-
-    bodies = {"body": {"session_id": sid, "text": "new draft"}}
-    captured = _capture_post(monkeypatch, None)
-    monkeypatch.setattr(routes, "read_body", lambda handler: bodies["body"])
-    real_ensure_full = routes._ensure_full_session_before_mutation
-
-    def _ensure_then_get(value, session):
-        full = real_ensure_full(value, session)
-        routes.get_session(value)  # concurrent GET caches the old draft
-        return full
-
-    monkeypatch.setattr(routes, "_ensure_full_session_before_mutation", _ensure_then_get)
-    real_lock_factory = routes._get_session_agent_lock
-    _install_swap_lock(monkeypatch, sid, swap_with=None)  # evicted before the lock
-    handler = _FakeHandler(b"{}")
-    handler.command = "POST"
-    routes.handle_post(handler, SimpleNamespace(path="/api/session/draft"))
-    assert captured["status"] == 200, f"expected 200, got {captured}"
-    assert SESSIONS[sid].composer_draft == {"text": "new draft"}
-
-    monkeypatch.setattr(routes, "_ensure_full_session_before_mutation", real_ensure_full)
-    monkeypatch.setattr(routes, "_get_session_agent_lock", real_lock_factory)
-    bodies["body"] = {"effort": "high", "session_id": sid}
-    routes.handle_post(_FakeHandler(b"{}"), SimpleNamespace(path="/api/reasoning"))
-    assert captured["status"] == 200, f"effort pick failed: {captured}"
-    SESSIONS.clear()
-    cold = Session.load(sid)
-    assert cold.reasoning_effort == "high"
-    assert cold.composer_draft == {"text": "new draft"}, (
-        f"a later effort pick saved the cached old draft back; got {cold.composer_draft!r}"
-    )
+# The draft-path cases of these #7738 windows (an effort pick saved after eviction,
+# a GET caching the old copy, a delete in the window) run through the draft
+# lifecycle lock that path takes: tests/test_composer_draft_stale_windows.py.
 
 
 # ---------------------------------------------------------------------------
@@ -1829,8 +1728,9 @@ def test_shell_fallback_refuses_object_with_messages(tmp_path, monkeypatch):
     assert routes._resolve_session_under_lock(sid, outside) is None
 
 
-@pytest.mark.parametrize("lane", ["draft", "reasoning"])
-def test_empty_session_deleted_before_lock_is_not_resurrected(tmp_path, monkeypatch, lane):
+# The draft lane: test_session_deleted_in_the_draft_window_is_not_resurrected in
+# tests/test_composer_draft_stale_windows.py.
+def test_empty_session_deleted_before_lock_is_not_resurrected(tmp_path, monkeypatch):
     """A delete in the window tombstones the chat; the empty-shell fallback
     must not save the outside object back.
     """
@@ -1861,12 +1761,8 @@ def test_empty_session_deleted_before_lock_is_not_resurrected(tmp_path, monkeypa
         delete_captured.update(captured)
         monkeypatch.setattr(routes, "read_body", lambda handler: body)
 
-    if lane == "draft":
-        body = {"session_id": sid, "text": "late keystroke"}
-        path = "/api/session/draft"
-    else:
-        body = {"effort": "high", "session_id": sid}
-        path = "/api/reasoning"
+    body = {"effort": "high", "session_id": sid}
+    path = "/api/reasoning"
     captured = _capture_post(monkeypatch, body)
     real_lock_factory = routes._get_session_agent_lock
 
@@ -1885,14 +1781,7 @@ def test_empty_session_deleted_before_lock_is_not_resurrected(tmp_path, monkeypa
     routes.handle_post(handler, SimpleNamespace(path=path))
 
     assert delete_captured.get("status") == 200, f"delete failed: {delete_captured}"
-    if lane == "draft":
-        # Master's draft lifecycle answers a session gone under the lock with
-        # 409 ``Session no longer active`` (the client keeps a local fallback).
-        assert captured["status"] == 409, f"expected 409, got {captured}"
-        assert captured["payload"].get("error") == "Session no longer active"
-        assert not (session_dir / ".drafts" / f"{sid}.json").exists()
-    else:
-        assert captured["status"] == 404, f"expected 404, got {captured}"
+    assert captured["status"] == 404, f"expected 404, got {captured}"
     assert sid not in SESSIONS
     assert not (session_dir / f"{sid}.json").exists()
 

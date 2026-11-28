@@ -122,9 +122,9 @@ def test_draft_text_type_coerced_to_string(monkeypatch, tmp_path):
     observed = {}
     original_save = routes._save_session_draft
 
-    def save_draft_spy(sid_value, draft_payload):
+    def save_draft_spy(sid_value, draft_payload, **kw):
         observed["payload"] = draft_payload
-        return original_save(sid_value, draft_payload)
+        return original_save(sid_value, draft_payload, **kw)
 
     monkeypatch.setattr(routes, "_save_session_draft", save_draft_spy)
     captured = _draft_post(
@@ -154,9 +154,9 @@ def test_draft_files_type_coerced_to_list(monkeypatch, tmp_path):
     observed = {}
     original_save = routes._save_session_draft
 
-    def save_draft_spy(sid_value, draft_payload):
+    def save_draft_spy(sid_value, draft_payload, **kw):
         observed["payload"] = draft_payload
-        return original_save(sid_value, draft_payload)
+        return original_save(sid_value, draft_payload, **kw)
 
     monkeypatch.setattr(routes, "_save_session_draft", save_draft_spy)
     captured = _draft_post(
@@ -193,15 +193,15 @@ def test_draft_validation_appears_before_persist(monkeypatch, tmp_path):
         def __exit__(self, exc_type, exc, tb):
             return None
 
-    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: LockProbe())
+    monkeypatch.setattr(routes, "_draft_lifecycle_lock_for_session_id", lambda _sid: LockProbe())
 
     original_save = routes._save_session_draft
 
-    def save_draft_spy(sid_value, draft_payload):
+    def save_draft_spy(sid_value, draft_payload, **kw):
         assert entered_lock
         assert draft_payload["text"] == ""
         assert draft_payload["files"] == []
-        return original_save(sid_value, draft_payload)
+        return original_save(sid_value, draft_payload, **kw)
 
     monkeypatch.setattr(routes, "_save_session_draft", save_draft_spy)
     _draft_post(
@@ -258,9 +258,9 @@ def test_draft_save_skips_unchanged_payload_before_persist(monkeypatch, tmp_path
     draft_calls = []
     original_save_draft = routes._save_session_draft
 
-    def save_draft_spy(sid_value, draft_payload):
+    def save_draft_spy(sid_value, draft_payload, **kw):
         draft_calls.append((sid_value, draft_payload))
-        return original_save_draft(sid_value, draft_payload)
+        return original_save_draft(sid_value, draft_payload, **kw)
 
     monkeypatch.setattr(routes, "_save_session_draft", save_draft_spy)
 
@@ -307,9 +307,9 @@ def test_slow_draft_save_with_minimal_handler_still_returns_payload(monkeypatch,
 
     original_save_draft = routes._save_session_draft
 
-    def slow_save_draft(sid_value, draft_payload):
+    def slow_save_draft(sid_value, draft_payload, **kw):
         time.sleep(0.25)
-        return original_save_draft(sid_value, draft_payload)
+        return original_save_draft(sid_value, draft_payload, **kw)
 
     monkeypatch.setattr(routes, "_save_session_draft", slow_save_draft)
 
