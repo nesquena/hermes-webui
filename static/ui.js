@@ -7865,12 +7865,37 @@ if(window.visualViewport){
 
 // ── Fit-based composer footer collapse ──────────────────────────────────────
 // Stage classes on .composer-footer:
-//   (none) full labels · .cf-icons icon chips · .cf-icons.cf-burger hamburger.
+//   (none) full labels · .cf-tight reduced whitespace · .cf-profile icon-only
+//   profile · .cf-shrink capped labels · .cf-icons icon chips ·
+//   .cf-icons.cf-burger hamburger.
 let _composerFitScheduled=false;
 let _composerFitResizeObserver=null;
 let _composerFitMutationObserver=null;
 let _composerFitObservedFooter=null;
 let _composerFitResizeListenerBound=false;
+
+function _fitComposerTooltipDirections(left){
+  // Reorder and visibility settings can put any direct tooltip button at a
+  // different edge. Flip only when its right-facing box would actually clip
+  // and the left-facing alternative fits; hidden siblings and DOM order alone
+  // cannot make that decision (a sole visible Attach sits at the LEFT edge).
+  const clip=left.getBoundingClientRect();
+  left.querySelectorAll(':scope > button.has-tooltip').forEach(function(button){
+    const rect=button.getBoundingClientRect();
+    const tooltip=getComputedStyle(button,'::after');
+    const width=parseFloat(tooltip.width)||0;
+    const hidden=getComputedStyle(button).display==='none'||!rect.width;
+    const rightClips=rect.right+8+width>clip.right+1;
+    const leftFits=rect.left-8-width>=clip.left-1;
+    button.classList.toggle('has-tooltip--left',!hidden&&rightClips&&leftFits);
+  });
+}
+
+function _fitComposerTooltipDirectionFromEvent(event){
+  const button=event.target&&event.target.closest&&event.target.closest('button.has-tooltip');
+  if(!button||button.parentElement!==event.currentTarget) return;
+  _fitComposerTooltipDirections(event.currentTarget);
+}
 
 function _fitComposerFooter(){
   const footer=document.querySelector('.composer-footer');
@@ -7909,18 +7934,41 @@ function _fitComposerFooter(){
   // for the synchronous strip-and-measure.
   footer.classList.add('cf-measuring');
   try{
-    footer.classList.remove('cf-icons','cf-burger');
+    footer.classList.remove('cf-tight','cf-profile','cf-shrink','cf-icons','cf-burger');
     if(overflows()){
-      footer.classList.add('cf-icons');
-      next='cf-icons';
+      // Reclaim whitespace and padding first: neither labels nor actions need
+      // to disappear while the unmodified content still has room to fit.
+      footer.classList.add('cf-tight');
+      next='cf-tight';
       if(overflows()){
-        footer.classList.add('cf-burger');
-        next='cf-icons cf-burger';
+        footer.classList.remove('cf-tight');
+        // The lowest-information label is the next thing to fold. Saved
+        // prompts and identifying workspace/model text remain intact here.
+        footer.classList.add('cf-profile');
+        next='cf-profile';
+        if(overflows()){
+          footer.classList.remove('cf-profile');
+          // Only now use the labeled-compact stage with capped chips.
+          footer.classList.add('cf-shrink');
+          next='cf-shrink';
+          if(overflows()){
+            footer.classList.remove('cf-shrink');
+            footer.classList.add('cf-icons');
+            next='cf-icons';
+            if(overflows()){
+              footer.classList.add('cf-burger');
+              next='cf-icons cf-burger';
+            }
+          }
+        }
       }
     }
   }finally{
     // Restore the measured stage, then release the frozen box in the same
     // task so no intermediate geometry is ever committed to the screen.
+    footer.classList.toggle('cf-tight',next.includes('cf-tight'));
+    footer.classList.toggle('cf-profile',next.includes('cf-profile'));
+    footer.classList.toggle('cf-shrink',next.includes('cf-shrink'));
     footer.classList.toggle('cf-icons',next.includes('cf-icons'));
     footer.classList.toggle('cf-burger',next.includes('cf-burger'));
     if(frozenHeight>0){
@@ -7934,6 +7982,7 @@ function _fitComposerFooter(){
     void footer.offsetWidth;
     footer.classList.remove('cf-measuring');
   }
+  if(typeof _fitComposerTooltipDirections==='function') _fitComposerTooltipDirections(left);
   // Post-restore transition check: fire the same composer menu cleanup used
   // by the 640px MediaQueryList boundary listener (see _onPhoneBoundaryChange
   // above). Both burger transitions (entering and leaving) close — the same
@@ -7966,6 +8015,10 @@ function _initComposerFooterFit(){
   _composerFitResizeObserver=null;
   _composerFitMutationObserver=null;
   _composerFitObservedFooter=footer;
+  // Re-read localized tooltip width at the interaction point too, without
+  // waiting for a resize/refit after a visibility or data-tooltip change.
+  left.addEventListener('pointerover',_fitComposerTooltipDirectionFromEvent);
+  left.addEventListener('focusin',_fitComposerTooltipDirectionFromEvent);
   if(window.ResizeObserver){
     try{
       _composerFitResizeObserver=new ResizeObserver(_scheduleComposerFit);
