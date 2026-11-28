@@ -150,7 +150,7 @@ jobs:
       # cannot be bypassed by the diff scope. (#4641)
       - name: Python syntax gate (whole tree — fails fast on any unparseable .py)
         if: needs.changes.outputs.docs_only != 'true'
-        run: python3 -m compileall -q api server.py bootstrap.py mcp_server.py tests scripts
+        run: python3 -m compileall -q api server.py bootstrap.py mcp_server.py managed_agent_startup.py startup_memory_limits.py tests scripts
 
       - name: Ruff forward gate (new/changed lines only)
         if: needs.changes.outputs.docs_only != 'true'
