@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Opening a parent conversation marks its delegated subagent children read.** Those children are not a second conversation: their result comes back as a hidden wakeup, so an unread child kept the parent's dot after the parent itself had been opened. Visiting the parent, including clicking the parent again while it is already open, now clears that delegated unread state. Forked conversations are unchanged: a parent still shows unread while a different fork is unread.
+
 ### Performance
 
 - **Resuming a long run's event stream reads less of its journal (#8991, @CharlesMcquade).** Replaying a run's events after a given point (`after_seq`) used to read and parse the whole run journal on every request. WebUI now keeps a small per-journal index of checkpoints, so a repeated lookup starts reading near the requested point instead of at the beginning. On the Gate's matched fixture, a warm lookup read 146,416 bytes instead of 3,648,926. The first lookup still reads the whole journal. Lookups fall back to the full reader whenever the file was rewritten, archived or rolled back, and the response is the same as before in every case tested.

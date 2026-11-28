@@ -1565,6 +1565,12 @@ function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, back
   if (!sid) return;
   _setSessionViewedCount(sid, messageCount);
   _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt);
+  // Delegated subagents are not a second conversation: their result returns as
+  // a hidden wakeup. Visiting the parent clears those children. Fork children
+  // stay on their own unread state (#4946).
+  if (typeof _acknowledgeDelegatedSubagentChildren === 'function') {
+    _acknowledgeDelegatedSubagentChildren(sid);
+  }
   if(backgroundRepaint&&typeof _repaintSidebarForBackgroundChurn==='function'){
     _repaintSidebarForBackgroundChurn();
   }else if(typeof renderSessionListFromCache==='function'){
@@ -1578,8 +1584,28 @@ function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, back
 function _sessionVisitHasUnreadState(sid) {
   if (!sid) return false;
   if (_hasSessionCompletionUnread(sid)) return true;
+  if (typeof _delegatedSubagentChildrenUnread === 'function' && _delegatedSubagentChildrenUnread(sid)) return true;
   if (!S.session || S.session.session_id !== sid) return false;
   return _hasUnreadForSession(S.session);
+}
+
+function _delegatedSubagentChildren(sid) {
+  if (!sid || typeof _allSessions === 'undefined' || !Array.isArray(_allSessions)) return [];
+  if (typeof _isDelegatedSubagentRow !== 'function') return [];
+  return _allSessions.filter(child => child && child.session_id && child.parent_session_id === sid && _isDelegatedSubagentRow(child));
+}
+
+function _acknowledgeDelegatedSubagentChildren(sid) {
+  for (const child of _delegatedSubagentChildren(sid)) {
+    const count = Number(child.message_count) || 0;
+    const last = Number(child.last_message_at || child.updated_at || 0);
+    _setSessionViewedCount(child.session_id, count);
+    _syncSessionListSnapshotOnVisit(child.session_id, count, last);
+  }
+}
+
+function _delegatedSubagentChildrenUnread(sid) {
+  return _delegatedSubagentChildren(sid).some(child => typeof _hasUnreadForSession === 'function' && _hasUnreadForSession(child));
 }
 
 function _isSessionActivelyViewedForList(sid) {
