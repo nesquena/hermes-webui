@@ -98,6 +98,406 @@ def _share_message_text(message: dict) -> str:
     return ""
 
 
+_IMAGE_TAIL = re.compile(r"file://[^\)]+\)")
+_LINK_TAIL = re.compile(r"file://[^\s\)]+\)")
+
+
+def _replace_md_file_refs(seg: str, *, image: bool) -> str:
+    tail = _IMAGE_TAIL if image else _LINK_TAIL
+    opener = "![" if image else "["
+    out, pos, scan = [], 0, 0
+    bracket_cursor = 0
+    last_close = -1
+    opener_cursor = 0
+    next_paren = -1
+    while True:
+        try:
+            j = seg.index("](file://", scan)
+        except ValueError:
+            break
+        if bracket_cursor < pos:
+            bracket_cursor = pos
+            last_close = -1
+        while True:
+            nb = seg.find("]", bracket_cursor, j)
+            if nb == -1:
+                break
+            last_close = nb
+            bracket_cursor = nb + 1
+        bracket_cursor = max(bracket_cursor, j)
+        start = pos if last_close < pos else last_close + 1
+
+        search_from = max(opener_cursor, start)
+        k = seg.find(opener, search_from, j) if search_from < j else -1
+        if k < 0:
+            opener_cursor = max(opener_cursor, j)
+            last_close = j
+            bracket_cursor = max(bracket_cursor, j + 1)
+            scan = j + 1
+            continue
+
+        opener_cursor = k
+        if not image and j == k + 1:
+            last_close = j
+            bracket_cursor = max(bracket_cursor, j + 1)
+            opener_cursor = max(opener_cursor, j)
+            scan = j + 1
+            continue
+
+        if next_paren < j:
+            next_paren = seg.find(")", j)
+            if next_paren == -1:
+                break
+        m = tail.match(seg, j + 2)
+        if not m:
+            last_close = j
+            bracket_cursor = max(bracket_cursor, j + 1)
+            opener_cursor = max(opener_cursor, j)
+            scan = j + 1
+            continue
+
+        out.append(seg[pos:k])
+        out.append(_PLACEHOLDER)
+        pos = scan = m.end()
+        last_close = -1
+        bracket_cursor = max(bracket_cursor, pos)
+        opener_cursor = max(opener_cursor, pos)
+    out.append(seg[pos:])
+    return "".join(out)
+
+
+_STASH_TOKEN_RE = re.compile(r"\x00([RMIF])(\d+)\x00")
+
+
+def _restore_stash_tokens(seg: str, tables: dict[str, list[str]]) -> str:
+    """Restore stash markers, expanding markers nested inside stashed text.
+
+    Stashing runs fences → inline code → math → raw ``<pre>``, so a later stash
+    can capture an earlier family's marker (a code span inside inline math, a
+    math span inside a raw ``<pre>``). Every entry is expanded once and
+    memoized, so the restored text never carries an internal marker and the
+    total work stays linear in the message size.
+    """
+    cache: dict[tuple[str, int], str] = {}
+
+    def expand(family: str, idx: int, depth: int = 0) -> str | None:
+        items = tables.get(family)
+        if items is None or not 0 <= idx < len(items):
+            return None
+        key = (family, idx)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        if depth > 64:  # the marker graph is a DAG ordered by stash time
+            return None
+        value = _STASH_TOKEN_RE.sub(
+            lambda inner: expand(inner[1], int(inner[2]), depth + 1) or inner[0],
+            items[idx],
+        )
+        cache[key] = value
+        return value
+
+    def replace(m: re.Match) -> str:
+        value = expand(m[1], int(m[2]))
+        return m[0] if value is None else value
+
+    return _STASH_TOKEN_RE.sub(replace, seg)
+
+
+def _strip_media_references(text: str) -> str:
+    """Replace local MEDIA: tokens and file:// URLs with inert placeholders.
+
+    Public shares must not emit links to the authenticated /api/media endpoint.
+    MEDIA:<path> sentinel values and file:// URLs that renderMd() would
+    convert into /api/media?path=... URLs are replaced with a non-clickable
+    placeholder so anonymous recipients never see broken auth-gated media links.
+
+    Covers every renderer-recognized file:// form (issue #6285 review):
+      - Bare file:// URLs (whitespace-delimited)
+      - Markdown links: [label](file://...)
+      - Markdown images: ![alt](file://...) — including whitespace/newline
+        destinations through the closing ')' (renderer image grammar)
+      - file://localhost/path, file://127.0.0.1/path
+      - URL-encoded file:// variants (e.g. file://%2Ftmp%2Ffile)
+    while preserving fenced code, inline code, raw <pre> blocks, and
+    complete blockquoted fences byte-for-byte (the renderer keeps file://
+    inert inside all of those). Stripping is restricted to the renderer-active
+    lowercase file:// spelling — inert file: and file:/ forms are left as-is.
+
+    Process order matches the real renderer's (ui.js) pipeline:
+      1. NUL byte replacement with U+FFFD and CRLF normalisation (renderer
+         replaces NUL and normalises CRLF before any parsing)
+      1b. Blockquote pre-pass (iterative walk with depth cap ~400, preserving
+          original > or &gt; line prefixes and complete blockquoted fences)
+      2. MEDIA: replacement (renderer converts MEDIA: to media tokens
+         before fenced/inline code processing, using _SHARE_MEDIA_RE and
+         split_media_token_ref)
+      3. Fenced code stashing (only complete balanced fences — an
+         unmatched opener stays as active prose for sanitisation)
+      4. Inline code stashing
+      4b. Display math stashing ($$...$$ and \\[...\\]) and inline math stashing
+          (\\(...\\) and $...$ with renderer boundary rules)
+      4c. Raw <pre> and entity-encoded <pre> block stashing
+      5. file:// URL replacement (images with renderer-matched [^\\)]+
+         destinations first, then links, then bare URLs)
+      6. Stash restoration (single re.sub pass over table: raw <pre>, math,
+         inline, fences)
+      7. Blockquote restoration in reverse nesting order (single re.sub pass
+         per segment over table)
+    """
+    if not isinstance(text, str) or not text:
+        return text
+
+    # (1) Normalise NUL bytes to U+FFFD (renderer replaces NUL before any
+    # stash token is generated so user text cannot spell internal markers)
+    # and normalise CRLF / bare CR to LF so the close-fence regex does not
+    # miss \r\n-terminated lines.
+    text = text.replace("\x00", "\ufffd").replace("\r\n", "\n").replace("\r", "\n")
+
+    # (1b) Iterative blockquote walk — mirror renderMd()'s _applyBlockquotes
+    # using an explicit worklist and bounded depth cap (~400).
+    # segments: [segment_text, depth, parent_idx, saved_prefixes]
+    segments: list[list] = [[text, 0, -1, []]]
+    seg_idx = 0
+    while seg_idx < len(segments):
+        cur_text, depth, _, _ = segments[seg_idx]
+        if depth >= 400:
+            seg_idx += 1
+            continue
+
+        _lines = cur_text.split("\n")
+        _bq_out: list[str] = []
+        _in_fence = False
+        _fence_len = 0
+        _bq_start = -1
+        _has_bq = False
+
+        # Default arguments bind the per-segment walk state at definition time
+        # (B023): one segment is classified per loop iteration, so the closure
+        # must not read the next iteration's lists.
+        def _flush(
+            end: int,
+            _lines: list[str] = _lines,
+            _bq_out: list[str] = _bq_out,
+            _depth: int = depth,
+            _seg_idx: int = seg_idx,
+        ):
+            nonlocal _bq_start, _has_bq
+            if _bq_start < 0:
+                return
+            _has_bq = True
+            child_lines = []
+            saved_prefixes = []
+            for l in _lines[_bq_start:end]:
+                m = re.match(r"^(>|&gt;)[ ]?", l)
+                if m:
+                    pref = m.group(0)
+                    saved_prefixes.append(pref)
+                    child_lines.append(l[len(pref):])
+                else:
+                    saved_prefixes.append("")
+                    child_lines.append(l)
+
+            child_text = "\n".join(child_lines)
+            child_idx = len(segments)
+            segments.append([child_text, _depth + 1, _seg_idx, saved_prefixes])
+            _bq_out.append(f"\x00Q{child_idx}\x00")
+            _bq_start = -1
+
+        _i = 0
+        while _i < len(_lines):
+            _line = _lines[_i]
+            if _in_fence:
+                _bq_out.append(_line)
+                _cm = re.match(r"^[ ]{0,3}(`{3,})[ \t]*$", _line)
+                if _cm and len(_cm.group(1)) >= _fence_len:
+                    _in_fence = False
+                _i += 1
+                continue
+            _om = re.match(r"^[ ]{0,3}(`{3,})([^`]*)$", _line)
+            if _om:
+                _flush(_i)
+                _bq_out.append(_line)
+                _in_fence = True
+                _fence_len = len(_om.group(1))
+                _i += 1
+                continue
+            if _line.startswith(">") or _line.startswith("&gt;"):
+                if _bq_start < 0:
+                    _bq_start = _i
+            else:
+                _flush(_i)
+                _bq_out.append(_line)
+            _i += 1
+        _flush(len(_lines))
+
+        if _has_bq:
+            segments[seg_idx][0] = "\n".join(_bq_out)
+
+        seg_idx += 1
+
+    # (2)-(6) Sanitize each segment outside blockquote markers
+    for k in range(len(segments)):
+        seg = segments[k][0]
+
+        # (2) Replace local MEDIA: tokens using _SHARE_MEDIA_RE and split_media_token_ref.
+        # Remote MEDIA:https?:// references are excluded by grammar; delimiters preserved.
+        pieces = []
+        last_idx = 0
+        for match in _SHARE_MEDIA_RE.finditer(seg):
+            split_res = split_media_token_ref(seg, match)
+            if split_res is None:
+                continue
+            _, suffix = split_res
+            pieces.append(seg[last_idx:match.start()])
+            pieces.append(_PLACEHOLDER)
+            pieces.append(suffix)
+            last_idx = match.end()
+        if pieces:
+            pieces.append(seg[last_idx:])
+            seg = "".join(pieces)
+
+        # (3) Stash fenced code blocks. Match the renderer's line-anchored
+        # variable-length fence grammar exactly. Complete balanced fences only.
+        _fenced: list[str] = []
+        _lines = seg.split("\n")
+        _nlines = len(_lines)
+        _close_len = [0] * (_nlines + 1)
+        for _j in range(_nlines):
+            _cm = re.match(r"^[ ]{0,3}(`{3,})[ \t]*$", _lines[_j])
+            if _cm:
+                _close_len[_j] = len(_cm.group(1))
+        _close_max_from = [0] * (_nlines + 1)
+        for _j in range(_nlines - 1, -1, -1):
+            _nxt = _close_max_from[_j + 1]
+            _close_max_from[_j] = _close_len[_j] if _close_len[_j] > _nxt else _nxt
+
+        _fence_parts: list[str] = []
+        _i = 0
+        while _i < _nlines:
+            _om = re.match(r"^[ ]{0,3}(`{3,})([^`]*)$", _lines[_i])
+            if _om:
+                _open_len = len(_om.group(1))
+                _start = _i
+                _close_at = -1
+                if _close_max_from[_i + 1] >= _open_len:
+                    _j = _i + 1
+                    while _close_len[_j] < _open_len:
+                        _j += 1
+                    _close_at = _j
+                if _close_at >= 0:
+                    _i = _close_at + 1
+                    _block = "\n".join(_lines[_start:_i])
+                    _fenced.append(_block)
+                    _fence_parts.append(f"\x00F{len(_fenced) - 1}\x00")
+                else:
+                    _fence_parts.append(_lines[_start])
+                    _i = _start + 1
+            else:
+                _fence_parts.append(_lines[_i])
+                _i += 1
+        seg = "\n".join(_fence_parts)
+
+        # (4) Stash inline code spans (`...`) so file:// inside them is preserved.
+        _inline: list[str] = []
+        seg = re.sub(
+            r"`[^`\n]+`",
+            lambda m, _acc=_inline: _acc.append(m.group(0)) or f"\x00I{len(_acc) - 1}\x00",
+            seg,
+        )
+
+        # (4b) Stash multiline display math ($$...$$ and \[...\]) and inline math
+        _math: list[str] = []
+        seg = re.sub(
+            r"(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\])",
+            lambda m, _acc=_math: _acc.append(m.group(0)) or f"\x00M{len(_acc) - 1}\x00",
+            seg,
+        )
+
+        def _stash_dollar_math(m: re.Match, _acc=_math) -> str:
+            if " | " in m.group(1):
+                return m.group(0)
+            _acc.append(m.group(0))
+            return f"\x00M{len(_acc) - 1}\x00"
+
+        seg = re.sub(
+            r"\$([^\s$\d\n][^$\n]*?[^\s$\n]|[^\s$\d\n])\$",
+            _stash_dollar_math,
+            seg,
+        )
+        seg = re.sub(
+            r"\\\((.+?)\\\)",
+            lambda m, _acc=_math: _acc.append(m.group(0)) or f"\x00M{len(_acc) - 1}\x00",
+            seg,
+        )
+
+        # (4c) Stash raw and entity-encoded <pre> blocks
+        _raw_pre: list[str] = []
+        seg = re.sub(
+            r"(<pre\b[^>]*>[\s\S]*?</pre>|&lt;pre\b(?:(?!&gt;)[\s\S])*&gt;[\s\S]*?&lt;/pre&gt;)",
+            lambda m, _acc=_raw_pre: _acc.append(m.group(0)) or f"\x00R{len(_acc) - 1}\x00",
+            seg,
+            flags=re.IGNORECASE,
+        )
+
+        # (5) file:// URL replacement
+        if "file://" in seg:
+            if "](file://" in seg:
+                seg = _replace_md_file_refs(seg, image=True)
+                seg = _replace_md_file_refs(seg, image=False)
+            seg = re.sub(
+                r"(^|\s)file://[^\s<>\"')\]]+",
+                r"\1" + _PLACEHOLDER,
+                seg,
+            )
+
+        # (6) Restore stashed regions. Stashing order is fences → inline code →
+        # math → raw <pre>, so a later stash can capture an earlier family's
+        # marker; the helper expands nested markers so none survives.
+        seg = _restore_stash_tokens(
+            seg,
+            {"R": _raw_pre, "M": _math, "I": _inline, "F": _fenced},
+        )
+
+        segments[k][0] = seg
+
+    # (7) Restore blockquotes in reverse nesting order
+    _reprefixed_table: dict[int, str] = {}
+    for k in range(len(segments) - 1, 0, -1):
+        child_text, _, _, saved_prefixes = segments[k]
+        if "\x00Q" in child_text:
+            child_text = re.sub(
+                r"\x00Q(\d+)\x00",
+                lambda m: _reprefixed_table.get(int(m[1]), m[0]),
+                child_text,
+            )
+        child_lines = child_text.split("\n")
+        reprefixed_lines = []
+        if len(child_lines) == len(saved_prefixes):
+            for line, pref in zip(child_lines, saved_prefixes, strict=True):
+                p = pref.rstrip()
+                sep = " " if (pref.endswith(" ") or not pref) else ""
+                reprefixed_lines.append((p + sep + line) if line else p)
+        else:
+            default_pref = saved_prefixes[0] if saved_prefixes else "> "
+            default_p = default_pref.rstrip()
+            default_sep = " " if default_pref.endswith(" ") else ""
+            for line in child_lines:
+                reprefixed_lines.append(
+                    (default_p + default_sep + line) if line else default_p
+                )
+        _reprefixed_table[k] = "\n".join(reprefixed_lines)
+
+    root_text = segments[0][0]
+    if "\x00Q" in root_text:
+        root_text = re.sub(
+            r"\x00Q(\d+)\x00",
+            lambda m: _reprefixed_table.get(int(m[1]), m[0]),
+            root_text,
+        )
+    return root_text
+
+
 def _redact_share_paths(text: str, extra_paths) -> str:
     """Strip known local session/workspace/home paths out of public-share text.
 
@@ -997,6 +1397,9 @@ def _sanitize_message(
     # URIs — or a static placeholder if the path is outside the allowed roots.
     text = _embed_share_media(text, allowed_roots=allowed_roots, trusted_roots=trusted_roots)
     text = _redact_share_paths(text, redact_paths)
+    # Strip MEDIA: / file:// references so the public share never renders
+    # links to the authenticated /api/media endpoint (issue #6126).
+    text = _strip_media_references(text)
     if not text.strip():
         return None
     sanitized = {
@@ -1013,10 +1416,24 @@ def _public_share_payload(payload: dict) -> dict:
     messages = payload.get("messages")
     if not isinstance(messages, list):
         messages = []
+    # Sanitize each message on read so legacy snapshots stored before the
+    # write-time sanitizer was introduced also have MEDIA:/file:// stripped
+    # (issue #6285 review – "close the legacy-snapshot path").
+    safe_messages = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
+            content = _strip_media_references(content)
+            if content.strip():
+                safe_messages.append({**msg, "content": content})
+        else:
+            safe_messages.append(msg)
     public = {
         "title": str(payload.get("title") or "Untitled"),
-        "messages": messages,
-        "message_count": int(payload.get("message_count") or len(messages)),
+        "messages": safe_messages,
+        "message_count": int(payload.get("message_count") or len(safe_messages)),
     }
     created_at = payload.get("created_at")
     updated_at = payload.get("updated_at")
