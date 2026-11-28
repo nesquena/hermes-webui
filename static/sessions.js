@@ -2436,23 +2436,125 @@ async function newSession(flash, options={}){
     const boundModel=(options&&options.model)||null;
     const boundProvider=(options&&options.model_provider)||null;
     const hasLoadedSession=!!(S.session&&S.session.session_id);
+    // #8576 maintainer follow-up: the explicit-picker evidence for the LOADED
+    // session. boot.js's modelSelect change handler records every pick the
+    // user makes on a loaded session under THAT session's own id
+    // (_rememberExplicitPickerPick, ui.js), and every session load/switch —
+    // plus newSession() itself — clears it. A marker that still exists for
+    // S.session was therefore authored by the user AFTER the current session
+    // loaded, under the CURRENT profile: a fresh selection the current
+    // profile owns, never the previous profile's picker/persisted pair. That
+    // is what lets a loaded-session custom pick survive an armed
+    // profile-switch model reset whose destination catalogue came back empty
+    // (the gate never releases there), while the stale-profile/catalogue
+    // quarantine below still rejects every value the marker does not name.
+    let freshExplicitPick=null;
+    if(S.session&&S.session.session_id&&typeof _readExplicitPickerPick==='function'){
+      try{ freshExplicitPick=_readExplicitPickerPick(S.session.session_id)||null; }
+      catch(_){ freshExplicitPick=null; }
+    }
+    const freshExplicitPickValue=String((freshExplicitPick&&freshExplicitPick.value)||'').trim();
+    // The marker authorizes ONLY the exact value it recorded. A picker entry
+    // holding anything else is leftover catalogue state from the previous
+    // profile and stays quarantined while the reset is armed. (The picker
+    // itself is per-tab DOM: whatever option it names carries its own
+    // provider, so a value match there is a pair match by construction.)
+    const freshExplicitPickOwns=(value)=>!!(freshExplicitPickValue
+      &&freshExplicitPickValue===String(value||'').trim());
+    // The persisted arm needs no value comparison of its own any more: while
+    // the reset gate is armed the session-scoped marker above is the ONLY
+    // authoritative record of what this tab's user picked (the picker is
+    // per-tab DOM that an empty catalogue refresh can clear, and the
+    // persisted pair is SHARED localStorage another tab can rewrite), so the
+    // marker alone authorizes the pick — see the persisted arm below. The
+    // picker arm above is likewise unaffected: the option the user picked is
+    // still selected, so its raw value still matches the marker.
     let newModelState=null;
     let consumedExplicitModelOverride=false;
     let usingConfiguredDefault=false;
+    // #8576 maintainer follow-up (2026-11-19): the pair the session-scoped
+    // marker above authorized under the armed reset, remembered so the session
+    // this creation ADOPTS can inherit the same authority (see the
+    // re-establishment after S.session is replaced). Null on every other
+    // admission path: a configured default, a project-bound model, the empty
+    // composer's override, and an unarmed picker/persisted fallback all keep
+    // their existing lifetime and must not mint a marker.
+    let markerAuthorizedPick=null;
     if(boundModel){
       newModelState={model:boundModel, model_provider:boundProvider||null};
     }else if(!hasLoadedSession&&explicitModelOverride&&explicitModelOverride.model){
       newModelState=explicitModelOverride;
       consumedExplicitModelOverride=true;
     }else if(window._defaultModel){
-      // Configured default wins over stale picker/persisted state even with no
-      // loaded session (deleting the last session left S.session null + stale picker) (#4728).
+      // Configured default wins over stale picker/persisted state (#4728).
       newModelState={model:window._defaultModel,model_provider:null};
+      // #8527: the configured default must travel with its own provider.
+      newModelState.model_provider=window._activeProvider||null;
       usingConfiguredDefault=true;
-    }else if(modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
+    }else if((!S._profileSwitchModelReset||freshExplicitPickOwns(modelSelForNew&&modelSelForNew.value))
+        &&modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
+      // #8576 follow-up: while the reset gate is armed the picker normally
+      // holds the PREVIOUS profile's catalogue, so it stays quarantined —
+      // unless the selection is the one the user explicitly picked on the
+      // loaded session (marker above), which the current profile owns even
+      // when the destination catalogue came back empty and the gate never
+      // released.
       newModelState=_modelStateForSelect(modelSelForNew,modelSelForNew.value);
-    }else if(typeof _readPersistedModelState==='function'){
-      newModelState=_readPersistedModelState();
+      // The marker is the only reason this arm may run under the armed reset
+      // (it owns the selected value), so what it resolved is a current-profile
+      // choice: remember it for the adopted session.
+      if(S._profileSwitchModelReset&&freshExplicitPickValue) markerAuthorizedPick=newModelState;
+    }else if((!S._profileSwitchModelReset||freshExplicitPickValue)
+        &&typeof _readPersistedModelState==='function'){
+      const _persistedModelState=_readPersistedModelState();
+      if(!S._profileSwitchModelReset){
+        // No pending profile switch: the persisted pair is this profile's own
+        // preference and may pass as-is.
+        newModelState=_persistedModelState;
+      }else if(freshExplicitPickValue){
+        // Under the armed gate the persisted pair is SHARED localStorage:
+        // another tab can rewrite it between this tab's pick and this New
+        // Chat. It is therefore evidence about ANOTHER tab's preference,
+        // never authority over this one — so admission derives from THIS
+        // tab's marker alone, and both outgoing fields are built from the
+        // marker's own selection. Requiring the shared pair to still name
+        // the same model let another tab's DIFFERENT-model rewrite
+        // (gpt-5.1 against a marker that owns
+        // @custom:review-route:gpt-5.4-mini) drop BOTH outgoing fields even
+        // though the marker still owned the pick (#8576 maintainer re-gate
+        // 2026-11-13); matching the model alone had earlier admitted that
+        // tab's same-model/different-provider pair and supplied the wrong
+        // model_provider (#8576, greptile P1 2026-11-08).
+        //
+        // Build BOTH outgoing fields from THIS tab's marker-owned selection
+        // through the picker's own normalisation contract
+        // (_modelStateForSelect) — the same resolver the picker arm above
+        // uses, which strips a custom provider's duplicated @<provider>:
+        // prefix — so the model sent is the pick's own normalised id and
+        // never a differently qualified shared string. The provider stays
+        // on the marker (the contract resolves the same one from the
+        // qualified value). The backend's deliberate qualifier precedence is
+        // NOT touched: the client simply stops sending a payload that would
+        // need it.
+        //
+        // Stale-profile quarantine is unchanged: with no marker for the
+        // loaded session nothing is admitted here at all, so the previous
+        // profile's picker/persisted state still cannot reach the new
+        // profile's New Chat.
+        const _markerSelection=(typeof _modelStateForSelect==='function'&&freshExplicitPickValue)
+          ? _modelStateForSelect(modelSelForNew,freshExplicitPickValue)
+          : null;
+        newModelState={
+          model:(_markerSelection&&_markerSelection.model)||freshExplicitPickValue,
+          model_provider:(freshExplicitPick&&freshExplicitPick.model_provider)
+            ||(_markerSelection&&_markerSelection.model_provider)||null,
+        };
+        // Admission came from THIS tab's marker alone, so the resolved pair is
+        // the current profile's accepted choice — remember it for the adopted
+        // session. The shared pair read just above is deliberately NOT used:
+        // it is another tab's evidence, never authority over this one.
+        markerAuthorizedPick=newModelState;
+      }
     }
     if(newModelState&&newModelState.model){
       reqBody.model=newModelState.model;
@@ -2503,18 +2605,55 @@ async function newSession(flash, options={}){
         ||null;
     }
     // #7865: New Chat replaces S.session without going through loadSession(),
-    // so drop the previous session's explicit-picker evidence here (placed
+    // so the replaced session's explicit-picker evidence is dropped here —
+    // but ONLY on the success path, next to where the new session is adopted
+    // (#8576 maintainer follow-up 2026-11-23). A failed create (e.g. the
+    // server's "untrusted workspace" 400) must leave the replaced session's
+    // marker intact: with the reset gate still armed, that marker is the ONLY
+    // evidence the retry can read, so clearing it before the POST destroyed
+    // the pick's model AND provider for every subsequent attempt. Capture the
+    // replaced session's id BEFORE the POST: after the adopt below S.session
+    // names the session this request created, not the one it replaced. (Placed
     // AFTER the provider fallback assignment on purpose — see the note in
     // _pickerExplicitPickKey about not disturbing the newSession source-shape
-    // window). The marker must never authorize a provider override for a
-    // different (new) session.
-    if(S.session&&S.session.session_id&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(S.session.session_id);
+    // window.)
+    const _replacedSessionId=(S.session&&S.session.session_id)||null;
     if(options&&typeof options.pickerClaimEpoch==='number') newSessionClaim=options.pickerClaimEpoch;
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
+    if(_replacedSessionId&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(_replacedSessionId);
+    // #8576 maintainer follow-up (2026-11-19): the accepted current-profile
+    // choice must outlive the session it was made on. The marker of the session
+    // this request REPLACED is cleared together with the adopt above (success
+    // path only), so a SECOND successive New Chat reads the re-established
+    // marker of the session the FIRST creation adopted — never the replaced
+    // session's cleared one. With the reset gate still armed — an empty
+    // catalogue never releases it — the picker and the SHARED persisted pair
+    // both stay quarantined, and a creation with no pick at all still goes out
+    // with NEITHER model NOR model_provider.
+    //
+    // Re-establish the marker for the session this SUCCESSFUL creation just
+    // adopted, carrying the pair the marker itself authorized. The next create
+    // reads it back through the same marker arm, so the authority stays on this
+    // tab's own session-scoped evidence — never on the shared store another tab
+    // can rewrite, and never on a marker scoped to a different session. Nothing
+    // else changes: the quarantine is not disabled (with no marker there is
+    // still nothing to admit), and the backend's @provider: qualifier
+    // precedence is untouched (the posted model stays the pick's normalised id).
+    //
+    // Only ever written from markerAuthorizedPick, so a configured default, a
+    // project-bound model, the empty composer's override and an unarmed
+    // picker/persisted fallback mint no marker at all. loadSession() clears the
+    // marker for the session it leaves and the one it loads, so navigating away
+    // still retires it.
+    if(markerAuthorizedPick&&S.session&&S.session.session_id
+       &&typeof _rememberExplicitPickerPick==='function'){
+      _rememberExplicitPickerPick(S.session.session_id,
+        markerAuthorizedPick.model,markerAuthorizedPick.model_provider||null);
+    }
     // #8356: New Chat takes the pane without going through loadSession(), so
     // an in-flight loadSession() for the previous session still owns the load
     // (its _loadingSessionId/_loadGeneration match) and its response can write
@@ -2745,10 +2884,42 @@ async function _switchProfileForSessionLoad(profile){
     // hold the previous profile's /api/skills payload, so drop them (and any reply
     // still in flight) once the switch has succeeded.
     if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
+    // #8576 catalog-owner fence: mirror the canonical switch in panels.js —
+    // invalidate the in-flight catalog generation BEFORE adopting any
+    // destination defaults/options/reset, so a delayed reply started on the
+    // previous profile cannot publish under the new one (its requestSeq is
+    // stale by the time it arrives). No profile-name comparison: any
+    // pre-transition request, including one started while the same profile was
+    // previously active (A→B→A), is stale once its generation was invalidated.
+    if(typeof _invalidateModelDropdownRequests==='function') _invalidateModelDropdownRequests();
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
-    if(data.default_model) window._defaultModel=data.default_model;
-    if(data.default_model_provider) window._activeProvider=data.default_model_provider;
+    // #8576 (greptile P1, 2026-11-08): an explicit-picker marker is session-
+    // scoped evidence authored under the profile that owned the pick. This
+    // writer still holds the PREVIOUS profile's session in S.session, and
+    // newSession() reads that session's marker — so drop it at the profile
+    // boundary, exactly like the persisted pair above. Without this, a pick
+    // made on the old conversation would pass the armed reset gate and send
+    // its model + provider under the destination profile's name.
+    if(S.session&&S.session.session_id&&typeof _clearExplicitPickerPick==='function'){
+      _clearExplicitPickerPick(S.session.session_id);
+    }
+    // The destination profile's defaults are a PAIR: adopting its default model
+    // also (re)binds the provider from the SAME switch response — replace or
+    // clear, never keep the previous profile's pair when the destination has
+    // none configured (#8527 profile-switch review). A successful per-client
+    // switch can legitimately return a null/absent/empty default model
+    // (api/profiles.py reads the destination's raw config), and a model-less
+    // destination still OWNS the default state: the previous profile's pair is
+    // cleared outright, and the one-shot reset gate keeps the still-pre-refresh
+    // picker/persisted pair from becoming newSession()'s fallback until the
+    // catalog rehydrates. (typeof-guarded like the slash-skill cache drop
+    // above: bare-eval harnesses run this writer without a window.)
+    if(typeof window!=='undefined'){
+      window._defaultModel=data.default_model||null;
+      window._activeProvider=data.default_model?(data.default_model_provider||null):null;
+    }
+    S._profileSwitchModelReset=!data.default_model;
     if(typeof refreshProfileTransitionReasoningChip==='function'){
       refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider);
     }
