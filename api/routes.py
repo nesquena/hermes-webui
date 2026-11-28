@@ -5630,6 +5630,7 @@ def _resolve_session_under_lock(sid: str, outside=None):
 # The source-identity fields _apply_cli_source_meta_to_session() stamps; one
 # definition shared with the effort pick's field-only sidecar writer.
 from api.models import _CLI_SOURCE_IDENTITY_FIELDS, _CLI_SOURCE_IDENTITY_MARKERS  # noqa: E402
+from api.models import _republish_session_after_shrink  # noqa: E402
 
 
 def _carry_cli_source_identity(target, outside) -> None:
@@ -5657,10 +5658,7 @@ def _carry_cli_source_identity(target, outside) -> None:
 
 def _publish_saved_session(sid: str, session) -> None:
     """Publish a just-saved session so later writers don't trust a stale copy."""
-    with LOCK:
-        SESSIONS[sid] = session
-        SESSIONS.move_to_end(sid)
-        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+    _republish_session_after_shrink(sid, session)
 
 
 _ANCHOR_ACTIVITY_SCENE_MAX_BYTES = 256_000

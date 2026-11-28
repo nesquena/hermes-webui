@@ -71,13 +71,20 @@ def _configure_pin_route(monkeypatch, sessions, persisted, source, active_profil
     import threading
     from collections import OrderedDict
     from contextlib import nullcontext
+    import api.models as models
     import api.profiles as profiles
     import api.routes as routes
 
     by_id = {session.session_id: session for session in sessions}
     names = sorted({"default", *(session.profile for session in sessions)})
     monkeypatch.setattr(routes, "LOCK", threading.Lock())
-    monkeypatch.setattr(routes, "SESSIONS", OrderedDict(by_id if source == "memory" else {}))
+    # The pin route reads the session cache through api.routes, but publishing a
+    # saved session goes through api.models. Bind one fixture store under both
+    # names so a fake session never lands in the real module cache and leaks
+    # into the next case.
+    session_store = OrderedDict(by_id if source == "memory" else {})
+    monkeypatch.setattr(routes, "SESSIONS", session_store)
+    monkeypatch.setattr(models, "SESSIONS", session_store)
     monkeypatch.setattr(routes, "all_sessions", lambda: list(persisted) if source == "persisted" else [])
     monkeypatch.setattr(routes, "get_session", lambda sid, **_: by_id[sid])
     monkeypatch.setattr(routes, "get_session_profile_readonly", lambda sid: by_id[sid].profile)
