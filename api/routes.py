@@ -26192,14 +26192,94 @@ def _parse_range_header(range_header: str, file_size: int) -> tuple[int, int] | 
         return None
 
 
+def _media_allowed_roots() -> list[Path]:
+    """Roots ``/api/media`` may serve from.
+
+    Same set the handler allowlists: Hermes home, ``/tmp``, the active
+    workspace, and ``MEDIA_ALLOWED_ROOTS``. Not the whole home directory.
+    """
+    home = Path(os.path.expanduser("~"))
+    hermes_home = Path(os.getenv("HERMES_HOME", str(home / ".hermes"))).expanduser()
+    allowed = [
+        hermes_home.resolve(),
+        Path("/tmp").resolve(),
+        (home / ".hermes").resolve(),
+    ]
+    try:
+        ws = Path(get_last_workspace()).resolve()
+        if ws.is_dir():
+            allowed.append(ws)
+    except Exception:
+        pass
+    extra_roots = os.environ.get("MEDIA_ALLOWED_ROOTS", "").strip()
+    if extra_roots:
+        for root in extra_roots.split(os.pathsep):
+            root = root.strip()
+            if not root:
+                continue
+            try:
+                rp = Path(root).resolve()
+            except OSError:
+                continue
+            if rp.is_dir():
+                allowed.append(rp)
+    return allowed
+
+
+def _media_open_anchor(target: Path) -> Path | None:
+    """Deepest allowed media root that lexically contains ``target``.
+
+    ``target`` is already the authorized canonical path. Do not resolve it
+    again: a component swapped for a symlink after the check must stay visible
+    to the no-follow walk. ``None`` means a token grant outside the roots, so
+    the caller walks from the filesystem anchor (``/`` on POSIX).
+    """
+    try:
+        roots = _media_allowed_roots()
+    except OSError:
+        return None
+    best: Path | None = None
+    for root in roots:
+        try:
+            if not root.is_dir():
+                continue
+            target.relative_to(root)
+        except (ValueError, OSError):
+            continue
+        if best is None or len(root.parts) > len(best.parts):
+            best = root
+    return best
+
+
 def _open_file_read_fd(target: Path, anchor_root: Path | None = None) -> int:
     if anchor_root is None:
+        # Absolute paths that reach this branch are already the authorized
+        # canonical target (media resolves before the allow check). Reopen
+        # that path without resolve(), so a symlink swapped in after the check
+        # is refused by O_NOFOLLOW. Start at the allowed media root when the
+        # target sits under one; token grants outside those roots walk from
+        # the filesystem anchor. Relative paths have an empty anchor and keep
+        # the plain open.
+        if target.anchor:
+            root = _media_open_anchor(target) or Path(target.anchor)
+            return open_anchored_fd(
+                root,
+                target,
+                want_dir=False,
+                plain_fallback=True,
+                expose_permission=True,
+            )
         flags = os.O_RDONLY
         # On Windows, files are opened in text mode by default; O_BINARY
         # prevents CRLF translation that would corrupt binary media files.
         if hasattr(os, "O_BINARY"):
             flags |= os.O_BINARY
-        return os.open(str(target), flags)
+        try:
+            return os.open(str(target), flags)
+        except PermissionError:
+            raise
+        except OSError:
+            raise FileNotFoundError(str(target)) from None
     return open_anchored_fd(anchor_root, target.resolve(), want_dir=False)
 
 
@@ -27510,10 +27590,7 @@ def _handle_media(handler, parsed):
     - Additional roots can be added via MEDIA_ALLOWED_ROOTS env var
       (os.pathsep-separated list of absolute paths; ":" on POSIX, ";" on Windows)
     """
-    import os as _os
     from api.auth import is_auth_enabled, parse_cookie, verify_session
-    _HOME = Path(_os.path.expanduser("~"))
-    _HERMES_HOME = Path(_os.getenv("HERMES_HOME", str(_HOME / ".hermes"))).expanduser()
 
     # Auth check
     if is_auth_enabled():
@@ -27547,33 +27624,7 @@ def _handle_media(handler, parsed):
     # Allowed roots: hermes home, /tmp, and active workspace.
     # Intentionally NOT the entire home dir — that would expose ~/.ssh,
     # ~/.aws, browser profiles, etc. to any authenticated user.
-    allowed_roots = [
-        _HERMES_HOME.resolve(),
-        Path("/tmp").resolve(),
-        (_HOME / ".hermes").resolve(),
-    ]
-    # Also allow the active workspace directory (where screenshots land)
-    try:
-        from api.workspace import get_last_workspace
-        ws = Path(get_last_workspace()).resolve()
-        if ws.is_dir():
-            allowed_roots.append(ws)
-    except Exception:
-        pass
-
-    # Also allow additional roots from MEDIA_ALLOWED_ROOTS env var
-    # (os.pathsep-separated list; ":" on POSIX, ";" on Windows).
-    extra_roots = _os.environ.get("MEDIA_ALLOWED_ROOTS", "").strip()
-    if extra_roots:
-        for root in extra_roots.split(_os.pathsep):
-            root = root.strip()
-            if root:
-                try:
-                    rp = Path(root).resolve()
-                    if rp.is_dir():
-                        allowed_roots.append(rp)
-                except Exception:
-                    pass
+    allowed_roots = _media_allowed_roots()
 
     _INLINE_IMAGE_TYPES = {
         "image/png", "image/jpeg", "image/gif", "image/webp",
@@ -27598,11 +27649,23 @@ def _handle_media(handler, parsed):
         "text/x-diff",
         "application/vnd.excalidraw+json",
     }
+    # Office documents are download-only artifacts: never previewed inline, but
+    # they can be authorized through an owning session's exact MEDIA: token so a
+    # generated spreadsheet/Word file outside the media roots is still served.
+    _OFFICE_MEDIA_TYPES = {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }
     _SESSION_MEDIA_TOKEN_TYPES = (
         _INLINE_IMAGE_TYPES
         | _AUDIO_VIDEO_PDF_TYPES
         | _ARCHIVE_TYPES
         | _SESSION_TEXT_ARTIFACT_TYPES
+        | _OFFICE_MEDIA_TYPES
         | {"text/html"}
     )
     session_media_allowed = _session_media_token_allows_path(

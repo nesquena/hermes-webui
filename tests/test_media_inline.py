@@ -86,6 +86,61 @@ def _outside_allowed_roots_dir():
     )
 
 
+class _CapturingHandler:
+    """Minimal handler that records the status and body of one media response."""
+
+    def __init__(self):
+        self.status = None
+        self.headers = {}
+        self.body = b""
+
+    def send_response(self, code):
+        self.status = code
+
+    def send_header(self, key, value):
+        self.headers[key.lower()] = value
+
+    def end_headers(self):
+        pass
+
+    class _W:
+        def __init__(self, owner):
+            self.owner = owner
+
+        def write(self, data):
+            self.owner.body += data
+
+        def flush(self):
+            pass
+
+    @property
+    def wfile(self):
+        return self._W(self)
+
+
+def _dispatch_media(query: str) -> _CapturingHandler:
+    from api import routes
+
+    handler = _CapturingHandler()
+    routes._handle_media(handler, SimpleNamespace(query=query, path="/api/media"))
+    return handler
+
+
+@contextlib.contextmanager
+def _patched_media(routes, hermes_home, workspace, session=None):
+    cms = [
+        mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home), "MEDIA_ALLOWED_ROOTS": ""}),
+        mock.patch.object(routes, "get_last_workspace", lambda: str(workspace)),
+        mock.patch("api.auth.is_auth_enabled", lambda: False),
+    ]
+    if session is not None:
+        cms.append(mock.patch.object(routes, "get_session", return_value=session))
+    with contextlib.ExitStack() as stack:
+        for cm in cms:
+            stack.enter_context(cm)
+        yield
+
+
 # ── Static analysis: renderMd MEDIA stash ────────────────────────────────────
 
 class TestMediaRenderMdStash(unittest.TestCase):
@@ -356,7 +411,7 @@ class TestMediaEndpointUnit(unittest.TestCase):
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
         start = routes_src.index("extra_roots =")
         block = routes_src[start:start + 900]
-        self.assertIn(".split(_os.pathsep)", block)
+        self.assertIn(".split(os.pathsep)", block)
         self.assertNotIn('.split(":")', block)
 
     def test_path_is_within_root_treats_commonpath_valueerror_as_not_within(self):
@@ -841,6 +896,502 @@ class TestMediaEndpointUnit(unittest.TestCase):
             self.assertIn("text/html", handler.headers.get("content-type", ""))
             self.assertIn("sandbox", handler.headers.get("content-security-policy", ""))
             self.assertIn(b"Report", handler.body)
+
+
+    def test_handle_media_session_authorizes_xlsx_artifact_outside_roots(self):
+        """Office artifacts outside the media roots are downloadable when the
+        owning session emitted an exact MEDIA: token, and ``inline=1`` still
+        forces Content-Disposition: attachment (no inline preview)."""
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+                self.body = b""
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, k, v):
+                self.headers[k.lower()] = v
+            def end_headers(self):
+                pass
+            class _W:
+                def __init__(self, owner):
+                    self.owner = owner
+                def write(self, b):
+                    self.owner.body += b
+                def flush(self):
+                    pass
+            @property
+            def wfile(self):
+                return self._W(self)
+
+        cases = (
+            ("report.xlsx", "spreadsheetml"),
+            ("report.xls", "vnd.ms-excel"),
+            ("report.docx", "wordprocessingml"),
+            ("report.doc", "application/msword"),
+            ("report.pptx", "presentationml"),
+            ("report.ppt", "vnd.ms-powerpoint"),
+        )
+        with tempfile.TemporaryDirectory() as home, _outside_allowed_roots_dir() as outside:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            for name, mime_marker in cases:
+                with self.subTest(name=name):
+                    path = pathlib.Path(outside) / name
+                    path.write_bytes(b"PK\x03\x04fake-office")
+                    session = SimpleNamespace(
+                        messages=[{"role": "assistant", "content": f"**MEDIA:{path}**"}]
+                    )
+                    with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home), "MEDIA_ALLOWED_ROOTS": ""}), \
+                         mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                         mock.patch.object(routes, "get_session", return_value=session), \
+                         mock.patch("api.auth.is_auth_enabled", lambda: False):
+                        handler = _Handler()
+                        routes._handle_media(
+                            handler,
+                            SimpleNamespace(
+                                query=(
+                                    f"path={urllib.parse.quote(str(path.resolve()))}"
+                                    "&session_id=s-media&inline=1"
+                                ),
+                                path="/api/media",
+                            ),
+                        )
+
+                    self.assertEqual(handler.status, 200)
+                    self.assertIn(mime_marker, handler.headers.get("content-type", ""))
+                    disposition = handler.headers.get("content-disposition", "")
+                    self.assertIn("attachment", disposition)
+                    self.assertNotIn("inline", disposition.split(";", 1)[0])
+                    self.assertIn(b"fake-office", handler.body)
+
+        from api.config import MIME_MAP
+        for macro_ext in (".xlsm", ".docm", ".pptm"):
+            self.assertNotIn(macro_ext, MIME_MAP)
+
+    def test_handle_media_does_not_follow_symlink_swapped_after_check(self):
+        """A symlink planted between the allow check and the open must not
+        serve a forbidden session transcript (404, never the transcript bytes)."""
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+                self.body = b""
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, k, v):
+                self.headers[k.lower()] = v
+            def end_headers(self):
+                pass
+            class _W:
+                def __init__(self, owner):
+                    self.owner = owner
+                def write(self, b):
+                    self.owner.body += b
+                def flush(self):
+                    pass
+            @property
+            def wfile(self):
+                return self._W(self)
+
+        secret = b"FORBIDDEN-SESSION-TRANSCRIPT-MARKER"
+        with tempfile.TemporaryDirectory() as home, _outside_allowed_roots_dir() as outside:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            transcript = hermes_home / "sessions" / "secret.json"
+            transcript.parent.mkdir()
+            transcript.write_bytes(secret)
+            office = pathlib.Path(outside) / "report.xlsx"
+            office.write_bytes(b"PK\x03\x04fake-office")
+            office_resolved = office.resolve()
+            session = SimpleNamespace(
+                messages=[{"role": "assistant", "content": f"**MEDIA:{office}**"}]
+            )
+            real_open = routes._open_file_read_fd
+
+            def _swap_then_open(target, anchor_root=None):
+                if pathlib.Path(target) == office_resolved:
+                    pathlib.Path(target).unlink()
+                    pathlib.Path(target).symlink_to(transcript)
+                return real_open(target, anchor_root)
+
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home), "MEDIA_ALLOWED_ROOTS": ""}), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                 mock.patch.object(routes, "get_session", return_value=session), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False), \
+                 mock.patch.object(routes, "_open_file_read_fd", side_effect=_swap_then_open):
+                handler = _Handler()
+                routes._handle_media(
+                    handler,
+                    SimpleNamespace(
+                        query=(
+                            f"path={urllib.parse.quote(str(office_resolved))}"
+                            "&session_id=s-media&inline=1"
+                        ),
+                        path="/api/media",
+                    ),
+                )
+
+            self.assertEqual(handler.status, 404)
+            self.assertNotIn(secret, handler.body)
+            self.assertNotIn(b"fake-office", handler.body)
+
+    def test_handle_media_serves_file_under_search_only_parent(self):
+        """A 0311 directory (enter, don't list) must still serve on Linux.
+
+        The anchored walk used to open every ancestor ``O_RDONLY`` and answered
+        404. A plain open only needs search permission, which is what master did.
+        """
+        if os.name == "nt":
+            self.skipTest("POSIX directory modes required")
+        from api import routes
+
+        payload = b"PNG-UNDER-0311"
+        with tempfile.TemporaryDirectory() as home:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            shot = ws / "shot.png"
+            shot.write_bytes(payload)
+            opened = []
+            real_open = routes.open_anchored_fd
+
+            def _record(root, target, **kwargs):
+                opened.append(pathlib.Path(root))
+                return real_open(root, target, **kwargs)
+
+            # The allowed root itself cannot be listed. The walk has to start
+            # here and open it search-only.
+            ws.chmod(0o311)
+            try:
+                self.assertEqual(ws.stat().st_mode & 0o777, 0o311)
+                with _patched_media(routes, hermes_home, ws), \
+                     mock.patch.object(routes, "open_anchored_fd", side_effect=_record):
+                    handler = _dispatch_media("path=" + urllib.parse.quote(str(shot)))
+                self.assertEqual(handler.status, 200, handler.body)
+                self.assertEqual(opened[0].resolve(), ws.resolve())
+                self.assertIn(payload, handler.body)
+            finally:
+                ws.chmod(0o755)
+
+            parent = ws / "enter-only"
+            parent.mkdir()
+            nested = parent / "nested.png"
+            nested.write_bytes(payload)
+            parent.chmod(0o311)
+            try:
+                self.assertEqual(parent.stat().st_mode & 0o777, 0o311)
+                with _patched_media(routes, hermes_home, ws):
+                    handler = _dispatch_media("path=" + urllib.parse.quote(str(nested)))
+                self.assertEqual(handler.status, 200, handler.body)
+                self.assertIn(payload, handler.body)
+            finally:
+                parent.chmod(0o755)
+
+        # Token grant outside the roots: the walk starts at ``/`` and still
+        # crosses the 0311 parent.
+        with tempfile.TemporaryDirectory() as home, _outside_allowed_roots_dir() as outside:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            parent = pathlib.Path(outside) / "enter-only"
+            parent.mkdir()
+            office = parent / "report.xlsx"
+            office.write_bytes(b"PK\x03\x04under-0311")
+            session = SimpleNamespace(
+                messages=[{"role": "assistant", "content": f"**MEDIA:{office}**"}]
+            )
+            opened = []
+            real_open = routes.open_anchored_fd
+
+            def _record(root, target, **kwargs):
+                opened.append(pathlib.Path(root))
+                return real_open(root, target, **kwargs)
+
+            parent.chmod(0o311)
+            try:
+                with _patched_media(routes, hermes_home, ws, session), \
+                     mock.patch.object(routes, "open_anchored_fd", side_effect=_record):
+                    handler = _dispatch_media(
+                        "path=" + urllib.parse.quote(str(office.resolve()))
+                        + "&session_id=s-media"
+                    )
+                self.assertEqual(handler.status, 200, handler.body)
+                self.assertIn(b"PK\x03\x04under-0311", handler.body)
+                self.assertIsNone(routes._media_open_anchor(office.resolve()))
+                self.assertEqual(opened[0].resolve(), pathlib.Path(office.anchor).resolve())
+            finally:
+                parent.chmod(0o755)
+
+    def test_handle_media_parent_and_leaf_swap_return_404(self):
+        """Swapping the parent directory or the leaf after the check is a 404.
+
+        Covers an Office file and a CSV, from ``/`` (token grant) and from an
+        allowed media root. Neither response may contain the other file's bytes.
+        A search-only parent must not disable the leaf check.
+        """
+        from api import routes
+
+        def _assert_swap(leaf, secret_path, legit, secret, kind, *, session, hermes_home, ws):
+            resolved = leaf.resolve()
+            real_open = routes._open_file_read_fd
+
+            def _swap(target, anchor_root=None):
+                if os.path.normpath(str(target)) == os.path.normpath(str(resolved)):
+                    if kind == "leaf":
+                        leaf.unlink()
+                        leaf.symlink_to(secret_path)
+                    else:
+                        parent = leaf.parent
+                        moved = parent.with_name(parent.name + "-moved")
+                        os.rename(parent, moved)
+                        os.symlink(secret_path if secret_path.is_dir() else secret_path.parent,
+                                   parent, target_is_directory=True)
+                return real_open(target, anchor_root)
+
+            try:
+                with _patched_media(routes, hermes_home, ws, session), \
+                     mock.patch.object(routes, "_open_file_read_fd", side_effect=_swap):
+                    query = "path=" + urllib.parse.quote(str(resolved))
+                    if session is not None:
+                        query += "&session_id=s-media"
+                    handler = _dispatch_media(query)
+                self.assertEqual(handler.status, 404, handler.body)
+                self.assertNotIn(secret, handler.body)
+                self.assertNotIn(legit, handler.body)
+            finally:
+                parent = leaf.parent
+                if parent.is_symlink():
+                    parent.unlink()
+                moved = parent.with_name(parent.name + "-moved")
+                if moved.exists() and not parent.exists():
+                    os.rename(moved, parent)
+
+        outside_cases = (
+            ("report.xlsx", b"PK\x03\x04office-legit", b"FORBIDDEN-OFFICE-OTHER"),
+            ("sample.csv", b"name,value\nlegit,1\n", b"FORBIDDEN-CSV-OTHER"),
+        )
+        for name, legit, secret in outside_cases:
+            for kind in ("leaf", "parent"):
+                with self.subTest(where="token", name=name, kind=kind):
+                    with tempfile.TemporaryDirectory() as home, _outside_allowed_roots_dir() as outside:
+                        hermes_home = pathlib.Path(home) / ".hermes"
+                        hermes_home.mkdir(parents=True)
+                        ws = hermes_home / "workspace"
+                        ws.mkdir()
+                        good = pathlib.Path(outside) / f"good-{kind}"
+                        evil = pathlib.Path(outside) / f"evil-{kind}"
+                        good.mkdir()
+                        evil.mkdir()
+                        leaf = good / name
+                        leaf.write_bytes(legit)
+                        secret_file = evil / name
+                        secret_file.write_bytes(secret)
+                        session = SimpleNamespace(
+                            messages=[{"role": "assistant", "content": f"**MEDIA:{leaf}**"}]
+                        )
+                        _assert_swap(
+                            leaf, evil if kind == "parent" else secret_file,
+                            legit, secret, kind,
+                            session=session, hermes_home=hermes_home, ws=ws,
+                        )
+
+        for kind in ("leaf", "parent"):
+            with self.subTest(where="workspace", name="shot.png", kind=kind):
+                with tempfile.TemporaryDirectory() as home:
+                    hermes_home = pathlib.Path(home) / ".hermes"
+                    hermes_home.mkdir(parents=True)
+                    ws = hermes_home / "workspace"
+                    ws.mkdir()
+                    good = ws / f"good-{kind}"
+                    evil = ws / f"evil-{kind}"
+                    good.mkdir()
+                    evil.mkdir()
+                    legit = b"PNG-LEGIT-BYTES"
+                    secret = b"PNG-SWAPPED-BYTES"
+                    leaf = good / "shot.png"
+                    leaf.write_bytes(legit)
+                    (evil / "shot.png").write_bytes(secret)
+                    _assert_swap(
+                        leaf, evil if kind == "parent" else evil / "shot.png",
+                        legit, secret, kind,
+                        session=None, hermes_home=hermes_home, ws=ws,
+                    )
+
+        with self.subTest(where="search-only", name="shot.png", kind="leaf"):
+            with tempfile.TemporaryDirectory() as home:
+                hermes_home = pathlib.Path(home) / ".hermes"
+                hermes_home.mkdir(parents=True)
+                ws = hermes_home / "workspace"
+                ws.mkdir()
+                parent = ws / "enter-only"
+                parent.mkdir()
+                legit = b"PNG-LEGIT-BYTES"
+                secret = b"PNG-SWAPPED-BYTES"
+                leaf = parent / "shot.png"
+                leaf.write_bytes(legit)
+                secret_file = ws / "other.png"
+                secret_file.write_bytes(secret)
+                parent.chmod(0o311)
+                try:
+                    _assert_swap(
+                        leaf, secret_file, legit, secret, "leaf",
+                        session=None, hermes_home=hermes_home, ws=ws,
+                    )
+                finally:
+                    parent.chmod(0o755)
+
+    def test_handle_media_unreadable_leaf_returns_403(self):
+        """A file the server cannot read is 403, not 404 and not 500."""
+        if os.name == "nt":
+            self.skipTest("POSIX file modes required")
+        from api import routes
+
+        def _deny(path, *, session, hermes_home, ws, query_path):
+            path.chmod(0o000)
+            try:
+                with _patched_media(routes, hermes_home, ws, session):
+                    query = "path=" + urllib.parse.quote(str(query_path))
+                    if session is not None:
+                        query += "&session_id=s-media"
+                    return _dispatch_media(query)
+            finally:
+                path.chmod(0o644)
+
+        payload = b"UNREADABLE-LEAF-BYTES"
+        with tempfile.TemporaryDirectory() as home:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            shot = ws / "shot.png"
+            shot.write_bytes(payload)
+            handler = _deny(shot, session=None, hermes_home=hermes_home, ws=ws, query_path=shot)
+            self.assertEqual(handler.status, 403, handler.body)
+            self.assertNotIn(payload, handler.body)
+
+            parent = ws / "enter-only"
+            parent.mkdir()
+            nested = parent / "nested.png"
+            nested.write_bytes(payload)
+            nested.chmod(0o000)
+            parent.chmod(0o311)
+            try:
+                with _patched_media(routes, hermes_home, ws):
+                    handler = _dispatch_media("path=" + urllib.parse.quote(str(nested)))
+                self.assertEqual(handler.status, 403, handler.body)
+                self.assertNotIn(payload, handler.body)
+            finally:
+                parent.chmod(0o755)
+                nested.chmod(0o644)
+
+        with tempfile.TemporaryDirectory() as home, _outside_allowed_roots_dir() as outside:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            office = pathlib.Path(outside) / "report.xlsx"
+            office.write_bytes(payload)
+            session = SimpleNamespace(
+                messages=[{"role": "assistant", "content": f"**MEDIA:{office}**"}]
+            )
+            handler = _deny(
+                office, session=session, hermes_home=hermes_home, ws=ws,
+                query_path=office.resolve(),
+            )
+            self.assertEqual(handler.status, 403, handler.body)
+            self.assertNotIn(payload, handler.body)
+
+    def test_handle_media_without_opath_falls_back_only_for_search_permission(self):
+        """macOS/BSD have no O_PATH. A search-only parent still serves.
+
+        The walk stays in place for symlink swaps: those are not permission
+        errors, so the plain-open fallback must not follow them.
+        """
+        if os.name == "nt":
+            self.skipTest("POSIX directory modes required")
+        from api import routes
+
+        payload = b"PNG-FALLBACK-BYTES"
+        with tempfile.TemporaryDirectory() as home:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            parent = ws / "enter-only"
+            parent.mkdir()
+            shot = parent / "shot.png"
+            shot.write_bytes(payload)
+            parent.chmod(0o311)
+            try:
+                with _patched_media(routes, hermes_home, ws), \
+                     mock.patch("api.workspace._O_PATH", 0):
+                    handler = _dispatch_media("path=" + urllib.parse.quote(str(shot)))
+                self.assertEqual(handler.status, 200, handler.body)
+                self.assertIn(payload, handler.body)
+            finally:
+                parent.chmod(0o755)
+
+            secret = b"PNG-FALLBACK-SECRET"
+            other = ws / "other.png"
+            other.write_bytes(secret)
+            leaf = ws / "shot.png"
+            leaf.write_bytes(payload)
+            real_open = routes._open_file_read_fd
+
+            def _swap_leaf(target, anchor_root=None):
+                if os.path.normpath(str(target)) == os.path.normpath(str(leaf.resolve())):
+                    leaf.unlink()
+                    leaf.symlink_to(other)
+                return real_open(target, anchor_root)
+
+            with _patched_media(routes, hermes_home, ws), \
+                 mock.patch("api.workspace._O_PATH", 0), \
+                 mock.patch.object(routes, "_open_file_read_fd", side_effect=_swap_leaf):
+                handler = _dispatch_media("path=" + urllib.parse.quote(str(leaf.resolve())))
+            self.assertEqual(handler.status, 404, handler.body)
+            self.assertNotIn(secret, handler.body)
+            self.assertNotIn(payload, handler.body)
+
+            good = ws / "good"
+            evil = ws / "evil"
+            good.mkdir()
+            evil.mkdir()
+            (good / "shot.png").write_bytes(payload)
+            (evil / "shot.png").write_bytes(secret)
+            resolved = (good / "shot.png").resolve()
+
+            def _swap_parent(target, anchor_root=None):
+                if os.path.normpath(str(target)) == os.path.normpath(str(resolved)):
+                    moved = good.with_name("good-moved")
+                    os.rename(good, moved)
+                    os.symlink(evil, good, target_is_directory=True)
+                return real_open(target, anchor_root)
+
+            try:
+                with _patched_media(routes, hermes_home, ws), \
+                     mock.patch("api.workspace._O_PATH", 0), \
+                     mock.patch.object(routes, "_open_file_read_fd", side_effect=_swap_parent):
+                    handler = _dispatch_media("path=" + urllib.parse.quote(str(resolved)))
+                self.assertEqual(handler.status, 404, handler.body)
+                self.assertNotIn(secret, handler.body)
+                self.assertNotIn(payload, handler.body)
+            finally:
+                if good.is_symlink():
+                    good.unlink()
+                moved = ws / "good-moved"
+                if moved.exists() and not good.exists():
+                    os.rename(moved, good)
 
     def test_handle_media_session_authorizes_safe_text_artifacts_outside_roots(self):
         from api import routes
