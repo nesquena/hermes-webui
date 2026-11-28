@@ -413,14 +413,14 @@ class TestLiveModelsCustomProviderFallback:
                 "provider": "openai",
                 "api_key": "active-provider-canary",
             },
-            "providers": {"mistralai": {}},
+            "providers": {"mistral": {}},
         }
         monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-        resp = self._call_live_models(monkeypatch, cfg, "mistralai")
+        resp = self._call_live_models(monkeypatch, cfg, "mistral")
 
         assert requests == []
-        assert resp["provider"] == "mistralai"
+        assert resp["provider"] == "mistral"
         assert resp["models"], "static fallback models should still be returned"
 
     def test_standard_provider_live_fetch_can_use_matching_top_level_key(self, monkeypatch):
@@ -452,14 +452,14 @@ class TestLiveModelsCustomProviderFallback:
 
         cfg = {
             "model": {
-                "provider": "mistralai",
+                "provider": "mistral",
                 "api_key": "active-provider-canary",
             },
-            "providers": {"mistralai": {}},
+            "providers": {"mistral": {}},
         }
         monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-        resp = self._call_live_models(monkeypatch, cfg, "mistralai")
+        resp = self._call_live_models(monkeypatch, cfg, "mistral")
 
         assert requests == [
             {
@@ -468,7 +468,7 @@ class TestLiveModelsCustomProviderFallback:
                 "timeout": 8,
             }
         ]
-        assert resp["provider"] == "mistralai"
+        assert resp["provider"] == "mistral"
 
     def test_standard_provider_live_fetch_allows_matching_active_provider_alias(self, monkeypatch):
         """Alias-equivalent active providers should still count as the same provider."""
