@@ -50,6 +50,7 @@ _UI_PRODUCER = (
 # Defined outside the `_messageComparableText` .. `// Load older messages` slice on some trees.
 _SESSIONS_OPTIONAL = (
     "_inflightHasVisibleLiveState",
+    "_serverLiveSnapshotToolId",
     "_serverLiveSnapshotInflight",
     "_selectLiveRecoveryInflight",
     "_notifyRunJournalSideEffectRecoveryTruncation",
@@ -152,7 +153,15 @@ def _prelude() -> str:
 
 
 def _node(script: str) -> dict:
-    done = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False, cwd=ROOT, timeout=60)
+    # Feed the script over stdin, not argv: the prelude embeds a large slice of
+    # static/sessions.js (from `_messageComparableText` to `// Load older
+    # messages`), and Linux caps a single argv string at 128 KiB
+    # (MAX_ARG_STRLEN). On current master the prelude is ~114 KB; #6649's
+    # inflight helpers push it to ~143 KB, so `node -e <script>` dies with
+    # `OSError: [Errno 7] Argument list too long` on the CI runners (macOS has
+    # no such cap, which is why local runs stayed green). `node -` reads the
+    # same script from stdin and has no argv limit.
+    done = subprocess.run([NODE, "-"], input=script, capture_output=True, text=True, check=False, cwd=ROOT, timeout=60)
     assert done.returncode == 0, done.stderr or done.stdout
     return json.loads(done.stdout.strip().splitlines()[-1])
 
@@ -166,8 +175,9 @@ def _load_passes(
     offset: int = 0,
     message_count: int = 2,
     pending=PROMPT,
+    journal_snapshot: dict | None = None,
 ) -> dict:
-    """Run `loadSession('s1',{force:true})` `passes` times over a running `stream-1` turn with no journal snapshot.
+    """Run `loadSession('s1',{force:true})` `passes` times over a running `stream-1` turn.
 
     `stream_id` is the INFLIGHT snapshot's own stream (None: the snapshot names none). The message fetch fails after
     `fail_after` reads, so later passes keep and re-merge the cached transcript, as `loadSession()` does in the field.
@@ -184,6 +194,8 @@ def _load_passes(
     }
     if pending is _ABSENT:
         del session["pending_user_message"]
+    if journal_snapshot is not None:
+        session["runtime_journal_snapshot"] = journal_snapshot
     snapshot = {"messages": inflight_messages, "toolCalls": []}
     if stream_id is not None:
         snapshot["streamId"] = stream_id
@@ -320,6 +332,42 @@ def test_windowed_stale_inflight_from_another_stream_shows_the_prompt_once():
     )
     assert result["counts"] == [1, 1, 1], result
     assert result["inflightRowShown"] is False, result
+
+
+@pytest.mark.parametrize("offset", [0, 31], ids=["full", "windowed"])
+@pytest.mark.parametrize("has_saved_prompt", [False, True], ids=["deferred", "persisted"])
+def test_assistant_only_journal_keeps_both_segments_when_the_previous_reply_repeats(offset, has_saved_prompt):
+    """A server snapshot is split before merging, even though it contains no current user row."""
+    saved = [_u("previous question", 50), {"role": "assistant", "content": "Done.", "_ts": 51}]
+    if has_saved_prompt:
+        saved.extend([
+            _u(PROMPT, 100, _active_turn_user=True),
+            {"role": "assistant", "content": "Done.", "_ts": 101},
+        ])
+    journal = {
+        "stream_id": "stream-1",
+        "last_assistant_text": "Done.\n\nNext step",
+        "activity_burst_anchors": [{"id": 1, "textEnd": 5}],
+        "current_activity_burst_id": 2,
+        "current_live_segment_seq": 2,
+    }
+    result = _load_passes(
+        saved, [], None, fail_after=3, offset=offset,
+        message_count=offset + len(saved), journal_snapshot=journal,
+    )
+    assert result["counts"] == [1, 1, 1], result
+    assert [(r["role"], r["content"]) for r in result["rows"]] == [
+        ("user", "previous question"),
+        ("assistant", "Done."),
+        ("user", PROMPT),
+        ("assistant", "Done."),
+        ("assistant", "Next step"),
+    ], result
+    prompt = result["rows"][2]
+    assert prompt["displayOnly"] is (not has_saved_prompt), result
+    assert prompt["ts"] == 100, result
+    assert result["rows"][1]["live"] is False, result
+    assert result["rows"][4]["live"] is True, result
 
 
 _NEW_PROMPT = "JUST SENT"
