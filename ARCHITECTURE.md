@@ -365,6 +365,22 @@ is caught).
 Fallback sync endpoint: POST /api/chat still exists and holds the connection open until
 the agent finishes. The frontend never uses it but it can be useful for debugging.
 
+#### Live-render cost pacing
+
+For non-fade live updates, `attachLiveStream` measures each paint's elapsed cost with
+`performance.now()` at render start and after its DOM/snapshot work. `_lastRenderCostMs`
+is seeded with the first measurement and then smoothed as `0.7 * previous + 0.3 * latest`.
+The next non-fade render start is spaced by `clamp(4 * EMA, 66 ms, 1000 ms)`: cheap
+renders retain the original 66 ms cadence, while expensive renders back off to at most
+one start per second.
+
+The existing scheduler coalesces work through `_renderPending` and tracks the pending
+continuation in `_pendingRafHandle`: a timeout owns any remaining delay, then hands the
+single paint to `requestAnimationFrame`. Live-prose fade rendering keeps its separate,
+unchanged 33 ms cadence rather than using cost pacing. Stream finalization remains
+unchanged: finalized streams do not schedule new work, pending callbacks recheck the
+finalization guard, and terminal transcript settlement is not deferred by this policy.
+
 ### 4.4 Agent Invocation (_run_agent_streaming)
 
     def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id):
