@@ -250,6 +250,10 @@ const navigator = {userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.3
 function matchMedia(){ return {matches: false}; }
 const KeyboardEvent = {DOM_KEY_LOCATION_NUMPAD: 3};
 let _imeComposing = false;
+// Module-scope binding the clarify handler closes over (#8614's per-input
+// composition flag). Declared here because only the handler text is eval'd,
+// not the messages.js scope that owns the real `let`.
+let _clarifyImeComposing = false;
 """ + functions + """
 let editSends = 0;
 let clarifySends = 0;
