@@ -3555,7 +3555,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     try{
       return JSON.parse(JSON.stringify(value));
     }catch(_){
-      return String(value);
+      try{ return String(value); }catch(__){ return '[Object]'; }
     }
   }
   function _anchorSceneToolId(tool){
@@ -3609,7 +3609,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     try{
       return JSON.stringify(value);
     }catch(_){
-      return String(value);
+      try{ return String(value); }catch(__){ return '[Object]'; }
     }
   }
   function _anchorSceneRowBase(role, kind, sourceEventType, orderIndex, messageIndex){
