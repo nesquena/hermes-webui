@@ -209,7 +209,10 @@ def shares(server):
 
 @pytest.fixture
 def page(browser, shares):
-    ctx = browser.new_context(viewport={"width": 1400, "height": 900}, base_url=shares["base"])
+    # No service worker: page.route does not reliably see requests a service worker
+    # takes part in, and _hold must see every request it is asked to hold.
+    ctx = browser.new_context(viewport={"width": 1400, "height": 900}, base_url=shares["base"],
+                              service_workers="block")
     ctx.add_init_script(_INIT)
     pg = ctx.new_page()
     pg.share_posts = []
@@ -910,15 +913,32 @@ def test_panel_share_dialog_answered_after_another_conversation_opened_writes_no
 # next list refresh. The tests share the row from its menu and hold the list
 # refresh, so the row keeps knowing for the whole test.
 
+# What a failed wait for the row's share token reports: a held list refresh keeps
+# the token, an unheld one (or a service worker in the way) drops it.
+_SHARE_ROW_STATE_JS = """(sid) => {
+  const row = _allSessions.find(s => s.session_id === sid);
+  return {sw_controller: !!(navigator.serviceWorker && navigator.serviceWorker.controller),
+          row_in_list: !!row, row_share_token: !!(row && row.share_token)};
+}"""
+
+
 def _share_row_from_its_menu(page, sid):
     """Share ``sid`` from its sidebar menu (it asks nothing yet) and keep the sidebar
     list from refreshing. Returns the function that lets it refresh again."""
     def is_list(url):
         return urllib.parse.urlsplit(url).path.endswith("/api/sessions")
-    _held, release = _hold(page, is_list)
+    held, release = _hold(page, is_list)
     _open_sidebar_action(page, sid, "share_session")
     _wait_until(page, "() => window.__opened.length > 0")
-    _wait_until(page, "(sid) => !!(_allSessions.find(s => s.session_id === sid) || {}).share_token", sid)
+    try:
+        _wait_until(page, "(sid) => !!(_allSessions.find(s => s.session_id === sid) || {}).share_token", sid)
+    except AssertionError as exc:
+        try:
+            state = page.evaluate(_SHARE_ROW_STATE_JS, sid)
+        except Exception as probe_exc:  # keep the original timeout as the failure
+            state = f"unavailable ({type(probe_exc).__name__})"
+        raise AssertionError(f"{exc}; held={len(held)} share_posts={page.share_posts} "
+                             f"share_statuses={page.share_statuses} page={state}") from exc
     page.share_posts.clear()
     page.share_statuses.clear()
     page.evaluate("() => { window.__opened = []; window.__copied = []; return true; }")
