@@ -1112,6 +1112,16 @@ def _reaper_loop() -> None:
             from api.run_journal import maybe_sweep_run_journal
 
             maybe_sweep_run_journal()
+            # Models-catalog prewarm (session-visit latency): a catalog snapshot
+            # is rebuilt here, off every request path, shortly before the
+            # session-visit freshness window expires. Without it the first
+            # session visit past the window pays a ~6 s serial provider probe
+            # (and receives a truncated catalog while the build outlives the
+            # foreground budget). Gated inside: due-check, single-flight and a
+            # five-minute retry backoff all live in the function.
+            from api.config import maybe_prewarm_models_catalog
+
+            maybe_prewarm_models_catalog()
         except Exception:
             logger.warning("SessionChannel reaper iteration failed", exc_info=True)
         # Wait but wake up promptly on stop.
