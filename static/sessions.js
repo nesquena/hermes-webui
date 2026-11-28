@@ -9457,7 +9457,13 @@ function _resolveSessionIdFromSidebarLineage(sid){
     );
     if(!lineageLike) continue;
     const key=_sidebarLineageKeyForRow(row);
-    if(key===sid||(!_isResetSuccessor(row)&&row.parent_session_id===sid)||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid)){
+    const rootId=row._lineage_root_id||row.lineage_root_id||null;
+    const isReset=typeof _isResetSuccessor==='function'?_isResetSuccessor(row):!!(row&&row.relationship_type==='reset_successor');
+    const isExternal=typeof _isExternalSession==='function'
+      ? _isExternalSession(row)
+      : !!(row&&(row.is_cli_session||row.session_source==='messaging'));
+    const allowsParentAlias=!isReset||(!!(rootId&&rootId!==row.session_id)&&!isExternal);
+    if(key===sid||(allowsParentAlias&&row.parent_session_id===sid)||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid)){
       candidates.push(row);
     }
   }

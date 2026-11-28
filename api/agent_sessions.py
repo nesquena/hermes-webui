@@ -1884,5 +1884,15 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             tip_id, tip_depth = lineage_tip_cache[root_id]
             entry['_lineage_tip_id'] = tip_id
             entry['_compression_segment_count'] = max(segment_count, tip_depth)
+            # #9102: compression of a reset successor hides the reset behind the
+            # rotated ids, so the direct reset rule above never sees it on the
+            # tip. The chain root still records that edge: classify the tip from
+            # the root's own parent link so the sidebar keeps the compressed
+            # conversation top-level instead of drawing "Forked from ...".
+            root_row = rows.get(root_id)
+            root_parent_id = root_row.get('parent_session_id') if root_row else None
+            root_parent_row = rows.get(str(root_parent_id)) if root_parent_id else None
+            if _is_user_visible_reset_successor(root_parent_row, root_row):
+                entry['relationship_type'] = 'reset_successor'
 
     return metadata
