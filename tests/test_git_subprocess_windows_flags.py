@@ -12,7 +12,10 @@ ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_GIT_RUNS = Counter(
     {
         "api/agent_runtime.py": 3,
-        "api/rollback.py": 4,
+        # 4 pre-existing readers plus the shared-store resolution added for the
+        # current checkpoint layout: rev-parse (ref existence), rev-list (commit
+        # history), ls-tree (tree modes), cat-file (blobs).
+        "api/rollback.py": 8,
         "api/updates.py": 1,
         "api/workspace.py": 1,
         "api/workspace_git.py": 2,
