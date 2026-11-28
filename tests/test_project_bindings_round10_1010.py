@@ -39,7 +39,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Unique anchors inside newSession() (static/sessions.js).
 _START = "    if(!Object.prototype.hasOwnProperty.call(options,'project_id')"
-_END = "const inheritWs="
+_END = "    const reqBody={"
 
 
 def _read(path: str) -> str:
@@ -51,10 +51,9 @@ def _resolution_preamble() -> str:
     src = _read("static/sessions.js")
     assert src.count(_START) == 1, "the active-project merge marker moved"
     i = src.index(_START)
-    assert src.count(_END) == 1, "the inheritWs marker moved"
+    assert src.count(_END) == 1, "the request-body marker moved"
     j = src.index(_END, i)
-    end = src.index("\n", j)
-    return src[i:end]
+    return src[i:j]
 
 
 def _run_node(tmp_path: Path, script: str) -> str:
@@ -209,7 +208,11 @@ def test_the_explicit_workspace_opt_out_is_still_shipped_in_newSession():
         "if(_pb.workspace&&!Object.prototype.hasOwnProperty.call(_merged,'workspace'))"
         in src
     ), "the merge must keep deferring to a caller-supplied workspace"
-    assert "const boundWs=(options&&options.workspace)||null;" in src
+    assert (
+        "const hasExplicitWorkspace=options&&Object.prototype.hasOwnProperty.call(options,'workspace');"
+        in src
+    )
+    assert "const boundWs=hasExplicitWorkspace?switchWs:null;" in src
 
 
 def test_the_sibling_switch_to_workspace_opt_out_is_unchanged():
