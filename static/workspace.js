@@ -994,6 +994,20 @@ function bumpWorkspaceTreeGen(){
 }
 if(typeof window!=='undefined') window.bumpWorkspaceTreeGen = bumpWorkspaceTreeGen;
 
+// Two loadDir() calls can be in flight at once (a conversation's deferred refresh and
+// the refresh after a workspace write), and their /api/list responses can arrive in
+// either order. Each load is numbered when it starts. An older load never replaces a
+// listing a newer load has already shown: it skips its first render. Without this, a
+// response taken before a change and landing last repainted the tree as it was.
+// Each folder listing in the cache remembers the cache epoch its request was sent in.
+// Any load fills an empty slot (so an older load can still show the folder), but a
+// listing requested earlier never replaces one requested later, and a load fetches
+// again any expanded folder whose listing predates the latest clear.
+let _wsTreeLoadSeq = 0;     // the number of the most recently started loadDir()
+let _wsTreeEntriesSeq = 0;  // the number of the load whose listing S.entries holds
+let _wsTreeCacheEpoch = 0;  // goes up each time S._dirCache is cleared
+const _wsTreeCacheListedAt = new Map();  // folder -> cache epoch its listing was requested in
+
 function showWorkspaceTreeSkeleton(){
   const tree = $('fileTree');
   if(!tree) return;
@@ -1042,6 +1056,7 @@ async function loadDir(path, opts={}){
   const refreshExpanded=!!(opts&&opts.refreshExpanded);
   if(!S.session)return;
   const sessionId=S.session.session_id;
+  const loadSeq=++_wsTreeLoadSeq;  // ordered against concurrent loads (see _wsTreeLoadSeq)
   const treeGen=_wsTreeGen;  // #4671: capture the workspace-tree generation. A profile
                              // switch bumps it (bumpWorkspaceTreeGen), so a stale response
                              // from the previous workspace — which would pass the session_id
@@ -1053,10 +1068,15 @@ async function loadDir(path, opts={}){
   try{
     if(!path||path==='.'||refreshExpanded){
       if(typeof _syncWorkspaceBirthtimeSupportScope==='function') _syncWorkspaceBirthtimeSupportScope((S.session&&S.session.workspace)||'');
-      S._dirCache={};
+      S._dirCache={};_wsTreeCacheListedAt.clear();
+      _wsTreeCacheEpoch+=1;
       _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
-    S.currentDir=path||'.';
+    // The breadcrumb and the cache key in renderFileTree() both read S.currentDir, so
+    // it may only name a folder once this load's listing is actually shown. Setting it
+    // before the await left it naming a folder whose listing never rendered when the
+    // response was dropped by the session check or the request failed (#9356).
+    const pendingDir=path||'.';
     const data=await api(
       _workspaceRouteForPath(path, 'list') ||
       `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path||'.')}`
@@ -1064,7 +1084,8 @@ async function loadDir(path, opts={}){
     if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
     if(data.workspace_recovered&&data.workspace){
       S.session.workspace=String(data.workspace);
-      S._dirCache={};
+      S._dirCache={};_wsTreeCacheListedAt.clear();
+      _wsTreeCacheEpoch+=1;
       _restoreExpandedDirs();
       if(typeof syncWorkspaceDisplays==='function')syncWorkspaceDisplays();
       if(typeof syncTerminalButton==='function')syncTerminalButton();
@@ -1077,27 +1098,52 @@ async function loadDir(path, opts={}){
     // position is only ever carried within one tree (a11y-helpers.js). Row
     // paths are workspace-relative, so the folder shown does not matter.
     const treeScope=[sessionId,treeGen,(S.session&&S.session.workspace)||''].join('\n');
-    if(refillsExpanded) refill={};
-    S.entries=data.entries||[];renderBreadcrumb();renderFileTree({partial:refill,scope:treeScope});
-    // #2673 — refresh Artifacts tab when its source data (the file tree) updates.
-    if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
+    // A load that started later has already shown its listing: this one is older and
+    // must not replace it (see _wsTreeLoadSeq). It still fills expanded folders below.
+    if(loadSeq>=_wsTreeEntriesSeq){
+      _wsTreeEntriesSeq=loadSeq;
+      S.currentDir=pendingDir;
+      if(refillsExpanded) refill={};
+      S.entries=data.entries||[];renderBreadcrumb();renderFileTree({partial:refill,scope:treeScope});
+      // #2673 — refresh Artifacts tab when its source data (the file tree) updates.
+      if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
+    }
     // Pre-fetch contents of restored expanded dirs so they render without a second click
     // (parallelized — avoids serial waterfall when multiple dirs are expanded)
     if(!path||path==='.'||refreshExpanded){
       const expanded=S._expandedDirs||new Set();
-      const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);
+      // A folder listed before the latest clear (an older load filling the gap) is
+      // fetched again: it may predate the change the clearing load was started for.
+      const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]
+        ||(_wsTreeCacheListedAt.has(dirPath)&&_wsTreeCacheListedAt.get(dirPath)<_wsTreeCacheEpoch));
       if(pending.length){
+        const listedAt=_wsTreeCacheEpoch;  // the cache epoch these listings are requested in
         const results=await Promise.all(pending.map(dirPath=>
           api(_workspaceRouteForPath(dirPath, 'list'))
             .then(dc=>({dirPath,entries:dc.entries||[]}))
             .catch(()=>({dirPath,entries:[]}))
         ));
         if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
-        for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
+        // Any load fills an empty slot. Otherwise the listing requested in the later
+        // cache epoch wins; within one epoch (or over a listing written elsewhere),
+        // only the load whose root listing is shown overwrites.
+        const ownsListing=loadSeq>=_wsTreeEntriesSeq;
+        for(const {dirPath,entries} of results){
+          const previous=_wsTreeCacheListedAt.get(dirPath);
+          if(!S._dirCache[dirPath]||(previous===undefined?ownsListing
+              :(listedAt>previous||(listedAt===previous&&ownsListing)))){
+            S._dirCache[dirPath]=entries;
+            _wsTreeCacheListedAt.set(dirPath,listedAt);
+          }
+        }
       }
       if(expanded.size>0)renderFileTree({completesRefill:refill,scope:treeScope});
     }
-    if(!preservePreview&&typeof clearPreview==='function'){
+    // The preview clear below belongs to the listing this load is showing. An older
+    // load that finishes late — its render skipped by the seq guard above — must not
+    // clear (or prompt about) a preview the newer load already decided to show (#9356).
+    const ownsShownListing=loadSeq>=_wsTreeEntriesSeq;
+    if(!preservePreview&&typeof clearPreview==='function'&&ownsShownListing){
       const hiddenEdits=typeof _previewHasUnsavedEdits==='function'&&_previewHasUnsavedEdits();
       // #8514 (review): a hidden editor can still hold real unsaved text. Inside
       // the same session, keep the preview instead of prompting or clearing —

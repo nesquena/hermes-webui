@@ -27598,12 +27598,28 @@ function _renderTreeItems(container, entries, depth){
         }else{
           S._expandedDirs.add(item.path);
           if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
-          // Fetch children if not cached
+          // Fetch children if not cached. The response is only cached while the
+          // request still belongs to the tree on screen: a refresh or workspace
+          // switch may clear the cache (or bump the generation) while it is in
+          // flight, and an unconditional write then puts one folder's contents
+          // under the new cache, with no listed-at stamp to get it refetched (#9356).
           if(!S._dirCache[item.path]){
+            const expandSession=S.session&&S.session.session_id;
+            const expandGen=_wsTreeGen;
+            const expandEpoch=_wsTreeCacheEpoch;
             try{
               const data=await api(_workspaceRouteForPath(item.path, 'list'));
-              S._dirCache[item.path]=data.entries||[];
-            }catch(e2){S._dirCache[item.path]=[];}
+              const stillOurs=S.session&&S.session.session_id===expandSession
+                &&expandGen===_wsTreeGen&&expandEpoch===_wsTreeCacheEpoch;
+              if(stillOurs){
+                S._dirCache[item.path]=data.entries||[];
+                _wsTreeCacheListedAt.set(item.path,expandEpoch);
+              }
+            }catch(e2){
+              const stillOurs=S.session&&S.session.session_id===expandSession
+                &&expandGen===_wsTreeGen&&expandEpoch===_wsTreeCacheEpoch;
+              if(stillOurs) S._dirCache[item.path]=[];
+            }
           }
           renderFileTree();
         }
