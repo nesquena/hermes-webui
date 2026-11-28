@@ -296,6 +296,16 @@ function _shareRenderMessages(messages){
     // Before highlighting or any other pass changes the rendered message.
     const body=row.querySelector('.share-message-body');
     if(body&&_shareMissingWords(source,body).length) _shareShowPlainText(body,source);
+    if(body) body.querySelectorAll('table').forEach(table=>{
+      if(table.closest('.csv-table-wrap')) return;
+      const scroll=document.createElement('div');
+      scroll.className='share-table-scroll';
+      scroll.tabIndex=0;
+      scroll.setAttribute('role','region');
+      scroll.setAttribute('aria-label','Scrollable table');
+      table.replaceWith(scroll);
+      scroll.appendChild(table);
+    });
     wrap.appendChild(row);
   });
   if(typeof highlightCode==='function') highlightCode(wrap);

@@ -16,7 +16,9 @@ real share page in Chromium and checks:
    treats specially: for every message shown formatted, each marker word is
    visible on the page. "Visible" is the browser's own layout-aware
    ``innerText``, plus link and image addresses and image alt text, which are
-   out of scope (a word glued to an address becomes part of it).
+   out of scope (a word glued to an address becomes part of it);
+4. a wide Markdown table keeps its formatting and its last column can be
+   scrolled into the message column on phone, narrow, and desktop viewports.
 
 Run:
     python tests/browser_share_hidden_text.py
@@ -187,6 +189,19 @@ ORDINARY = [
     "`a.`MEDIA:`",
 ]
 
+WIDE_COLUMNS = 48
+WIDE_TABLE = "\n".join(
+    "| " + " | ".join(row) + " |"
+    for row in (
+        [f"Column{n:02}" for n in range(WIDE_COLUMNS)],
+        ["---"] * WIDE_COLUMNS,
+        ["Cell"] * (WIDE_COLUMNS - 1) + ["LastColumnMarker"],
+    )
+)
+
+TABLE_LIST = '<table><tr><td><ol><li value="9999">marker content</li></ol></td></tr></table>'
+CSV_TABLE = '```csv\nName,Value\nExample,42\n```'
+
 # Random messages: tokens renderMd treats specially, with numbered marker words.
 # Address tokens end with a space so a marker never joins an address.
 FUZZ_TOKENS = [
@@ -278,6 +293,89 @@ def _read_share(browser, token, expected):
     return rows, errors
 
 
+def _check_wide_table(browser, token):
+    failures = []
+    for width in (390, 640, 1280):
+        ctx = browser.new_context(base_url=BASE, viewport={"width": width, "height": 800}, is_mobile=width == 390)
+        try:
+            page = ctx.new_page()
+            page.goto(f"/share/{token}", wait_until="domcontentloaded")
+            table = page.locator(".share-message-body table")
+            table.wait_for(timeout=10000)
+            metrics = table.evaluate("""table => {
+                const message = table.closest('.share-message-body');
+                const last = table.rows[1].cells[table.rows[1].cells.length - 1];
+                const messageEdge = message.getBoundingClientRect().right;
+                const hiddenBefore = last.getBoundingClientRect().right > messageEdge + 1;
+                let scroller = table;
+                while (scroller && message.contains(scroller) &&
+                       (!/^(auto|scroll)$/.test(getComputedStyle(scroller).overflowX) ||
+                        scroller.scrollWidth <= scroller.clientWidth)) {
+                    scroller = scroller.parentElement;
+                }
+                if (!message.contains(scroller)) scroller = null;
+                if (scroller) scroller.scrollLeft = scroller.scrollWidth;
+                const lastEnd = last.getBoundingClientRect().right;
+                return {
+                    hiddenBefore,
+                    scrolled: Boolean(scroller && scroller.scrollLeft > 0),
+                    lastVisible: lastEnd <= messageEdge + 1 && lastEnd <= innerWidth + 1,
+                    lastMarker: last.textContent.trim(),
+                    pageOverflow: document.documentElement.scrollWidth > innerWidth + 1,
+                };
+            }""")
+            print(f"wide table at {width}px: {metrics}")
+            if (not metrics["hiddenBefore"] or not metrics["scrolled"] or not metrics["lastVisible"]
+                    or metrics["lastMarker"] != "LastColumnMarker" or metrics["pageOverflow"]):
+                failures.append(f"wide table at {width}px: last column must be reachable by scrolling the message table")
+        finally:
+            ctx.close()
+    return failures
+
+
+def _check_table_list_marker(browser, token):
+    failures = []
+    for width in (390, 1280):
+        ctx = browser.new_context(base_url=BASE, viewport={"width": width, "height": 800})
+        try:
+            page = ctx.new_page()
+            page.goto(f"/share/{token}", wait_until="domcontentloaded")
+            item = page.locator('.share-message-body table li[value="9999"]')
+            item.wait_for(timeout=10000)
+            metrics = item.evaluate("""item => {
+                const clip = item.closest('.share-table-scroll');
+                const text = document.createRange();
+                text.selectNodeContents(item);
+                const start = text.getClientRects()[0].left;
+                const marker = getComputedStyle(item, '::marker');
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                context.font = marker.font || getComputedStyle(item).font;
+                const markerWidth = context.measureText('9999. ').width;
+                return { position: getComputedStyle(item).listStylePosition,
+                    markerLeft: start - markerWidth, clipLeft: clip.getBoundingClientRect().left };
+            }""")
+            print(f"table list marker at {width}px: {metrics}")
+            if metrics["markerLeft"] < metrics["clipLeft"] - 1:
+                failures.append(f"table list marker at {width}px is clipped by its scroll container")
+        finally:
+            ctx.close()
+    return failures
+
+
+def _check_csv_table(browser, token):
+    ctx = browser.new_context(base_url=BASE, viewport={"width": 390, "height": 800})
+    try:
+        page = ctx.new_page()
+        page.goto(f"/share/{token}", wait_until="domcontentloaded")
+        table = page.locator('.share-message-body .csv-table-wrap table')
+        table.wait_for(timeout=10000)
+        nested = table.evaluate("table => Boolean(table.closest('.share-table-scroll'))")
+        return ["CSV table has a redundant share-table scroll container"] if nested else []
+    finally:
+        ctx.close()
+
+
 def main():
     try:
         from playwright.sync_api import sync_playwright
@@ -312,6 +410,9 @@ def main():
         convs = [
             {"title": "hiding", "messages": [{"role": "assistant", "content": c} for c in HIDING]},
             {"title": "ordinary", "messages": [{"role": "assistant", "content": c} for c in ORDINARY]},
+            {"title": "wide table", "messages": [{"role": "assistant", "content": WIDE_TABLE}]},
+            {"title": "list in table", "messages": [{"role": "assistant", "content": TABLE_LIST}]},
+            {"title": "CSV table", "messages": [{"role": "assistant", "content": CSV_TABLE}]},
         ]
         fuzz = []
         for seed in seeds:
@@ -344,7 +445,13 @@ def main():
                     failures.append(f"ordinary shown as plain text: {content!r}")
             print(f"ordinary: {sum(not r['plain'] for r in rows)}/{len(ORDINARY)} keep their formatting")
 
-            for seed, cases, token in zip(seeds, fuzz, tokens[2:], strict=True):
+            failures += _check_wide_table(browser, tokens[2])
+
+            failures += _check_table_list_marker(browser, tokens[3])
+
+            failures += _check_csv_table(browser, tokens[4])
+
+            for seed, cases, token in zip(seeds, fuzz, tokens[5:], strict=True):
                 rows, errors = _read_share(browser, token, len(cases))
                 failures += [f"fuzz {seed} page error: {e}" for e in errors]
                 if len(rows) != len(cases):
