@@ -1778,7 +1778,10 @@ def _custom_provider_entries(
     native = source.get("providers")
     if not isinstance(native, dict):
         return entries
-    seen = {_custom_provider_slug_from_name(entry.get("name")) for entry in entries}
+    seen = {
+        _custom_provider_slug_from_name(_str_field(entry, "name"))
+        for entry in entries
+    }
     index = _native_identity_index(native)
     for key in native:
         if not _is_native_custom_provider_key(key):
@@ -1936,7 +1939,7 @@ def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
     return {
         slug
         for slug in (
-            _custom_provider_slug_from_name(entry.get("name"))
+            _custom_provider_slug_from_name(_str_field(entry, "name"))
             for entry in _custom_provider_entries(config_obj)
         )
         if slug
@@ -1960,7 +1963,7 @@ def _named_custom_provider_slug_for_provider(
     legacy_only = _is_bare_builtin_provider_id(raw)
     legacy_names = _legacy_custom_provider_names(config_obj) if legacy_only else set()
     for entry in _custom_provider_entries(config_obj):
-        entry_name = str(entry.get("name") or "").strip().lower()
+        entry_name = _str_field(entry, "name").lower()
         slug = _custom_provider_slug_from_name(entry_name)
         if not entry_name or not slug:
             continue
@@ -1978,9 +1981,9 @@ def _legacy_custom_provider_names(config_obj: dict | None = None) -> set[str]:
     if not isinstance(raw_entries, list):
         return set()
     return {
-        str(entry.get("name") or "").strip().lower()
+        _str_field(entry, "name").lower()
         for entry in raw_entries
-        if isinstance(entry, dict) and str(entry.get("name") or "").strip()
+        if isinstance(entry, dict) and _str_field(entry, "name")
     }
 
 
@@ -2290,7 +2293,7 @@ def _custom_provider_entry_owns_model(entry: dict, model_id: str) -> bool:
     model = str(model_id or "").strip()
     if not model or not isinstance(entry, dict):
         return False
-    if str(entry.get("model") or "").strip() == model:
+    if _str_field(entry, "model") == model:
         return True
     if _provider_models_are_discovered_catalog(entry):
         return False
@@ -2319,7 +2322,7 @@ def _named_custom_provider_slug_for_base_url(
         entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_base_url != target:
             continue
-        slug = _custom_provider_slug_from_name(entry.get("name")) or "custom"
+        slug = _custom_provider_slug_from_name(_str_field(entry, "name")) or "custom"
         if not fallback:
             fallback = slug
         if model_id and _custom_provider_entry_owns_model(entry, model_id):
@@ -3184,11 +3187,11 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     if prov.startswith("custom:"):
         raw_suffix = prov.removeprefix("custom:")
         for entry in _custom_provider_entries():
-            slug = _custom_provider_slug_from_name(entry.get("name"))
-            entry_name = str(entry.get("name") or "").strip().lower()
+            entry_name = _str_field(entry, "name").lower()
+            slug = _custom_provider_slug_from_name(entry_name)
             if not (prov in {entry_name, slug} or (slug and raw_suffix == slug.removeprefix("custom:"))):
                 continue
-            if str(entry.get("model") or "").strip() == model:
+            if _str_field(entry, "model") == model:
                 return True
             if model in _configured_model_ids(entry.get("models")):
                 return True
@@ -3341,14 +3344,14 @@ def _get_provider_base_url(provider_id):
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
     prov_cfg = _get_provider_cfg(provider_id)
-    explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
+    explicit = _str_field(prov_cfg, "base_url").rstrip("/")
     if explicit:
         return explicit
     model_cfg = cfg.get("model", {}) or {}
     if isinstance(model_cfg, dict):
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
         if model_provider == str(provider_id).strip().lower():
-            model_base = (model_cfg.get("base_url") or "").strip().rstrip("/")
+            model_base = _str_field(model_cfg, "base_url").rstrip("/")
             if model_base:
                 return model_base
     return None
@@ -3504,19 +3507,40 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
     for entry in custom_providers:
         if not isinstance(entry, dict):
             continue
-        name = str(entry.get("name") or "").strip()
+        name = _str_field(entry, "name")
         if not name:
             continue
         if _custom_provider_slug_key(name) == slug_key:
             matches.append(entry)
     if len(matches) >= 2:
-        names = [str(e.get("name") or "").strip() for e in matches]
+        names = [_str_field(e, "name") for e in matches]
         raise AmbiguousCustomProviderError(
             f"Custom providers {names!r} all normalize to the same provider slug "
             f"{slug_key!r}; an endpoint and API key could be resolved from "
             f"different entries. Rename one so each custom provider has a unique slug."
         )
     return matches[0] if matches else None
+
+
+def _str_field(entry: dict, key: str) -> str:
+    """Stripped ``entry[key]`` when it is a ``str``, ``''`` otherwise.
+
+    Legacy ``custom_providers`` rows are hand-written YAML, so a field the
+    resolver reads as text (``name``, ``model``, ``base_url``) may arrive as a
+    non-string scalar — ``name: 5``, ``base_url: 9``. Calling ``.strip()`` on
+    such a value raised ``AttributeError`` and took the whole resolution down
+    (#9328). A non-string value is treated as ABSENT. Endpoint handling
+    matches the installed Agent's legacy-row URL reader
+    (``hermes_cli.config_providers._pick_provider_base_url``, which accepts
+    only ``str``), while the identity rule is deliberately stricter than that
+    module's ``coerce_provider_id``, which does coerce a name. Deliberately
+    NOT ``str(value)``: coercing would mint a provider named "5", a row the
+    user never wrote.
+    """
+    if not isinstance(entry, dict):
+        return ""
+    value = entry.get(key)
+    return value.strip() if isinstance(value, str) else ""
 
 
 def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
@@ -3554,7 +3578,14 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     config_base_url = None
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
-        config_base_url = model_cfg.get("base_url")
+        _raw_config_base_url = model_cfg.get("base_url")
+        # A non-string endpoint is ABSENT (#9328), never an int/float
+        # travelling back to callers that build a URL from it.
+        config_base_url = (
+            _raw_config_base_url
+            if isinstance(_raw_config_base_url, str) or _raw_config_base_url is None
+            else None
+        )
         config_provider = _resolve_configured_provider_id(
             model_cfg.get("provider"),
             cfg,
@@ -3679,7 +3710,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             _active_custom_slug = config_provider
 
         def _entry_owns_model(entry: dict) -> bool:
-            entry_model = (entry.get('model') or '').strip()
+            entry_model = _str_field(entry, 'model')
             ids = set()
             if entry_model:
                 ids.add(entry_model)
@@ -3698,7 +3729,8 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                     e for e in custom_providers
                     if isinstance(e, dict)
                     and _entry_owns_model(e)
-                    and _custom_provider_slug_key(e.get('name')) == _active_key
+                    and _str_field(e, 'name')
+                    and _custom_provider_slug_key(_str_field(e, 'name')) == _active_key
                 ),
                 None,
             )
@@ -3712,14 +3744,14 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 return _finalize(
                     model_id,
                     _active_custom_slug,
-                    (_active_owner.get('base_url') or '').strip() or None,
+                    (_str_field(_active_owner, 'base_url')) or None,
                 )
         for entry in custom_providers:
             if not isinstance(entry, dict):
                 continue
-            entry_model = (entry.get('model') or '').strip()
-            entry_name = (entry.get('name') or '').strip()
-            entry_base_url = (entry.get('base_url') or '').strip()
+            entry_model = _str_field(entry, 'model')
+            entry_name = _str_field(entry, 'name')
+            entry_base_url = _str_field(entry, 'base_url')
             entry_model_ids = set()
             if entry_model:
                 entry_model_ids.add(entry_model)
@@ -3776,7 +3808,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             if _skip_custom_providers and _canonicalise_provider_id(slug) != _active_slug:
                 continue
             if target in _configured_model_ids(pdef.get('models')):
-                p_base_url = str(pdef.get('base_url') or '').strip()
+                p_base_url = _str_field(pdef, 'base_url')
                 return model_id, slug, p_base_url or None
 
     # @provider:model format — explicit provider hint from the dropdown.
@@ -3844,7 +3876,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 _custom_provider_slug_key(provider_hint),
             )
             if entry is not None:
-                base_url = str(entry.get('base_url') or '').strip() or None
+                base_url = _str_field(entry, "base_url") or None
             else:
                 base_url = _get_provider_base_url(provider_hint)
         else:
@@ -3894,9 +3926,9 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             _custom_cfg = _custom_provider_entries(cfg)
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
-                    if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
+                    if isinstance(_entry, dict) and _str_field(_entry, "name") == prefix:
                         _slug = _custom_provider_slug_from_name(prefix)
-                        _base = (_entry.get("base_url") or "").strip()
+                        _base = _str_field(_entry, "base_url")
                         return _finalize(model_id, _slug, _base or None)
 
         # If a custom endpoint base_url is configured, don't reroute through OpenRouter
@@ -4043,7 +4075,7 @@ def _custom_record_base_url(record: object) -> str | None:
     """Return a custom record's OWN endpoint, or None when it declares none."""
     if not isinstance(record, dict):
         return None
-    return str(record.get("base_url") or "").strip() or None
+    return _str_field(record, "base_url") or None
 
 
 def _resolve_custom_record_key(
@@ -8056,12 +8088,12 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                         _custom_provider_slug_key(provider),
                     )
                     if _cp_match is not None:
-                        _url = str(_cp_match.get("base_url") or "").strip()
+                        _url = _str_field(_cp_match, "base_url")
                         if _url:
                             resolved_base_url = _raw_custom_provider_url(
                                 config_data, _exp_cfg, _cp_match, _url,
                             )
-                if not resolved_base_url:
+                if not resolved_base_url and provider == "custom":
                     # Best-effort fallback for the unnamed `custom` case (no own
                     # entry). Keep it non-fatal for unexpected errors, but let a
                     # genuine ambiguity propagate so the save fails closed.
