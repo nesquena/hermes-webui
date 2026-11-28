@@ -3,6 +3,7 @@ import collections
 import contextvars
 import copy
 import datetime
+import errno
 import hashlib
 import inspect
 import json
@@ -333,10 +334,47 @@ def _sidecar_unchanged_since(session_id, marker) -> bool:
     return sig_before is not None and _sidecar_stat_signature(SESSION_DIR / f'{session_id}.json') == sig_before
 
 
+_DIR_FSYNC_UNSUPPORTED_ERRNOS = {
+    errno.EINVAL,
+    errno.EBADF,
+    errno.EACCES,
+}
+for _name in ("ENOTSUP", "EOPNOTSUPP"):
+    _val = getattr(errno, _name, None)
+    if _val is not None:
+        _DIR_FSYNC_UNSUPPORTED_ERRNOS.add(_val)
+
+
+def _fsync_parent_dir(path: Path | str) -> None:
+    """Fsync the parent directory of path to ensure publication is durable."""
+    p = Path(path)
+    parent = p if p.is_dir() else p.parent
+    fd = None
+    try:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        fd = os.open(parent, flags)
+        os.fsync(fd)
+    except PermissionError:
+        return
+    except OSError as exc:
+        if exc.errno in _DIR_FSYNC_UNSUPPORTED_ERRNOS:
+            return
+        raise
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 def _replace_session_sidecar(tmp: Path, path: Path, session_id) -> None:
     _note_sidecar_write(session_id)
     try:
         _safe_replace(tmp, path)
+        _fsync_parent_dir(path)
     finally:
         _note_sidecar_write(session_id)
 
@@ -377,6 +415,46 @@ def _normalize_session_id_for_path(session_id) -> str | None:
     if not sid or not is_safe_session_id(sid):
         return None
     return sid
+
+
+@contextmanager
+def _session_sidecar_cross_process_lock(sid):
+    """Serialize sidecar save operations across WebUI worker processes for one session.
+
+    Keep the lock file in place permanently: unlinking it while another process
+    is waiting can split later callers across different inodes and defeat the
+    lock. POSIX uses ``flock``; native Windows locks the first byte with
+    ``msvcrt.locking``. If neither primitive exists, fail closed rather than
+    running without cross-process serialization.
+    """
+    normalized_sid = _normalize_session_id_for_path(sid)
+    if not normalized_sid:
+        raise ValueError(f"Unsafe session_id {sid!r}; refusing to lock sidecar")
+    lock_path = SESSION_DIR / f"{normalized_sid}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, "r+b", buffering=0) as lock_file:
+        if _fcntl is not None:
+            _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
+            return
+
+        if _msvcrt is not None:
+            if os.fstat(lock_file.fileno()).st_size == 0:
+                lock_file.write(b"\0")
+            lock_file.seek(0)
+            _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_UNLCK, 1)
+            return
+
+        raise RuntimeError("cross-process session sidecar locking is unavailable")
 
 
 def _session_draft_dir() -> Path:
@@ -1858,6 +1936,174 @@ def _normalize_skill_provenance(value) -> dict[str, int]:
     return normalized
 
 
+def _normalize_single_tool_call(call: object) -> tuple | None:
+    if not isinstance(call, dict):
+        return None
+    call_id = call.get("id")
+    norm_cid = str(call_id).strip() if call_id is not None and str(call_id).strip() else None
+
+    func = call.get("function")
+    if isinstance(func, dict):
+        fname = func.get("name")
+        norm_name = str(fname).strip() if fname is not None and str(fname).strip() else None
+        fargs = func.get("arguments")
+    else:
+        fname = call.get("name")
+        norm_name = str(fname).strip() if fname is not None and str(fname).strip() else None
+        fargs = call.get("arguments")
+
+    norm_args = None
+    if isinstance(fargs, dict):
+        try:
+            norm_args = json.dumps(fargs, sort_keys=True)
+        except Exception:
+            norm_args = str(fargs)
+    elif isinstance(fargs, str):
+        s = fargs.strip()
+        if s:
+            try:
+                parsed = json.loads(s)
+                norm_args = json.dumps(parsed, sort_keys=True)
+            except Exception:
+                norm_args = s
+    elif fargs is not None:
+        norm_args = str(fargs)
+
+    if norm_cid is None and norm_name is None and norm_args is None:
+        return None
+    return (norm_cid, norm_name, norm_args)
+
+
+def _normalized_tool_calls(tool_calls: object) -> tuple | None:
+    if not isinstance(tool_calls, (list, tuple)):
+        return None
+    normalized = []
+    for call in tool_calls:
+        entry = _normalize_single_tool_call(call)
+        if entry is not None:
+            normalized.append(entry)
+    return tuple(normalized) if normalized else None
+
+
+def _normalized_tool_call_id(val: object) -> str | None:
+    if val is None or isinstance(val, bool):
+        return None
+    s = str(val).strip()
+    return s if s else None
+
+
+def _row_has_tool_metadata(row: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if _normalized_tool_calls(row.get("tool_calls")) is not None:
+        return True
+    if _normalized_tool_call_id(row.get("tool_call_id")) is not None:
+        return True
+    return False
+
+
+def _message_rows_match(row_a: object, row_b: object) -> bool:
+    if not isinstance(row_a, dict) or not isinstance(row_b, dict):
+        return row_a == row_b
+    role_content_match = (
+        row_a.get("role") == row_b.get("role")
+        and row_a.get("content") == row_b.get("content")
+    )
+    if not role_content_match:
+        return False
+    if is_context_compression_marker(row_a) != is_context_compression_marker(row_b):
+        return False
+
+    a_has_tool = _row_has_tool_metadata(row_a)
+    b_has_tool = _row_has_tool_metadata(row_b)
+    if a_has_tool != b_has_tool:
+        return False
+    if a_has_tool:
+        if _normalized_tool_calls(row_a.get("tool_calls")) != _normalized_tool_calls(row_b.get("tool_calls")):
+            return False
+        if _normalized_tool_call_id(row_a.get("tool_call_id")) != _normalized_tool_call_id(row_b.get("tool_call_id")):
+            return False
+
+    # Two turns with the same text are still distinct rows; the timestamp the
+    # writer stamps at creation tells them apart when neither carries an id.
+    a_ts = row_a.get("timestamp")
+    b_ts = row_b.get("timestamp")
+    if a_ts is not None and b_ts is not None and a_ts != b_ts:
+        return False
+    a_stable, a_valid = _stable_message_identity_details(row_a)
+    b_stable, b_valid = _stable_message_identity_details(row_b)
+    if a_valid and b_valid and a_stable is not None and b_stable is not None:
+        return a_stable == b_stable
+
+    has_a_id = "id" in row_a and row_a.get("id") is not None
+    has_b_id = "id" in row_b and row_b.get("id") is not None
+    if has_a_id and has_b_id:
+        return row_a.get("id") == row_b.get("id")
+
+    return True
+
+
+def _row_already_held(disk_row: object, our_rows: list) -> bool:
+    """True when ``disk_row`` is a row this array already holds.
+
+    A disk row that survives the prefix match can still be one this writer
+    already carries further down its own tail — the gateway finalization
+    backfills context-only rows into the middle of the display transcript, so
+    its array is not a positional extension of the sidecar it loaded. Inserting
+    such a row again duplicates the turn (#3300: two identical visible turns).
+    Rows that match on identity but carry different timestamps are distinct
+    turns and are never treated as duplicates.
+    """
+    if not isinstance(disk_row, dict):
+        return False
+    disk_ts = disk_row.get("timestamp")
+    for our_row in our_rows:
+        if not _message_rows_match(disk_row, our_row):
+            continue
+        if isinstance(our_row, dict):
+            our_ts = our_row.get("timestamp")
+        else:
+            our_ts = None
+        if disk_ts is not None and our_ts is not None and disk_ts != our_ts:
+            continue
+        return True
+    return False
+
+
+def _merge_concurrent_message_arrays(
+    disk_msgs: list | None,
+    our_msgs: list | None,
+    allow_zero_prefix_merge: bool = False,
+    loaded_base: list | None = None,
+) -> list:
+    """Merge message arrays from concurrent writers sharing an ancestor prefix."""
+    if not isinstance(our_msgs, list):
+        return []
+    if not isinstance(disk_msgs, list):
+        return list(our_msgs)
+
+    prefix_len = 0
+    max_prefix = min(len(disk_msgs), len(our_msgs))
+    while prefix_len < max_prefix:
+        if not _message_rows_match(disk_msgs[prefix_len], our_msgs[prefix_len]):
+            break
+        prefix_len += 1
+
+    if prefix_len == 0 and not allow_zero_prefix_merge:
+        return list(our_msgs)
+
+    prefix = our_msgs[:prefix_len]
+    disk_tail = [
+        row for row in disk_msgs[prefix_len:]
+        if not _row_already_held(row, our_msgs)
+        and not (loaded_base is not None and _row_already_held(row, loaded_base))
+    ]
+    if not disk_tail:
+        return list(our_msgs)
+    our_tail = our_msgs[prefix_len:]
+    return prefix + disk_tail + our_tail
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -1964,6 +2210,12 @@ class Session:
         # Preserve malformed persisted containers so save() can fail closed
         # instead of silently normalizing a dict/string to an empty transcript.
         self.messages = messages if messages is not None else []
+        self._loaded_messages = None
+        self._loaded_context_messages = None
+        # Set by a streaming run to the history the agent actually ran against;
+        # its terminal append-intent save reads it (see _save_locked) and clears
+        # it right after that save.
+        self._replacement_baseline = None
         self.tool_calls = tool_calls or []
         self.created_at = created_at or time.time()
         self.updated_at = updated_at or time.time()
@@ -2126,16 +2378,39 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+    def save(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        *,
+        append_intent: bool = False,
+    ) -> None:
         # #7881: every save of this session id, skip_index=True included,
         # holds one reentrant persistence lock across the persisted-effort
         # read, the payload construction and the atomic replacement, so a
         # save cannot freeze an effort that another save replaces before it
         # lands. Lock order: persist -> _INDEX_WRITE_LOCK -> LOCK.
         with _session_persist_lock(self.session_id):
-            return self._save_locked(touch_updated_at=touch_updated_at, skip_index=skip_index)
+            if append_intent and (_fcntl is not None or _msvcrt is not None):
+                with _session_sidecar_cross_process_lock(self.session_id):
+                    return self._save_locked(
+                        touch_updated_at=touch_updated_at,
+                        skip_index=skip_index,
+                        append_intent=append_intent,
+                    )
+            return self._save_locked(
+                touch_updated_at=touch_updated_at,
+                skip_index=skip_index,
+                append_intent=append_intent,
+            )
 
-    def _save_locked(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+    def _save_locked(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        *,
+        append_intent: bool = False,
+    ) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -2227,6 +2502,57 @@ class Session:
         # actually still owed.
         _pending_hidden_wakeup_at = _validated_pending_hidden_wakeup_at(self)
         self._pending_hidden_wakeup_at = _pending_hidden_wakeup_at
+
+        if append_intent and (_fcntl is not None or _msvcrt is not None):
+            disk_sidecar = None
+            if self.path.exists():
+                try:
+                    disk_sidecar = json.loads(self.path.read_text(encoding="utf-8"))
+                except Exception:
+                    disk_sidecar = None
+            if isinstance(disk_sidecar, dict):
+                # A terminal streaming save declares the history the run actually
+                # ran against, so an intermediate import is not read here as a
+                # deliberate local removal. Without a declaration the last
+                # persisted snapshot is the base, which is what keeps an in-place
+                # compression replacement authoritative for the rows it dropped.
+                _declared_baseline = getattr(self, "_replacement_baseline", None)
+                loaded_messages_base = (
+                    _declared_baseline.get("messages")
+                    if _declared_baseline is not None
+                    else getattr(self, "_loaded_messages", None)
+                )
+                loaded_context_base = (
+                    _declared_baseline.get("context_messages")
+                    if _declared_baseline is not None
+                    else getattr(self, "_loaded_context_messages", None)
+                )
+                disk_messages = disk_sidecar.get("messages")
+                if isinstance(disk_messages, list):
+                    self.messages = _merge_concurrent_message_arrays(
+                        disk_messages,
+                        self.messages,
+                        allow_zero_prefix_merge=False,
+                        loaded_base=loaded_messages_base,
+                    )
+
+                disk_context = disk_sidecar.get("context_messages")
+                has_disk_context = isinstance(disk_context, list) and len(disk_context) > 0
+                has_our_context = isinstance(self.context_messages, list) and len(self.context_messages) > 0
+
+                if not has_our_context and has_disk_context:
+                    self.context_messages = list(disk_context)
+                elif has_our_context and not has_disk_context:
+                    self.context_messages = list(self.context_messages)
+                elif has_our_context and has_disk_context:
+                    self.context_messages = _merge_concurrent_message_arrays(
+                        disk_context,
+                        self.context_messages,
+                        allow_zero_prefix_merge=False,
+                        loaded_base=loaded_context_base,
+                    )
+                else:
+                    self.context_messages = []
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -2572,6 +2898,8 @@ class Session:
         self._reasoning_effort_saved = written_reasoning_effort
         self._share_token_saved = self.share_token
         self._share_created_at_saved = self.share_created_at
+        self._loaded_messages = copy.deepcopy(self.messages) if isinstance(self.messages, list) else None
+        self._loaded_context_messages = copy.deepcopy(self.context_messages) if isinstance(self.context_messages, list) else None
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
@@ -2638,6 +2966,10 @@ class Session:
         data = _apply_session_draft_overlay(data, sid)
         session = cls(**data)
         session._share_fields_misplaced = _share_fields_misplaced
+        if isinstance(data.get('messages'), list):
+            session._loaded_messages = copy.deepcopy(data['messages'])
+        if isinstance(data.get('context_messages'), list):
+            session._loaded_context_messages = copy.deepcopy(data['context_messages'])
         if _names_other_session:
             # Mark it so save() refuses. Loads still return it as before.
             session._sidecar_names_other_session = sid

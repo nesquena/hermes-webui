@@ -493,7 +493,7 @@ def _setup_production_composed_runtime(
             self.pending_user_source = None
             self.profile = None
 
-        def save(self, touch_updated_at=True, skip_index=False):
+        def save(self, touch_updated_at=True, skip_index=False, append_intent=False):
             self._saved = touch_updated_at
 
         def compact(self):

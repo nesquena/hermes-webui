@@ -89,7 +89,7 @@ def test_streaming_passes_target_model_and_prefers_runtime_base_url(monkeypatch)
             self.pending_attachments = []
             self.pending_started_at = None
 
-        def save(self, touch_updated_at=True):
+        def save(self, touch_updated_at=True, append_intent=False):
             self._saved = touch_updated_at
 
         def compact(self):

@@ -510,6 +510,11 @@ def _recovery_persist_lock(session_path: Path):
     return models._session_persist_lock(session_path.stem)
 
 
+def _fsync_parent_dir(path: Path | str) -> None:
+    from api.models import _fsync_parent_dir as _models_fsync_parent_dir
+    _models_fsync_parent_dir(path)
+
+
 def recover_session(session_path: Path) -> dict:
     """Restore session_path from its .bak when the bak has more messages.
 
@@ -550,6 +555,7 @@ def _recover_session_locked(session_path: Path) -> dict:
             os.replace(tmp_path, session_path)
         finally:
             _note_recovered_sidecar_write(session_path)
+        _fsync_parent_dir(session_path)
     except (OSError, TypeError, ValueError) as exc:
         logger.warning("recover_session: guarded restore failed for %s: %s", session_path, exc)
         try:
@@ -800,49 +806,66 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         sid = str(row.get('id') or '').strip()
         if not sid:
             continue
-        target = session_dir / f"{sid}.json"
-        if target.exists():
-            continue
-        payload = _with_marked_message_count(_state_db_row_to_sidecar(row))
-        # Per-process/per-thread tmp suffix to avoid corruption under
-        # concurrent reconciliation calls (matches api/models.py:484
-        # Session.save() convention).
-        tmp_suffix = f".json.reconcile.tmp.{os.getpid()}.{threading.current_thread().ident}"
-        tmp = target.with_suffix(tmp_suffix)
-        detail_recorded = False
-        try:
-            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
-        except OSError as exc:
+        models = sys.modules.get('api.models')
+        lock_ctx = models._session_persist_lock(sid) if models is not None else nullcontext()
+        with lock_ctx:
+            target = session_dir / f"{sid}.json"
+            if target.exists():
+                continue
+            payload = _with_marked_message_count(_state_db_row_to_sidecar(row))
+            # Per-process/per-thread tmp suffix to avoid corruption under
+            # concurrent reconciliation calls (matches api/models.py:484
+            # Session.save() convention).
+            tmp_suffix = f".json.reconcile.tmp.{os.getpid()}.{threading.current_thread().ident}"
+            tmp = target.with_suffix(tmp_suffix)
+            detail_recorded = False
             try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-            details.append({'session_id': sid, 'materialized': False, 'error': str(exc)})
-            continue
-        # Atomic create-or-fail: os.link() refuses to overwrite an existing
-        # target. Closes the TOCTOU window between the target.exists() check
-        # above and the rename — a concurrent Session.save() for the same SID
-        # will win and we silently skip rather than overwrite a live sidecar.
-        materialized_now = False
-        try:
-            os.link(str(tmp), str(target))
-            materialized_now = True
-        except FileExistsError:
-            # Live sidecar appeared between the check and the link — keep it.
-            pass
-        except OSError as exc:
-            details.append({'session_id': sid, 'materialized': False, 'error': str(exc)})
-            detail_recorded = True
-        finally:
+                with open(tmp, 'w', encoding='utf-8') as fh:
+                    fh.write(json.dumps(payload, ensure_ascii=False, indent=2))
+                    fh.flush()
+                    os.fsync(fh.fileno())
+            except OSError as exc:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                details.append({'session_id': sid, 'materialized': False, 'error': str(exc)})
+                continue
+            # Atomic create-or-fail: os.link() refuses to overwrite an existing
+            # target. Closes the TOCTOU window between the target.exists() check
+            # above and the rename — a concurrent Session.save() for the same SID
+            # will win and we silently skip rather than overwrite a live sidecar.
+            materialized_now = False
             try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
+                os.link(str(tmp), str(target))
+                materialized_now = True
+            except FileExistsError:
+                # Live sidecar appeared between the check and the link — keep it.
                 pass
-        if materialized_now:
-            materialized += 1
-            details.append({'session_id': sid, 'materialized': True, 'messages': len(payload.get('messages') or [])})
-        elif not detail_recorded:
-            details.append({'session_id': sid, 'materialized': False, 'skipped': 'sidecar_appeared_during_reconcile'})
+            except OSError as exc:
+                details.append({'session_id': sid, 'materialized': False, 'error': str(exc)})
+                detail_recorded = True
+            finally:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if materialized_now:
+                # The link published the sidecar; only the durability proof can
+                # still fail, and a real I/O error there must be reported as
+                # such instead of pretending the row was never materialized.
+                durability_error = None
+                try:
+                    _fsync_parent_dir(target)
+                except OSError as exc:
+                    durability_error = str(exc)
+                materialized += 1
+                detail = {'session_id': sid, 'materialized': True, 'messages': len(payload.get('messages') or [])}
+                if durability_error is not None:
+                    detail['durability_error'] = durability_error
+                details.append(detail)
+            elif not detail_recorded:
+                details.append({'session_id': sid, 'materialized': False, 'skipped': 'sidecar_appeared_during_reconcile'})
     return {'scanned': len(rows), 'materialized': materialized, 'details': details}
 
 

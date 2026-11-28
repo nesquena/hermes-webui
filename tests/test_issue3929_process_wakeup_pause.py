@@ -2636,7 +2636,7 @@ def test_gateway_success_path_checks_cancel_before_clearing_process_wakeup_pause
         'clear_process_wakeup_pause(s, reason="run_completed")',
         final_cancel_idx,
     )
-    save_idx = src.index("s.save()", pause_clear_idx)
+    save_idx = src.index("s.save(", pause_clear_idx)
 
     assert current_idx < early_cancel_idx < pending_clear_idx < final_cancel_idx < pause_clear_idx < save_idx
 
