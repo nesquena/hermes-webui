@@ -10,7 +10,10 @@ def test_webui_drains_only_matching_background_completion_events():
     assert "proc = process_registry.get(evt_sid)" in src
     assert "def _completion_event_targets_webui_session(evt_session_key: str, session_id: str)" in src
     assert "PROCESS_SESSION_INDEX.get(evt_session_key) == session_id" in src
-    assert "not _completion_event_targets_webui_session(evt_session_key, session_id)" in src
+    # #6752: an ownerless event addressed to this session by the key index is
+    # parked, never injected; foreign events stay queued for their owner.
+    assert "elif _completion_event_targets_webui_session(evt_session_key, session_id):" in src
+    assert "park_ownerless_completion(" in src
     assert "skipped_events.append(evt)" in src
     assert "completion_queue.put(evt)" in src
 

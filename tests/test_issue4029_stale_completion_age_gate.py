@@ -60,6 +60,8 @@ def _make_event(sid, completed_at, session_key="websess-1"):
         "type": "completion",
         "session_id": sid,
         "session_key": session_key,
+        # Immutable owner (#6752): ownerless events are parked, not delivered.
+        "origin_ui_session_id": session_key,
         "command": f"cmd-{sid}",
         "exit_code": 0,
         "output": f"out-{sid}",
