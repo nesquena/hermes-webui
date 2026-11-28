@@ -16580,6 +16580,11 @@ def _run_agent_streaming(
             # Mirrors gateway _agent_cache.  Keeps _user_turn_count alive so
             # injectionFrequency: "first-turn" actually suppresses after turn 1.
             _cache_new_agent = False
+            # A cache hit is a borrowed shared object: a successor admitted
+            # after Stop may already be running on it. Track the borrow so a
+            # cancelled worker can relinquish it before the outer finally's
+            # pending-steer drain reaches the successor (#9399).
+            _borrowed_cached_agent = False
             if ephemeral:
                 agent, _ = construct_profile_scoped_agent(
                     _AIAgent, _agent_kwargs, profile_home=_profile_home,
@@ -16626,6 +16631,7 @@ def _run_agent_streaming(
                                 _bypassed_memory_agent = True
                             else:
                                 agent = _cached_agent
+                                _borrowed_cached_agent = True
                                 SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
                                 logger.debug('[webui] Reusing cached agent for session %s', session_id)
                         else:
@@ -16657,6 +16663,14 @@ def _run_agent_streaming(
                     # no-interrupt rejection, so the borrow itself must be
                     # guarded (#9397).
                     if _worker_is_cancelled():
+                        # Stop already released this stream's registration; a
+                        # successor may be running on the same borrowed cache
+                        # hit. Relinquish the local handle before the outer
+                        # finally drains pending guidance, so its registry
+                        # fallback cannot consume the successor's Steer
+                        # (#9399 review).
+                        if _borrowed_cached_agent:
+                            agent = None
                         with _agent_lock:
                             _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                         put('cancel', _cancel_event_payload('Cancelled by user'))
@@ -16677,6 +16691,7 @@ def _run_agent_streaming(
                             except Exception:
                                 logger.debug("Failed to close stale-runtime cached agent for session %s", session_id, exc_info=True)
                         agent = None
+                        _borrowed_cached_agent = False
 
                 if agent is not None:
                     # The runtime refresh above can be the Stop boundary too
@@ -16684,6 +16699,12 @@ def _run_agent_streaming(
                     # rebinding callbacks / adopting the per-request SessionDB:
                     # those mutations belong to a turn this worker still owns.
                     if _worker_is_cancelled():
+                        # Same relinquish as the pre-refresh exit: the runtime
+                        # refresh can be the Stop boundary too, and the outer
+                        # finally must not drain a successor's guidance through
+                        # this worker's borrowed handle (#9399 review).
+                        if _borrowed_cached_agent:
+                            agent = None
                         with _agent_lock:
                             _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                         put('cancel', _cancel_event_payload('Cancelled by user'))

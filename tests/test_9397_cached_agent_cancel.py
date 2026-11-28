@@ -31,7 +31,11 @@ _SCENE = {"ref": None}
 
 
 class _FakeSessionDB:
-    """Per-request SessionDB stand-in tracking adoption/close like the real one."""
+    """Fake SessionDB harness for handle-identity/adoption evidence.
+
+    Tracks which per-request handle the worker would adopt or close; it is not
+    a reproduction of a live SessionDB leak (no real state.db is involved).
+    """
 
     def __init__(self):
         self._conn = object()  # `_session_db_is_open` treats this as an open handle
@@ -296,6 +300,85 @@ def test_resend_after_stop_clears_legacy_agent_interrupt_attrs(worker_scene, mon
         "legacy _interrupted was not reset before the reused Agent's run_conversation"
     )
     assert scene.calls.count("run") == 2
+
+
+def test_cancelled_cache_hit_worker_does_not_drain_successor_steer(worker_scene, monkeypatch):
+    """A cache-hit worker cancelled during startup must not consume a successor's Steer.
+
+    Stop eagerly releases the old stream registration, so the outer finally's
+    pending-steer fallback (``AGENT_INSTANCES.get(stream_id) or agent``) could
+    reach the shared cached Agent after a successor had started on it. The
+    cancelled worker must relinquish its borrowed local handle before terminal
+    cleanup; it must not interrupt, close or drain the successor's object.
+    """
+    scene = worker_scene
+    _install_fake_session_db_factory(monkeypatch)
+    monkeypatch.setattr(config, "SESSION_WRITEBACK_OWNERS", {})
+
+    def run_stream(stream_id):
+        return streaming._run_agent_streaming(
+            "original", "Do the task.", "test-model",
+            str(scene.session.workspace), stream_id,
+        )
+
+    # Prime the shared cache.
+    scene.run()
+    agent = scene.agent
+    assert config.SESSION_AGENT_CACHE.get("original") is not None
+
+    # Old worker: hold it inside the cached runtime refresh, after the cache-hit
+    # borrow and before the post-refresh cancellation re-check.
+    _arm_resend(scene, "run")
+    old_paused, release_old = threading.Event(), threading.Event()
+    real_refresh = streaming._refresh_cached_agent_runtime
+    refresh_calls = []
+
+    def gated_refresh(agent_obj, agent_kwargs):
+        refresh_calls.append(1)
+        if len(refresh_calls) == 1:
+            old_paused.set()
+            assert release_old.wait(10), "old worker was never released"
+        return real_refresh(agent_obj, agent_kwargs)
+
+    monkeypatch.setattr(streaming, "_refresh_cached_agent_runtime", gated_refresh)
+    old_thread = threading.Thread(target=lambda: run_stream("run"), daemon=True)
+    old_thread.start()
+    assert old_paused.wait(10), "old worker never reached the refresh window"
+    assert streaming.cancel_stream("run")
+
+    # Successor: same session, same cached Agent, blocked in run_conversation.
+    _arm_resend(scene, "run2")
+    successor_running, release_successor = threading.Event(), threading.Event()
+
+    def successor_on_run():
+        successor_running.set()
+        assert release_successor.wait(10), "successor was never released"
+
+    scene.on_run = successor_on_run
+    successor_thread = threading.Thread(target=lambda: run_stream("run2"), daemon=True)
+    successor_thread.start()
+    assert successor_running.wait(10), "successor never started running"
+
+    # Real Steer handler accepts guidance for the successor only.
+    steer = streaming._steer_bound_stream("original", "run2", "successor-only guidance")
+    assert steer and steer.get("accepted") is True, steer
+    assert agent.pending == ["successor-only guidance"]
+
+    # Release the cancelled old worker. Its terminal cleanup must leave the
+    # successor's guidance pending and must not drain it.
+    release_old.set()
+    old_thread.join(timeout=10)
+    assert not old_thread.is_alive()
+    leaked = list(agent.pending)
+    assert "successor-only guidance" not in "".join(scene.drained), (
+        "old cancelled worker drained the successor's pending guidance"
+    )
+
+    release_successor.set()
+    successor_thread.join(timeout=10)
+    assert leaked == ["successor-only guidance"], (
+        f"old cancelled worker consumed the successor's guidance: {leaked!r}"
+    )
 
 
 def test_installed_agent_exposes_clear_interrupt():
