@@ -6,6 +6,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from tests.js_source_extract import extract_function
+
 REPO = Path(__file__).resolve().parent.parent
 SESSIONS_JS = REPO / "static" / "sessions.js"
 NODE = shutil.which("node")
@@ -13,6 +15,12 @@ NODE = shutil.which("node")
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _optional_function(js: str, name: str, prefix: str = "function") -> str:
+    if f"{prefix} {name}(" in js:
+        return extract_function(js, name, prefix)
+    return ""
 
 
 def _run_load_session_failures(*, statuses, sid, route, saved, current_sid=None,
@@ -32,10 +40,12 @@ def _run_load_session_failures(*, statuses, sid, route, saved, current_sid=None,
     catch_start = boot.index("\n    catch(", load_call)
     catch_open = boot.index("{", catch_start)
     catch_close = boot.index("}", catch_open)
+    refresh_opts = _optional_function(js, "_sessionLoadWorkspaceRefreshOpts")
     spec = json.dumps({
         "load": js[load_start:load_end],
         "routeParser": js[route_start:route_end],
         "profileMismatchParser": js[mismatch_start:mismatch_end],
+        "refreshOpts": refresh_opts,
         "bootCatch": boot[catch_open + 1:catch_close],
         "statuses": statuses,
         "sid": sid,
@@ -91,7 +101,7 @@ const context = vm.createContext({{
     throw error;
   }}
 }});
-vm.runInContext(spec.profileMismatchParser + '\\n' + spec.routeParser + '\\n' + spec.load, context);
+vm.runInContext(spec.profileMismatchParser + '\\n' + spec.routeParser + (spec.refreshOpts ? ('\\n' + spec.refreshOpts) : '') + '\\n' + spec.load, context);
 (async()=>{{
   for(let i=0;i<spec.statuses.length;i++){{
     const retrySid=context._sessionIdFromLocation() || localStorage.getItem('hermes-webui-session');
@@ -148,12 +158,14 @@ def _run_continuation_restore(responses, *, attempts=1, current_sid=None,
         source_function("_clearComposerDraftRestoreSuppression"),
         source_function("_isComposerDraftRestoreSuppressed"),
     ])
+    refresh_opts = _optional_function(js, "_sessionLoadWorkspaceRefreshOpts")
     spec = json.dumps({
         "load": js[load_start:load_end],
         "routeParser": js[route_start:route_end],
         "profileMismatchParser": js[mismatch_start:mismatch_end],
         "draftDependencies": draft_dependencies,
         "draftRestore": js[draft_start:draft_end],
+        "refreshOpts": refresh_opts,
         "responses": responses,
         "attempts": attempts,
         "currentSid": current_sid,
@@ -229,7 +241,7 @@ const context=vm.createContext({{
   }}
 }});
 vm.runInContext(spec.draftDependencies+'\\n'+spec.draftRestore,context);
-vm.runInContext(spec.profileMismatchParser+'\\n'+spec.routeParser+'\\n'+spec.load,context);
+vm.runInContext(spec.profileMismatchParser+'\\n'+spec.routeParser+(spec.refreshOpts?('\\n'+spec.refreshOpts):'')+'\\n'+spec.load,context);
 (async()=>{{
   const errors=[];
   const attemptStates=[];

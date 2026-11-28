@@ -74,7 +74,9 @@ def test_every_writer_that_empties_the_tree_resets_its_role():
     workspace_js = (STATIC / "workspace.js").read_text(encoding="utf-8")
     sessions_js = (STATIC / "sessions.js").read_text(encoding="utf-8")
     assert "a11yTreeReset(box,{" in _function_body(UI_JS, "renderFileTree")
-    assert _function_body(UI_JS, "renderFileTree").count("treeEmptied();") == 2
+    # Three writers empty the container now: no workspace, empty folder, and the
+    # open preview that owns the pane (#9350 review).
+    assert _function_body(UI_JS, "renderFileTree").count("treeEmptied();") == 3
     body = _function_body(workspace_js, "showWorkspaceTreeSkeleton")
     # Reset before the wipe, so focus in the tree can move to the Files tab.
     assert body.index("a11yTreeReset(tree, {focusTo: $('workspaceFilesTab')})") < body.index("tree.innerHTML = ''")

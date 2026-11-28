@@ -1038,7 +1038,7 @@ function clearWorkspaceTreeSkeleton(){
 }
 
 async function loadDir(path, opts={}){
-  const preservePreview=!!(opts&&opts.preservePreview);
+  let preservePreview=!!(opts&&opts.preservePreview);
   const refreshExpanded=!!(opts&&opts.refreshExpanded);
   if(!S.session)return;
   const sessionId=S.session.session_id;
@@ -1096,6 +1096,12 @@ async function loadDir(path, opts={}){
         for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
       }
       if(expanded.size>0)renderFileTree({completesRefill:refill,scope:treeScope});
+    }
+    if(preservePreview && (
+      (typeof _previewBelongsToWorkspace==='function' && !_previewBelongsToWorkspace((S.session&&S.session.workspace)||''))
+      || (typeof _previewHiddenEditsOwnedHere==='function' && !_previewHiddenEditsOwnedHere())
+    )){
+      preservePreview=false;
     }
     if(!preservePreview&&typeof clearPreview==='function'){
       const hiddenEdits=typeof _previewHasUnsavedEdits==='function'&&_previewHasUnsavedEdits();
@@ -1289,6 +1295,7 @@ let _previewDirty = false;     // true when edits are unsaved (DERIVED — see _
 let _previewSavedText = null;  // text the editor was populated with / last saved (null = no baseline)
 let _previewEditSessionId = '';  // session the baseline was taken in (#8514 review)
 let _previewEditWorkspace = '';  // workspace the baseline was taken in (#8514 review)
+let _previewOpenWorkspace = '';  // workspace that supplied the open preview (#9350 review)
 let _previewServerEditable = null;  // backend editability metadata when available
 let _previewSaveRoute = '/api/file/save';  // current save adapter for the open preview
 let _previewOfficeFormat = '';  // current claimed Office format, if any
@@ -1355,10 +1362,12 @@ function _previewNeedsDiscardPrompt(){
 // can only be saved into that workspace. `false` means the editor belongs to a
 // different tree and must be dropped before the session's workspace moves.
 function _previewBelongsToWorkspace(ws){
-  if(_previewSavedText===null) return true;      // no editor carrying text
-  if(!_previewEditWorkspace) return true;        // unknown baseline → don't over-clear
+  // #9350 (review): a read-only preview is owned by the workspace that supplied its content;
+  // typeof keeps harnesses that only declare the edit owner working.
+  const owner=_previewEditWorkspace||(typeof _previewOpenWorkspace==='string'?_previewOpenWorkspace:'')||'';
+  if(!owner) return true;                        // unknown owner → don't over-clear
   if(!ws) return true;
-  return String(_previewEditWorkspace)===String(ws);
+  return String(owner)===String(ws);
 }
 function _resetPreviewDirty(){
   _previewSavedText=null;
@@ -1427,6 +1436,10 @@ async function toggleEditMode(){
     showToast('This Office document is preview-only.', 3000, 'error');
     return;
   }
+  // #9350: never adopt a preview whose content came from another workspace.
+  if(typeof _previewBelongsToWorkspace==='function'
+     &&!_previewBelongsToWorkspace((S.session&&S.session.workspace)||'')){
+    if(typeof clearPreview==='function')clearPreview({keepPanelOpen:true});showToast(t('file_open_failed'),2500,'error');return;}
   if(editing){
     // Save
     if(!S.session||!_previewCurrentPath)return;
@@ -1460,6 +1473,7 @@ async function toggleEditMode(){
       showToast(t('saved'));
     }catch(e){setStatus(t('save_failed')+e.message);}
   }else{
+    if(!_previewCurrentPath)return;   // the preview was dropped: nothing to edit
     // Enter edit mode: populate textarea with current content
     const currentText = _previewCurrentMode==='code'
       ? $('previewCode').textContent
@@ -1548,6 +1562,9 @@ async function openFile(path, opts={}){
   $('fileTree').style.display='none';
 
   _previewCurrentPath = path;
+  // #9350 (review): every branch below reads its content through this session, so this
+  // is the workspace a relative Save resolves against. Record it before the first await.
+  _previewOpenWorkspace=(S.session && S.session.workspace) || '';
   // #6710: this open's ownership token (see _previewOpenOwned). Captured before
   // the first await of any branch so a slower completion can be recognised as
   // stale and rejected instead of committing over a newer preview.

@@ -2848,7 +2848,17 @@ function clearPreview(opts={}){
   const pc=$('previewCode');if(pc)pc.textContent='';
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
+  // #9350: with the preview owning the pane, renderFileTree() EMPTIES the
+  // container, so unhiding it no longer brings the rows back. Rebuild them from
+  // the directory that is already loaded (renderFileTree() renders S.entries; it
+  // does not fetch). Guarded for partial harnesses: a stubbed element may have no
+  // children collection, and S/session may be absent.
+  if(ft&&ft.children&&!ft.children.length&&typeof renderFileTree==='function'
+     &&typeof S!=='undefined'&&S&&S.session){
+    renderFileTree({});
+  }
   _previewCurrentPath='';_previewCurrentMode='';
+  _previewOpenWorkspace='';
   // Reset the editor baseline as well, so a later preview cannot inherit a
   // stale "unsaved" comparison from the file that was just closed (#8514).
   if(typeof _resetPreviewDirty==='function') _resetPreviewDirty(); else _previewDirty=false;

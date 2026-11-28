@@ -37,6 +37,8 @@ def _source():
         "_messageReloadLimitForSession",
     )
     functions = [extract_function(sessions, name) for name in names]
+    if "function _sessionLoadWorkspaceRefreshOpts(" in sessions:
+        functions.append(extract_function(sessions, "_sessionLoadWorkspaceRefreshOpts"))
     for name in ("loadSession", "_ensureMessagesLoaded", "_ensureAllMessagesLoaded"):
         functions.append(extract_function(sessions, name, "async function"))
     functions.append(extract_function(ui, "regenerateResponse", "async function"))
