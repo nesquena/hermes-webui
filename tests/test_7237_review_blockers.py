@@ -2218,3 +2218,45 @@ class TestRoundNDirectBranchDiscriminators:
             "zero rows; it must not fail closed and drop the raw context "
             "(#7237 round-N blocker 2)"
         )
+
+
+def test_settlement_reports_first_projected_mismatch(caplog):
+    caplog.set_level("INFO")
+    projected = [
+        {"role": "user", "content": "private-prompt"},
+        {"role": "assistant", "tool_calls": [{"id": "private-tool"}]},
+        {"role": "tool", "content": "private-result"},
+    ]
+    raw = [dict(row, timestamp=1) for row in projected]
+    reply = {"role": "assistant", "content": "new reply"}
+    changed = [projected[0], dict(projected[1], tool_calls=[]),
+               dict(projected[2], content="changed"), reply]
+    for returned, detail in [
+        (changed, "index=1 field=tool_calls projected_len=3 returned_len=4"),
+        (projected[:2], "index=2 field=returned_exhausted projected_len=3 returned_len=2"),
+    ]:
+        caplog.clear()
+        settled, _ = _dedupe_replayed_context_messages(
+            raw, returned, "next", None, projected_history=projected,
+        )
+        assert settled == raw
+        assert detail in caplog.text
+        fail_closed_logs = [
+            record for record in caplog.records
+            if record.levelname == "INFO"
+            and (
+                "Projected history not a strict exact prefix and no verified "
+                "tail-merge: failing closed, keeping raw pre-turn context "
+                "(3 rows)"
+            ) in record.getMessage()
+        ]
+        assert len(fail_closed_logs) == 1
+        assert "private-" not in caplog.text
+
+    caplog.clear()
+    settled, _ = _dedupe_replayed_context_messages(
+        raw, raw + [reply], "next", None, projected_history=projected,
+    )
+    assert settled == raw + [reply]
+    assert "projected_len=" not in caplog.text
+    assert "failing closed, keeping raw pre-turn context" not in caplog.text
