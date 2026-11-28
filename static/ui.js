@@ -11276,8 +11276,13 @@ function renderMd(raw){
     };
     for(const raw of lines){
       const line=String(raw||'');
-      const om=line.match(/^(\s*)(\d+)\.\s+(.*)$/);
-      const um=line.match(/^(\s*)([-*+])\s+(.*)$/);
+      // Item text is matched with ([^\n]*) rather than (.*): JS `.` does not
+      // match U+2028/U+2029 and `$` without `m` anchors at end-of-string, so a
+      // line containing either separator matched neither pattern, fell to the
+      // continuation branch, and was dropped when no item was open yet (#9217).
+      // Lines arrive already split on \n, so [^\n]* is exactly "rest of line".
+      const om=line.match(/^(\s*)(\d+)\.\s+([^\n]*)$/);
+      const um=line.match(/^(\s*)([-*+])\s+([^\n]*)$/);
       const m=om||um;
       if(m){
         const depth=m[1].length<2?0:Math.floor(m[1].length/2);
