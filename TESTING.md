@@ -489,6 +489,34 @@ Run it locally with
 `python tests/browser_file_tree_keyboard.py`; add `--screenshots DIR` to write
 the Files tab with keyboard focus on a row at 1440x900 and 390x844.
 
+Also in that job, `tests/browser_composer_status_label.py` guards the
+focus-to-reveal treatment of the composer status row (#7856). The row clips long
+prefill context names and `title` only reaches mouse users, so
+`setComposerStatus()` makes it focusable. Above 640px the reveal is an
+out-of-flow disclosure bubble on `.composer-footer::after`, capped with `100cqw`
+against the composer row; below 640px the row expands in place.
+Each of three phone viewports (390x844, 360x740, 320x700) x four labels (a short
+one, a medium one, a ~55-character spaced one, and an unbroken ~126-character
+one) x two focus paths (a real tap and Tab from the composer) asserts that the
+focused label is fully readable — normal wrapping, nothing clipped horizontally
+or vertically — that the Send control's 44x44 rect stays inside the viewport
+with its centre hit-testable, that `documentElement.scrollWidth` does not exceed
+the viewport, and that an ordinary send still POSTs the typed text to
+`/api/chat/start`. A content-sized percentage cap silently collapses a short
+label to 0px, which is why the short and medium labels are in the matrix.
+
+A second section runs the schedule that lost the click above 640px: 1440x900,
+1920x1000, 800x900 and 844x390 (touch) with a ~128-character label. The draft is
+typed with the status collapsed, then the label is revealed, then Send is
+pressed while the row still has focus. Each case asserts that revealing the
+label does not move Send (within 1.5px on every edge — an in-flow reveal moved it
+by up to 396px and the click then landed on a container), that Send stays
+hit-testable and inside the viewport, and that the POST carries the typed
+message. The `lost-click` arm also passes on master, where the row is not
+focusable, so it is a true regression rather than a new-behavior spec; the
+`reveal` arm additionally requires the focusable row and the disclosed label.
+Run it locally with `python tests/browser_composer_status_label.py`.
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic
