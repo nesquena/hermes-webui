@@ -569,6 +569,7 @@ def _settle_gateway_run_approval(
     """
     from api.route_approvals import (
         gateway_yolo_handoff,
+        is_protected_approval,
         settle_gateway_pending_run,
         submit_gateway_pending_mirror,
     )
@@ -579,7 +580,13 @@ def _settle_gateway_run_approval(
     with gateway_yolo_handoff(session_id):
         if cancel_event is not None and cancel_event.is_set():
             return False, None, 0
-        if _gateway_session_yolo_enabled(session_id):
+        # Session YOLO answers command approvals. An elicitation / publish
+        # approval is consent for an outbound side effect the user never
+        # pre-authorised, so it always surfaces as a card (#9108).
+        if (
+            _gateway_session_yolo_enabled(session_id)
+            and not is_protected_approval(approval_data)
+        ):
             try:
                 _auto_approve_gateway_run(
                     base_url,
@@ -849,6 +856,7 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
         allow_permanent = "always" in choices
     if not (tool or command or description):
         return None
+    surface = str(payload.get("surface") or "").strip()
     return {
         "tool": tool,
         "command": command,
@@ -859,6 +867,10 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
         "risk_level": risk,
         "run_id": run_id,
         "approval_id": approval_id,
+        # Kept when present: `surface` is how a consent prompt for an outbound
+        # send or a public post is marked, and the YOLO settle must see it to
+        # refuse answering it (#9108).
+        **({"surface": surface} if surface else {}),
         "_gateway_raw_approval_id_present": bool(raw_approval_id),
         "_gateway_execution_generation": execution_generation,
         "choices": choices,
