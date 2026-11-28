@@ -118,6 +118,7 @@ Run the repo bootstrap:
 ```bash
 git clone https://github.com/nesquena/hermes-webui.git hermes-webui
 cd hermes-webui
+python3 bootstrap.py --setup
 python3 bootstrap.py
 ```
 
@@ -169,8 +170,8 @@ Two optional, self-hosted-deployment features — attaching dynamic **session-re
 
 The bootstrap will:
 
-1. Detect Hermes Agent and, if missing, attempt the official installer (`curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`).
-2. Find or create a Python environment with the WebUI dependencies.
+1. Discover Hermes Agent and resolve its Python. On a fresh install, run `python3 bootstrap.py --setup` once to install missing prerequisites.
+2. Check the Agent and WebUI imports in that interpreter. Normal starts never invoke the WebUI dependency installer.
 3. Start the web server and wait for `/health`.
 4. Open the browser unless you pass `--no-browser`.
 5. Drop you into a first-run onboarding wizard inside the WebUI.
@@ -418,12 +419,12 @@ before the session's named-profile Gateway ownership is known.
 | Thing | How it finds it |
 |---|---|
 | Hermes agent dir | `HERMES_WEBUI_AGENT_DIR`, then valid authoritative `run_agent.py` checkouts, the `hermes` launcher, the selected Python, valid fallback checkouts, and finally marker-only roots |
-| Python executable | `HERMES_WEBUI_PYTHON`, Agent venv, interpreter that proved the Agent root, `.venv` in this repo, then system Python |
+| Python executable | `HERMES_WEBUI_PYTHON`, interpreter that proved the Agent root, Hermes PM store Python, Agent venv, `.venv` in this repo, then system Python |
 | State directory | `HERMES_WEBUI_STATE_DIR` env, then `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`) |
 | Default workspace | `HERMES_WEBUI_DEFAULT_WORKSPACE` env, then `~/workspace`, then state dir |
 | Port | `HERMES_WEBUI_PORT` env or first argument, default `8787` |
 
-Before it installs the agent or writes any state, the bootstrap binds the resolved host and port as a preflight. If another service already holds the port, it stops right there, names the address it could not bind, and prints a free alternative to pass to `./start.sh <port>` or set as `HERMES_WEBUI_PORT` in `.env`. The running service and your existing configuration are left untouched. When the listener on that port is a healthy WebUI -- the instance you already started -- bootstrap reports it ready and leaves it alone, browser included; only a foreign service gets the conflict message.
+Before it starts the server or writes WebUI state, the bootstrap binds the resolved host and port as a preflight. If another service already holds the port, it stops right there, names the address it could not bind, and prints a free alternative to pass to `./start.sh <port>` or set as `HERMES_WEBUI_PORT` in `.env`. The running service and your existing configuration are left untouched. When the listener on that port is a healthy WebUI -- the instance you already started -- bootstrap reports it ready and leaves it alone, browser included; only a foreign service gets the conflict message.
 
 If discovery finds everything, nothing else is required.
 
@@ -435,11 +436,10 @@ If discovery finds everything, nothing else is required.
 export HERMES_WEBUI_AGENT_DIR=/path/to/hermes-agent
 export HERMES_WEBUI_PYTHON=/path/to/python
 export HERMES_WEBUI_PORT=9000
-export HERMES_WEBUI_AUTO_INSTALL=1  # enable auto-install of agent deps (disabled by default)
 ./start.sh
 ```
 
-Auto-install requires the selected Agent to match `HERMES_WEBUI_AGENT_DIR` or the Agent under `HERMES_HOME`, and still checks ownership and permissions.
+For a legacy Agent, `HERMES_WEBUI_AUTO_INSTALL=1 python3 bootstrap.py --setup` explicitly installs its dependencies. This requires the selected Agent to match `HERMES_WEBUI_AGENT_DIR` or the Agent under `HERMES_HOME`, and still checks ownership and permissions.
 
 Or inline:
 

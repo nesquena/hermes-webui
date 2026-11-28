@@ -6,7 +6,7 @@ other services.
 
 ## TL;DR
 
-Pass ``--foreground`` to ``bootstrap.py`` (or ``bash start.sh``):
+Run `python3 bootstrap.py --setup` interactively once. Pass ``--foreground`` to ``bootstrap.py`` (or ``bash start.sh``):
 
 ```bash
 bash start.sh --foreground
@@ -35,8 +35,13 @@ respawns again — loop.
 
 In foreground mode, ``bootstrap.py`` does its setup work and then calls
 ``os.execv`` to replace its own process with ``server.py``. The supervisor
-sees the long-lived server as the original child. ``KeepAlive=true`` /
-``Restart=always`` work correctly.
+sees the long-lived server as the original child. A missing runtime produces
+configuration exit code 78. Under a recognized launchd job, bootstrap logs
+the remedy and sleeps until stopped, since unconditional KeepAlive restarts
+every exit. Three launches of the same port within five minutes also suspend
+the job if the server crashes after preflight. After repair and expiry of
+that window, restart the job. Service managers should rate-limit
+other startup failures.
 
 ## Stopping: the bounded run drain
 
@@ -184,6 +189,9 @@ the server exits or ``TimeoutStopSec`` expires, whichever comes first.
     <true/>
 
     <!-- Stop timeout: drain budget (default 90s) + 30s. See "Stopping". -->
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
     <key>ExitTimeOut</key>
     <integer>120</integer>
 
@@ -230,13 +238,16 @@ The flag is still recommended as documentation of intent.
 [Unit]
 Description=Hermes Web UI
 After=network.target
+StartLimitIntervalSec=120
+StartLimitBurst=3
 
 [Service]
 Type=simple
 WorkingDirectory=%h/hermes-webui
 ExecStart=/bin/bash %h/hermes-webui/start.sh --foreground
 Restart=on-failure
-RestartSec=5
+RestartSec=10
+RestartPreventExitStatus=78
 # Let active agent runs drain on stop: SIGTERM only the server (child tool
 # processes are SIGKILLed when it exits or the timeout expires), and wait the
 # drain budget (HERMES_WEBUI_SHUTDOWN_DRAIN_SECONDS, default 90) + 30s.
@@ -272,7 +283,9 @@ command=/bin/bash /home/youruser/hermes-webui/start.sh --foreground
 directory=/home/youruser/hermes-webui
 user=youruser
 autostart=true
-autorestart=true
+autorestart=unexpected
+exitcodes=0,78
+startretries=3
 stopsignal=TERM
 ; drain budget (HERMES_WEBUI_SHUTDOWN_DRAIN_SECONDS, default 90) + 30s
 stopwaitsecs=120

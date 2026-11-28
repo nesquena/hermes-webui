@@ -8,7 +8,7 @@ setup, or first-run support, read
 [`docs/onboarding-agent-checklist.md`](onboarding-agent-checklist.md) before
 running commands or inspecting logs.
 
-The short version: run the bootstrap, open the WebUI, choose a provider, choose
+The short version: run `python3 bootstrap.py --setup` once, then run the bootstrap, open the WebUI, choose a provider, choose
 a workspace, optionally set a password, then start a chat. If you are using a
 local model server from Docker, pay special attention to the Base URL section
 below.
@@ -73,8 +73,7 @@ For managed hosting or fully preconfigured images, set
 
 ## If the port is already in use
 
-The bootstrap checks the resolved host and port before it installs the agent,
-sets up dependencies, or creates state. When another service already holds
+The bootstrap checks the resolved host and port before a normal launch creates WebUI state. When another service already holds
 the port, it stops there and reports the address it could not bind together
 with a free alternative it verified, for example:
 
