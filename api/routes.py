@@ -26468,12 +26468,56 @@ def _tts_addr_is_blocked(ip_str: str) -> bool:
     )
 
 
-def _tts_host_is_blocked_target(hostname: str) -> bool:
+def _tts_has_private_host_approval(hostname: str, allow_private_hosts) -> bool:
+    """True when ``hostname`` (already lower/literal, as found in a base_url) is
+    exactly listed in the operator-approved private-host allowlist (#9349).
+
+    The allowlist is an exact-host opt-in, never a network/range switch: it
+    names the specific host (literal IP or hostname literal written in the
+    config) the operator owns on their LAN/Tailscale and wants the TTS proxy to
+    reach. Mismatching or malformed values fail closed (return False), so a bad
+    config revokes, rather than broadens, approval. This keeps the SSRF surface
+    per-host and default-deny.
+    """
+    if not isinstance(allow_private_hosts, (list, tuple, set)):
+        return False
+    for item in allow_private_hosts:
+        if not isinstance(item, str):
+            continue
+        if item.strip().lower() == hostname:
+            return True
+    return False
+
+
+def _tts_normalized_private_hosts(allow_private_hosts) -> tuple:
+    """Pre-normalize an operator allowlist for request-scoped pinning.
+
+    Returns a tuple of lowercased, stripped hostname literals. A non-list /
+    malformed value yields an empty tuple, so the caller's pinning step stays
+    fail-closed (no private host approved) rather than silently trusting a
+    mis-typed config that could otherwise behave as a broad approval.
+    """
+    if not isinstance(allow_private_hosts, (list, tuple, set)):
+        return ()
+    out = []
+    for item in allow_private_hosts:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip().lower())
+    return tuple(out)
+
+
+def _tts_host_is_blocked_target(hostname: str, *, allow_private_hosts=None) -> bool:
     """True if the hostname resolves to (or literally is) a private / loopback /
     link-local / reserved / multicast address — the SSRF-risk targets that an
     OpenAI-compatible TTS base_url must not be allowed to reach. Public hosts
     (a user's own hosted OpenAI-compatible server) are allowed; the explicit
-    localhost-over-http dev case is handled separately by the caller."""
+    localhost-over-http dev case is handled separately by the caller.
+
+    ``allow_private_hosts`` is an optional exact-host opt-in (#9349): when the
+    hostname itself (not its resolved target) is listed, the block is lifted
+    for that host so an operator can point the proxy at their own LAN/Tailscale
+    server. Default (no allowlist) preserves the fail-closed SSRF posture.
+    """
     import ipaddress
     import socket
 
@@ -26484,6 +26528,8 @@ def _tts_host_is_blocked_target(hostname: str) -> bool:
     # Literal IP host?
     try:
         ipaddress.ip_address(host)
+        if _tts_has_private_host_approval(host, allow_private_hosts):
+            return False
         return _tts_addr_is_blocked(host)
     except ValueError:
         pass
@@ -26499,6 +26545,10 @@ def _tts_host_is_blocked_target(hostname: str) -> bool:
         infos = socket.getaddrinfo(host, None)
     except Exception:
         return False
+    if _tts_has_private_host_approval(host, allow_private_hosts):
+        # The operator named this exact DNS hostname; trust the DNS resolution
+        # for it (still subject to pinning in the connection path).
+        return False
     for info in infos:
         sockaddr = info[4]
         if sockaddr and _tts_addr_is_blocked(str(sockaddr[0])):
@@ -26506,8 +26556,16 @@ def _tts_host_is_blocked_target(hostname: str) -> bool:
     return False
 
 
-def _tts_resolve_pinned_addresses(hostname: str, port: int | None) -> list[str]:
-    """Resolve once, validate the RRset, and preserve candidate dial order."""
+def _tts_resolve_pinned_addresses(
+    hostname: str, port: int | None, *, allow_private_hosts=None
+) -> list[str]:
+    """Resolve once, validate the RRset, and preserve candidate dial order.
+
+    ``allow_private_hosts`` (#9349) is an exact-host opt-in: when the requested
+    hostname is operator-listed, the SSRF block at pinning time is lifted so the
+    proxy can dial the operator's own LAN/Tailscale server. Pinning still runs,
+    so the address actually dialed equals the address resolved here.
+    """
     import socket
 
     host = (hostname or "").strip().lower()
@@ -26518,13 +26576,14 @@ def _tts_resolve_pinned_addresses(hostname: str, port: int | None) -> list[str]:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except Exception as exc:
         raise ValueError("could not resolve OpenAI TTS base_url host") from exc
+    private_approved = _tts_has_private_host_approval(host, allow_private_hosts)
     pinned_hosts = []
     for info in infos:
         sockaddr = info[4]
         if not sockaddr:
             continue
         pinned_host = str(sockaddr[0])
-        if _tts_addr_is_blocked(pinned_host):
+        if not private_approved and _tts_addr_is_blocked(pinned_host):
             raise ValueError("resolved OpenAI TTS target is not allowed")
         pinned_hosts.append(pinned_host)
     if not pinned_hosts:
@@ -26532,12 +26591,12 @@ def _tts_resolve_pinned_addresses(hostname: str, port: int | None) -> list[str]:
     return pinned_hosts
 
 
-def _tts_resolve_pinned_address(hostname: str) -> str:
+def _tts_resolve_pinned_address(hostname: str, *, allow_private_hosts=None) -> str:
     """Return the first vetted literal address for direct helper callers."""
-    return _tts_resolve_pinned_addresses(hostname, None)[0]
+    return _tts_resolve_pinned_addresses(hostname, None, allow_private_hosts=allow_private_hosts)[0]
 
 
-def _normalized_openai_tts_base_url(base_url: str) -> str:
+def _normalized_openai_tts_base_url(base_url: str, *, allow_private_hosts=None) -> str:
     from urllib.parse import urlsplit, urlunsplit
 
     raw = str(base_url or "").strip()
@@ -26551,10 +26610,18 @@ def _normalized_openai_tts_base_url(base_url: str) -> str:
         # Public https hosts are allowed (a user's own OpenAI-compatible server),
         # but reject private/loopback/link-local/reserved targets to close the
         # SSRF surface (e.g. https://169.254.169.254, https://10.x internal).
-        if _tts_host_is_blocked_target(hostname):
+        # An operator can opt a specific host in via ``allow_private_hosts``
+        # (#9349), never changing the default-deny posture.
+        if _tts_host_is_blocked_target(hostname, allow_private_hosts=allow_private_hosts):
             raise ValueError("invalid OpenAI base_url in config")
     elif parsed.scheme == "http" and hostname in _TTS_LOCALHOST_HOSTS:
         # Explicit localhost-over-http dev/self-hosted case only.
+        pass
+    elif parsed.scheme == "http" and _tts_has_private_host_approval(
+        hostname, allow_private_hosts
+    ):
+        # Operator-approved private host over plain http (#9349). Only reachable
+        # when the exact host is allowlisted; everything else fails closed.
         pass
     else:
         raise ValueError("invalid OpenAI base_url in config")
@@ -26610,10 +26677,16 @@ class _NoRedirectTtsHandler(HTTPRedirectHandler):
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     """Connect to a pinned IP while keeping Host and TLS SNI on the hostname."""
 
+    # #9349 exact-host opt-in, attached by _PinnedHTTPSHandler. Empty by default,
+    # so ordinary connections keep the fail-closed SSRF posture.
+    allow_private_hosts = ()
+
     def connect(self):
         sys.audit("http.client.connect", self, self.host, self.port)
         last_error = None
-        for pinned_host in _tts_resolve_pinned_addresses(self.host, self.port):
+        for pinned_host in _tts_resolve_pinned_addresses(
+            self.host, self.port, allow_private_hosts=self.allow_private_hosts
+        ):
             try:
                 self.sock = _socket.create_connection(
                     (pinned_host, self.port), self.timeout, self.source_address
@@ -26638,9 +26711,79 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname)
 
 
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """Connect to a pinned IP for an operator-approved plain-http host (#9349).
+
+    The https sibling keeps TLS SNI on the hostname; a plain-http dial has no
+    TLS layer, so this only pins the address that actually gets dialled.
+    """
+
+    allow_private_hosts = ()
+
+    def connect(self):
+        sys.audit("http.client.connect", self, self.host, self.port)
+        last_error = None
+        for pinned_host in _tts_resolve_pinned_addresses(
+            self.host, self.port, allow_private_hosts=self.allow_private_hosts
+        ):
+            try:
+                self.sock = _socket.create_connection(
+                    (pinned_host, self.port),
+                    self.timeout,
+                    getattr(self, "source_address", None),
+                )
+                break
+            except OSError as exc:
+                last_error = exc
+        else:
+            if last_error is not None:
+                raise last_error
+            raise OSError("could not connect to any pinned OpenAI TTS target")
+        try:
+            self.sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+        except OSError as exc:
+            if exc.errno != errno.ENOPROTOOPT:
+                raise
+
+
 class _PinnedHTTPSHandler(HTTPSHandler):
+    # #9349: exact-host allowlist for this request/opener. Empty by default.
+    allow_private_hosts = ()
+
     def https_open(self, req):
-        return self.do_open(_PinnedHTTPSConnection, req, context=self._context)
+        opts = tuple(self.allow_private_hosts or ())
+        if opts:
+            # do_open() constructs the connection class itself, so carry the
+            # request-scoped allowlist on a per-opener subclass instead of
+            # mutating module/class state shared across threads.
+            scoped_connection = type(
+                "_ScopedPinnedHTTPSConnection",
+                (_PinnedHTTPSConnection,),
+                {"allow_private_hosts": opts},
+            )
+        else:
+            scoped_connection = _PinnedHTTPSConnection
+        return self.do_open(scoped_connection, req, context=self._context)
+
+    def http_open(self, req):
+        """Pin the dial for an approved plain-http private host (#9349).
+
+        Without this the opener falls through to urllib's default HTTPHandler,
+        which resolves the name again at connect time — so an approved hostname
+        whose DNS answer changes between validation and dial would reach an
+        unapproved address, and the pinning that protects the https path would
+        simply not exist here. Only taken when the operator allowlisted a host;
+        an empty allowlist leaves the opener chain untouched.
+        """
+        opts = tuple(self.allow_private_hosts or ())
+        if not opts:
+            return None
+        scoped_connection = type(
+            "_ScopedPinnedHTTPConnection",
+            (_PinnedHTTPConnection,),
+            {"allow_private_hosts": opts},
+        )
+        return self.do_open(scoped_connection, req)
 
 
 def _tts_open(req, *, timeout=30, opener_factory=None):
@@ -26984,13 +27127,18 @@ def _handle_tts(handler, parsed):
         base_url = _urlunsplit(("https", "api.openai.com", "/v1", "", ""))
         model = "gpt-4o-mini-tts"
         oai_voice = "alloy"
+        allow_private_hosts = None
         try:
             from api.config import get_config
             tts_cfg = (get_config() or {}).get("tts", {})
             if isinstance(tts_cfg, dict):
                 oai_cfg = tts_cfg.get("openai", {})
                 if isinstance(oai_cfg, dict):
-                    base_url = _normalized_openai_tts_base_url(oai_cfg.get("base_url") or base_url)
+                    allow_private_hosts = oai_cfg.get("allow_private_hosts")
+                    base_url = _normalized_openai_tts_base_url(
+                        oai_cfg.get("base_url") or base_url,
+                        allow_private_hosts=allow_private_hosts,
+                    )
                     model = oai_cfg.get("model") or model
                     oai_voice = oai_cfg.get("voice") or oai_voice
                 else:
@@ -27019,8 +27167,14 @@ def _handle_tts(handler, parsed):
         # Use a pinned HTTPS opener so the resolved address is the one that gets
         # dialed. Keep the no-redirect handler in the same chain to block
         # bearer leaks and SSRF bounce redirects after hostname validation.
+        # The exact-host allowlist (#9349) is request-scoped on the handler so
+        # concurrent TTS requests cannot share one operator's approval.
+        pinned_handler = _PinnedHTTPSHandler()
+        pinned_handler.allow_private_hosts = _tts_normalized_private_hosts(
+            allow_private_hosts
+        )
         try:
-            with _tts_open(req, timeout=30, opener_factory=lambda: build_opener(ProxyHandler({}), _NoRedirectTtsHandler(), _PinnedHTTPSHandler())) as resp:
+            with _tts_open(req, timeout=30, opener_factory=lambda: build_opener(ProxyHandler({}), _NoRedirectTtsHandler(), pinned_handler)) as resp:
                 audio_data = _buffer_tts_audio_response(resp)
         except ValueError:
             logger.warning("OpenAI TTS rejected an invalid upstream response", exc_info=True)
