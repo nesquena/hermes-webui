@@ -216,7 +216,10 @@ def test_update_flows_keep_explicit_longer_timeouts():
     # /api/updates/check builds its body in a _checkBody var (to optionally add
     # an explicit channel). Both boot and manual callers need enough time for
     # the endpoint's bounded fetches; api() does not retry ordinary timeouts.
-    assert "api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000})" in boot
+    assert "api('api/updates/check',{method:'POST',body:JSON.stringify({force:false}),timeoutMs:300000,timeoutToast:false})" in boot
+    # ?test_updates=1 keeps its own simulation GET, same 300 s budget (PR #6480
+    # split the one-shot ternary into two explicit call sites).
+    assert "api('api/updates/check?simulate=1',{method:'GET',timeoutMs:300000})" in boot
     assert "api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000})" in panels
     assert "api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null}),timeoutMs:60000})" in src
     # apply/force also need time for bounded fetch/pull and restart recovery.

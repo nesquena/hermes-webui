@@ -10043,6 +10043,9 @@ function _schedulePreferencesAutosave(){
 async function _autosavePreferencesSettings(payload){
   try{
     const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
+    if(payload&&payload.check_for_updates!==undefined&&typeof window._setUpdateCheckEnabled==='function'){
+      window._setUpdateCheckEnabled((saved&&saved.check_for_updates!==undefined)?saved.check_for_updates:payload.check_for_updates);
+    }
     if(payload&&payload.screen_reader_mode!==undefined){
       setScreenReaderMode(saved&&saved.screen_reader_mode);
     }
@@ -13601,6 +13604,11 @@ async function checkUpdatesNow(channelOverride){
     const _checkBody={force:true};
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
     const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
+    const _owner=(typeof window!=='undefined')?(window._updateCheckOwner=window._updateCheckOwner||{generation:0,manualPending:0}):null;
+    if(_owner){
+      _owner.generation=(_owner.generation||0)+1;
+      _owner.manualPending=(_owner.manualPending||0)+1;
+    }
     const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
@@ -13674,6 +13682,10 @@ async function checkUpdatesNow(channelOverride){
     }
     if(status){status.textContent=userMsg;status.style.color='var(--error)';}
   } finally {
+    const _owner=(typeof window!=='undefined')?window._updateCheckOwner:null;
+    if(_owner&&_owner.manualPending>0){
+      _owner.manualPending-=1;
+    }
     btn.disabled=false;
     if(spinner) spinner.style.display='none';
     if(label) label.textContent=t('settings_check_now');
@@ -14279,6 +14291,9 @@ async function saveSettings(andClose){
     if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
     try{
       const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
+      if(payload&&payload.check_for_updates!==undefined&&typeof window._setUpdateCheckEnabled==='function'){
+        window._setUpdateCheckEnabled((saved&&saved.check_for_updates!==undefined)?saved.check_for_updates:payload.check_for_updates);
+      }
       if(modelChanged && model){
         try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
@@ -14322,6 +14337,9 @@ async function saveSettings(andClose){
   }
   try{
     const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(body)});
+    if(body&&body.check_for_updates!==undefined&&typeof window._setUpdateCheckEnabled==='function'){
+      window._setUpdateCheckEnabled((saved&&saved.check_for_updates!==undefined)?saved.check_for_updates:body.check_for_updates);
+    }
     if(modelChanged && model){
       try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});

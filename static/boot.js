@@ -4329,13 +4329,78 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     _applyComposerFooterVisibilitySettings();
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }
-  // Non-blocking update check (fire-and-forget, once per tab session)
-  // ?test_updates=1 in URL forces banner display for testing (bypasses sessionStorage guards)
+  // Non-blocking update check (re-checks on tab focus + periodic poll).
+  // Overlapping triggers (boot, visibilitychange, 30-min timer) are coalesced
+  // behind one boot-scope in-flight promise: callers arriving while a request
+  // is pending share that promise instead of issuing duplicate POSTs, and the
+  // token is cleared in finally so a later trigger can run after settlement.
+  // ?test_updates=1 in URL forces banner display for testing (bypasses dismissed guard)
   const _testUpdates=new URLSearchParams(location.search).get('test_updates')==='1';
-  if(_testUpdates||(_bootSettings.check_for_updates!==false&&!sessionStorage.getItem('hermes-update-checked')&&!sessionStorage.getItem('hermes-update-dismissed'))){
-    const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
-    const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
-    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d,_recoveryGenerationAtCheck);}).catch(()=>{});
+  window._updateCheckOwner=window._updateCheckOwner||{generation:0,manualPending:0};
+  let _updateCheckInFlight=null;
+  let _updateCheckTimer=null;
+  const _checkUpdates=()=>{
+    const _owner=(typeof window!=='undefined')?(window._updateCheckOwner=window._updateCheckOwner||{generation:0,manualPending:0}):null;
+    if(_owner&&_owner.manualPending>0) return;
+    if(_bootSettings.check_for_updates===false||sessionStorage.getItem('hermes-update-dismissed')) return;
+    if(_updateCheckInFlight) return _updateCheckInFlight;
+    // The banner must not be rendered from a check that started before an
+    // update-recovery restart: capture the recovery generation per request
+    // (the boot one-shot captured it right before its own POST).
+    const _recoveryGenAtCheck=Number(window._updateRecoveryGeneration)||0;
+    const _checkGen=_owner?_owner.generation:0;
+    _updateCheckInFlight=api('api/updates/check',{method:'POST',body:JSON.stringify({force:false}),timeoutMs:300000,timeoutToast:false}).then(d=>{
+      if(_owner&&_owner.generation!==_checkGen) return;
+      if(d&&d.disabled){
+        if(_bootSettings)_bootSettings.check_for_updates=false;
+        return;
+      }
+      // Re-check dismissed state after fetch — the user may have dismissed
+      // the banner while the request was in flight, preventing a race where
+      // _showUpdateBanner() re-displays a banner the user just closed.
+      if(sessionStorage.getItem('hermes-update-dismissed')) return;
+      if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0)) _showUpdateBanner(d,_recoveryGenAtCheck);
+    }).catch(()=>{}).finally(()=>{_updateCheckInFlight=null;});
+    return _updateCheckInFlight;
+  };
+  const _setUpdateCheckEnabled=window._setUpdateCheckEnabled=(enabled)=>{
+    if(enabled===false){
+      if(_bootSettings) _bootSettings.check_for_updates=false;
+      if(_updateCheckTimer){
+        clearInterval(_updateCheckTimer);
+        _updateCheckTimer=null;
+      }
+      if(_setUpdateCheckEnabled._visibilityHandler){
+        document.removeEventListener('visibilitychange',_setUpdateCheckEnabled._visibilityHandler);
+        _setUpdateCheckEnabled._visibilityHandler=null;
+      }
+      return;
+    }
+    if(_bootSettings) _bootSettings.check_for_updates=true;
+    if(!_setUpdateCheckEnabled._visibilityHandler){
+      const vh=()=>{if(document.visibilityState==='visible') _checkUpdates();};
+      _setUpdateCheckEnabled._visibilityHandler=vh;
+      document.addEventListener('visibilitychange',vh);
+    }
+    if(!_updateCheckTimer){
+      _updateCheckTimer=setInterval(_checkUpdates,1800000);
+    }
+  };
+  if(_testUpdates){
+    const _recoveryGenAtCheck=Number(window._updateRecoveryGeneration)||0;
+    api('api/updates/check?simulate=1',{method:'GET',timeoutMs:300000}).then(d=>_showUpdateBanner(d,_recoveryGenAtCheck)).catch(()=>{});
+  }else{
+    _checkUpdates();
+    // Arm the lifecycle triggers through the same interface the Settings save
+    // paths use, so enable/disable has one implementation. The guard keeps the
+    // trigger block runnable in harnesses that extract it alone (this file uses
+    // the same `typeof` pattern for its other boot-scope helpers).
+    if(typeof _setUpdateCheckEnabled==='function'){
+      _setUpdateCheckEnabled(true);
+    }else{
+      document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible') _checkUpdates();});
+      _updateCheckTimer=setInterval(_checkUpdates,1800000);
+    }
   }
   const _bootActiveProfileUnauthRedirectBudget=(()=>{
     const markerKey='hermes-webui-active-profile-bootstrap-401';
