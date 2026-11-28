@@ -37,13 +37,7 @@
 
 - **A named profile's Skills panel no longer shows another profile's external skill folders (#7842, @Notaloop763).** The skills list, skill view, linked files and the on/off toggle used to take the external skill folders (`skills.external_dirs`) from the profile the server started with, whichever profile made the request. So a named profile could list, open and toggle skills that were configured only for another profile. Each request now reads those folders from its own profile's `config.yaml`, with variables resolved for that profile. A missing or broken profile config lists no external folders and never hides the profile's own skills.
 
-- **Closing the "already shared" dialog no longer refreshes the public share (#9260, @JayPokale, fixes #9259).** When a chat already had a public link, dismissing the dialog with ×, Escape or a click outside it counted as "Refresh snapshot", so backing out republished every message added since the last share. Now only the "Refresh snapshot" button refreshes the snapshot; dismissing the dialog does nothing.
-
 - **Dialogs now act on the conversation they were opened for (#9316, fixes #9315).** Share and Stop sharing in the conversation panel, Clear conversation, the outside-link prompt and the workspace delete, rename, new-file and new-folder dialogs used to act on whichever conversation was on screen when you answered. If you switched conversations with one of them open, they could share, revoke, clear or change the wrong one. Each dialog now remembers its conversation when it opens, and an answer given after that conversation has left the screen is dropped. Going back or forward in the browser closes an open dialog first. The J/K and Cmd/Ctrl+K shortcuts do nothing while a dialog is open. Copying a share link falls back to the older copy method when the clipboard API refuses, and a failed copy now says so.
-
-- **A switched-off provider entry no longer routes a model or supplies its address (#9248, @chhxbchhxb, refs #8954).** With two spellings of one built-in provider in `providers` (for example `OpenAI` with `enabled: false` and `openai`), and the switched-off one listing the chat's model, WebUI picked that entry's `base_url` while Hermes Agent authenticated with the enabled entry's key. So the enabled entry's key went to the switched-off entry's address. The model lookup now skips switched-off entries, so the chat routes as if that entry didn't list the model. Enabled entries, the `enabled` default and its string forms, `custom:` entries and the active-provider guard are unchanged.
-
-- **A provider entry with its own endpoint keeps its key on that endpoint when WebUI looks up a model's context window (#9262, refs #8822).** When a `providers` entry for a built-in provider such as Anthropic, Novita or OpenAI Codex declares its own endpoint (`api`, `url` or `base_url`, the shape Hermes Agent's own config migration writes), the Agent uses that entry's key only with that endpoint. WebUI's context-window lookup could still send the key to the provider's own metadata host when you reloaded a conversation, switched model or started a chat. It now asks only the entry's own endpoint, and otherwise uses the catalog or default context window. An entry without an endpoint of its own is unchanged. Standalone installs without the Agent now also recognise the `chatgpt`, `chatgpt-codex`, `novita-ai` and `novitaai` provider names.
 
 - **A malformed passkey response is refused with 400/401, never a server error.** Registering or signing in with a
   crafted passkey response, for example one whose declared credential ID is longer than the real one, could make the
@@ -57,14 +51,14 @@
 
 - **The WebUI updater now stamps its autostash with a UTC time (#9387, part of #9377).** When an update needs to set local changes aside, WebUI now names the stash `hermes-update-autostash-YYYYMMDD-HHMMSS` (UTC), the same form the Agent's updater writes. The Agent's orphaned-autostash warning only recognises that stamped form, so a stash WebUI leaves behind can now be reported. Existing unstamped `hermes-update-autostash` entries are not touched and still aren't reported; #9377 stays open for those. Thanks @shu-chen-dot-ca.
 
-- **WebUI now logs where a turn's returned history first stopped matching what it sent (#9276, toward #9233).** After a turn, WebUI checks that the Agent's returned messages begin with exactly the history it projected. When they don't, it keeps the raw pre-turn context and drops the unproven rows. That fail-closed path used to log only that the prefix wasn't exact. It now logs one INFO line with the index and the first field that differs (or that the returned list ran out), plus both lengths. No message content is logged. The fail-closed message moved to the point where WebUI actually gives up, after the verified tail-merge check. The comparison itself is unchanged. This is a diagnostic for #9233, not a fix for it. Thanks @mvanhorn.
-
 - **A cached Agent whose context-engine rebind keeps failing no longer repeats the same traceback every turn (#9285, #9271).** When a cached Agent adopts a new session store and the context engine's `bind_session_state` hook raises, WebUI retries the bind on the next cached turn. Before, each retry logged the full traceback again. Now each Agent logs one WARNING naming the exception type and one traceback, on its first DEBUG entry. Later failures log a DEBUG line with the exception type and message, so a different later error stays diagnosable. A lock makes sure two concurrent failing turns on the same Agent log the first failure only once. Separately, a positional-only `run_conversation` parameter no longer receives a keyword argument it can't accept. The turn itself is unchanged: a failing bind never breaks it. Thanks @webtecnica.
 
 - **A managed-startup test no longer fails when the Agent's own dependency is missing from WebUI's venv (#9384).** `tests/test_managed_profile_startup.py::test_real_managed_bootstrap_preserves_named_profile_concurrency` failed under WebUI's venv because the installed Agent now imports `psutil`, which is optional for WebUI. The test now looks at why its isolated child failed. It skips only when the Agent's own source imports a package that the Agent declares as a runtime dependency in its `pyproject.toml`, and the child exited normally with an error. A deleted or renamed Agent module, a broken WebUI import or a crash still fails it. This is a test-only change.
 
 - **The dialog-to-conversation binding browser tests no longer time out intermittently (#9383).** `tests/test_dialog_actions_bind_their_conversation_browser.py` had two sources of flakiness:
+
   - Its draft-save hold could catch the composer's debounced autosave instead of the conversation switch's own save. The test now waits until the autosave has been answered and holds only the switch's save.
+
   - Its release step removed the route right after letting the held request through. Removing the page's last route turns Playwright's request interception off, which could strand the page's next request, so the switch never finished and the test timed out. The hold helper now keeps its route and passes requests through after release. This applies to all twelve tests that use it.
 
   This is a test-only change.
@@ -86,16 +80,6 @@
 - **Switching chats while a message is still being sent no longer hands that message to the chat you switched to (#9284, refs #9237).** The turn now stays with the chat that sent it, with that chat's model, workspace and profile, and the chat you moved to is left as it was. If the send then fails to start after you have moved away, its text is saved in its own chat as a draft and a short notice names that chat. When the chat was compressed into a continuation meanwhile, the text is restored exactly as before and the notice names the chat without saying where the text went. A chat that is still busy queues the message and takes you back to it, as before, and sending while you stay on the chat is unchanged.
 
 - **Saving a default model from a provider's pinned model group in Settings no longer breaks every later chat (#9304, fixes #9300).** The picker can send the group's id (for example `nous:meituan/longcat-2.5`) as the provider; it was written into `config.yaml` unchanged, and the WebUI and the CLI then refused every turn with an unknown-provider error until the file was edited by hand. The save now keeps only the provider (`nous`), and a provider your config declares under a name with a colon (for example `openrouter:eu`) is kept as is. Thanks @zhangkom.
-
-- **A full disk or quota now shows "Storage on the server is full" instead of "Internal server error" (#9169, closes #9167).** Thanks @angelusbr. When a write fails with no space left (ENOSPC) or over quota (EDQUOT), the server answers HTTP 507 with a message that says to free up space, and the chat shows it. Freeing space is enough; no restart is needed. `docs/troubleshooting.md` has the recovery steps.
-
-- **When Hermes Agent declines to claim an external memory provider while WebUI builds a session's agent, that refusal is now recorded (#9240, refs #9061).** Thanks @chhxbchhxb. WebUI already recorded its own cross-profile refusals, but not the Agent's, so the session's memory status read as normal although the provider was gone. Built-in memory is unaffected.
-
-- **Workspace git change counts include lines that start with `---` or `+++` inside a change (#9206, closes #9205).** Thanks @nurlanmnn. The added and removed line counts skipped every changed line beginning with `---` or `+++` (a YAML front-matter separator, an SQL comment, `++i;`), so a file could show fewer changes than it had. Now only each file's own `---`/`+++` header lines are skipped, and the counts cover the whole change even when a very large diff is cut short.
-
-- **A reply is no longer lost when the Agent shortens an old tool result to save space (#9286, refs #9233).** When the Agent's cold-cache pruning replaced an earlier tool output with a short placeholder, WebUI could no longer prove the new turn extended the saved conversation and refused to keep the reply. WebUI now restores its own full copy of that tool row before the check, so the reply is kept; any other difference is still refused as before.
-
-- **A public share page no longer hides part of a message (#9214).** Some messages contained text the page left out without any sign: an HTML comment, an attribute value the renderer drops, or angle-bracket text such as `git checkout <branch-name>` or a traceback's `File "<stdin>", line 1, in <module>`. Anyone reading the published snapshot's source could still see it. When the rendered message would leave out any of its words, the share page now shows that message as plain text, with a short note, so every word is visible. Messages the page shows in full render as before. A few formatting-only shapes also fall back to plain text although nothing in them is hidden; they're listed in the PR and tracked in #9267.
 
 - **The gateway-sync reset test runs on newer Hermes Agent versions too (#9261, closes #9258).** Both cases of the test that checks a reset conversation stays separate from its reopened parent failed against current Agents, because their fixture used storage calls newer Agents no longer have. The fixture now writes rows with `append_message`, ends the parent session through whichever reset call the installed Agent provides, and checks that the reset took effect.
 
@@ -338,8 +322,6 @@
 
 ### Documentation
 
-- **The README now describes opening a session in a new tab (#9185).** Thanks @chhxbchhxb. Middle-click, or Ctrl/Cmd+click, a sidebar session row to open its `/session/<id>` link in a new tab; rows that belong to a profile other than the active one are refused, because a new tab would switch the shared profile cookie under the tab you came from.
-
 - **Documented the reverse-proxy basic-auth caveat for installed PWAs.** README, onboarding, and troubleshooting now explain that proxy basic auth can block the same-origin service-worker/shell update fetches an installed PWA needs (leaving it on a blank screen after an update), and give recovery steps — prefer WebUI's built-in password, or scope proxy auth so `sw.js`/manifest/shell requests complete. Thanks @rodboev. (#5673, #2781)
 
 - **Documented the `HERMES_WEBUI_*` environment variables and refreshed stale version/test/locale references.** README, ARCHITECTURE, TESTING, ROADMAP, SPRINTS, and the `.env` example files now describe the supported runtime env vars (host/port/state-dir/agent-dir/home) and no longer carry stale hardcoded version/test-count/locale figures. Thanks @mo7al876any. (#5536)
@@ -355,10 +337,6 @@
 - **The shared-memory-provider test skips cleanly when the Agent's own dependencies aren't installed (test-only, #9340).** `test_real_memory_manager_refuses_a_shared_instance_for_a_second_profile` imports the real Agent class. In a WebUI-only venv that has the Agent's source but not its third-party packages (`psutil`), it errored instead of skipping. It now skips only for those known Agent-only packages when they are truly absent. Any other missing module, including the Agent's own `run_agent` and WebUI imports, still fails.
 
 - **The slow-endpoint model-catalog test no longer fails on a busy machine (test-only, #9331).** `test_real_slow_healthy_endpoint_is_listed_and_cached` timed a real 2.5 s endpoint against the rebuild window, so on a loaded runner the rest of the rebuild could use up the slack and fail it. The test keeps the real HTTP server but runs the window on a virtual clock that moves only by the endpoint's latency, and it fails if any timed wait expires, so a shortened wait or slice is still caught.
-
-- **The context-length contract tests check behaviour again (#9254, closes #8900).** Thanks @chhxbchhxb. An earlier byte-for-byte revert of two test files also dropped later behavioural cases, which had degraded to source-string checks. They are back: the per-profile config re-read on every lookup, and safe handling of a null, empty or malformed `providers:` section.
-
-- **A test now pins that the profile secret-scope setter is inspected again when it is replaced (#9234, refs #9096).** Thanks @chhxbchhxb. Replacing `set_secret_scope` on the same Agent module (an Agent reload, or a plugin that wraps the setter) has to re-check whether the new setter accepts `profile_home`; nothing guarded that half of the cache before.
 
 - **CI lint gate:** the ruff diff gate keeps the full history when it fetches `origin/master`, so it diffs against the real merge-base instead of reporting upstream findings as introduced by the PR. Thanks @happy5318.
 
@@ -377,6 +355,40 @@
 - **Test suite reads static assets as UTF-8 so it runs on Windows.** 34 test files that opened `static/` assets without an explicit encoding now pass `encoding="utf-8"`, so the suite no longer fails under a non-UTF-8 default locale (Windows `cp1252`). Two method signatures over-matched by the encoding sweep were reverted. Assertions are unchanged. Thanks @mo7al876any. (#5537)
 
 - **Added regression coverage for messaging clear-watermark semantics.** New test locks the watermark behavior so a future change can't silently regress it. Thanks @rodboev. (#5589, #5572)
+
+## [v0.52.741] — 2026-11-28
+
+### Security
+
+- **Closing the "already shared" dialog no longer refreshes the public share (#9260, @JayPokale, fixes #9259).** When a chat already had a public link, dismissing the dialog with ×, Escape or a click outside it counted as "Refresh snapshot", so backing out republished every message added since the last share. Now only the "Refresh snapshot" button refreshes the snapshot; dismissing the dialog does nothing.
+
+- **A switched-off provider entry no longer routes a model or supplies its address (#9248, @chhxbchhxb, refs #8954).** With two spellings of one built-in provider in `providers` (for example `OpenAI` with `enabled: false` and `openai`), and the switched-off one listing the chat's model, WebUI picked that entry's `base_url` while Hermes Agent authenticated with the enabled entry's key. So the enabled entry's key went to the switched-off entry's address. The model lookup now skips switched-off entries, so the chat routes as if that entry didn't list the model. Enabled entries, the `enabled` default and its string forms, `custom:` entries and the active-provider guard are unchanged.
+
+- **A provider entry with its own endpoint keeps its key on that endpoint when WebUI looks up a model's context window (#9262, refs #8822).** When a `providers` entry for a built-in provider such as Anthropic, Novita or OpenAI Codex declares its own endpoint (`api`, `url` or `base_url`, the shape Hermes Agent's own config migration writes), the Agent uses that entry's key only with that endpoint. WebUI's context-window lookup could still send the key to the provider's own metadata host when you reloaded a conversation, switched model or started a chat. It now asks only the entry's own endpoint, and otherwise uses the catalog or default context window. An entry without an endpoint of its own is unchanged. Standalone installs without the Agent now also recognise the `chatgpt`, `chatgpt-codex`, `novita-ai` and `novitaai` provider names.
+
+### Fixed
+
+- **WebUI now logs where a turn's returned history first stopped matching what it sent (#9276, toward #9233).** After a turn, WebUI checks that the Agent's returned messages begin with exactly the history it projected. When they don't, it keeps the raw pre-turn context and drops the unproven rows. That fail-closed path used to log only that the prefix wasn't exact. It now logs one INFO line with the index and the first field that differs (or that the returned list ran out), plus both lengths. No message content is logged. The fail-closed message moved to the point where WebUI actually gives up, after the verified tail-merge check. The comparison itself is unchanged. This is a diagnostic for #9233, not a fix for it. Thanks @mvanhorn.
+
+- **A full disk or quota now shows "Storage on the server is full" instead of "Internal server error" (#9169, closes #9167).** Thanks @angelusbr. When a write fails with no space left (ENOSPC) or over quota (EDQUOT), the server answers HTTP 507 with a message that says to free up space, and the chat shows it. Freeing space is enough; no restart is needed. `docs/troubleshooting.md` has the recovery steps.
+
+- **When Hermes Agent declines to claim an external memory provider while WebUI builds a session's agent, that refusal is now recorded (#9240, refs #9061).** Thanks @chhxbchhxb. WebUI already recorded its own cross-profile refusals, but not the Agent's, so the session's memory status read as normal although the provider was gone. Built-in memory is unaffected.
+
+- **Workspace git change counts include lines that start with `---` or `+++` inside a change (#9206, closes #9205).** Thanks @nurlanmnn. The added and removed line counts skipped every changed line beginning with `---` or `+++` (a YAML front-matter separator, an SQL comment, `++i;`), so a file could show fewer changes than it had. Now only each file's own `---`/`+++` header lines are skipped, and the counts cover the whole change even when a very large diff is cut short.
+
+- **A reply is no longer lost when the Agent shortens an old tool result to save space (#9286, refs #9233).** When the Agent's cold-cache pruning replaced an earlier tool output with a short placeholder, WebUI could no longer prove the new turn extended the saved conversation and refused to keep the reply. WebUI now restores its own full copy of that tool row before the check, so the reply is kept; any other difference is still refused as before.
+
+- **A public share page no longer hides part of a message (#9214).** Some messages contained text the page left out without any sign: an HTML comment, an attribute value the renderer drops, or angle-bracket text such as `git checkout <branch-name>` or a traceback's `File "<stdin>", line 1, in <module>`. Anyone reading the published snapshot's source could still see it. When the rendered message would leave out any of its words, the share page now shows that message as plain text, with a short note, so every word is visible. Messages the page shows in full render as before. A few formatting-only shapes also fall back to plain text although nothing in them is hidden; they're listed in the PR and tracked in #9267.
+
+### Documentation
+
+- **The README now describes opening a session in a new tab (#9185).** Thanks @chhxbchhxb. Middle-click, or Ctrl/Cmd+click, a sidebar session row to open its `/session/<id>` link in a new tab; rows that belong to a profile other than the active one are refused, because a new tab would switch the shared profile cookie under the tab you came from.
+
+### Internal
+
+- **The context-length contract tests check behaviour again (#9254, closes #8900).** Thanks @chhxbchhxb. An earlier byte-for-byte revert of two test files also dropped later behavioural cases, which had degraded to source-string checks. They are back: the per-profile config re-read on every lookup, and safe handling of a null, empty or malformed `providers:` section.
+
+- **A test now pins that the profile secret-scope setter is inspected again when it is replaced (#9234, refs #9096).** Thanks @chhxbchhxb. Replacing `set_secret_scope` on the same Agent module (an Agent reload, or a plugin that wraps the setter) has to re-check whether the new setter accepts `profile_home`; nothing guarded that half of the cache before.
 
 ## [v0.52.735] — 2026-11-26
 
