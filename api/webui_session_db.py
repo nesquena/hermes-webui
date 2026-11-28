@@ -64,6 +64,7 @@ _METADATA_FIELDS = frozenset(
         "llm_title_generated",
         "manual_title",
         "parent_session_id",
+        "done_at",
         "worktree_path",
         "worktree_branch",
         "worktree_repo_root",
@@ -140,6 +141,11 @@ class WebUIJsonSessionDB:
         path = self._existing_path_for_sid(sid)
         data = self._read_writable_session(path)
         data.update(copy.deepcopy(fields))
+        # `json.dumps` writes a non-finite float as a bare `NaN` token, which
+        # no browser can parse: normalize at this write boundary like
+        # Session.save() does (#9282).
+        if "done_at" in data:
+            data["done_at"] = models._normalize_done_at(data.get("done_at"))
         data["message_count"] = len(data["messages"])
         self._atomic_write(path, data)
         return self._metadata_row(str(data.get("session_id") or sid), data)
@@ -203,6 +209,12 @@ class WebUIJsonSessionDB:
         if not isinstance(message_count, int):
             message_count = len(messages) if isinstance(messages, list) else 0
         row = {field: copy.deepcopy(data.get(field)) for field in _METADATA_FIELDS if field in data}
+        # This read path parses raw JSON and never builds a Session, so the
+        # __init__ normalization does not cover it: a sidecar holding
+        # `"done_at": "nan"` would otherwise emit a bare NaN token that the
+        # browser's JSON.parse rejects for the whole session list (#9282).
+        if "done_at" in row:
+            row["done_at"] = models._normalize_done_at(row["done_at"])
         row["session_id"] = sid
         row["message_count"] = message_count
         row["last_message_at"] = data.get("last_message_at") or data.get("updated_at") or data.get("created_at")

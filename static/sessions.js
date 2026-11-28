@@ -9347,8 +9347,13 @@ function _formatSessionDate(timestampMs, nowMs) {
   return date.toLocaleDateString(undefined, options);
 }
 
-function _formatRelativeSessionTime(timestampMs, nowMs) {
-  if (!timestampMs) return t('session_time_unknown');
+// `opts.allowZero`: `done_at` is stored in epoch seconds, so a stored 0 is a
+// real timestamp and the done badge must format it. The activity-time callers
+// pass no opts and keep "0 means missing" (`_sessionTimestampMs` returns 0 for
+// a row with no timestamp), so presence stays the caller's decision instead of
+// the shared formatter loosening its guard for everyone.
+function _formatRelativeSessionTime(timestampMs, nowMs, opts) {
+  if (!timestampMs && !(opts && opts.allowZero)) return t('session_time_unknown');
   nowMs = nowMs || _serverNowMs();
   const diffMs = Math.max(0, nowMs - timestampMs);
   const minute = 60 * 1000;
@@ -9368,6 +9373,18 @@ function _formatRelativeSessionTime(timestampMs, nowMs) {
   if (timestampMs >= startOfWeek) return t('session_time_days_ago', dayDiff);
   if (timestampMs >= startOfLastWeek) return t('session_time_last_week');
   return _formatSessionDate(timestampMs, nowMs);
+}
+
+// A `done_at` of 0 is a valid epoch timestamp, so presence is decided here
+// (never with truthiness) and the formatting is delegated to the shared
+// relative formatter with `allowZero`, so the wording cannot diverge.
+function _formatSessionDoneTime(timestampMs, nowMs) {
+  const value = Number(timestampMs);
+  if (timestampMs === null || timestampMs === undefined || timestampMs === ''
+      || !Number.isFinite(value) || value < 0) {
+    return t('session_time_unknown');
+  }
+  return _formatRelativeSessionTime(value, nowMs, {allowZero: true});
 }
 
 function _sessionTimeBucketLabel(timestampMs, nowMs) {
@@ -11386,7 +11403,7 @@ function renderSessionListFromCache(){
     const attention=_sessionAttentionState(s)||_sessionAttentionState({_child:true,attention:s._child_session_attention});
     const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(ownStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+((s.done_at!==null&&s.done_at!==undefined&&s.done_at!=='')?' done':'')+(ownStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
     const swipeReturnOffset=_sessionSwipeReturnOffsets.get(s.session_id);
     if(swipeReturnOffset!==undefined){
       _sessionSwipeReturnOffsets.delete(s.session_id);
@@ -11573,6 +11590,30 @@ function renderSessionListFromCache(){
       titleRow.appendChild(segmentCountEl);
     }
     const childCount=typeof s._child_session_count==='number'?s._child_session_count:(Array.isArray(s._child_sessions)?s._child_sessions.length:0);
+    // Done marker: `done_at` is workflow state written by the close/checkmark
+    // scripts through POST /api/session/mark-done, never inferred from the
+    // title or from silence. Distinct from `.archived` (storage): both can hold.
+    // Presence, not truthiness: a stored 0 is a valid (epoch) timestamp and
+    // must still read as done. Inlined rather than hoisted into a variable:
+    // this renderer gets sliced by browser tests that extract fragments from
+    // the middle of the function, and a helper declared above the slice would
+    // be out of scope in their page context.
+    if(s.done_at!==null&&s.done_at!==undefined&&s.done_at!==''){
+      const doneEl=document.createElement('span');
+      doneEl.className='session-done-badge';
+      // A glyph, not the localised word: the pill spent horizontal room in the
+      // title row on a state that reads at a glance anyway. The label survives
+      // as aria-label and the timestamp as tooltip, so meaning is not lost.
+      const doneLabel=t('session_done_badge');
+      doneEl.textContent='✓';
+      // `aria-label` on a role-less span is skipped by some screen readers; a
+      // glyph-only element needs an explicit role to be exposed.
+      doneEl.setAttribute('role','img');
+      doneEl.setAttribute('aria-label',doneLabel);
+      const doneMs=Number(s.done_at)*1000;
+      doneEl.title=t('session_done_tooltip', _formatSessionDoneTime(doneMs));
+      titleRow.appendChild(doneEl);
+    }
     if(childCount>0){
       const childCountEl=document.createElement('span');
       childCountEl.className='session-child-count';

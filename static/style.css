@@ -6117,6 +6117,18 @@ main.main > #mainPlugin{display:none;}
 .session-item.archived{opacity:.5;}
 .session-item.archived .session-title{font-style:italic;}
 
+/* ── Done sessions (structural `done_at`, not a title prefix) ── */
+/* The row-level `done` class carries one job the badge cannot: a finished
+   conversation's title loses emphasis, so the sidebar reads "settled" at a
+   glance without relying on the marker alone. Deliberately NOT dimmed like
+   `.archived` (storage): a finished row is still normal working history. */
+.session-item.done .session-title{font-weight:400;}
+/* A bare check, not a pill: the word cost ~34px of every title row for a state
+   that reads at a glance. Fixed box so a long title never shifts it, and the
+   localised word lives in aria-label/title instead of the visible row. */
+.session-done-badge{display:inline-flex;align-items:center;justify-content:center;height:16px;width:14px;font-size:12px;line-height:1;font-weight:700;color:var(--success,#22c55e);margin-left:5px;flex-shrink:0;user-select:none;cursor:default;}
+.session-item.active .session-done-badge{color:color-mix(in srgb,var(--success,#22c55e) 82%,#fff);}
+
 /* ── Subagent session tree (#494) ── */
 .session-lineage-count{display:inline-flex;align-items:center;justify-content:center;height:16px;font-size:10px;font-weight:600;padding:0 6px;border-radius:999px;background:rgba(148,163,184,.14);color:var(--muted);margin-left:6px;flex-shrink:0;user-select:none;cursor:default;}
 .session-lineage-count.expandable{cursor:pointer;}

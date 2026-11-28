@@ -14,6 +14,7 @@ import gzip
 import json
 from api.sse_chunked import end_sse_headers
 import logging
+import math
 import mimetypes
 import os
 import queue
@@ -21182,6 +21183,93 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/session/anchor-scene":
         return _handle_session_anchor_scene(handler, body)
+
+    if parsed.path == "/api/session/mark-done":
+        # Workflow state, not storage: `done_at` says the conversation is
+        # finished (set/cleared here), while `archived` stays a storage flag.
+        # Sibling of /api/session/rename and subject to the same contracts:
+        # 404 for an unknown id, 403 for a read-only imported session, and the
+        # write goes through the server's session object — never a raw sidecar
+        # write (the file has a single writer).
+        #
+        # Contract: marking an ALREADY-done session replaces its timestamp (the
+        # explicit `done_at`, else now()) rather than keeping the first one --
+        # a backfill re-running over the same rows is expected to converge on
+        # the caller's value. `done: false` clears it.
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = body["session_id"]
+        if not isinstance(sid, str) or not sid:
+            return bad(handler, "session_id must be a non-empty string")
+        raw_done = body.get("done", True)
+        if not isinstance(raw_done, bool):
+            return bad(handler, "done must be a boolean")
+        explicit_ts = body.get("done_at")
+        if explicit_ts is not None:
+            # Numbers only: `float()` would happily turn `true` into 1.0 and
+            # `"99"` into 99.0, storing a timestamp the caller never sent, so
+            # reject booleans and non-numbers before the conversion.
+            if isinstance(explicit_ts, bool) or not isinstance(explicit_ts, (int, float)):
+                return bad(handler, "done_at must be a unix timestamp")
+            try:
+                explicit_ts = float(explicit_ts)
+            except (TypeError, ValueError, OverflowError):
+                # OverflowError: a JSON integer too large for float(), e.g.
+                # 10**400 -- a 500 on master. `float()` also accepts nan/inf.
+                return bad(handler, "done_at must be a unix timestamp")
+            # `float()` happily accepts nan/inf and 1e400 → inf. `Session.save()`
+            # writes with a default json.dumps, so a non-finite value becomes a
+            # bare `NaN`/`Infinity` token in the sidecar: `JSON.parse` rejects it
+            # and the sidebar fetch breaks for every client, permanently (Python
+            # reloads it fine, so it survives restarts). Reject at the door.
+            if not math.isfinite(explicit_ts) or explicit_ts < 0:
+                return bad(handler, "done_at must be a finite, non-negative unix timestamp")
+        try:
+            _get_or_materialize_session(sid)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        except PermissionError:
+            return bad(handler, "Read-only imported sessions cannot be marked done from WebUI", 403)
+        # #7776 Finding 2, same guard as the rename handler: capture the CLI
+        # source identity BEFORE the lock, because the lock-held Session.load(sid)
+        # reload materializes a WebUI session without the pre-lock CLI metadata,
+        # and the save below would then persist stripped provenance.
+        _done_cli_meta = _lookup_cli_session_metadata(sid) or {}
+        with _get_session_agent_lock(sid):
+            with LOCK:
+                latest = SESSIONS.get(sid)
+                if latest is not None and str(getattr(latest, "session_id", "") or "") != sid:
+                    SESSIONS.pop(sid, None)
+                    latest = None
+                elif latest is not None:
+                    SESSIONS.move_to_end(sid)
+            if latest is None:
+                latest = Session.load(sid)
+                if latest is None:
+                    return bad(handler, "Session not found", 404)
+            s = _ensure_full_session_before_mutation(sid, latest)
+            if getattr(s, "read_only", False):
+                return bad(handler, "Read-only imported sessions cannot be marked done from WebUI", 403)
+            if _done_cli_meta:
+                _apply_cli_source_meta_to_session(s, _done_cli_meta)
+            s.done_at = (explicit_ts if explicit_ts is not None else time.time()) if raw_done else None
+            # `touch_updated_at=False`: marking done is not new activity. Letting
+            # save() bump `updated_at` would re-sort the sidebar and reset every
+            # touched row's displayed last-activity — catastrophic on a backfill
+            # of hundreds of rows.
+            s.save(touch_updated_at=False)
+            with LOCK:
+                SESSIONS[sid] = s
+                SESSIONS.move_to_end(sid)
+                _evict_sessions_over_cap()
+        publish_session_list_changed(
+            "session_done",
+            profile=getattr(s, "profile", None),
+            session_id=getattr(s, "session_id", sid),
+        )
+        return j(handler, {"session": s.compact()})
 
     if parsed.path == "/api/session/rename":
         try:
