@@ -19,7 +19,7 @@ import sys
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 from api import yaml_compat as yaml
 
@@ -1755,6 +1755,16 @@ def _agent_registry_credential_env_names() -> set[str]:
     return names
 
 
+# #9187: every worker entry (the streaming checkpoint fires on tool completion)
+# now unions the credential names of EVERY profile's config.yaml, so re-parsing
+# an unchanged file on each entry is pure overhead. Cache the declared names
+# under the file's (mtime_ns, size) identity: a Settings save rewrites both, so
+# a changed declaration is observed on the next entry, and the cache is bounded.
+_DECLARED_SECRET_NAMES_CACHE: dict[tuple[str, int, int], frozenset[str]] = {}
+_DECLARED_SECRET_NAMES_CACHE_LOCK = threading.Lock()
+_DECLARED_SECRET_NAMES_CACHE_MAX = 256
+
+
 def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
     names: set[str] = set()
     try:
@@ -1776,6 +1786,18 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
     config_path = Path(profile_home_path) / "config.yaml"
     if not config_path.exists():
         return names
+    cache_key = None
+    try:
+        stat = config_path.stat()
+        cache_key = (str(config_path), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        with _DECLARED_SECRET_NAMES_CACHE_LOCK:
+            cached = _DECLARED_SECRET_NAMES_CACHE.get(cache_key)
+        if cached is not None:
+            names.update(cached)
+            return names
     try:
         payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except Exception:
@@ -1786,6 +1808,7 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
         )
         return names
 
+    declared: set[str] = set()
     custom_providers = payload.get("custom_providers") if isinstance(payload, dict) else None
     entries = list(custom_providers) if isinstance(custom_providers, list) else []
     # Scrubbing is intentionally independent of catalog visibility/precedence:
@@ -1799,28 +1822,198 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
         for field in ("key_env", "api_key_env"):
             key_env = str(custom_provider.get(field) or "").strip()
             if key_env:
-                names.add(key_env)
+                declared.add(key_env)
         api_key = str(custom_provider.get("api_key") or "").strip()
         match = re.fullmatch(r"\$\{([^}]+)\}", api_key)
         if match:
             env_name = str(match.group(1) or "").strip()
             if env_name:
-                names.add(env_name)
+                declared.add(env_name)
+    if cache_key is not None:
+        with _DECLARED_SECRET_NAMES_CACHE_LOCK:
+            if len(_DECLARED_SECRET_NAMES_CACHE) >= _DECLARED_SECRET_NAMES_CACHE_MAX:
+                _DECLARED_SECRET_NAMES_CACHE.clear()
+            _DECLARED_SECRET_NAMES_CACHE[cache_key] = frozenset(declared)
+    names.update(declared)
     return names
 
 
+def _all_profiles_secret_env_names(profile_home_path: Path) -> set[str]:
+    """Every credential env name ANY profile on this server declares, not just *profile_home_path*'s.
+
+    ``_apply_profile_env_to_process`` scrubs the names it is given out of the process
+    env for a background worker's body, and WebUI runs the Agent with multiplexing
+    off, so ``agent.secret_scope.get_secret`` falls through to ``os.environ`` on a
+    scope miss. A name only ANOTHER profile's ``config.yaml`` declares (a custom
+    provider's ``key_env``) was in neither set, so a concurrent worker's mirror left
+    it in the process env and this profile's reads resolved it as its own (#9187).
+    The wider set keeps the scrub fail-closed: it only ever removes names a profile
+    config declares as credentials, and the body profile's own values are mirrored in
+    from its runtime env, so they stay readable. A profile home that cannot be listed
+    (or read) contributes its base set only, exactly as ``_profile_secret_env_names``
+    does for an unreadable ``config.yaml``.
+    """
+    names = _profile_secret_env_names(profile_home_path)
+    try:
+        base_home = Path(_DEFAULT_HERMES_HOME)
+        homes = [base_home]
+        profiles_root = base_home / "profiles"
+        if profiles_root.is_dir():
+            homes.extend(sorted(p for p in profiles_root.iterdir() if p.is_dir()))
+        for home in homes:
+            if home == Path(profile_home_path):
+                continue
+            names |= _profile_secret_env_names(home)
+    except Exception:
+        logger.debug(
+            "Failed to collect every profile's credential env names for the worker scrub",
+            exc_info=True,
+        )
+    return names
+
+
+# #9187: the process-env mirror is shared by every concurrent worker in this
+# server, so a per-scope snapshot/restore cannot survive overlapping lifetimes.
+# A second worker's scrub erased a still-running worker's credential, and a later
+# exit put back a value that belonged to a worker which had already finished.
+# Track, per env name, the live scopes that claim it and recompute the process
+# value from the live set instead. The recompute is commutative: entering and
+# leaving in any order lands on the same value, and once the last claimant
+# leaves the name returns to the process baseline captured on first use. A name
+# claimed visible by a live scope stays readable (the direct-os.environ
+# compatibility contract), so overlapping scopes never blindfold each other;
+# the context-local secret scope stays per-profile and untouched.
+_ENV_MIRROR_LOCK = threading.Lock()
+_ENV_MIRROR_HIDDEN = object()
+_ENV_MIRROR_OWNERS: dict[str, dict[object, object]] = {}
+_ENV_MIRROR_BASELINE: dict[str, Optional[str]] = {}
+_ENV_MIRROR_CLAIMS: dict[object, tuple[str, ...]] = {}
+
+
+def _recompute_process_env(name: str) -> None:
+    """Project one mirrored name onto ``os.environ`` from its live claimants."""
+    owners = _ENV_MIRROR_OWNERS.get(name)
+    if not owners:
+        _ENV_MIRROR_OWNERS.pop(name, None)
+        if name in _ENV_MIRROR_BASELINE:
+            baseline = _ENV_MIRROR_BASELINE.pop(name)
+            if baseline is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = baseline
+        return
+    visible = cast(
+        "list[str]", [value for value in owners.values() if value is not _ENV_MIRROR_HIDDEN]
+    )
+    if visible:
+        os.environ[name] = visible[-1]
+    else:
+        os.environ.pop(name, None)
+
+
+def _claim_process_env(desired: dict[str, object]) -> object:
+    """Register one live scope's claims and return the token that releases them.
+
+    #9244: the claims are registered before the values are written, so a write
+    that raises (a value carrying an embedded NUL, which ``os.environ``
+    refuses) would leave the scope registered forever: the caller never
+    receives the token, so its cleanup cannot release the claims. A leaked
+    claim keeps a failed worker's values active and keeps other profiles'
+    credential names hidden for the rest of the server's lifetime. Roll the
+    registration back before re-raising.
+    """
+    token = object()
+    with _ENV_MIRROR_LOCK:
+        for name, value in desired.items():
+            if name not in _ENV_MIRROR_BASELINE:
+                _ENV_MIRROR_BASELINE[name] = os.environ.get(name)
+            _ENV_MIRROR_OWNERS.setdefault(name, {})[token] = value
+        _ENV_MIRROR_CLAIMS[token] = tuple(desired)
+        try:
+            for name in desired:
+                _recompute_process_env(name)
+        except BaseException:
+            # Undo this scope's registration. The lock is already held here, so
+            # the rollback runs the locked variant. A rollback that itself
+            # fails must not hide the original failure, so it is best-effort:
+            # the claim entries are removed either way.
+            try:
+                _release_process_env_locked(token, robust=True)
+            except BaseException:
+                logger.debug(
+                    "Failed to roll back the process-env mirror claims of a "
+                    "worker whose mirror write failed",
+                    exc_info=True,
+                )
+                _ENV_MIRROR_CLAIMS.pop(token, None)
+                for owners in _ENV_MIRROR_OWNERS.values():
+                    owners.pop(token, None)
+            raise
+    return token
+
+
+def _release_process_env_locked(token: object, *, robust: bool = False) -> None:
+    """Drop one live scope's claims. The caller must hold ``_ENV_MIRROR_LOCK``.
+
+    #9244: ``robust`` is used on the rollback path, where a recompute can fail
+    because the value the environment refuses (e.g. one carrying an embedded
+    NUL) is being written back. There each name is handled on its own and a
+    failing one is forced back to the baseline captured for it, so releasing
+    does not stop half-way and leave the remaining claims registered. The
+    normal release path keeps its original behaviour and lets a failing
+    recompute propagate.
+    """
+    for name in _ENV_MIRROR_CLAIMS.pop(token, ()):
+        owners = _ENV_MIRROR_OWNERS.get(name)
+        if owners is None or token not in owners:
+            continue
+        del owners[token]
+        if not robust:
+            _recompute_process_env(name)
+            continue
+        try:
+            _recompute_process_env(name)
+        except BaseException:
+            logger.debug(
+                "Failed to recompute the process env of %s while rolling back a "
+                "worker's claims; restoring its baseline",
+                name,
+                exc_info=True,
+            )
+            baseline = _ENV_MIRROR_BASELINE.get(name)
+            if baseline is None:
+                os.environ.pop(name, None)
+            else:
+                try:
+                    os.environ[name] = baseline
+                except BaseException:
+                    logger.debug(
+                        "Failed to restore the baseline of %s", name, exc_info=True
+                    )
+
+
+def _release_process_env(token: object) -> None:
+    """Drop one live scope's claims and let the remaining claimants decide."""
+    with _ENV_MIRROR_LOCK:
+        _release_process_env_locked(token)
+
+
 def _apply_profile_env_to_process(
-    process_env,
     safe_runtime_env: dict[str, str],
     *,
     secret_env_names: set[str],
-) -> dict[str, Optional[str]]:
-    scoped_keys = set(safe_runtime_env) | set(secret_env_names)
-    previous_env = {key: process_env.get(key) for key in scoped_keys}
-    for key in secret_env_names:
-        if key not in safe_runtime_env:
-            process_env.pop(key, None)
-    return previous_env
+) -> object:
+    """Claim *safe_runtime_env* and hide *secret_env_names* for one live scope.
+
+    The returned token must be handed back to ``_release_process_env`` when the
+    scope ends; nothing is restored eagerly, because a name another live scope
+    still claims must stay readable.
+    """
+    desired: dict[str, object] = dict(safe_runtime_env)
+    for name in secret_env_names:
+        if name not in desired:
+            desired[name] = _ENV_MIRROR_HIDDEN
+    return _claim_process_env(desired)
 
 
 _secret_scope_available = None
@@ -1950,7 +2143,10 @@ def profile_env_for_background_worker(
         profile_home_path = Path(get_hermes_home_for_profile(profile))
         runtime_env = get_profile_runtime_env(profile_home_path)
         safe_runtime_env = filter_runtime_env_for_gateway_parity(runtime_env)
-        secret_env_names = _profile_secret_env_names(profile_home_path)
+        # #9187: the scrub must cover the credential env names EVERY profile on this
+        # server declares, not only this one's, or a name only another profile's
+        # config.yaml declares survives the mirror and this body reads it as its own.
+        secret_env_names = _all_profiles_secret_env_names(profile_home_path)
     except Exception:
         log.debug(
             "Failed to resolve profile env for %s profile %s; falling back to current env",
@@ -1969,9 +2165,7 @@ def profile_env_for_background_worker(
     # os.getenv() directly for provider credentials.  Keep the _ENV_LOCK scope
     # narrow: serialize only setup/restore, not the whole worker body.
     skill_home_snapshot = None
-    old_runtime_env: dict[str, Optional[str]] = {}
-    old_hermes_home = None
-    had_hermes_home = False
+    _mirror_token = None
     previous_thread_env = getattr(_thread_ctx, "env", {}).copy()
     previous_block_process_env = bool(
         getattr(_thread_ctx, "block_process_env_fallback", False)
@@ -2050,28 +2244,17 @@ def profile_env_for_background_worker(
                 skill_home_snapshot = snapshot_skill_home_modules()
                 patch_skill_home_modules(profile_home_path)
 
-            old_runtime_env = _apply_profile_env_to_process(
-                os.environ,
-                safe_runtime_env,
+            _mirror_token = _apply_profile_env_to_process(
+                thread_env,
                 secret_env_names=secret_env_names,
             )
-            had_hermes_home = "HERMES_HOME" in os.environ
-            old_hermes_home = os.environ.get("HERMES_HOME")
-            os.environ.update(safe_runtime_env)
-            os.environ["HERMES_HOME"] = str(profile_home_path)
         yield
     finally:
         try:
             with _ENV_LOCK:
-                for key, old_value in old_runtime_env.items():
-                    if old_value is None:
-                        os.environ.pop(key, None)
-                    else:
-                        os.environ[key] = old_value
-                if had_hermes_home:
-                    os.environ["HERMES_HOME"] = old_hermes_home or ""
-                else:
-                    os.environ.pop("HERMES_HOME", None)
+                if _mirror_token is not None:
+                    _release_process_env(_mirror_token)
+                    _mirror_token = None
                 if should_restore_skill_modules and skill_home_snapshot is not None:
                     restore_skill_home_modules(skill_home_snapshot)
         finally:

@@ -84,11 +84,18 @@ def test_filter_runtime_env_for_gateway_parity_blocks_shell_identity_vars():
 
 
 def test_profile_background_worker_uses_gateway_parity_runtime_env_filter():
+    """The worker mirror must project the gateway-parity view, not the raw profile env.
+
+    #9187 replaced the one-shot ``os.environ.update(...)`` with a claim registry,
+    so this pins the facts that still hold: the filtered mapping is the base of
+    what the scope claims, and the raw ``runtime_env`` never reaches the mirror.
+    """
     src = Path("api/profiles.py").read_text(encoding="utf-8")
 
     assert "filter_runtime_env_for_gateway_parity" in src
     assert "safe_runtime_env" in src
-    assert "os.environ.update(safe_runtime_env)" in src
+    assert "thread_env = dict(safe_runtime_env)" in src
+    assert "_apply_profile_env_to_process(" in src
     assert "os.environ.update(runtime_env)" not in src
 
 
