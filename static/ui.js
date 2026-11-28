@@ -27728,9 +27728,8 @@ function _showFileContextMenu(e, item){
   menu.style.cssText='position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:140px;box-shadow:0 4px 16px rgba(0,0,0,.35);';
   // Keep menu within viewport
   const vw=window.innerWidth,vh=window.innerHeight;
-  menu.style.left=(e.clientX+140>vw?e.clientX-150:e.clientX)+'px';
-  menu.style.top=(e.clientY+100>vh?e.clientY-100:e.clientY)+'px';
   const isDirLike=item.type==='dir'||(item.type==='symlink'&&item.is_dir);
+  const isExternalLink=item.type==='symlink'&&!!item.target_outside_workspace;
   const targetDir=isDirLike ? item.path : _workspaceParentDir(item.path);
   const isReadOnlyEscape=typeof _workspaceEscapeGrantForPath==='function' ? !!_workspaceEscapeGrantForPath(item.path) : false;
 
@@ -27827,6 +27826,34 @@ function _showFileContextMenu(e, item){
       }
     };
     menu.appendChild(copyRelPathItem);
+
+    // Copy file URL — the absolute http(s) URL of the raw file, resolved
+    // against document.baseURI so a subpath mount is kept. inline=1 only for
+    // HTML, which the raw route then renders sandboxed (as "Open in browser"
+    // does) instead of downloading; on other types it would only add the
+    // sandbox CSP, which some browsers' PDF viewers refuse to run under.
+    // Regular files only (is_regular from the listing, which follows an
+    // in-workspace symlink): the raw route serves nothing else, so a
+    // directory, a FIFO or socket, or a link to one gets no item, and a
+    // symlink to a target outside the workspace 404s there. Kept inside the non-escape
+    // block, and rechecked at click time (a grant may land while the menu is
+    // open), so the copied URL never carries an escape grant token.
+    if(item.is_regular===true&&!isDirLike&&!isExternalLink){
+      menu.appendChild(_workspaceContextMenuItem(t('copy_file_url'),()=>{
+        menu.remove();
+        // The server picks the MIME type from the resolved target's suffix,
+        // so an in-workspace symlink is judged by its target.
+        const typePath=(item.type==='symlink'&&item.target)||item.path||'';
+        const isHtml=HTML_EXTS.has(fileExt(typePath));
+        const grantNow=typeof _workspaceEscapeGrantForPath==='function'&&!!_workspaceEscapeGrantForPath(item.path);
+        const url=grantNow?'':_workspaceRouteForPath(item.path,'raw',isHtml?{inline:true}:{});
+        if(!/^https?:\/\//i.test(url)){
+          showToast(t('file_url_copy_failed').replace(/[\s:：]+$/,''));
+          return;
+        }
+        _copyTextWithFallback(url,t('file_url_copied'),t('file_url_copy_failed'));
+      }));
+    }
   }
 
   if(isDirLike){
@@ -27858,7 +27885,31 @@ function _showFileContextMenu(e, item){
   }
 
   document.body.appendChild(menu);
-  const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
+  // Place it by its real size, now that it is in the DOM: the item count
+  // varies with the target and label widths with the locale. A menu taller
+  // than the viewport scrolls instead of pushing its last items (Delete) off
+  // screen; one that fits gets no scroll container at all.
+  menu.style.boxSizing='border-box';
+  if(menu.getBoundingClientRect().height>vh-16){
+    menu.style.maxHeight=Math.max(0,vh-16)+'px';
+    menu.style.overflowY='auto';
+  }
+  // Open away from the pointer: flip above/left of it when the menu does
+  // not fit below/right, and clamp only as a fallback, so the pointer never
+  // lands on an item (Delete is last) the way a plain clamp would put it.
+  const menuRect=menu.getBoundingClientRect();
+  const place=(at,size,limit)=>{
+    const pos=at+size+8<=limit ? at : at-size;
+    return Math.max(8,Math.min(pos,limit-size-8));
+  };
+  menu.style.left=place(e.clientX,menuRect.width,vw)+'px';
+  menu.style.top=place(e.clientY,menuRect.height,vh)+'px';
+  // Clicks inside the menu (its scrollbar or padding) keep it open; items
+  // remove it themselves.
+  const dismiss=(ev)=>{
+    if(ev&&ev.target&&menu.contains(ev.target))return;
+    menu.remove();document.removeEventListener('click',dismiss);
+  };
   setTimeout(()=>document.addEventListener('click',dismiss),0);
 }
 
