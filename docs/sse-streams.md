@@ -105,6 +105,35 @@ earlier turns are never modified.
 
 Regression coverage: `tests/test_settlement_agent_reasoning_authoritative.py`.
 
+## Terminal progress notifications
+
+`terminal(background=true, heartbeat=60, notify=true)` can wake the owning
+conversation repeatedly while the process is running. These are Agent process
+notifications, not SSE keepalives. The Agent queues a heartbeat only when there
+is new output; WebUI uses the Agent's formatter for elapsed time, the next
+interval, and any output-tail omission marker.
+
+The background dispatcher and next-turn drain share atomic heartbeat claims
+keyed by `(session_id, process_id, seq)`. A duplicate tick is delivered once;
+distinct sequences, including out-of-order arrivals, remain independent, and
+no heartbeat consumes the process's final-completion marker. Claimed sequences
+are stored as merged inclusive ranges per owning session and process, so a
+contiguous stream needs only one range. Claims remain for the session's
+in-process lifetime regardless of unrelated traffic or process completion;
+session deletion releases only that session's records. These claims are not
+restart-durable. Busy sessions retain each tick under its own delivery identity
+and use the existing deferred-wakeup/retry lane; no overlapping turn is started.
+
+Progress uses only the native server-side wakeup path: once the turn starts,
+`start_session_turn` emits `server_turn_started` so an open tab can attach to
+its stream. Heartbeats never enter the `bg_task_complete`/legacy
+`process_complete` publisher, which the browser interprets as a completion
+toast. A later final completion still uses that lane with the real process id
+as `task_id`. Wakeups do not require an open browser tab. See
+`tests/test_process_heartbeat_wakeup.py` for both queue lanes, the completion
+publisher boundary, native live-view publication, duplicate/race handling,
+busy-turn deferral and later completion.
+
 ## Heartbeats and proxy behavior
 
 - All long-lived streams emit SSE keepalive comment lines on the
