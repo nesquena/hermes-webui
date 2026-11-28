@@ -4674,7 +4674,9 @@ def _resolve_image_input_mode(cfg: dict, active_provider: str = "", active_model
       active_provider: the provider selected by the current session
         (e.g. ``"custom:mygateway"``).  When provided, it beats the config/global
         default so image routing matches the model the user actually picked.
-      active_model: the model selected by the current session.
+      active_model: the model selected by the current session. Gateway sessions
+        store it provider-qualified (``@custom:mygateway:my-vision-model``); it
+        is unwrapped to the bare model name before the capability lookup.
       requested_provider: the provider identity before runtime canonicalization
         (e.g. the original ``"custom:mygateway"`` when ``active_provider`` was
         normalized to ``"custom"`` by
@@ -4683,6 +4685,22 @@ def _resolve_image_input_mode(cfg: dict, active_provider: str = "", active_model
     """
     if not isinstance(cfg, dict):
         cfg = {}
+
+    # #9196: a gateway session keeps the picker's model in provider-qualified
+    # form (``@custom:mygateway:my-vision-model``) because internal routing and
+    # the agent runtime need that identity (#1253). The capability lookup below
+    # — like the gateway request body built by ``_gateway_model_field()``
+    # (#6722) — expects the bare model name instead: the config lives at
+    # ``providers.<provider>.models.<model>``, so the prefixed string never
+    # matched and a configured ``supports_vision`` was silently missed.
+    # Normalise here, at the single routing entry point, so every caller
+    # (gateway runs/completions, sanitizer, builder) is covered. Only the model
+    # is unwrapped: ``active_provider``/``requested_provider`` already carry the
+    # provider identity and their format is relied on by #1253.
+    if active_model:
+        parsed_model = _parse_provider_qualified_model_id(active_model)
+        if parsed_model and parsed_model[0]:
+            active_model = str(parsed_model[0]).strip()
 
     try:
         from agent.image_routing import decide_image_input_mode, _lookup_supports_vision
