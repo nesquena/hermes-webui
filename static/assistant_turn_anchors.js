@@ -235,9 +235,17 @@
     return out;
   }
 
+  function _primitiveScalar(value){
+    if(value===undefined||value===null) return null;
+    const type=typeof value;
+    if(type==='string'||type==='number'||type==='boolean'||type==='bigint') return value;
+    return null;
+  }
+
   function _coerceSeq(value){
-    if(value==null||value==='') return null;
-    const str=String(value);
+    const scalar=_primitiveScalar(value);
+    if(scalar===null||scalar==='') return null;
+    const str=String(scalar);
     const numeric=Number(str);
     return Number.isFinite(numeric)?numeric:str;
   }
@@ -322,8 +330,8 @@
     if(explicit) return explicit;
     const sessionId=_cleanString(_own(context,'session_id'))||'session';
     const turnId=_cleanString(_own(context,'turn_id'))||'turn';
-    const ctxSeq=_own(context,'seq');
-    const seq=(ctxSeq!=null&&ctxSeq!=='')?String(ctxSeq):'pending';
+    const ctxSeq=_primitiveScalar(_own(context,'seq'));
+    const seq=(ctxSeq!==null&&ctxSeq!=='')?String(ctxSeq):'pending';
     return [sessionId,turnId,sourceType||'event',seq].join(':');
   }
 
@@ -332,8 +340,8 @@
     const eventId=_cleanString(_own(event,'event_id'));
     if(eventId) return 'event_id:'+JSON.stringify(eventId);
     const runId=_cleanString(_own(event,'run_id'));
-    const eventSeq=_own(event,'seq');
-    const seq=(eventSeq!=null&&eventSeq!=='')?String(eventSeq):'';
+    const eventSeq=_primitiveScalar(_own(event,'seq'));
+    const seq=(eventSeq!==null&&eventSeq!=='')?String(eventSeq):'';
     if(runId&&seq) return 'run_seq:'+JSON.stringify([runId,seq]);
     const sid=_cleanString(_own(event,'session_id'));
     const localId=_cleanString(_own(event,'local_id'));
@@ -804,8 +812,8 @@
     const eventId=_cleanString(_own(event,'event_id'));
     if(eventId) return eventId;
     const runId=_cleanString(_own(event,'run_id'));
-    const seq=_own(event,'seq');
-    if(runId&&seq!==undefined&&seq!==null&&seq!=='') return [runId,String(seq)].join(':');
+    const seq=_primitiveScalar(_own(event,'seq'));
+    if(runId&&seq!==null&&seq!=='') return [runId,String(seq)].join(':');
     const localId=_cleanString(_own(event,'local_id'));
     if(localId){
       const sourceType=_cleanString(_own(event,'source_event_type'))||_cleanString(_own(event,'kind'))||'event';
@@ -863,20 +871,20 @@
   }
 
   function _activityRowGroup(event, payload, index){
-    const activitySegmentSeq=_activityPayloadFirst(payload,['activitySegmentSeq','activity_segment_seq','segmentSeq','segment_seq']);
-    const activityBurstId=_activityPayloadFirst(payload,['activityBurstId','activity_burst_id','burstId','burst_id']);
-    const assistantMsgIdx=_activityPayloadFirst(payload,['assistant_msg_idx','assistantMessageIndex','assistant_msg_index']);
-    const cleanSegment=activitySegmentSeq!==undefined&&activitySegmentSeq!==null&&String(activitySegmentSeq)!==''
+    const activitySegmentSeq=_primitiveScalar(_activityPayloadFirst(payload,['activitySegmentSeq','activity_segment_seq','segmentSeq','segment_seq']));
+    const activityBurstId=_primitiveScalar(_activityPayloadFirst(payload,['activityBurstId','activity_burst_id','burstId','burst_id']));
+    const assistantMsgIdx=_primitiveScalar(_activityPayloadFirst(payload,['assistant_msg_idx','assistantMessageIndex','assistant_msg_index']));
+    const cleanSegment=activitySegmentSeq!==null&&String(activitySegmentSeq)!==''
       ? activitySegmentSeq
       : null;
-    const cleanBurst=activityBurstId!==undefined&&activityBurstId!==null&&String(activityBurstId)!==''
+    const cleanBurst=activityBurstId!==null&&String(activityBurstId)!==''
       ? activityBurstId
       : null;
-    const cleanAssistant=assistantMsgIdx!==undefined&&assistantMsgIdx!==null&&String(assistantMsgIdx)!==''
+    const cleanAssistant=assistantMsgIdx!==null&&String(assistantMsgIdx)!==''
       ? assistantMsgIdx
       : null;
-    const fallbackSeq=_own(event,'seq');
-    const fallbackKey=fallbackSeq!==undefined&&fallbackSeq!==null&&fallbackSeq!==''?`event:${String(fallbackSeq)}`:`activity:${String(index)}`;
+    const fallbackSeq=_primitiveScalar(_own(event,'seq'));
+    const fallbackKey=fallbackSeq!==null&&fallbackSeq!==''?`event:${String(fallbackSeq)}`:`activity:${String(index)}`;
     const groupKey=cleanSegment!==null
       ? `segment:${String(cleanSegment)}`
       : cleanBurst!==null

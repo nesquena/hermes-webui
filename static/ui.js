@@ -16770,7 +16770,7 @@ function _transparentToolStatus(tc, settled){
 function _transparentToolSummary(tc){
   if(!tc||typeof tc!=='object') return '';
   // Explicit progress text (e.g. subagent_progress) wins while still running.
-  const explicit=String(tc.preview||'').trim();
+  const explicit=(typeof _stringifyToolValue==='function'?_stringifyToolValue(tc.preview):String(tc.preview||'')).trim();
   if(tc.done===false&&explicit) return _shortToolLabel(explicit,160);
   // Target-based summary only (path/command/query/skill). Deliberately NO generic
   // arg-preview fallback: a call with args but no real target (e.g. `terminal`
@@ -16921,9 +16921,14 @@ function _copyEventToClipboard(row,control){
           });
         }catch(e){ argsForCopy=tc.args; }
       }
-      parts.push('args: '+JSON.stringify(argsForCopy,null,2));
+      let argsJson='';
+      try{ argsJson=JSON.stringify(argsForCopy,null,2); }catch(_){ argsJson='[Object]'; }
+      parts.push('args: '+argsJson);
     }
-    if(tc.snippet) parts.push('output:\n'+String(tc.snippet));
+    if(tc.snippet){
+      const snippetCopy=typeof _stringifyToolValue==='function'?_stringifyToolValue(tc.snippet):String(tc.snippet);
+      if(snippetCopy) parts.push('output:\n'+snippetCopy);
+    }
     if(parts.length===1){
       const argsText=Array.from(row.querySelectorAll('.tool-card-args .tool-arg-pair'))
         .map(pair=>String(pair.textContent||'').trim())
@@ -17181,11 +17186,14 @@ function _transparentToolDetailHtml(tc, status){
   // The tool name is already shown in the row header and the status is shown as
   // a badge, so don't repeat them as pseudo-args in the body. Only surface a
   // duration meta when present. (Trifecta finding V6 — reduce redundancy.)
+  const _str=typeof _stringifyToolValue==='function'
+    ? _stringifyToolValue
+    : ((v,o)=>v===undefined?'':(v===null?(o&&o.preserveNull?'null':''):(typeof v==='string'?v:JSON.stringify(v,null,o&&o.pretty?2:undefined))));
   const meta=[];
-  if(tc&&tc.duration!==undefined&&tc.duration!==null) meta.push(['duration', String(tc.duration)]);
-  const preview=String((tc&&(tc.snippet||tc.preview||tc.result||tc.output))||'').trim();
+  if(tc&&tc.duration!==undefined&&tc.duration!==null) meta.push(['duration', _str(tc.duration)]);
+  const preview=_str(tc&&(tc.snippet||tc.preview||tc.result||tc.output),{pretty:true}).trim();
   const argHtml=[...meta,...argEntries].map(([k,v])=>{
-    let sv=typeof v==='string'?v:JSON.stringify(v,null,2);
+    let sv=_str(v,{pretty:true,preserveNull:true});
     // Redact secret-bearing arg values before rendering the transparent Full
     // tab — content args can be long multi-line commands (#4928) whose later
     // lines may carry secrets the short label never showed (#4928 gate).
@@ -18004,12 +18012,13 @@ function _toolIdentity(tc){
   if(!tc) return '';
   const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
   if(tid) return `id:${tid}`;
+  const _str=typeof _stringifyToolValue==='function'?_stringifyToolValue:(v=>v==null?'':(typeof v==='object'?JSON.stringify(v):String(v)));
   const args=tc.args&&typeof tc.args==='object'?tc.args:{};
   return [
     tc.assistant_msg_idx!==undefined?`a:${tc.assistant_msg_idx}`:'',
-    tc.name||'tool',
-    JSON.stringify(args),
-    String(tc.snippet||tc.preview||'').slice(0,160),
+    _str(tc.name)||'tool',
+    _str(args),
+    _str(tc.snippet||tc.preview).slice(0,160),
   ].join('|');
 }
 function _toolDisclosureIdentity(tc){
@@ -18053,10 +18062,12 @@ function _anchorSceneMergeToolRows(prev, row){
   const mergedPayload=Object.assign({},prevPayload,nextPayload);
   const mergedTool=Object.assign({},prevTool,nextTool);
   if(!Object.keys(nextArgs).length&&Object.keys(prevArgs).length) mergedTool.args=prevArgs;
-  const prevPreview=String(prevTool.preview||prevPayload.preview||'').trim();
-  const nextText=String(row&&row.text||'').trim();
-  const nextSnippet=String(nextTool.snippet||nextPayload.snippet||nextPayload.result||nextPayload.output||'').trim();
-  const nextStatus=String(row&&row.status||'').toLowerCase();
+  const _str=typeof _stringifyToolValue==='function'?_stringifyToolValue:(v=>v==null?'':String(v));
+  const prevPreview=_str(prevTool.preview||prevPayload.preview).trim();
+  const nextText=_str(row&&row.text).trim();
+  const nextRawSnippet=nextTool.snippet||nextPayload.snippet||nextPayload.result||nextPayload.output;
+  const nextSnippet=_str(nextRawSnippet).trim();
+  const nextStatus=_str(row&&row.status).toLowerCase();
   const nextLooksLikeResult=!!nextSnippet||(
     !!nextText&&nextStatus&&nextStatus!=='running'&&nextStatus!=='pending'
   );
@@ -18064,7 +18075,7 @@ function _anchorSceneMergeToolRows(prev, row){
     mergedTool.preview=prevTool.preview||prevPayload.preview||prevPreview;
     if(!mergedPayload.preview) mergedPayload.preview=prevPayload.preview||prevPreview;
   }
-  if(nextSnippet) mergedTool.snippet=nextTool.snippet||nextPayload.snippet||nextPayload.result||nextPayload.output||nextSnippet;
+  if(nextSnippet) mergedTool.snippet=typeof nextRawSnippet==='string'?nextRawSnippet:nextSnippet;
   return Object.assign({},prev,row,{
     row_id:prev.row_id||row.row_id,
     order_index:prev.order_index??row.order_index,
@@ -18209,15 +18220,16 @@ function _anchorSceneToolCallFromRow(row, opts){
     : firstValidTimestampSeconds(row&&row.created_at, row&&row.timestamp, row&&row.ts, row&&row.started_at, row&&row.completed_at);
   const id=tool.id||row.tool_call_id||payload.tid||payload.id||payload.tool_call_id||payload.tool_use_id||payload.call_id||'';
   const settled=!!(opts&&opts.settled);
+  const _str=typeof _stringifyToolValue==='function'?_stringifyToolValue:(v=>v==null?'':String(v));
   return {
     name:tool.name||payload.name||'tool',
     args:(tool.args&&typeof tool.args==='object')?tool.args:((payload.args&&typeof payload.args==='object')?payload.args:{}),
     command:tool.command||payload.command||payload.cmd||'',
     raw_command:tool.raw_command||payload.raw_command||'',
     preview:tool.preview||payload.preview||'',
-    snippet:tool.snippet||payload.snippet||payload.result||payload.output||(
+    snippet:_str(tool.snippet||payload.snippet||payload.result||payload.output||(
       row&&row.status!=='running'&&row.status!=='pending'?row.text:''
-    )||'',
+    )),
     done:settled?true:(tool.done!==null&&tool.done!==undefined?tool.done:(row.status!=='running'&&row.status!=='pending')),
     is_error:!!(tool.is_error||payload.is_error||row.status==='error'||row.status==='failed'),
     is_diff:!!(tool.is_diff||payload.is_diff||payload.isDiff),
@@ -21388,7 +21400,7 @@ function _toolArgsSnapshot(args, limit){
   ].slice(0,max);
   const out={};
   keys.forEach(k=>{
-    const v=String(args[k]);
+    const v=typeof _stringifyToolValue==='function'?_stringifyToolValue(args[k],{preserveNull:true}):String(args[k]);
     const cap=contentKeys.has(String(k).toLowerCase())?CONTENT_CAP:120;
     let val=v.slice(0,cap)+(v.length>cap?'...':'');
     // Now that content args are retained up to 4000 chars (#4928), a secret on
@@ -24452,7 +24464,8 @@ function _toolDisplayName(tc){
 const _MEMORY_SAVE_ACTIONS=new Set(['add','replace']);
 const _SKILL_UPDATE_ACTIONS=new Set(['create','patch','edit','write_file']);
 function _tcAction(tc){
-  return String((tc&&tc.args&&tc.args.action)||'').toLowerCase();
+  const action=tc&&tc.args&&tc.args.action;
+  return (typeof _stringifyToolValue==='function'?_stringifyToolValue(action):String(action||'')).toLowerCase();
 }
 function _isMemorySave(tc){
   if(!tc||tc.name!=='memory'||tc.done===false||tc.is_error) return false;
@@ -24556,14 +24569,17 @@ function _toolTargetLabel(tc){
   else if(kind==='search'||kind==='web') raw=a.query||a.pattern||a.url||a.uri||'';
   else if(kind==='delegate') raw=_toolDelegateTargetLabel(tc,a);
   else raw=a.cmd||a.command||a.path||a.file_path||a.file||a.uri||a.url||a.query||a.pattern||a.dir||a.task||a.name||'';
-  return _redactToolTargetLabel(_decodeToolLabelEntities(String(raw).split('\n')[0].trim()));
+  const rawText=typeof _stringifyToolValue==='function'?_stringifyToolValue(raw):String(raw);
+  return _redactToolTargetLabel(_decodeToolLabelEntities(rawText.split('\n')[0].trim()));
 }
 // delegate_task names its work in goal or a tasks batch; saved args may be a truncated string, so the result's count wins.
 function _toolDelegateTargetLabel(tc,a){
-  if(a.action&&a.action!=='spawn') return `subagents (${a.action})`;
-  const counted=String(tc&&tc.snippet||'').match(/"count"\s*:\s*(\d+)/);
+  const _str=typeof _stringifyToolValue==='function'?_stringifyToolValue:(v=>v==null?'':String(v));
+  const action=_str(a.action);
+  if(action&&action!=='spawn') return `subagents (${action})`;
+  const counted=_str(tc&&tc.snippet).match(/"count"\s*:\s*(\d+)/);
   let tasks=a.tasks;
-  const n=counted?+counted[1]:Array.isArray(tasks)?tasks.length:(String(tasks||'').match(/['"]goal['"]\s*:/g)||[]).length;
+  const n=counted?+counted[1]:Array.isArray(tasks)?tasks.length:(_str(tasks).match(/['"]goal['"]\s*:/g)||[]).length;
   if(n>1) return `${n} subagents`;
   if(Array.isArray(tasks)) tasks=tasks[0]&&tasks[0].goal;
   else if(typeof tasks==='string') tasks=(tasks.match(/['"]goal['"]\s*:\s*['"]([^'"]+)/)||[])[1];
@@ -24590,7 +24606,8 @@ function _toolFullCommandLabel(tc){
   // is expanded (#4926). Redaction + entity-decode still applied to the whole.
   const a=tc&&tc.args||{};
   const raw=a.cmd||a.command||tc.command||tc.raw_command||tc.original_command||tc.display_command||'';
-  return _redactToolTargetLabel(_decodeToolLabelEntities(String(raw).replace(/\s+$/,'')));
+  const rawText=typeof _stringifyToolValue==='function'?_stringifyToolValue(raw):String(raw);
+  return _redactToolTargetLabel(_decodeToolLabelEntities(rawText.replace(/\s+$/,'')));
 }
 function _toolVisibleTargetLabel(tc, opts){
   opts=opts||{};
@@ -24863,6 +24880,26 @@ function toolIcon(name){
   return icons[name]||li('wrench');
 }
 
+// Safe stringification for tool args, previews, and results: structured values
+// (including null-prototype objects from assistant_turn_anchors._sanitizePayload)
+// must never throw TypeError on bare String(v) or render as "[object Object]".
+function _stringifyToolValue(value, opts){
+  if(value===undefined) return '';
+  if(value===null) return (opts&&opts.preserveNull)?'null':'';
+  const type=typeof value;
+  if(type==='string') return value;
+  if(type==='number'||type==='boolean'||type==='bigint') return String(value);
+  if(type==='object'){
+    const space=opts&&opts.pretty?2:undefined;
+    try{
+      const json=JSON.stringify(value,null,space);
+      if(typeof json==='string') return json;
+    }catch(_){ /* cyclic or hostile toJSON */ }
+    return '[Object]';
+  }
+  try{ return String(value); }catch(_){ return '[Object]'; }
+}
+
 function _toolArgPreviewValue(value){
   if(value===null||value===undefined) return '';
   if(Array.isArray(value)){
@@ -24922,9 +24959,10 @@ function _toolResultOneLiner(preview){
   return trimmed.length>180?trimmed.slice(0,177)+'…':trimmed;
 }
 function _toolCardPreviewText(tc, displaySnippet){
-  const explicitPreview=String(tc&&tc.preview||'').trim();
+  const _str=typeof _stringifyToolValue==='function'?_stringifyToolValue:(v=>v==null?'':String(v));
+  const explicitPreview=_str(tc&&tc.preview).trim();
   if(tc&&tc.done===false&&explicitPreview) return explicitPreview;
-  const resultSource=explicitPreview||String(tc&&tc.snippet||'').trim();
+  const resultSource=explicitPreview||_str(tc&&tc.snippet).trim();
   const resultLine=_toolResultOneLiner(resultSource);
   if(tc&&tc.done!==false&&resultLine) return resultLine;
   const argPreview=_formatToolArgPreview(tc&&tc.args);
@@ -24956,10 +24994,13 @@ function _toolDetailLeadText(kind, tc){
   return target;
 }
 function buildToolCard(tc){
+  const _str=typeof _stringifyToolValue==='function'
+    ? _stringifyToolValue
+    : ((v,o)=>v===undefined?'':(v===null?(o&&o.preserveNull?'null':''):String(v)));
   const row=document.createElement('div');
   row.className='tool-card-row';
   if(!row.dataset) row.dataset={};
-  row.dataset.toolName=String(tc&&tc.name||'tool');
+  row.dataset.toolName=_str(tc&&tc.name)||'tool';
   const toolKind=typeof _toolActionKind==='function'?_toolActionKind(tc):'unknown';
   row.dataset.toolKind=toolKind;
   row.dataset.toolDone=String(tc&&tc.done!==false);
@@ -24972,8 +25013,9 @@ function buildToolCard(tc){
   const allowsDetail=typeof _toolCardAllowsDetail==='function'?_toolCardAllowsDetail(toolKind,tc):true;
   const hasDetail=hasRawDetail&&allowsDetail;
   let displaySnippet='';
-  if(tc.snippet){
-    const s=tc.snippet;
+  const snippetText=tc.snippet?_str(tc.snippet):'';
+  if(snippetText){
+    const s=snippetText;
     if(s.length<=800){displaySnippet=s;}
     else{
       const cutoff=s.slice(0,800);
@@ -24981,7 +25023,7 @@ function buildToolCard(tc){
       displaySnippet=lastBreak>80?s.slice(0,lastBreak+1):cutoff;
     }
   }
-  const hasMore=tc.snippet&&tc.snippet.length>displaySnippet.length;
+  const hasMore=snippetText&&snippetText.length>displaySnippet.length;
   const moreLabel=tc.is_diff?'Show diff':'Show more';
   const lessLabel=tc.is_diff?'Hide diff':'Show less';
   const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
@@ -25015,14 +25057,14 @@ function buildToolCard(tc){
         ${detailLead}
         ${visibleArgs.length?`<div class="tool-card-args">${
           visibleArgs.map(([k,v])=>{
-            let sv=String(v);
+            let sv=_str(v,{preserveNull:true});
             if(typeof _redactToolTargetLabel==='function'){ try{ sv=_redactToolTargetLabel(sv); }catch(e){} }
             return `<div class="tool-arg-pair"><span class="tool-arg-key">${esc(k)}</span><span class="tool-arg-val">${esc(sv)}</span></div>`;
           }).join('')
         }</div>`:''}
         ${displaySnippet?`<div class="tool-card-result">
           <pre>${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?`<code class="diff-block" data-highlighted="1">${_colorDiffLines(displaySnippet)}</code>`:esc(displaySnippet)}</pre>
-          ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" data-is-diff="${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?1:0}" data-more-label="${esc(moreLabel)}" data-less-label="${esc(lessLabel)}" onclick="event.stopPropagation();_toggleToolDiff(this)">${esc(moreLabel)}</button>`:''}
+          ${hasMore?`<button class="tool-card-more" data-full="${esc(snippetText||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" data-is-diff="${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?1:0}" data-more-label="${esc(moreLabel)}" data-less-label="${esc(lessLabel)}" onclick="event.stopPropagation();_toggleToolDiff(this)">${esc(moreLabel)}</button>`:''}
         </div>`:''}
       </div>`:''}
     </div>`;
@@ -25039,7 +25081,7 @@ function buildToolCard(tc){
 }
 
 function _colorDiffLines(text){
-  if(typeof text !== 'string') return esc(String(text||''));
+  if(typeof text !== 'string') return esc(typeof _stringifyToolValue==='function'?_stringifyToolValue(text):String(text||''));
   return esc(text).split('\n').map(line=>{
     if(line.startsWith('@@')) return `<span class="diff-line diff-hunk">${line}</span>`;
     if(line.startsWith('+')&&!line.startsWith('+++')) return `<span class="diff-line diff-plus">${line}</span>`;
