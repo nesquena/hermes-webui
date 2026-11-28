@@ -400,6 +400,20 @@ def _approval_sse_unsubscribe(session_id: str, q: queue.Queue) -> None:
                 _approval_sse_subscribers.pop(session_id, None)
 
 
+def _schedule_web_push_head(session_id: str, head: dict) -> None:
+    """Coalesce the current head before handing it to the bounded push pool.
+
+    Owner lookup, payload preparation and delivery run on those workers, not on
+    a new thread per mirror or under the caller's approval lock.
+    """
+    try:
+        from api.web_push import enqueue_approval_required
+
+        enqueue_approval_required(session_id, head)
+    except Exception:
+        pass
+
+
 def _approval_sse_notify_locked(session_id: str, head: dict | None, total: int) -> None:
     """Push an approval event to all SSE subscribers for a session.
 
@@ -418,6 +432,8 @@ def _approval_sse_notify_locked(session_id: str, head: dict | None, total: int) 
     hide its approval card.
     """
     payload = {"pending": dict(head) if head else None, "pending_count": total}
+    if head:
+        _schedule_web_push_head(session_id, dict(head))
     subs = _approval_sse_subscribers.get(session_id, ())
     for q in subs:
         try:
@@ -871,6 +887,16 @@ def _gateway_mirrored_pending_run_id(session_key: str, approval_id: str) -> str 
     return None
 
 
+def _web_push_approval(session_key: str, approval: dict) -> None:
+    """Best-effort, non-blocking closed-app push (no-op unless Web Push is enabled)."""
+    try:
+        from api.web_push import notify_approval_required
+
+        notify_approval_required(session_key, approval)
+    except Exception:
+        pass
+
+
 def submit_gateway_pending_mirror(session_key: str, approval: dict, *, cancel_event=None) -> tuple[dict | None, int]:
     """Mirror the live gateway head into WebUI polling state under a typed tag.
 
@@ -1085,6 +1111,8 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict, *, cancel_ev
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
     publish_session_list_changed("attention_pending")
+    if head:
+        _web_push_approval(session_key, head)
     return (dict(head) if head else None), total
 
 
@@ -1293,6 +1321,8 @@ def submit_pending(session_key: str, approval: dict) -> None:
         # notify arriving before T1's earlier notify with a stale count).
         _approval_sse_notify_locked(session_key, head, total)
     publish_session_list_changed("attention_pending")
+    if total == 1:
+        _web_push_approval(session_key, head)
     # NOTE: We do NOT call _submit_pending_raw here — that function overwrites
     # _pending[session_key] with a single dict, which would undo the list we just
     # built. The gateway blocking path uses _gateway_queues (a separate mechanism
