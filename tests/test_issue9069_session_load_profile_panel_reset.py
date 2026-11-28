@@ -11,10 +11,9 @@ created the previous profile's job in the NEW profile.
 
 The fix shares the synchronous half of that reset
 (``_resetProfileScopedPanelState``) between both switch paths, drops the
-Skills cache like ``switchToProfile`` does, and reloads only a visible Tasks
-panel (``loadCrons`` is latest-wins, #6767) on the session-load path. Memory
-and Skills are deliberately NOT reloaded there: their loaders have no
-owner-profile/latest-response check yet (separate hardening follow-up).
+Skills cache unconditionally, and reloads whichever panel is currently visible
+(Tasks, Memory, Skills, etc.) via ``_profileSwitchPanelLoad`` (fire-and-forget,
+#9077). Hidden panels issue zero requests.
 
 These tests drive the REAL helpers (``_switchProfileForSessionLoad``,
 ``_resetProfileScopedPanelState``, ``_profileSwitchPanelLoad``,
@@ -115,6 +114,7 @@ let _cronLoadGeneration = 0;
 let _cronAcceptedLoadGeneration = 0;
 let _cronLatestLoadSettled = Promise.resolve();
 let _skillsData = null;
+let _skillsLoadGeneration = 0;  // #9077 loader generation
 let _workspaceList = [];
 let _profileSwitchGeneration = 0;
 let _sessionListSkeletonActive = false;
@@ -338,12 +338,11 @@ process.stdout.write(JSON.stringify({
     assert b["currentCronDetail"] is None
 
 
-def test_session_load_switch_reloads_only_a_visible_tasks_panel_and_no_memory_or_skills():
+def test_session_load_switch_reloads_the_visible_panel_and_drops_skills_cache():
     """Whatever panel is visible, the session-load switch drops the previous
-    profile's Tasks state (and the Skills cache unless Skills is visible), but
-    the only panel reload it starts is loadCrons for a VISIBLE Tasks panel.
-    Memory/Skills (and the other panels) are not reloaded and issue no
-    network request on this path."""
+    profile's Tasks state and the Skills cache unconditionally. The visible
+    panel (Tasks, Memory, Skills, etc.) is reloaded through _profileSwitchPanelLoad,
+    while hidden panels do not fetch and issue no network request."""
     result = _run_node(_script(r"""
 const out = {};
 for (const panel of ['chat', 'memory', 'skills', 'kanban', 'profiles', 'workspaces', 'tasks']) {
@@ -363,18 +362,25 @@ for (const panel of ['chat', 'memory', 'skills', 'kanban', 'profiles', 'workspac
 }
 process.stdout.write(JSON.stringify(out));
 """))
+    expected_loaders = {
+        "tasks": "loadCrons",
+        "skills": "loadSkills",
+        "memory": "loadMemory",
+        "kanban": "loadKanban",
+        "profiles": "loadProfilesPanel",
+        "workspaces": "loadWorkspacesPanel",
+    }
     for panel, row in result.items():
         snap = row["snap"]
         assert snap["activeProfile"] == "beta", panel
         assert snap["currentCronDetail"] is None, f"{panel}: previous profile's cron detail survived"
         assert snap["editingCronId"] is None, panel
-        # A visible Skills panel keeps its cache (its controls re-render from
-        # it); every other panel drops it so the next Skills open refetches.
-        assert snap["skillsDataIsNull"] is (panel != "skills"), f"{panel}: wrong Skills cache handling"
+        # The Skills cache is dropped unconditionally regardless of panel visibility.
+        assert snap["skillsDataIsNull"] is True, f"{panel}: wrong Skills cache handling"
         assert row["apiUrls"] == ["/api/profile/switch"], f"{panel}: unexpected network on the session-load path"
         expected = {k: 0 for k in row["loaders"]}
-        if panel == "tasks":
-            expected["loadCrons"] = 1
+        if panel in expected_loaders:
+            expected[expected_loaders[panel]] = 1
         assert row["loaders"] == expected, f"{panel}: wrong panel reloads {row['loaders']}"
 
 
@@ -403,9 +409,9 @@ process.stdout.write(JSON.stringify({ before, afterSwitch, apiUrls: calls.apiUrl
 
 
 def test_visible_skills_panel_keeps_working_controls_through_session_load_switch():
-    """No Skills reload runs on this path, so a VISIBLE Skills panel keeps its
-    cache: search re-renders the same list instead of going inert, as on
-    master (the stale display itself is the loader-ownership follow-up)."""
+    """Under the new contract, a VISIBLE Skills panel is reloaded for the new
+    profile: its cache is refreshed with Beta's skills and search works with
+    the new profile's skills."""
     result = _run_node(_script(r"""
 _currentPanel = 'skills';
 await loadSkills();                       // Alpha's list rendered and cached
@@ -417,9 +423,9 @@ filterSkills();
 process.stdout.write(JSON.stringify({ apiUrls: calls.apiUrls, rendered: calls.renderedSkills,
   cached: _skillsData && _skillsData.map(s => s.name) }));
 """, real_skills=True))
-    assert result["apiUrls"] == ["/api/profile/switch"]
-    assert result["cached"] == ["alpha-skill"]
-    assert result["rendered"] == ["alpha-skill"], "Skills search went inert after the switch"
+    assert result["apiUrls"] == ["/api/profile/switch", "/api/skills"]
+    assert result["cached"] == ["beta-skill"]
+    assert result["rendered"] == ["beta-skill"], "Skills search went inert after the switch"
 
 
 def test_in_flight_tasks_reload_cannot_publish_after_returning_to_previous_profile():
@@ -559,12 +565,14 @@ process.stdout.write(JSON.stringify({ canonicalOk, canonical, sessionLoad }));
 def test_session_load_switch_reuses_the_shared_synchronous_reset():
     """Contract: one shared synchronous reset, not a copy of cron lines; the
     canonical switch still runs it through _profileSwitchPanelLoad (awaited
-    once, Skills cache dropped once); the session-load path never calls the
-    full visible-panel reload nor the Memory/Skills loaders."""
+    once, Skills cache dropped once); the session-load path reloads the visible
+    panel through _profileSwitchPanelLoad (fire-and-forget, never awaited) with
+    _resetProfileScopedPanelState as the fallback, and never calls the individual
+    panel loaders directly."""
     alt = _extract_function(SESSIONS_JS, "_switchProfileForSessionLoad")
-    assert "_resetProfileScopedPanelState();" in alt
-    assert "loadCrons()" in alt
-    for forbidden in ("_profileSwitchPanelLoad(", "loadMemory(", "loadSkills(", "await loadCrons"):
+    assert "_profileSwitchPanelLoad" in alt
+    assert "_resetProfileScopedPanelState" in alt
+    for forbidden in ("loadMemory(", "loadSkills(", "loadCrons(", "await _profileSwitchPanelLoad"):
         assert forbidden not in alt, f"{forbidden} on the session-load path"
     for copied in ("_editingCronId", "_cronIsDuplicate", "_cronPreFormDetail", "_clearCronDetail"):
         assert copied not in alt, f"{copied} copied into sessions.js instead of reusing the shared reset"

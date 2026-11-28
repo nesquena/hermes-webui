@@ -1027,11 +1027,21 @@ function _cronGatewayNoticeHtml(status) {
   `;
 }
 
+// #9077: the gateway notice is display-only, but /api/gateway/status is served
+// for the active profile, so a reply may only paint while it is still the
+// newest notice load for the profile that asked for it. loadCrons() fires this
+// without awaiting; the profile switch retires it through
+// _resetProfileScopedPanelState().
+let _cronGatewayNoticeGeneration = 0;
+
 async function loadCronGatewayNotice() {
   const box = $('cronGatewayNotice');
   if (!box) return;
+  const seq = ++_cronGatewayNoticeGeneration;
+  const owner = S.activeProfile;
   try {
     const status = await api('/api/gateway/status');
+    if (seq !== _cronGatewayNoticeGeneration || S.activeProfile !== owner) return;
     const html = _cronGatewayNoticeHtml(status);
     if (html) {
       box.innerHTML = html;
@@ -1041,6 +1051,7 @@ async function loadCronGatewayNotice() {
       box.style.display = 'none';
     }
   } catch (_) {
+    if (seq !== _cronGatewayNoticeGeneration || S.activeProfile !== owner) return;
     box.innerHTML = '';
     box.style.display = 'none';
   }
@@ -3180,18 +3191,35 @@ function _kanbanUnavailableHtml(err){
   return `<div class="main-view-empty"><div class="main-view-empty-title">${msg}</div></div>`;
 }
 
+// #9077: the Kanban board/config/assignees answers are profile-scoped. A load
+// may only publish its board (or paint the "unavailable" panel for a failure)
+// while it is still the newest kanban load and the profile that issued it is
+// still active; the profile switch retires in-flight loads through
+// _resetProfileScopedPanelState(). The poller/SSE refresh re-enters here, so
+// this is also plain latest-wins for overlapping refreshes, like loadCrons.
+// loadKanbanBoards() itself stays unguarded: the board switcher and the board
+// modal call it directly, so a guard there would strand them on the previous
+// profile's board list; loadKanban() re-checks the generation as soon as it
+// returns and bails before using the reply.
+let _kanbanLoadGeneration = 0;
+
 async function loadKanban(animate){
   const board = $('kanbanBoard');
   const list = $('kanbanList');
+  const seq = ++_kanbanLoadGeneration;
+  const owner = S.activeProfile;
+  const stale = () => seq !== _kanbanLoadGeneration || S.activeProfile !== owner;
   try {
     if (animate && board) board.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:13px">${esc(t('loading'))}</div>`;
     // Resolve the active board before board-scoped requests. If another CLI or
     // tab archived the previous board, /boards can fall back to default instead
     // of leaving config/board pinned to a ghost slug.
     await loadKanbanBoards();
+    if (stale()) return;
     const config = await api('/api/kanban/config' + _kanbanBoardQuery());
     let assignees = null;
     try { assignees = await api('/api/kanban/assignees' + _kanbanBoardQuery()); } catch(e) { assignees = null; }
+    if (stale()) return;
     _kanbanApplyConfigDefaults(config);
     const filters = _kanbanCurrentFilters();
     const params = new URLSearchParams();
@@ -3202,6 +3230,7 @@ async function loadKanban(animate){
     if (_kanbanCurrentBoard) params.set('board', _kanbanCurrentBoard);
     const path = '/api/kanban/board' + (params.toString() ? '?' + params.toString() : '');
     const data = await api(path);
+    if (stale()) return;
     if (data && data.changed === false && _kanbanBoard) { _kanbanRenderBoard(); return; }
     _kanbanBoard = data || {columns: []};
     if ((!_kanbanBoard.columns || !_kanbanBoard.columns.length) && config && config.columns) {
@@ -3218,6 +3247,7 @@ async function loadKanban(animate){
     _kanbanSetSelectOptions($('kanbanAssigneeFilter'), _kanbanBoard.assignees || (assignees && assignees.assignees) || (config && config.assignees), 'kanban_all_assignees');
     _kanbanSetSelectOptions($('kanbanTenantFilter'), _kanbanBoard.tenants, 'kanban_all_tenants');
     await loadKanbanStats();
+    if (stale()) return;
     // Note: PR #1828 (v0.51.20) moved the boards refresh to the start of
     // loadKanban() so the active board is resolved BEFORE board-scoped
     // requests fire. The previous tail-of-function refresh has been removed
@@ -3228,6 +3258,7 @@ async function loadKanban(animate){
     _kanbanStartPolling();
     _kanbanRenderBoard();
   } catch(e) {
+    if (stale()) return;  // a stale rejection must not paint this profile's board
     const html = _kanbanUnavailableHtml(e);
     if (board) board.innerHTML = html;
     if (list) list.innerHTML = html;
@@ -3237,8 +3268,14 @@ async function loadKanban(animate){
 function filterKanban(){ _kanbanRenderBoard(); }
 
 async function loadKanbanStats(){
+  // Sub-load of the current loadKanban(): same owner/generation gate, so a
+  // switch that retired that load cannot have its stats repaint this profile's
+  // header (#9077).
+  const seq = _kanbanLoadGeneration;
+  const owner = S.activeProfile;
   try {
     const stats = await api('/api/kanban/stats' + _kanbanBoardQuery());
+    if (seq !== _kanbanLoadGeneration || S.activeProfile !== owner) return;
     const el = $('kanbanStats');
     if (!el) return;
     const byStatus = (stats && stats.by_status) || {};
@@ -3325,24 +3362,44 @@ function _kanbanStartEventStream(){
 
 let _kanbanRefreshScheduled = false;
 let _kanbanRefreshPendingTaskIds = new Set();
+let _kanbanRefreshInFlight = false;
+let _kanbanRefreshRerunPending = false;
 function _scheduleKanbanRefresh(events){
-  for (const ev of events) {
+  for (const ev of (events || [])) {
     if (ev && ev.task_id) _kanbanRefreshPendingTaskIds.add(ev.task_id);
+  }
+  if (_kanbanRefreshInFlight) {
+    _kanbanRefreshRerunPending = true;
+    return;
   }
   if (_kanbanRefreshScheduled) return;
   _kanbanRefreshScheduled = true;
   // 250ms debounce — keeps a burst of N events from triggering N reloads.
   setTimeout(async () => {
     _kanbanRefreshScheduled = false;
-    const taskIds = Array.from(_kanbanRefreshPendingTaskIds);
-    _kanbanRefreshPendingTaskIds.clear();
-    if (_currentPanel !== 'kanban') return;
+    if (_kanbanRefreshInFlight) {
+      _kanbanRefreshRerunPending = true;
+      return;
+    }
+    _kanbanRefreshInFlight = true;
     try {
-      await loadKanban(true);
-      if (_kanbanCurrentTaskId && taskIds.includes(_kanbanCurrentTaskId)) {
-        await loadKanbanTask(_kanbanCurrentTaskId);
+      while (true) {
+        _kanbanRefreshRerunPending = false;
+        const taskIds = Array.from(_kanbanRefreshPendingTaskIds);
+        _kanbanRefreshPendingTaskIds.clear();
+        if (_currentPanel !== 'kanban') break;
+        const animate = !(_kanbanBoard && Array.isArray(_kanbanBoard.columns) && _kanbanBoard.columns.length);
+        try {
+          await loadKanban(animate);
+          if (_kanbanCurrentTaskId && taskIds.includes(_kanbanCurrentTaskId)) {
+            await loadKanbanTask(_kanbanCurrentTaskId);
+          }
+        } catch(_) { /* swallow — SSE refresh shouldn't toast */ }
+        if (_currentPanel !== 'kanban' || !_kanbanRefreshRerunPending) break;
       }
-    } catch(_) { /* swallow — SSE refresh shouldn't toast */ }
+    } finally {
+      _kanbanRefreshInFlight = false;
+    }
   }, 250);
 }
 
@@ -5487,11 +5544,20 @@ async function clearConversation() {
 }
 
 // ── Skills panel ──
+// #9077: /api/skills is per profile, so a reply may only publish while it is
+// still the newest load and its owner profile is still active. The profile
+// switch retires in-flight loads via _resetProfileScopedPanelState().
+let _skillsLoadGeneration = 0;
+
 async function loadSkills() {
   if (_skillsData) { renderSkills(_skillsData); return; }
   const box = $('skillsList');
+  const seq = ++_skillsLoadGeneration;
+  const owner = S.activeProfile;
+  const stale = () => seq !== _skillsLoadGeneration || S.activeProfile !== owner;
   try {
     const data = await api('/api/skills');
+    if (stale()) return;  // superseded, or answered for the previous profile
     _skillsData = data.skills || [];
     _skillsData.profile = data.profile;  // #9077: owner the writes echo back
     // Prune collapsed state to only keep categories present in fresh data,
@@ -5499,7 +5565,10 @@ async function loadSkills() {
     const liveCats = new Set(_skillsData.map(s => s.category || '(general)'));
     for (const c of _collapsedCats) { if (!liveCats.has(c)) _collapsedCats.delete(c); }
     renderSkills(_skillsData);
-  } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`; }
+  } catch(e) {
+    if (stale()) return;  // a stale rejection must not paint this profile's list
+    if (box) box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`;
+  }
 }
 
 let _collapsedCats = new Set(); // persisted collapsed state across re-renders
@@ -6122,14 +6191,25 @@ function _renderMemoryEdit(section) {
   if (ta) ta.focus();
 }
 
-async function loadNotesSources(force) {
+// #9077: External notes source cache outlives the load; publish only if the
+// reply still belongs to the active profile and has not been superseded.
+async function loadNotesSources(force, isStale) {
   if (_notesSourcesData && !force) return _notesSourcesData;
+  const owner = S.activeProfile;
+  const stale = () => S.activeProfile !== owner || (typeof isStale === 'function' && isStale());
+  let data;
   try {
-    _notesSourcesData = await api('/api/notes/sources');
+    data = await api('/api/notes/sources');
+    if (data && typeof data === 'object' && !('error' in data)) {
+      data.error = null;
+    }
   } catch (e) {
-    _notesSourcesData = {sources: [], automatic_recall_unchanged: true, error: e && e.message ? e.message : String(e)};
+    data = {sources: [], automatic_recall_unchanged: true, error: e && e.message ? e.message : String(e)};
   }
-  return _notesSourcesData;
+  if (!stale()) {
+    _notesSourcesData = data;
+  }
+  return data;
 }
 
 function selectExternalNotesSource(source) {
@@ -6641,10 +6721,22 @@ window.addEventListener('resize',()=>{
   if(dd&&dd.classList.contains('open')) _positionComposerWsDropdown();
 });
 
+// #9077: the workspaces list is served per profile. The panel render is
+// profile-owned: a reply may only paint while it is still the newest panel
+// load and its owner profile is still active (the switch retires in-flight
+// loads through _resetProfileScopedPanelState). loadWorkspaceList() itself is
+// intentionally left alone: boot, the composer dropdown and the Kanban board
+// modal share it as a cache, and a guard there would strand those callers on an
+// empty list after a switch unless they refetched.
+let _workspacePanelLoadGeneration = 0;
+
 async function loadWorkspacesPanel(){
   const panel=$('workspacesPanel');
   if(!panel)return;
+  const seq=++_workspacePanelLoadGeneration;
+  const owner=S.activeProfile;
   const data=await loadWorkspaceList();
+  if(seq!==_workspacePanelLoadGeneration||S.activeProfile!==owner)return;
   renderWorkspacesPanel(data.workspaces);
 }
 
@@ -7258,6 +7350,14 @@ function _openProfileDropdownShell(){
   if(tbtn && _profileDropdownTrigger===tbtn) tbtn.classList.add('active');
 }
 
+function _restartVisiblePanelLoadForResolvedProfile(resolvedProfile){
+  if (!resolvedProfile || resolvedProfile === 'default' || typeof _profileSwitchPanelLoad !== 'function') {
+    return false;
+  }
+  Promise.resolve(_profileSwitchPanelLoad()).catch(()=>{});
+  return true;
+}
+
 async function _profileSwitchPanelLoad(){
   _resetProfileScopedPanelState();
   if (_currentPanel === 'skills') await loadSkills();
@@ -7280,6 +7380,12 @@ function _resetProfileScopedPanelState(){
   // latest-wins). With Tasks hidden no newer load supersedes it, and its reply
   // would otherwise publish that profile's writable rows under this one.
   ++_cronLoadGeneration;
+  // Same for the other profile-owned panel loaders (#9077): Memory, Skills,
+  // Workspaces, Kanban and the cron gateway notice all answer for the profile
+  // that issued the request. With the panel hidden no newer load supersedes
+  // them, so their late replies must be retired here. typeof-guarded: frontend
+  // harnesses eval this helper in isolation, without the loader block below.
+  if (typeof _retireProfileScopedPanelLoads === 'function') _retireProfileScopedPanelLoads();
   // Cross-profile cron visibility is an active-profile opt-in; never carry it
   // into the next profile when the Tasks panel wasn't the visible panel.
   _showAllCronProfiles = false;
@@ -7300,6 +7406,20 @@ function _resetProfileScopedPanelState(){
   // The cron form's skill autocomplete cache is per profile too; the next
   // Duplicate/Edit form open refetches /api/skills for this profile.
   _cronSkillsCache = null;
+}
+
+// #9077: bump every profile-owned panel loader's generation, retiring the
+// loads that were issued for the profile that is being left behind. A retired
+// reply bails before touching its cache, DOM or error box, so a panel that
+// stays hidden across a switch cannot publish the previous profile's content
+// when its request finally lands. Declared next to the shared reset so the two
+// halves of the switch contract stay in one place.
+function _retireProfileScopedPanelLoads(){
+  ++_memoryLoadGeneration;
+  ++_skillsLoadGeneration;
+  ++_workspacePanelLoadGeneration;
+  ++_kanbanLoadGeneration;
+  ++_cronGatewayNoticeGeneration;
 }
 
 // ── Tab-visibility reconciliation guard ────────────────────────────────────
@@ -8317,19 +8437,32 @@ async function deleteProfile(name) {
 }
 
 // ── Memory panel ──
+// #9077: /api/memory answers for the profile (and session) that was active when
+// the request left, so a reply is only publishable while it is still the newest
+// load AND the profile that asked for it is still the active one. Both switch
+// paths retire in-flight loads through _resetProfileScopedPanelState(), so a
+// reply that lands after a switch bails here instead of overwriting this
+// profile's _memoryData / panel / error box with the previous one's content.
+let _memoryLoadGeneration = 0;
+
 async function loadMemory(force) {
   const panel = $('memoryPanel');
+  const seq = ++_memoryLoadGeneration;
+  const owner = S.activeProfile;
+  const stale = () => seq !== _memoryLoadGeneration || S.activeProfile !== owner;
   try {
     const memoryUrl = S.session && S.session.session_id
       ? `/api/memory?session_id=${encodeURIComponent(S.session.session_id)}`
       : '/api/memory';
     const data = await api(memoryUrl);
+    if (stale()) return;  // superseded, or answered for the previous profile
     _memoryData = data;
     if (_currentMemorySection === 'external_notes' && !data.external_notes_enabled) {
       _currentMemorySection = null;
     }
     if (_currentMemorySection === 'external_notes') {
-      await loadNotesSources(!!force);
+      await loadNotesSources(!!force, stale);
+      if (stale()) return;
     }
     if (panel) {
       panel.innerHTML = '';
@@ -8350,6 +8483,7 @@ async function loadMemory(force) {
       _renderMemoryDetail(_currentMemorySection);
     }
   } catch(e) {
+    if (stale()) return;  // a stale rejection must not paint this profile's panel
     if (panel) panel.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
   }
 }

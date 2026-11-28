@@ -47,6 +47,8 @@
 
 ### Fixed
 
+- **A profile switch no longer lets an older profile's panel reply land in the new one (#9077).** The Memory, Skills, Workspaces, Kanban and cron gateway-notice loaders now publish a reply only while it is still the newest load for the profile that asked for it, so a response that arrives after a switch — a late success or a late failure — is dropped instead of overwriting the new profile's panel, cache or error box. Both switch paths already retire in-flight loads through the shared panel reset, so this also covers panels that stay hidden across the switch. Thanks @webtecnica.
+
 - **The System health disk gauge now measures the disk that holds WebUI's state (#9178, related: #9167).** It used to measure the root filesystem (`/`). In a container that's the image filesystem, so a nearly full state volume could show close to 0%. If the state directory can't be measured, the disk metric is reported as unavailable instead of falling back to `/`. Thanks @angelusbr.
 
 - **The dialog-binding browser tests run with service workers blocked, and a failed share-row wait now says why (#9407).** In `tests/test_dialog_actions_bind_their_conversation_browser.py`, the page fixture now opens its browser context with service workers blocked. Playwright's request interception (`page.route`, which the tests use to hold the sidebar list refresh) doesn't reliably see requests a service worker handles, and nothing in this file needs one. If the wait for a shared row's token still times out, the failure now reports the held-request count, the share posts and statuses, whether a service worker controls the page, and the row's state. This hardens the test against the one-off timeout seen in master's CI; it is not a proven root-cause fix.
