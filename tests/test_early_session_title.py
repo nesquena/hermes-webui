@@ -1,4 +1,12 @@
+import sys
+import time
+from concurrent.futures import Future
+from io import BytesIO
 from pathlib import Path
+from queue import Queue
+from types import SimpleNamespace
+
+import pytest
 
 
 def test_prepare_chat_start_sets_provisional_title_for_default_session(tmp_path, monkeypatch):
@@ -165,3 +173,159 @@ def test_messages_js_applies_chat_start_title():
     assert "_sessionTitleProvisionalBySid" in src
     assert "rememberProvisional:true" in src
     assert "provisionalText:displayText.slice(0,64)" in src
+
+
+@pytest.mark.parametrize('timing', ['early', 'late', 'after_fallback', 'manual', 'cancelled'])
+def test_agent_title_reaches_saved_session_and_sidebar(tmp_path, monkeypatch, timing):
+    from api import models, streaming
+    from api.session_events import subscribe_session_events, unsubscribe_session_events
+    from api.session_ops import apply_session_title_rename
+
+    monkeypatch.setattr(models, 'SESSION_DIR', tmp_path)
+    monkeypatch.setattr(models, 'SESSION_INDEX_FILE', tmp_path / '_index.json')
+    monkeypatch.setattr(models, 'SESSIONS', models.SESSIONS.copy())
+    monkeypatch.setattr(streaming, 'SESSIONS', models.SESSIONS)
+
+    prompt = 'Investigate why the title in the sidebar contains my opening sentence'
+    messages = [
+        {'role': 'user', 'content': prompt, 'timestamp': 123},
+        {'role': 'assistant', 'content': 'The two stores disagree.', 'timestamp': 124},
+    ]
+    provisional = models.title_from(messages)
+    session = models.Session(
+        session_id='agent-title-session', profile='work', title=provisional, messages=messages,
+    )
+    session.save()
+    models.SESSIONS[session.session_id] = session
+    updated_at = session.updated_at
+    fallback = {'fallback_title': None}
+    settled = Future()
+    events = subscribe_session_events()
+    summary = 'Investigate sidebar title synchronization'
+    try:
+        on_title = streaming._agent_title_callback(
+            session.session_id, 'work', settled, fallback, clear_generation=session.clear_generation,
+        )
+        on_title(provisional, 'derived')
+        assert events.empty()
+        if timing == 'early':
+            on_title(summary, 'llm')
+            assert models.Session.load(session.session_id).title == provisional
+            assert events.empty()
+        if timing == 'after_fallback':
+            session.title = 'Local automatic summary'
+            session.llm_title_generated = True
+            fallback['fallback_title'] = session.title
+            session.save(touch_updated_at=False)
+        if timing == 'manual':
+            apply_session_title_rename(session, 'Keep my title')
+            session.save(touch_updated_at=False)
+        if timing == 'cancelled':
+            settled.cancel()
+        else:
+            settled.set_result(None)
+        if timing != 'early':
+            on_title(summary, 'llm')
+
+        saved = models.Session.load(session.session_id)
+        assert saved.updated_at == updated_at
+        assert saved.messages == messages
+        if timing in ('manual', 'cancelled'):
+            assert saved.title == ('Keep my title' if timing == 'manual' else provisional)
+            assert events.empty()
+        else:
+            assert saved.title == summary
+            assert saved.llm_title_generated and not saved.manual_title
+            event = events.get_nowait()
+            assert event['reason'] == 'agent_title'
+            assert event['profile'] == 'work'
+            assert event['session_id'] == session.session_id
+            on_title(summary, 'llm')
+            assert events.empty()
+    finally:
+        unsubscribe_session_events(events)
+
+
+@pytest.mark.parametrize('clear', [False, True])
+def test_agent_title_callback_survives_stream_end(tmp_path, monkeypatch, clear):
+    from api import config, models, routes, streaming
+    from api.session_events import subscribe_session_events, unsubscribe_session_events
+
+    monkeypatch.setattr(models, 'SESSION_DIR', tmp_path)
+    monkeypatch.setattr(models, 'SESSION_INDEX_FILE', tmp_path / '_index.json')
+    monkeypatch.setattr(streaming, 'SESSION_DIR', tmp_path)
+    monkeypatch.setattr(config, 'SESSION_DIR', tmp_path)
+    monkeypatch.setattr(models, '_sync_sidecar_from_state_db_if_newer', lambda *_a, **_kw: False)
+    monkeypatch.setattr('api.state_sync.sync_session_cwd_background', lambda *_a, **_kw: None)
+    monkeypatch.setattr(config, 'get_config', lambda *_a, **_kw: {})
+    monkeypatch.setattr(config, '_resolve_cli_toolsets', lambda *_a, **_kw: [])
+    monkeypatch.setitem(sys.modules, 'hermes_state', SimpleNamespace(SessionDB=lambda *_a, **_kw: object()))
+    monkeypatch.setattr(streaming, 'resolve_model_provider', lambda *_a, **_kw: ('gpt-4o', 'openai', None))
+    monkeypatch.setattr(streaming, '_title_exchange_for_unresolved_title', lambda _messages: (None, None))
+
+    callbacks = []
+
+    class ControlledAgent:
+        def __init__(self, **kwargs):
+            self.session_id = kwargs['session_id']
+            self.context_compressor = None
+            self.session_prompt_tokens = self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = None
+            self.reasoning_config = self.ephemeral_system_prompt = None
+
+        def run_conversation(self, **kwargs):
+            callbacks.append(self._on_session_title)
+            return {'messages': [
+                {'role': 'user', 'content': kwargs['persist_user_message']},
+                {'role': 'assistant', 'content': 'I checked the title update.'},
+            ]}
+
+        def commit_memory_session(self):
+            pass
+
+    monkeypatch.setattr(streaming, '_get_ai_agent', lambda: ControlledAgent)
+    sid = 'late-title-after-clear' if clear else 'late-title-after-stream-end'
+    session = models.Session(session_id=sid, workspace=str(tmp_path), model='gpt-4o')
+    monkeypatch.setitem(models.SESSIONS, sid, session)
+
+    def run_turn(prompt, stream_id):
+        session.active_stream_id = stream_id
+        session.pending_user_message = prompt
+        session.pending_started_at = time.time()
+        session.pending_user_source = 'webui'
+        session.save()
+        frames = Queue()
+        monkeypatch.setitem(config.STREAMS, stream_id, frames)
+        config.register_stream_owner(stream_id, sid)
+        streaming._run_agent_streaming(sid, prompt, 'gpt-4o', str(tmp_path), stream_id)
+        assert [frame[0] for frame in frames.queue if frame[0] in ('done', 'stream_end', 'apperror')] == [
+            'done', 'stream_end',
+        ]
+
+    try:
+        run_turn('Investigate the first sidebar issue', 'late-title-first')
+        if clear:
+            body = ('{"session_id":"%s"}' % sid).encode()
+            handler = SimpleNamespace(headers={'Content-Length': str(len(body))}, rfile=BytesIO(body))
+            monkeypatch.setattr(routes, '_check_csrf', lambda _handler: True)
+            monkeypatch.setattr(routes, 'j', lambda _handler, payload: payload)
+            assert routes.handle_post(handler, SimpleNamespace(path='/api/session/clear'))['ok']
+            assert models.Session.load(sid).clear_generation
+            run_turn('Investigate a different sidebar issue', 'late-title-second')
+
+        events = subscribe_session_events()
+        try:
+            if clear:
+                provisional = models.Session.load(sid).title
+                callbacks[0]('Old conversation summary', 'llm')
+                assert models.Session.load(sid).title == provisional
+                assert events.empty()
+            callbacks[-1]('Current conversation summary', 'llm')
+            assert models.Session.load(sid).title == 'Current conversation summary'
+            event = events.get_nowait()
+            assert event['session_id'] == sid
+            assert event['reason'] == 'agent_title'
+        finally:
+            unsubscribe_session_events(events)
+    finally:
+        config._evict_session_agent(sid)
