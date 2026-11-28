@@ -727,21 +727,38 @@ the text's language, in this order:
 
 1. `tts.edge.voices.<lang>` from the active profile's `config.yaml` — an
    explicit per-language choice always wins (`<lang>` is `it` or `en`).
-2. A built-in per-language default: `it` → `it-IT-ElsaNeural`,
+2. `tts.edge.voice` — the single configured voice, with one exception: when
+   it speaks the *other* detected language (an `it-IT` voice for English
+   text, or an `en-*` voice for Italian text), step 3 is used instead. A voice
+   in any other language, or a `Multilingual` voice, is used for all text.
+3. A built-in per-language default: `it` → `it-IT-ElsaNeural`,
    `en` → `en-US-AvaNeural`.
-3. `tts.edge.voice` — the single configured voice. It applies to every
-   language, and it is where an inconclusive detection lands.
-4. `it-IT-ElsaNeural`.
+4. `en-US-AvaMultilingualNeural`.
 
-Language detection is a stopword **vote**: an `it`/`en` word list plus accented
-Italian letters, where a language needs at least two votes and a strict majority
-to win. Mixed text is therefore decided by that vote — the winner is used, a
-single language does not have to own the whole string. Only a tie, or a text too
-short to cast two votes, resolves to no language at all, and that is what falls
-through to steps 3–4. An explicit `voice` in the request overrides the whole
-chain, and the voice that comes out of it still has to pass the allowlist. A
-malformed `tts` block, or a `${VAR}` reference that did not resolve, is treated
-as absent and degrades to the built-in default rather than failing the request.
+Language detection is a stopword **vote**: an `it`/`en` word list plus the
+accented letters `à ì ò ù` and the Italian-only ending `-zione`/`-zioni`, where
+a language needs at least two votes and a strict majority to win. The French
+`à`/`là`/`déjà`/`voilà`, and `é`/`è` inside a word, cast no vote. The words
+Italian shares with French and Spanish (`la`, `le`, `un`, `una`, `con`) vote
+only as backup: when the text already has an Italian word that French and
+Spanish don't use (`ho`, `stata`, `nella`, `fatto`, `faccio`, `quando`, ..., a
+word with `à ì ò ù`, or `-zione`) and no French, Spanish or Portuguese word
+(`est`, `les`, `es`, `el`, `muy`, `não`, ...; never a word ordinary Italian
+uses, such as `su` or `tiene`). `il`, `lo`, `di`, `ma`, `come` and `cosa`
+are French or Spanish words too, so they vote but can't be
+that Italian word (`non` can when used as Italian pre-verbal negation, but not
+when French syntax uses it as an interjection before punctuation).
+Text in those languages therefore usually resolves to no
+language, while short Italian replies such as "Le modifiche sono pronte." or
+"Quando la build termina?" still vote Italian. Mixed text is
+decided by the vote — the winner is used, a single language does not have to
+own the whole string. Only a tie, or a text too short to cast two votes,
+resolves to no language at all, and that skips steps 1 and 3. An explicit
+`voice` in the request overrides the whole chain and must be on the endpoint's
+Edge voice allowlist, or the request fails with `invalid voice`. A configured
+voice (steps 1 and 2) that is not on the allowlist, a malformed `tts` block, or
+a `${VAR}` reference that did not resolve, is treated as absent and degrades to
+the next step rather than failing the request.
 
 ## Registering a custom TTS engine
 
