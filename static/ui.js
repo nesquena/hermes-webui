@@ -4195,7 +4195,7 @@ function _isSafeDataImageUri(ref){
 
 function _dataImageHtml(ref, altText){
   if(!_isSafeDataImageUri(ref)) return null;
-  return `<img class="msg-media-img" src="${esc(ref)}" alt="${esc(altText||'image')}" loading="lazy">`;
+  return `<img class="msg-media-img" src="${esc(ref)}" alt="${esc(altText||'image').replace(/\[/g,'&#91;').replace(/\]/g,'&#93;')}" loading="lazy">`;
 }
 
 // Remote image policy (#7941). The served CSP img-src is default-deny for
@@ -4274,7 +4274,7 @@ function _remoteImagePlaceholderHtml(raw, altText){
   const reason=_remoteImageReason(raw);
   const alt=String(altText||'').trim();
   const tip=alt&&alt!=='image'?`${reason} (${alt.slice(0,120)})`:reason;
-  return `<a class="msg-media-link" href="${esc(String(raw||''))}" target="_blank" rel="noopener" title="${esc(tip)}">🖼 ${esc(label)}${host?` · ${esc(host)}`:''}</a>`;
+  return `<a class="msg-media-link" href="${esc(String(raw||''))}" target="_blank" rel="noopener" title="${esc(tip).replace(/\[/g,'&#91;').replace(/\]/g,'&#93;')}">🖼 ${esc(label)}${host?` · ${esc(host)}`:''}</a>`;
 }
 
 // Markdown image syntax ![alt](url) → HTML. https:// keeps the historical direct
@@ -4282,6 +4282,12 @@ function _remoteImagePlaceholderHtml(raw, altText){
 // MEDIA: pipeline uses, so ![x](file:///p.png) renders the artifact card instead
 // of the broken "!<a>" anchor it used to produce, and ![x](data:image/...) stops
 // dumping raw base64 text into the chat.
+// (gate G9072-IMAGE-REENTRY) every attribute this emits carries the alt with
+// [ and ] entity-encoded: esc() alone leaves `![` and `](scheme:` intact inside
+// the attribute value, and a later Markdown image pass scanning the finished
+// document pairs an emitted alt with the next `](/url)` in the text, rebuilds a
+// second image out of the tag, drops the literal tail and spills the tag's own
+// attributes into the new alt. Entities render identically.
 function _mdImageHtml(alt, url){
   if(/^data:/i.test(url)){
     const img=_dataImageHtml(url, alt);
@@ -4290,7 +4296,7 @@ function _mdImageHtml(alt, url){
   }
   if(/^file:\/\//i.test(url)) return _inlineMediaHtmlForRef(url,undefined,alt);
   if(typeof _remoteImageAllowed==='function'&&!_remoteImageAllowed(url)) return _remoteImagePlaceholderHtml(url, alt);
-  return `<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
+  return `<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt).replace(/\[/g,'&#91;').replace(/\]/g,'&#93;')}" class="msg-media-img" loading="lazy">`;
 }
 
 function _mediaTokenParts(source, matchOffset, rawRef){
@@ -11145,13 +11151,291 @@ function renderMd(raw){
     }
     return out+run.slice(cursor);
   }
+  // Placeholder tokens.  `\x00K0\x00` is also valid message text, and the
+  // restore replace cannot tell the caller's characters from a placeholder it
+  // wrote: a message containing one lost its text to the stash.  Each pass
+  // therefore picks, once per render, a lead the text does not spell out as
+  // `<lead>K<digits>\x00`, so the marker cannot appear in the caller's own
+  // text.  The marker length is constant in every ordinary case.  It used to
+  // be the shortest run of `K` / `H` after a NUL, which grew with the message:
+  // one NUL followed by a long letter run made a regex of that size, and every
+  // stashed code span copied the whole prefix into the temporary text, so the
+  // stash could grow quadratically in the message length (greptile P1 on
+  // #9072).
+  // Whitespace controls stay out of the candidate list: `\s`-shaped regexes
+  // in the later passes must not treat a marker as layout.
+  const _MARK_LEADS='\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f';
+  const _MARK_LEAD=new Array(32);
+  for(let i=0;i<_MARK_LEADS.length;i++)_MARK_LEAD[_MARK_LEADS.charCodeAt(i)]=true;
+  const _isMarkLead=c=>{const k=c.charCodeAt(0);return k<32&&_MARK_LEAD[k]===true;};
+  // The leads of length `len` that the text already spells out as a marker
+  // (`<lead><ch><digits>\x00`).  Only that shape collides with a placeholder:
+  // a lead character on its own is harmless, so presence alone is not enough
+  // to rule a lead out.
+  const _takenLeads=(text,ch,len)=>{
+    const taken=new Set();
+    for(let i=0;i+len<text.length;i++){
+      let lead='';
+      for(let k=0;k<len;k++){
+        const c=text.charAt(i+k);
+        if(!_isMarkLead(c)){lead='';break;}
+        lead+=c;
+      }
+      if(!lead||text.charAt(i+len)!==ch)continue;
+      let j=i+len+1;
+      while(j<text.length){
+        const d=text.charCodeAt(j);
+        if(d<48||d>57)break;
+        j++;
+      }
+      if(j>i+len+1&&text.charAt(j)==='\x00')taken.add(lead);
+    }
+    return taken;
+  };
+  const _firstFreeLead=(taken,len,pre)=>{
+    if(pre.length===len)return taken.has(pre)?'':pre;
+    for(let i=0;i<_MARK_LEADS.length;i++){
+      const got=_firstFreeLead(taken,len,pre+_MARK_LEADS.charAt(i));
+      if(got)return got;
+    }
+    return '';
+  };
+  const _tokPrefix=(base,text,flat)=>{
+    const ch=base.slice(-1);
+    // Ordinary case: a candidate character neither form contains at all
+    // cannot collide, and one indexOf answers it.
+    for(let i=0;i<_MARK_LEADS.length;i++){
+      const lead=_MARK_LEADS.charAt(i);
+      if(text.indexOf(lead)<0&&(!flat||flat.indexOf(lead)<0))return lead+ch;
+    }
+    // The text carries every candidate character.  Lengthen the lead until its
+    // marker shape is free, so a message that spells out `\x00K0\x00` (a JSON
+    // or Python escape that arrived as real control characters) takes the next
+    // lead instead of having its own characters replaced by a stash entry.
+    // The shape is checked against `flat` too: flattening an image alt strips
+    // <code>/backtick boundaries and can thereby JOIN bytes that arrived
+    // separated by such a boundary into the chosen marker shape, so a lead
+    // free in the boundary-stripped text is free in every flattened alt
+    // (gate G9072-MANUFACTURED-TOKEN-AMPLIFICATION).
+    for(let len=1;len<=3;len++){
+      const taken=_takenLeads(text,ch,len);
+      if(flat)for(const l of _takenLeads(flat,ch,len))taken.add(l);
+      const lead=_firstFreeLead(taken,len,'');
+      if(lead)return lead+ch;
+    }
+    // Reachable only when the message spells out every lead of up to three
+    // characters in both forms.  A random nonce then stands in: the message
+    // was fixed before the nonce existed, so it cannot target it, and unlike
+    // the previous `\x00+ch.repeat(run+1)` marker the marker length never
+    // grows with the input — a long letter run used to size every stash write
+    // and the temporary text could no longer stay bounded.
+    for(;;){
+      const lead='\x00'+ch+Math.random().toString(36).slice(2,10);
+      const re=new RegExp(lead+'(\\d+)\x00');
+      if(!re.test(text)&&(!flat||!re.test(flat)))return lead;
+    }
+  };
+  // Image pass: ![alt](url) for http(s), file, data:image/ and root-relative
+  // sources.  Parsed with a forward scan rather than a regex: in the regex
+  // form the url class `[^\)]+` rescans the remaining suffix for every `![`
+  // opener when a message opens an image and never closes the parenthesis,
+  // which is quadratic in the message length (gate G9072-ROOTIMAGE-QUADRATIC:
+  // 96 KB of `![x](/` rendered in ~1.5 s against 2 ms on frozen master).  The
+  // scan below visits the input once, remembers opener positions, and a `)`
+  // that does not exist at all ends the search for the whole remainder.
+  // `altText` maps stash placeholders in the alt back to plain text: an alt
+  // string is an attribute value, so restoring <code> markup there would end
+  // the attribute early and spill the rest into the tag (G9072-IMAGEALT-STASH).
+  function _mdImagePass(str,altText){
+    if(str.indexOf('![')<0)return str;
+    const scheme=/^(?:https?:\/\/|file:\/\/|data:image\/|\/(?!\/|\\))/;
+    let out='',copy=0,i=0,rp=-2,rpFrom=-1;
+    const pend=[];
+    // Position of the next `)`, cached across candidates: queries only move
+    // forward, so the total indexOf work stays linear.
+    const nextRParen=p=>{
+      if(rp!==-2){
+        if(rp===-1){if(p>=rpFrom)return -1;}
+        else if(rp>=p)return rp;
+      }
+      rpFrom=p;rp=str.indexOf(')',p);return rp;
+    };
+    // Forward-only next-tag-end cache. Unmarked `<span` openers can repeat
+    // thousands of times before a `>` (greptile round 10: repeated
+    // `indexOf('>', i+1)` grew ~50ms -> ~953ms for 16k -> 128k openers).
+    let gtCache=-2,gtFrom=-1,gtGenerated=false;
+    const nextTagEnd=p=>{
+      if(gtCache!==-2){
+        if(gtCache===-1){if(p>=gtFrom)return -1;}
+        else if(gtCache>=p)return gtCache;
+      }
+      gtFrom=p;gtCache=str.indexOf('>',p);
+      // Compute the marker flag ONCE per distinct tag end, not per pending
+      // opener: a run of `<span ` before one `>` would otherwise rescan the
+      // whole tag for each opener (greptile round 10 growth).
+      gtGenerated=gtCache>=0&&/\b(?:class="msg-|loading="lazy")/.test(str.slice(p,gtCache));
+      return gtCache;
+    };
+    while(i<str.length){
+      // Already-emitted HTML (from an earlier inlineMd/image pass) is opaque:
+      // its attributes can legitimately contain `![` (a URL with `![`, or an
+      // alt like `A![B`). Pairing that opener with a later `](/url)` rebuilds
+      // a second image out of the tag and spills attributes into its alt
+      // (gate G9072-IMAGE-REENTRY). Input here is escaped prose plus generated
+      // tags, so a `<` always opens a tag whose `>` is the tag end.
+      if(str.charAt(i)==='<'){
+        // Only media/img tags can carry a rendered URL or alt with `![` in an
+        // attribute. Skipping formatting tags (<code>, <strong>, ...) here
+        // would break opener pairing across them, e.g. ![`logo`](url).
+        // Two cases must be opaque:
+        //   * no opener pending — the tag cannot be part of an image alt, so
+        //     skip it wholesale (round-7 re-entry guard);
+        //   * a tag emitted by an earlier image pass — it carries the
+        //     renderer's own markers (class="msg-…" or loading="lazy"). An
+        //     unfinished `![` opener must not reach across such a tag and
+        //     consume the image it already rendered (greptile P2: unfinished
+        //     examples ate a later heading/list image), so skip the tag and
+        //     drop any opener still pending before it. Genuine user HTML in an
+        //     alt (`<span>logo</span>`) has none of these markers and stays
+        //     eligible for pairing.
+        // Inspect the COMPLETE start tag, not a fixed 220-char prefix: a
+        // generated image emits `src` before the `class`/`loading` markers,
+        // so a long destination pushed them past the old window and an
+        // unfinished opener rebuilt a second image from the tag's attributes
+        // (greptile round 10). The forward-only cache keeps the tag-end search
+        // linear even with thousands of pending unmarked openers.
+        const gt=nextTagEnd(i+1);
+        if(gt<0){i++;continue;}
+        // Check the tag name on a bounded prefix; `gtGenerated` was computed
+        // once for this tag end by nextTagEnd (see above). A generated image
+        // may put a long `src` before `class`/`loading`, so the marker test
+        // covers the whole tag, not a fixed 220-char window (round 10).
+        const tagHead=str.slice(i,Math.min(i+16,gt+1));
+        if(/^<(?:img|span|svg|a|video|audio|source)\b/i.test(tagHead)){
+          if(pend.length===0||gtGenerated){
+            if(gtGenerated)pend.length=0;
+            out+=str.slice(copy,gt+1);
+            copy=gt+1;i=gt+1;continue;
+          }
+        }
+      }
+      if(str.charAt(i)==='!'&&str.charAt(i+1)==='['){pend.push(i);i+=2;continue;}
+      if(str.charAt(i)!==']'){i++;continue;}
+      const us=i+2;
+      let matched=false;
+      while(pend.length){
+        const open=pend.shift();
+        if(str.charAt(i+1)!=='('||!scheme.test(str.slice(us,us+11)))continue;
+        const close=nextRParen(us);
+        if(close<0)return out+str.slice(copy);
+        if(close<=us)continue;
+        const rawAlt=altText?String(altText(str.slice(open+2,i))):str.slice(open+2,i);
+        // Attribute value: drop code-span markup and decode the entities the
+        // fence stash already escaped, so the single esc() below is the only
+        // escaping this text ever gets.  The pipeline only emits the bare
+        // `<code>`/`</code>` pair into an alt, so these string splits stay
+        // linear (a lazy tag regex here would be another ReDoS candidate).
+        const alt=rawAlt.split('<code>').join('').split('</code>').join('')
+          .replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&');
+        const url=str.slice(us,close);
+        out+=str.slice(copy,open)+((typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt).replace(/\[/g,'&#91;').replace(/\]/g,'&#93;')}" class="msg-media-img" loading="lazy">`);
+        copy=close+1;i=close+1;matched=true;
+        // Every opener still pending sits left of this `]`, so the match just
+        // swallowed it.  Keeping those positions lets a later `](` re-emit
+        // them (`![A![B](/one.png)`) and copy text that is already rendered
+        // into a second alt, which is how a nested input grew the output
+        // quadratically.  One bracket pair, one image - as before this pass.
+        pend.length=0;
+        break;
+      }
+      if(matched)continue;
+      // Alt text may not contain `]`, so every opener seen before this one is
+      // dead once this bracket did not complete an image.
+      pend.length=0;
+      i++;
+    }
+    return out+str.slice(copy);
+  }
   // inlineMd: process bold/italic/code/links within a single line of text.
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
   function inlineMd(t){
-    // Stash backtick code spans first so bold/italic never esc() their content
+    // Stash code spans first so bold/italic never esc() their content.
+    // Already-rendered <code> elements arrive here from list / heading / table
+    // text when the paragraph splitter re-enters inlineMd(); they are stashed
+    // as well so a second pass cannot render image syntax inside them.
     const _code_stash=[];
-    t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);return `\x00C${_code_stash.length-1}\x00`;});
+    const _code_plain=[];
+    const _html_code_stash=[];
+    const _html_code_plain=[];
+    // A prefix this line does not contain, so the restore below only ever see
+    // placeholders this pass wrote (see _tokPrefix).  The boundary-stripped
+    // form guards the same alt-flattening join as the outer K stash, and it
+    // must strip every opening the H plain-text extraction strips -- including
+    // attributed ones like `<code class="language-text">`, not just the bare
+    // tag.  Resolving an H token replaces the whole element with its plain
+    // text, so caller NUL bytes on either side of the element can join that
+    // text into the C token shape AFTER _cPre was chosen while the shape was
+    // still split by the tag (gate G9072-ATTRIBUTED-CODE-TOKEN-JOIN).  With
+    // the attributed opening removed here, _cPre sees the joined bytes and
+    // takes a lead the restored alt cannot spell.  A forward scan does the
+    // strip: `<code\b[^>]*>` looks linear but backtracks to end-of-line once
+    // per unterminated opener (a forged `<code ` run that never closes), so
+    // 128 KB of openers froze the tab for ~630 ms (gate G9072-HFLAT-QUADRATIC).
+    // Stop at the first opener with no closing `>` -- like the selective
+    // stash below, an opener that never closes stays literal and ends the
+    // scan.  The `\b` guard (next char not [A-Za-z0-9_]) is preserved exactly.
+    const _hRaw=t.split('<code>').join('').split('</code>').join('').split('`').join('');
+    let _hFlat='';
+    {
+      let i=0;
+      while(i<_hRaw.length){
+        const open=_hRaw.indexOf('<code',i);
+        if(open<0){_hFlat+=_hRaw.slice(i);break;}
+        const after=_hRaw.charAt(open+5);
+        if(after&&/[A-Za-z0-9_]/.test(after)){_hFlat+=_hRaw.slice(i,open+5);i=open+5;continue;}
+        const gt=_hRaw.indexOf('>',open+5);
+        if(gt<0){_hFlat+=_hRaw.slice(i);break;}
+        _hFlat+=_hRaw.slice(i,open);i=gt+1;
+      }
+    }
+    const _hPre=_tokPrefix('\x00H',t,_hFlat);
+    const _hTok=new RegExp(_hPre+'(\\d+)\x00','g');
+    // The C tokens get the same treatment.  A caller can type real NUL bytes,
+    // and a hardcoded `\x00C0\x00` shape would then match text the caller
+    // supplied rather than a span this pass stashed (gate
+    // G9072-CALLER-NUL-AMPLIFICATION): inside the image-alt resolver every
+    // forged token re-expanded into its own raw text, so 20 typed copies of
+    // `\x00C0\x00` doubled into 20^n tokens across the fixpoint rounds and
+    // froze the tab.  A prefix the line does not contain makes every
+    // resolution terminal — the only matchable tokens are the ones the
+    // backtick pass wrote below.
+    const _cPre=_tokPrefix('\x00C',t,_hFlat);
+    const _cTok=new RegExp(_cPre+'(\\d+)\x00','g');
+    // One forward scan collects complete <code> elements.  A lazy
+    // `[\s\S]*?</code>` rescans the rest of the line for every opener when a
+    // message opens a code element and never closes it, which is quadratic
+    // (gate G9072-INLINECODE-QUADRATIC); an unmatched opener stays literal.
+    {
+      let out='',i=0;
+      while(i<t.length){
+        const open=t.indexOf('<code',i);
+        if(open<0){out+=t.slice(i);break;}
+        const afterTag=t.charAt(open+5);
+        if(afterTag!=='>'&&!/\s/.test(afterTag)){out+=t.slice(i,open+5);i=open+5;continue;}
+        const gt=t.indexOf('>',open+5);
+        const close=gt<0?-1:t.indexOf('</code>',gt+1);
+        if(close<0){out+=t.slice(i);break;}
+        const end=close+7;
+        const span=t.slice(open,end);
+        _html_code_stash.push(span);
+        _html_code_plain.push(span.replace(/^<code\b[^>]*>/,'').replace(/<\/code>$/,'').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&'));
+        out+=t.slice(i,open)+_hPre+(_html_code_stash.length-1)+'\x00';
+        i=end;
+      }
+      t=out;
+    }
+    t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);_code_plain.push(x);return _cPre+(_code_stash.length-1)+'\x00';});
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
     t=t.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
@@ -11160,12 +11444,34 @@ function renderMd(raw){
     // #487: Image pass — runs while code stash is active so ![x](url) inside
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
-    // is not consumed by the [label](url) link regex.
-    t=t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+    // is not consumed by the [label](url) link regex.  Code content in the alt
+    // comes back as plain text, never as markup inside the attribute.
+    t=_mdImagePass(t,alt=>{
+      // Dependent alt tokens resolve to final plain text before the image
+      // is built: a backtick span can wrap an H placeholder (a rendered
+      // <code> element flanked by stray backticks), so a C plain text may
+      // carry a NEW H token that one H-then-C pass left raw inside the
+      // attribute (gate G9072-ALT-TOKEN-AMPLIFICATION). Iterate to a fixed
+      // point; every resolution produces plain text, never markup.
+      let a=String(alt);
+      for(let n=0;n<8;n++){
+        // An index with no stash entry is caller text that merely spells the
+        // token shape after normalization, not a token this pass wrote: keep
+        // its bytes verbatim instead of emitting `undefined` (gate
+        // G9072-ATTRIBUTED-CODE-TOKEN-JOIN).  The adaptive prefix makes this
+        // unreachable for well-formed lines; it is the last line of defence.
+        const b=a.replace(_hTok,(m,i)=>{const v=_html_code_plain[+i];return v===undefined?m:v;})
+          .replace(_cTok,(m,i)=>{const v=_code_plain[+i];return v===undefined?m:v;});
+        if(b===a)break;
+        a=b;
+      }
+      return a;
+    });
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
-    t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
+    t=t.replace(_cTok,(m,i)=>{const v=_code_stash[+i];return v===undefined?m:v;});
+    t=t.replace(_hTok,(m,i)=>{const v=_html_code_stash[+i];return v===undefined?m:v;});
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
@@ -11396,10 +11702,125 @@ function renderMd(raw){
     // markdown block's trailing newlines.
     return `\n\n<table><thead>${header}</thead><tbody>${body}</tbody></table>\n\n`;
   });
+  // Image syntax inside an inline code span is documentation, not media: keep
+  // such spans verbatim through the outer image and link passes.  Paragraph
+  // text is still raw backticks here (the paragraph splitter runs inlineMd()
+  // later), while list / heading / table text already carries rendered <code>.
+  // Only spans that actually contain `![` are stashed, so a code-wrapped link
+  // label still flows through the outer link pass as before.  Spans pair up
+  // exactly the way inlineMd() pairs them (`([^`\n]+)`) and a rendered <code>
+  // match never crosses its own closing tag: otherwise an image sitting
+  // between two code spans would be swallowed as one chunk and stay literal.
+  const _code_outer_stash=[];
+  // Same rule as the block-local H stash: a prefix this message does not
+  // contain, so a literal `\x00K0\x00` in the caller's text stays text.
+  // The image pass below flattens a code-formatted alt by stripping the
+  // <code>/backtick boundaries, which can join caller bytes into the chosen
+  // marker shape; the lead is therefore also chosen against the
+  // boundary-stripped text, a superset of every flattened alt
+  // (gate G9072-MANUFACTURED-TOKEN-AMPLIFICATION).
+  const _kFlat=s.split('<code>').join('').split('</code>').join('').split('`').join('');
+  const _kPre=_tokPrefix('\x00K',s,_kFlat);
+  const _kTok=new RegExp('(K)?'+_kPre+'(\\d+)\x00','g');
+  // A caller text ending in a dangling `<lead>K<digits>` sits directly in
+  // front of where a placeholder is appended: the borrowed NUL lets the
+  // pair read as a marker for an index that was never stashed, and the
+  // restore then replaced the caller's tail plus the real marker's first
+  // byte with `undefined` (gate G9072-MARKER-INSERTION-BOUNDARY).  A
+  // placeholder written behind such a tail spells one extra K -- the lead
+  // it owns -- so the borrowed NUL no longer lands on a digit; the index
+  // is recorded so the restore can tell that guard K from a caller K, and
+  // a match whose index was never stashed is left untouched instead of
+  // being consumed.
+  // Does `before` end with `_kPre` followed by at least one digit?  The
+  // regex probe that answered this before (`new RegExp(_kPre+'\\d+$')`)
+  // walked the whole growing prefix once per stashed span, so replies built
+  // from repeated examples went quadratic: 560 KB of `` `![x]` `` took ~46 s
+  // here against ~0.2 s without the probe, all on the browser main thread
+  // (gate G9072-MARKER-TAIL-QUADRATIC).  A match leaves only digits after
+  // the `_kPre` occurrence, and `_kPre` opens with a non-digit lead, so that
+  // occurrence must end within `_kPre.length-1` characters of the maximal
+  // trailing digit run: walk that run back once, then compare the `_kPre`
+  // characters at each candidate end.  Every placeholder ends in the NUL
+  // lead, which caps each digit run at the raw gap since the previous
+  // placeholder, so the walk work across a render stays linear in the
+  // message length.
+  const _kTailAt=(L,at)=>{
+    const preLen=_kPre.length;
+    if(L===0||preLen>L)return false;
+    let d=0;
+    while(d<L){
+      const c=at(L-1-d);
+      if(c<48||c>57)break;
+      d++;
+    }
+    if(d===0)return false;
+    for(let t=Math.min(L-d-1+preLen,L-1);t>=Math.max(L-d,preLen);t--){
+      let ok=true;
+      for(let k=0;k<preLen;k++){
+        if(at(t-preLen+k)!==_kPre.charCodeAt(k)){ok=false;break;}
+      }
+      if(ok)return true;
+    }
+    return false;
+  };
+  // The probe never materialises the text it inspects: callers hand it a
+  // length plus a char accessor -- the original source bounded at the match
+  // offset, or the accumulated output joined with the pending gap. Building
+  // `str.slice(0,offset)` / `out+s.slice(i,open)` in front of every stashed
+  // span made repeated-example replies quadratic again after the boundary
+  // fix (greptile round 3 on #9072).
+  const _tailOf=(a,b)=>_kTailAt(a.length+b.length,p=>p<a.length?a.charCodeAt(p):b.charCodeAt(p-a.length));
+  const _kGuardIdx=new Set();
+  const _stashOuterCode=(m,tail)=>{
+    _code_outer_stash.push(m);
+    if(tail){
+      _kGuardIdx.add(_code_outer_stash.length-1);
+      return 'K'+_kPre+(_code_outer_stash.length-1)+'\x00';
+    }
+    return _kPre+(_code_outer_stash.length-1)+'\x00';
+  };
+  s=s.replace(/`[^`\n]+`/g,(m,offset,str)=>m.includes('![')?_stashOuterCode(m,_kTailAt(offset,p=>str.charCodeAt(p))):m);
+  // Complete rendered <code> elements are collected by one forward scan.  A
+  // tempered pattern that looks for `![` between two lazy "not </code>" runs
+  // rescans the remaining suffix for every image opener when a message opens a
+  // code element and never closes it, which is quadratic in the message length
+  // (gate G9072-CODE-QUADRATIC: 160 KB took ~32x a clean render).  indexOf
+  // locates the same spans in linear time; whether the span needs stashing is
+  // decided on the matched text, so code stays opaque, images between two
+  // separate code spans still render, and an unterminated span is left alone.
+  {
+    let out='',i=0;
+    while(i<s.length){
+      const open=s.indexOf('<code',i);
+      if(open<0){out+=s.slice(i);break;}
+      const afterTag=s.charAt(open+5);
+      if(afterTag!=='>'&&!/\s/.test(afterTag)){
+        out+=s.slice(i,open+5);i=open+5;continue;
+      }
+      const gt=s.indexOf('>',open+5);
+      const close=gt<0?-1:s.indexOf('</code>',gt+1);
+      if(close<0){out+=s.slice(i);break;}
+      const end=close+7;
+      const span=s.slice(open,end);
+      const gap=s.slice(i,open);
+      out+=gap+(span.includes('![')?_stashOuterCode(span,_tailOf(out,gap)):span);
+      i=end;
+    }
+    s=out;
+  }
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
-  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+  // A stashed code span (only spans containing `![` reach the stash) or a raw
+  // backtick span sitting in the alt is flattened to its text: alt is an
+  // attribute value, so markup there would break the tag.
+  s=_mdImagePass(s,alt=>String(alt).replace(_kTok,(m,k,i)=>{
+    const span=_code_outer_stash[+i];
+    if(span===undefined)return m;
+    const plain=/^<code\b/i.test(span)?span.replace(/^<code\b[^>]*>/i,'').replace(/<\/code>$/i,''):(/^`/.test(span)?span.slice(1,-1):span);
+    return k&&!_kGuardIdx.has(+i)?'K'+plain:plain;
+  }).replace(/`([^`\n]+)`/g,(_,x)=>x));
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
@@ -11407,6 +11828,7 @@ function renderMd(raw){
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
   s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,label,url)=>_markdownAnchor(label,url));
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
+  s=s.replace(_kTok,(m,k,i)=>{const span=_code_outer_stash[+i];return span===undefined?m:(k&&!_kGuardIdx.has(+i)?'K'+span:span);});
   // Restore raw <pre> only after markdown rewrites so literal preformatted
   // content stays placeholder-protected, then let the sanitizer normalize tags.
   s=s.replace(/\x00R(\d+)\x00/g,(_,i)=>rawPreStash[+i]);
@@ -11509,6 +11931,9 @@ function renderMd(raw){
     if(/^https?:\/\//i.test(raw)) return true;
     if(/^(mailto:|tel:|message:)/i.test(raw)) return true;
     if(img && /^api\//i.test(raw)) return true;
+    // Root-relative same-origin media. Scheme-relative `//host` and backslash
+    // forms are excluded: browsers normalise those to a remote origin.
+    if(img && /^\/(?!\/|\\)/.test(compact)) return true;
     if(!img && (/^api\//i.test(raw) || /^#/.test(raw) || _isInternalSessionHref(raw))) return true;
     return false;
   }
@@ -11569,22 +11994,29 @@ function renderMd(raw){
       if(a.title&&cls.includes('msg-media-link')&&typeof _remoteImageAllowed==='function'
          &&typeof _remoteImageReason==='function'){
         const href=_safeAttrValue(a.href);
-        const tip=_safeAttrValue(a.title);
+        // _remoteImagePlaceholderHtml entity-encodes [ and ] in every tooltip
+        // it emits (image-reentry guard), so decode those two back before the
+        // shape check and the re-escape — the <img> branch right below does
+        // the same for alt.  Without the decode an alt like `a[b` surfaced as
+        // visible `a&#91;b` tooltip text, and the encoding blow-up (1 char →
+        // 5) pushed longer descriptions past the 120-char suffix check and
+        // silently dropped the tooltip altogether.
+        const tip=_safeAttrValue(a.title).replace(/&#91;/g,'[').replace(/&#93;/g,']');
         const reason=/^https?:\/\//i.test(href)&&!_remoteImageAllowed(href)?_remoteImageReason(href):'';
         // Exactly the shapes _remoteImagePlaceholderHtml emits: the reason, or the
         // reason followed by " (<alt>)".
         // The producer caps alt at 120 chars; re-admit no longer suffix than that.
         if(reason&&(tip===reason||(tip.startsWith(reason+' (')&&tip.endsWith(')')&&tip.length<=reason.length+123))){
-          tipAttr=` title="${esc(tip)}"`;
+          tipAttr=` title="${esc(tip).replace(/\[/g,'&#91;').replace(/\]/g,'&#93;')}"`;
         }
       }
       return `<a${cls} href="${esc(_safeAttrValue(a.href))}"${target}${rel}${download}${tipAttr}>`;
     }
     if(name==='img'){
       if(!_isSafeUrl(a.src,true)) return '';
-      if(typeof _remoteImageAllowed==='function'&&!_remoteImageAllowed(_safeAttrValue(a.src))) return _remoteImagePlaceholderHtml(_safeAttrValue(a.src), _safeAttrValue(a.alt||''));
+      if(typeof _remoteImageAllowed==='function'&&!_remoteImageAllowed(_safeAttrValue(a.src))) return _remoteImagePlaceholderHtml(_safeAttrValue(a.src), _safeAttrValue(a.alt||'').replace(/&#91;/g,'[').replace(/&#93;/g,']'));
       const cls=_cls(a.class,['msg-media-img']);
-      const alt=` alt="${esc(_safeAttrValue(a.alt||''))}"`;
+      const alt=` alt="${esc(_safeAttrValue(a.alt||'').replace(/&#91;/g,'[').replace(/&#93;/g,']')).replace(/\[/g,'&#91;').replace(/\]/g,'&#93;')}"`;
       const loading=a.loading==='lazy'?' loading="lazy"':'';
       return `<img${cls} src="${esc(_safeAttrValue(a.src))}"${alt}${loading}>`;
     }
