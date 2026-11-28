@@ -13691,6 +13691,20 @@ def _models_cache_profiles() -> list[tuple[str, Path]]:
     plausible profile id.
     """
     base = _models_cache_path
+    # Isolated single-profile mode pins every profile lookup to one name: the
+    # resolver ignores set_request_profile() entirely, so the cache writer always
+    # publishes the pinned profile's file. Enumerating "default" there would
+    # schedule a rebuild that can never write models_cache.json, and the
+    # completion check would then treat every attempt as a failure and retry.
+    try:
+        from api.profiles import _is_isolated_profile_mode, _isolated_profile_name
+
+        if _is_isolated_profile_mode():
+            pinned = (_isolated_profile_name() or "").strip()
+            if pinned:
+                return [(pinned, _get_models_cache_path(pinned))]
+    except Exception:
+        pass
     found: list[tuple[str, Path]] = [("default", base)]
     try:
         candidates = sorted(base.parent.glob(base.stem + "*.json"))
@@ -13846,13 +13860,22 @@ def _prewarm_profile_catalog(profile: str, cache_path: Path) -> None:
             logger.info(
                 "models catalog prewarmed (profile=%s, cache=%s)", profile, cache_path.name
             )
-        else:
-            # Coalesced onto another build or still running out of band: retry
-            # on the next tick instead of spending the lead window on backoff.
+        elif _cache_build_in_progress:
+            # Coalesced onto a build that is still running: it publishes on its
+            # own, so let the next tick re-check instead of spending the 600 s
+            # lead window on a 300 s retry window.
             _release_prewarm_backoff(profile)
-            logger.info("models catalog prewarm did not rebuild (profile=%s)", profile)
+            logger.info(
+                "models catalog prewarm coalesced onto an in-flight build (profile=%s)", profile
+            )
+        else:
+            # The attempt completed without publishing. A persistent failure must
+            # not turn the sweep into a 60 s retry loop: keep the reservation so
+            # the retry stays behind _MODELS_PREWARM_RETRY_SECONDS.
+            logger.info("models catalog prewarm did not publish (profile=%s)", profile)
     except Exception:
-        _release_prewarm_backoff(profile)
+        # Same reasoning as above: keep the retry reservation for a failed
+        # attempt. Releasing it here made a persistent failure retry every tick.
         logger.debug("models catalog prewarm failed (profile=%s)", profile, exc_info=True)
     finally:
         if clear_request_profile is not None:
@@ -13870,8 +13893,9 @@ def maybe_prewarm_models_catalog(*, now: float | None = None) -> dict[str, str]:
     function decides when a profile is actually due). A profile is due when its
     disk cache is missing, unloadable, or within ``_MODELS_PREWARM_LEAD_SECONDS``
     of the session-visit freshness window. At most one prewarm worker runs at a
-    time; a coalesced or failed attempt is retried on the next tick instead of
-    waiting out the backoff; ``HERMES_WEBUI_MODELS_PREWARM=0`` disables the sweep
+    time; the retry reservation is kept for a failed or unpublished attempt
+    (bounded throttle) and released only when the attempt coalesced onto a build
+    that is still running; ``HERMES_WEBUI_MODELS_PREWARM=0`` disables the sweep
     for tests and operators.
     """
     global _MODELS_PREWARM_THREAD

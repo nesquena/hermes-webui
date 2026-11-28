@@ -102,17 +102,62 @@ def test_cache_near_expiry_is_prewarmed(prewarm_env):
 
 
 def test_scheduled_prewarm_is_backed_off(prewarm_env):
-    base, _calls, workers = prewarm_env
+    base, calls, workers = prewarm_env
     due_before = (
         config._SESSION_VISIT_MODELS_FRESHNESS_SECONDS - config._MODELS_PREWARM_LEAD_SECONDS
     )
     _write_cache(base, time.time() - due_before - 1)
 
     assert config.maybe_prewarm_models_catalog() == {"default": "scheduled"}
-    # Same tick state again: the retry backoff keeps a failing rebuild from
-    # spawning a worker every minute.
+    # Run the worker to completion before the next tick: the injected catalog
+    # call publishes nothing, i.e. a persistent failure. The reservation must
+    # survive it, otherwise the sweep retries every minute instead of every
+    # _MODELS_PREWARM_RETRY_SECONDS.
+    config._prewarm_profiles(workers[0])
+    assert calls == [{"force_refresh": True}]
     assert config.maybe_prewarm_models_catalog() == {}
     assert len(workers) == 1
+
+
+def test_coalesced_attempt_releases_the_backoff(prewarm_env, monkeypatch):
+    base, _calls, workers = prewarm_env
+    due_before = (
+        config._SESSION_VISIT_MODELS_FRESHNESS_SECONDS - config._MODELS_PREWARM_LEAD_SECONDS
+    )
+    _write_cache(base, time.time() - due_before - 1)
+
+    def _coalesce(**kwargs):
+        # A build is still running when the call returns: it publishes on its
+        # own, so the next tick should look again rather than wait out the
+        # retry reservation.
+        config._cache_build_in_progress = True
+        return {"groups": []}
+
+    monkeypatch.setattr(config, "get_available_models", _coalesce)
+
+    try:
+        assert config.maybe_prewarm_models_catalog() == {"default": "scheduled"}
+        config._prewarm_profiles(workers[0])
+        assert config.maybe_prewarm_models_catalog() == {"default": "scheduled"}
+        assert len(workers) == 2
+    finally:
+        config._cache_build_in_progress = False
+
+
+def test_isolated_mode_enumerates_only_the_pinned_profile(prewarm_env, monkeypatch):
+    """In isolated single-profile mode the resolver ignores set_request_profile,
+    so "default" can never be written: enumerating it schedules a rebuild that
+    always looks like a failure."""
+    from api import profiles
+
+    base, _calls, _workers = prewarm_env
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: True)
+    monkeypatch.setattr(profiles, "_isolated_profile_name", lambda: "personal")
+
+    listed = config._models_cache_profiles()
+
+    assert [name for name, _path in listed] == ["personal"]
+    assert listed[0][1].name == "models_cache.personal.json"
 
 
 def test_named_profile_cache_is_covered(prewarm_env):
