@@ -411,6 +411,7 @@ _ALLOWED = {
     ("config.py", "_load_yaml_config_file_raw"): _LOADER,
     ("config.py", "_load_yaml_config_file"): _LOADER + " (expands under the caller's scope)",
     ("config.py", "_refresh_config_cache"): _LOADER + " (expands under the pinned process env)",
+    ("config.py", "_credential_selection_config"): "value reader: expands the raw file under the caller's profile binding (#9249)",
     ("routes.py", "_read_profile_config_cached"): _LOADER + " (raw parse cache)",
     ("yaml_compat.py", "safe_load"): _LOADER,
     ("profiles.py", "load_profile_config"): "THE helper",

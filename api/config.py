@@ -4062,8 +4062,13 @@ def _resolve_custom_record_key(
     if raw_api_key is not None:
         key_text = str(raw_api_key).strip()
         if key_text.startswith("${") and key_text.endswith("}") and len(key_text) > 3:
+            # Resolved through the thread-local-first lookup: a profile-scoped
+            # read sees its own binding first and, under the fail-closed
+            # profile scope, refuses the server process env (#3961) — so an
+            # unresolved reference yields no key there (#9249). Outside a
+            # profile scope this keeps today's process-env resolution.
             api_key = _thread_local_env_value(key_text[2:-1]).strip() or None
-        elif key_text:
+        elif key_text and not _has_env_ref(key_text):
             api_key = key_text
     if not api_key:
         key_env = str(raw_key_env or "").strip()
@@ -4970,8 +4975,13 @@ def resolve_custom_provider_connection(
         return None, None
 
     # Read the live config snapshot to avoid stale module-level cache edge
-    # cases after profile switches or runtime config edits.
-    record, _source, is_exact, _status = _select_custom_provider_record(pid, slug, get_config())
+    # cases after profile switches or runtime config edits. The snapshot is
+    # profile-scoped when this thread carries a fail-closed profile binding,
+    # so a `${VAR}` this profile does not define is never resolved from the
+    # server process environment (#9249).
+    record, _source, is_exact, _status = _select_custom_provider_record(
+        pid, slug, _credential_selection_config()
+    )
     if record is None:
         # Nothing owns this slug. Returning ``(None, None)`` is the whole point:
         # an unknown named route must not inherit an unrelated row's endpoint or
@@ -5080,14 +5090,134 @@ def _custom_record_pool_runtime(base_url: str | None, record: dict) -> dict | No
         resolve_pool = getattr(_runtime_provider, "_try_resolve_from_custom_pool", None)
         if resolve_pool is None:
             return None
-        return resolve_pool(
+        runtime = resolve_pool(
             base_url,
             "custom",
             _custom_record_api_mode(record),
             provider_name=str(record.get("provider_key") or record.get("name") or "") or None,
         )
+        if not isinstance(runtime, dict):
+            return runtime
+        # A pool credential that is still an unresolved ``${VAR}`` reference is
+        # no credential at all: a named profile reads only its own .env
+        # (#3961), so a variable that profile's .env does not define arrives
+        # here verbatim, and forwarding the literal would hand the provider
+        # ``${VAR}`` as the key (#8976).
+        #
+        # An unresolved FIRST selection is not a reason to drop the whole pool,
+        # though: the pool may hold a usable entry behind it. Skip unresolved
+        # entries and pick a usable one with the pool's own strategy, exactly
+        # the failover the Agent's credential-pool recovery performs when the
+        # first entry 401s. Only a pool with NO usable entry left is reported
+        # as no runtime, so the record's existing "declares a credential
+        # source that produced no key" refusal names the real cause (#9249).
+        if _has_env_ref(runtime.get("api_key")):
+            refined = _custom_pool_runtime_skip_unresolved(runtime)
+            if refined is not None:
+                return refined
+            return None
+        return runtime
     except Exception:
         return None
+
+
+def _custom_pool_runtime_skip_unresolved(runtime: dict) -> dict | None:
+    """Re-pick a usable pool entry when the pool's first choice is unresolved.
+
+    ``runtime`` carries the pool object it was selected from
+    (``credential_pool``); that pool is the one authority for which entries
+    serve this endpoint and for its selection strategy. Drop the entries whose
+    credential is still an unresolved ``${...}``, rebuild the same pool over
+    the usable remainder, and let that pool's own strategy choose — the
+    failover the Agent performs when an entry 401s, applied before the first
+    send instead of dropping the whole pool (#9249). Returns ``None`` when no
+    usable entry remains, so the caller reports no pool and the record's
+    missing-credential refusal applies.
+    """
+    pool = runtime.get("credential_pool")
+    if pool is None:
+        return None
+    try:
+        entries_getter = getattr(pool, "entries", None)
+        if not callable(entries_getter):
+            return None
+        raw_entries = entries_getter()
+        if not isinstance(raw_entries, (list, tuple)):
+            return None
+        entries = list(raw_entries)
+        usable = [entry for entry in entries if not _has_env_ref(_pool_entry_key(entry))]
+        if not usable:
+            # The pool EXISTS and declares this endpoint's credential source, it
+            # just produced no usable key. Report that declaration (an empty
+            # runtime) instead of "no pool": a record with no api_key of its own
+            # must get the missing-credential refusal, never the keyless
+            # placeholder, because "authenticated endpoint, unresolved pool" is
+            # not the same claim as "endpoint wants no authentication" (#9249).
+            return {"api_key": None, "credential_pool": None}
+        filtered = _pool_with_entries(pool, usable)
+        chosen = _pick_pool_entry(filtered, usable)
+        if chosen is None:
+            return None
+        chosen_key = _pool_entry_key(chosen)
+        if not chosen_key or _has_env_ref(chosen_key):
+            return None
+        refined = dict(runtime)
+        refined["api_key"] = chosen_key
+        refined["credential_pool"] = filtered
+        return refined
+    except Exception:
+        return None
+
+
+def _pool_entry_key(entry) -> str:
+    """The credential a pooled entry would send, or "" when it holds none."""
+    if entry is None:
+        return ""
+    key = getattr(entry, "runtime_api_key", None)
+    if not key:
+        key = getattr(entry, "access_token", None)
+    return str(key or "").strip()
+
+
+def _pool_with_entries(pool, entries):
+    """``pool`` rebuilt over exactly ``entries``.
+
+    Same provider (so the same selection strategy), same entry objects. Falls
+    back to the original pool when the installed Agent build does not let us
+    build one; ``_pick_pool_entry`` then never accepts an unresolved choice.
+    """
+    try:
+        from agent.credential_pool import CredentialPool
+
+        provider = str(getattr(pool, "provider", "") or "custom")
+        return CredentialPool(provider, list(entries))
+    except Exception:
+        return pool
+
+
+def _pick_pool_entry(pool, entries):
+    """The entry ``pool``'s own selection strategy would pick from ``entries``.
+
+    ``choose`` is the Agent's own read-only selection (no counting, no
+    rotation, no persistence — the key has not been used yet). Without it,
+    ``select`` is the strategy's only other entry point, and the first usable
+    entry is the last resort. A choice whose credential is still unresolved
+    never wins.
+    """
+    for name in ("choose", "select"):
+        selector = getattr(pool, name, None)
+        if not callable(selector):
+            continue
+        try:
+            choice = selector()
+        except Exception:
+            choice = None
+        if choice is not None and not _has_env_ref(_pool_entry_key(choice)):
+            return choice
+    for entry in entries:
+        if not _has_env_ref(_pool_entry_key(entry)):
+            return entry
+    return None
 
 
 def _host_gated_env_key(base_url: str | None) -> str | None:
@@ -5136,6 +5266,21 @@ def _custom_record_key_cmd_provider(base_url: str | None, record: dict, pid: str
     except Exception:
         logger.debug("key_cmd token provider unavailable for %s", pid, exc_info=True)
         return None
+
+
+def _custom_record_declares_static_credential(record: dict) -> bool:
+    """True when the record NAMES a credential source of its own.
+
+    ``api_key`` / ``key_env`` / ``key_cmd`` are the record's explicit
+    statements about where its key comes from. A record that names one must not
+    also be handed the endpoint's host-gated ambient key: the Agent does not
+    use host-gated keys for such a record, and substituting one would
+    authenticate with a credential the record never chose (#9249).
+    """
+    return any(
+        str(record.get(field) or "").strip()
+        for field in ("api_key", "key_env", "key_cmd")
+    )
 
 
 def _custom_record_declares_credential(
@@ -5197,6 +5342,63 @@ def _unowned_custom_provider_bundle(pid: str, slug: str, status: str) -> dict:
         "keyless": False,
         "owned": {},
     }
+
+
+def _config_has_env_ref(config_data) -> bool:
+    """True when any nested string in *config_data* holds a ``${...}`` reference."""
+    if isinstance(config_data, str):
+        return _has_env_ref(config_data)
+    if isinstance(config_data, dict):
+        return any(_config_has_env_ref(v) for v in config_data.values())
+    if isinstance(config_data, (list, tuple)):
+        return any(_config_has_env_ref(v) for v in config_data)
+    return False
+
+
+def _credential_selection_config() -> dict:
+    """The config document a credential/endpoint selection must read.
+
+    ``get_config()`` serves the process-global cache, and
+    ``_refresh_config_cache`` deliberately pins that cache to PROCESS-env
+    expansion (#798). Inside a named-profile scope that pin is the wrong
+    authority: a ``${VAR}`` the profile's own ``.env`` does not define would be
+    silently resolved from the server process environment, so the selected
+    record would carry another profile's value before any credential ladder
+    ran (#9249).
+
+    When the thread carries a fail-closed profile binding, re-expand the RAW
+    file under THAT binding instead — the same contract
+    ``expand_profile_config`` applies: what the profile defines resolves,
+    everything else stays the literal ``${...}`` (and the ladder treats an
+    unresolved reference as absent). A caller-provided in-memory override is
+    expanded under the same binding, never re-read from the process
+    environment. Outside a profile scope this is ``get_config()`` unchanged.
+    """
+    if not bool(getattr(_thread_ctx, "block_process_env_fallback", False)):
+        return get_config()
+    # An in-memory override (tests, runtime config edits) is the document of
+    # record; keep it and expand it under the profile binding rather than
+    # discarding it for a disk read. A document that carries no reference at
+    # all needs no expansion and is used as given, preserving object identity
+    # for callers that assert on the selected record.
+    try:
+        if cfg is not _cfg_cache and isinstance(cfg, dict):
+            if not _config_has_env_ref(cfg):
+                return cfg
+            expanded = _expand_env_vars(cfg)
+            return expanded if isinstance(expanded, dict) else get_config()
+    except NameError:
+        pass
+    try:
+        raw = _load_yaml_config_file_raw(_get_config_path(), _copy=False)
+        if isinstance(raw, dict) and raw:
+            expanded = _expand_env_vars(raw)
+            if isinstance(expanded, dict):
+                _apply_config_defaults(expanded)
+                return expanded
+    except Exception:
+        logger.debug("profile-scoped credential config expansion failed", exc_info=True)
+    return get_config()
 
 
 def resolve_custom_provider_bundle(
@@ -5311,7 +5513,7 @@ def resolve_custom_provider_bundle(
             "owned": {},
         }
 
-    record, source, is_exact, status = _select_custom_provider_record(pid, slug, get_config())
+    record, source, is_exact, status = _select_custom_provider_record(pid, slug, _credential_selection_config())
     if record is None:
         return _unowned_custom_provider_bundle(pid, slug, status)
 
@@ -5335,7 +5537,15 @@ def resolve_custom_provider_bundle(
     if not api_key:
         api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
     if not api_key and not lookup_only:
-        api_key = _host_gated_env_key(base_url)
+        # A host-gated env key (OPENAI_API_KEY at api.openai.com, …) is the
+        # endpoint's ambient credential, not this record's. Offer it only to a
+        # record that declares NO credential source of its own: the Agent
+        # itself does not consult host-gated env keys for a record that
+        # declares api_key / key_env / key_cmd, and substituting one here would
+        # quietly authenticate with a DIFFERENT credential than the record
+        # asked for (the unresolved `${VAR}` case in #9249).
+        if not _custom_record_declares_static_credential(record):
+            api_key = _host_gated_env_key(base_url)
 
     # ``key_cmd`` beats a static api_key / key_env (short-lived bearers go stale
     # mid-session), but never displaces a pooled credential, which the pool
