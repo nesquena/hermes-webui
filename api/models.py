@@ -1918,6 +1918,11 @@ class Session:
                  delegation_reservation=None,
                  delegation_cutoff_ts=None,
                  skill_provenance=None,
+                 relationship_type=None,
+                 handoff_source_session_id=None,
+                 handoff_created_at=None,
+                 handoff_compressed=None,
+                 handoff_consumed_anchor=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -2060,6 +2065,28 @@ class Session:
         self.llm_title_generated = bool(llm_title_generated)
         self.manual_title = bool(manual_title)
         self.parent_session_id = parent_session_id
+        self.relationship_type = (
+            str(relationship_type).strip().lower()
+            if relationship_type
+            else (str(kwargs.get('relationship_type') or '').strip().lower() or None)
+        )
+        self.handoff_source_session_id = (
+            str(handoff_source_session_id).strip()
+            if handoff_source_session_id
+            else (str(kwargs.get('handoff_source_session_id') or '').strip() or None)
+        )
+        self.handoff_created_at = (
+            handoff_created_at
+            if handoff_created_at is not None
+            else kwargs.get('handoff_created_at')
+        )
+        _h_comp = handoff_compressed if handoff_compressed is not None else kwargs.get('handoff_compressed')
+        self.handoff_compressed = bool(_h_comp) if _h_comp is not None else None
+        self.handoff_consumed_anchor = (
+            str(handoff_consumed_anchor).strip()
+            if handoff_consumed_anchor is not None
+            else (str(kwargs.get('handoff_consumed_anchor') or '').strip() or None)
+        )
         self.worktree_path = str(Path(worktree_path).expanduser().resolve()) if worktree_path else None
         self.worktree_branch = str(worktree_branch) if worktree_branch else None
         self.worktree_repo_root = str(Path(worktree_repo_root).expanduser().resolve()) if worktree_repo_root else None
@@ -2255,6 +2282,11 @@ class Session:
             'transcript_generation_baseline',
             'gateway_routing', 'gateway_routing_history', 'last_used_model', 'llm_title_generated', 'manual_title',
             'parent_session_id',
+            'relationship_type',
+            'handoff_source_session_id',
+            'handoff_created_at',
+            'handoff_compressed',
+            'handoff_consumed_anchor',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft',
@@ -2960,6 +2992,13 @@ class Session:
             # Only emit 'parent_session_id' when set (the /branch fork link, #1342).
             # Sessions without a fork must not leak None — see test_session_lineage_metadata_api.
             **({'parent_session_id': self.parent_session_id} if self.parent_session_id else {}),
+            **({'relationship_type': self.relationship_type} if self.relationship_type else {}),
+            **({
+                'handoff_source_session_id': self.handoff_source_session_id,
+                'handoff_created_at': self.handoff_created_at,
+                'handoff_compressed': self.handoff_compressed,
+                **({'handoff_consumed_anchor': self.handoff_consumed_anchor} if self.handoff_consumed_anchor else {}),
+            } if (self.handoff_source_session_id or self.handoff_compressed) else {}),
             # #6672: immutable workspace captured at session creation, exposed so
             # the UI can distinguish it from the live `workspace` field (which
             # updates on mid-session switches without touching the system prompt).
@@ -8013,7 +8052,7 @@ def _profile_default_reasoning_effort(profile=None):
         return None
 
 
-def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None, enabled_toolsets=None):
+def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None, enabled_toolsets=None, title=None):
     """Create a new in-memory session.
 
     The session lives in the SESSIONS dict only — no disk write happens until
@@ -8056,6 +8095,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
     wt = worktree_info if isinstance(worktree_info, dict) else None
     workspace_path = (wt.get('path') if wt and wt.get('path') else workspace) if wt else workspace
     s = Session(
+        title=title or 'Untitled',
         workspace=workspace_path or get_last_workspace(profile=profile),
         model=effective_model,
         model_provider=effective_model_provider,
