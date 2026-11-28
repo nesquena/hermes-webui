@@ -711,6 +711,59 @@ python3 -c "import agent.memory_manager as m; print('claim_instance:', callable(
 
 ---
 
+## Credentials appear masked (or unmasked) in the server log (#8984)
+
+**Symptom.** The server log shows a provider `base_url` whose userinfo is replaced by asterisks — `https://***:***@host/v1` — instead of the `user:password@host` form. A credential in clear is not expected behaviour: the WebUI masks the userinfo pair at its own log boundary in every state (see Why), so a clear credential points at the redaction opt-out or a bug.
+
+**Why.** The WebUI installs one root log handler on stderr at WARNING so that Agent library warnings are masked instead of falling through to Python's last-resort handler. Two layers mask the line, and the WebUI's handler owns the boundary:
+
+- **The WebUI's own mask** runs on the handler's output in every state — no Agent installed, an Agent build whose formatter does not mask this shape, or a formatter that raises. It replaces the whole userinfo pair (`user:password@` becomes `***:***@`) and leaves the scheme and host readable, so a diagnostic line never disappears and never carries the credential.
+- **The Agent's own `agent.redact.RedactingFormatter`** is the primary, richer policy whenever it is importable — it masks far more than URLs (API keys, tokens, headers). The handler resolves it **when a record is formatted**, not when the handler is installed, because the Agent can become importable after startup (the bootstrap transition that installs missing Agent dependencies runs later in the process's life).
+
+The WebUI's own mask exists because the Agent's coverage of this shape depends on its version: `RedactingFormatter.format` only started masking the whole userinfo pair in Agent v0.23.2 (via `redact_log_urls`); builds from v0.23.0/v0.23.1 mask the password alone, and v0.22.0 masks neither. Both layers produce the same shape, so the line looks identical whichever layer masked it.
+
+One legitimate clear case: redaction follows the Agent's `security.redact_secrets` policy, so an Agent explicitly configured to allow raw credentials in logs is honoured — the WebUI does not override the operator's policy. Without an Agent there is no policy to honour, so the built-in mask applies.
+
+Masking applies to the server's own stdout/stderr stream only. The Logs panel (`agent.log`, `errors.log`, `gateway.log` under the Hermes home) is written by the Agent with its own handlers and is unaffected.
+
+**Diagnostic commands.** Use the interpreter the server actually runs on — the shell's `python3` may be a different one, and the Agent directory is only on `sys.path` for that interpreter. The startup banner names both the Agent directory and the selected Python:
+
+```
+  agent dir   : /path/to/hermes-agent
+  python      : /path/to/python
+```
+
+Read that banner from wherever your server's output went — it is not always on the terminal:
+
+```bash
+# The server log: $HERMES_WEBUI_STATE_DIR (default: $HERMES_HOME/webui, else ~/.hermes/webui).
+grep -iE 'agent dir|python' "${HERMES_WEBUI_STATE_DIR:-${HERMES_HOME:-$HOME/.hermes}/webui}"/bootstrap-*.log | tail -5
+```
+
+On a POSIX launch from a terminal the server inherits your shell's stdout, so the same two lines are in the terminal output; on Windows, and when the launcher starts the server as a detached child, stdout/stderr are redirected into `bootstrap-<port>.log` instead. If the server is already running, read the banner from its log — starting it again is not required.
+
+Then run the check with that interpreter, and with the Agent directory importable:
+
+```bash
+# The server's selected Python (from the banner, or $HERMES_WEBUI_PYTHON).
+PY=/path/to/python
+
+# Confirm the Agent's formatter is reachable from that interpreter.
+"$PY" -c "import sys; sys.path.insert(0, '/path/to/hermes-agent'); \
+from agent.redact import RedactingFormatter; print(RedactingFormatter)"
+
+# Or, with the Agent already on the path (the venv that has it installed):
+"$PY" -c "from agent.redact import RedactingFormatter; print(RedactingFormatter)"
+```
+
+A failure here means the Agent is not importable for the server's interpreter — the Agent venv (`<agent dir>/venv/bin/python`) is the one that normally has it. The URL userinfo shape is still masked by the WebUI's own boundary mask, but the Agent's broader policy (API keys, tokens, headers) is only active when the formatter is importable, so fix that; see "AIAgent not available -- check that hermes-agent is on sys.path" above for the full recovery flow.
+
+**Fix.** Nothing to fix if the userinfo is masked — that is the intended behavior. If a credential is in clear, check the opt-out first: an Agent configured with `security.redact_secrets: false` (or `HERMES_REDACT_SECRETS=false`) deliberately logs raw credentials, and the WebUI honours that policy. With redaction not opted out, a clear credential is a bug — install the Hermes Agent (or its dependencies) and restart the WebUI, then file it if it persists.
+
+**When to file a bug.** File a WebUI bug if a credential is in clear in the server log while redaction is not opted out (the Agent's formatter being importable is no longer required — the WebUI masks the shape itself), or if masking changes the shape of a non-secret log line.
+
+---
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.

@@ -129,6 +129,7 @@ from api.run_drain import RunAdmissionClosed, ShutdownDrain, send_admission_clos
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
+from api.log_redaction import install_server_log_redaction, refresh_server_log_redaction
 
 
 class QuietHTTPServer(ThreadingHTTPServer):
@@ -573,6 +574,9 @@ def main() -> None:
     # instead of a silent death. The paired memory root-cause is #4765.
     install_crash_visibility()
 
+    # Log redaction (issue #8984): mask credentials in the server log.
+    install_server_log_redaction()
+
     print_startup_config()
 
     fd_limit = _raise_fd_soft_limit()
@@ -644,6 +648,12 @@ def main() -> None:
             print('     Agent features may not work correctly.', flush=True)
         else:
             print('[ok] Agent dependencies installed successfully.', flush=True)
+
+    # The bootstrap transition above can make the Agent importable AFTER the
+    # redaction handler was installed (#8984 round 2): the handler resolved the
+    # Agent's formatter at install time and kept the plain fallback for good.
+    # It now resolves it per record; this makes the switch happen now.
+    refresh_server_log_redaction()
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
