@@ -2716,7 +2716,22 @@ function _currentSessionIsReusableEmptyChat(){
 
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};
 $('cameraFileInput').onchange=e=>{_handleCameraFiles(Array.from(e.target.files));e.target.value='';};
-$('btnNewChat').onclick=async()=>{
+function _blockPendingNewChatLink(e){
+  // Returning false from an onauxclick property handler cancels the native
+  // middle-click action, even if preventDefault() was never called.
+  if(e.currentTarget.getAttribute('aria-disabled')!=='true') return;
+  e.preventDefault();
+  return true;
+}
+$('btnNewChat').onauxclick=_blockPendingNewChatLink;
+$('btnNewChat').oncontextmenu=_blockPendingNewChatLink;
+$('btnNewChat').onclick=async(e)=>{
+  if(_blockPendingNewChatLink(e)) return;
+  // Native link gestures (middle/Ctrl/Meta/Shift click) open the one-shot
+  // new-chat URL in another tab/window; an ordinary click keeps the existing
+  // in-page draft/empty-session behavior instead of navigating away.
+  if(e.button!==0||e.ctrlKey||e.metaKey||e.shiftKey||e.altKey) return;
+  e.preventDefault();
   // If the current session has no messages AND nothing is in flight, just focus
   // the composer rather than creating another empty session that will clutter the
   // sidebar list (#1171).
@@ -4558,6 +4573,16 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     }
   };
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
+  // #7824 review P1: a middle/Ctrl/Meta/Shift click on the sidebar "+" is a
+  // real link to the one-shot new-chat URL, and it carries the project the
+  // source tab was filtered to. Apply that project BEFORE the new-chat branch
+  // below creates the conversation, so the new tab keeps the project's pinned
+  // workspace/model instead of starting outside the project (newSession reads
+  // the active project filter for its bindings). The param is one-shot: it is
+  // stripped here so it cannot leak into the session URL.
+  if(!urlSession&&typeof _consumeNewChatProjectParamFromLocation==='function'){
+    _consumeNewChatProjectParamFromLocation();
+  }
   const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
     ? window.HermesPWA.launchAction()
     : null;

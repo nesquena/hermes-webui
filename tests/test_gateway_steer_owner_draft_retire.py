@@ -23,6 +23,7 @@ def _run(scenario):
     ses = (ROOT / 'static/sessions.js').read_text(encoding='utf-8')
     msg = (ROOT / 'static/messages.js').read_text(encoding='utf-8')
     parts = [
+        _slice(ses, 'const _newChatDraftSaveGenerationsBySid', 'function _saveComposerDraft('),
         _slice(ses, 'let _draftSaveTimer = null;', 'function _composerDraftFileSignature('),
         _slice(ses, 'function _composerDraftFileSignature(', 'function _profileMatchesActiveProfile('),
         _slice(ses, 'function _isRestorableNewChatDraftSession(', 'function _adoptRegenerationRevision('),

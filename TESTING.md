@@ -2564,6 +2564,13 @@ Bridged CLI sessions:
 *Run: ./scripts/test.sh*
 *Source: <repo>/*
 
+### New Chat draft ownership across tabs (#7824)
+
+Keep a saved draft in tab A, open an empty chat in tab B, then type in B.
+Before the debounce and POST complete, New Chat in another tab must still restore A.
+After B saves successfully, it may restore B. Failed saves, typing then erasing,
+or sending before an older save completes must not publish that obsolete draft.
+
 ### Media preview access errors (#7254)
 
 Verify CSV, PDF and HTML previews at desktop and 390px widths, including light

@@ -255,9 +255,39 @@ async function _restoreRememberedNewChatDraftSession() {
   }
 }
 
+// #7824 (review P1): a pending save keeps its New Chat claim until a newer save
+// or a clear of the SAME conversation lands. One global counter let a clear in
+// conversation A cancel an in-flight claim from conversation B: B's save
+// succeeded server-side, but New Chat in another tab then missed that draft and
+// opened A instead. Claims are therefore tracked per session id; the map only
+// holds small integers for the conversations this tab touched.
+const _newChatDraftSaveGenerationsBySid = new Map();
+
+function _claimNewChatDraftSave(sid) {
+  const next = (_newChatDraftSaveGenerationsBySid.get(sid) || 0) + 1;
+  _newChatDraftSaveGenerationsBySid.set(sid, next);
+  return next;
+}
+
+function _ownsNewChatDraftSaveClaim(sid, generation) {
+  return generation === (_newChatDraftSaveGenerationsBySid.get(sid) || 0);
+}
+
+// #7824 (review P1): `api()` resolves with `undefined` when the auth session
+// expired and it redirected to login, so a resolved promise is not proof that
+// the draft reached the server. Only a JSON body back from the draft route is
+// a confirmed save; anything else must leave the shared New Chat pointer alone,
+// otherwise a failed save in one tab steals the link to a draft another
+// conversation really stored.
+function _composerDraftSaveConfirmed(response) {
+  return !!(response && typeof response === 'object');
+}
+
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
+  const claimGeneration = _claimNewChatDraftSave(sid);
+  const draftSession = S.session && S.session.session_id === sid ? S.session : null;
   const normalizedText = String(text || '');
   const liveFiles = Array.isArray(files) ? files.filter(Boolean).slice() : [];
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -290,7 +320,17 @@ function _saveComposerDraft(sid, text, files) {
         && String(_restoredCont.text || '').trim() === String(normalizedText || '').trim()) {
       _autosaveContId = _restoredCont.id;
     }
-    _postComposerDraftPayload(sid, normalizedDraft, intent, _autosaveContId).catch((error) => {
+    _postComposerDraftPayload(sid, normalizedDraft, intent, _autosaveContId).then((response) => {
+      // Publish only server-confirmed drafts. A newer edit/clear invalidates an
+      // older completion; switching sessions alone does not lose its owner.
+      try {
+        if (_composerDraftSaveConfirmed(response)
+            && _ownsNewChatDraftSaveClaim(sid, claimGeneration) && draftSession
+            && _composerDraftHasPayload(normalizedText, normalizedFiles)) {
+          _rememberNewChatDraftSession(draftSession);
+        }
+      } catch (_) { /* the pointer is best-effort; a failed claim must not fail the save */ }
+    }).catch((error) => {
       _handleComposerDraftPostFailure(error, sid, normalizedText, liveFiles, intent);
     });
   }, _DRAFT_SAVE_DELAY_MS);
@@ -480,6 +520,8 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 function _saveComposerDraftNow(sid, text, files, goalContinuationId) {
   if (!sid) return Promise.resolve();
   clearTimeout(_draftSaveTimer);
+  const claimGeneration = _claimNewChatDraftSave(sid);
+  const draftSession = S.session && S.session.session_id === sid ? S.session : null;
   const normalizedText = String(text || '');
   const liveFiles = Array.isArray(files) ? files.filter(Boolean).slice() : [];
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -511,7 +553,15 @@ function _saveComposerDraftNow(sid, text, files, goalContinuationId) {
     return Promise.resolve();
   }
   const intent = _setComposerDraftLocalIntent(sid, normalizedText, liveFiles);
-  return _postComposerDraftPayload(sid, normalizedDraft, intent, normalizedGoalContId);
+  return _postComposerDraftPayload(sid, normalizedDraft, intent, normalizedGoalContId).then((response) => {
+    try {
+      if (_composerDraftSaveConfirmed(response)
+          && _ownsNewChatDraftSaveClaim(sid, claimGeneration) && draftSession
+          && _composerDraftHasPayload(normalizedText, normalizedFiles)) {
+        _rememberNewChatDraftSession(draftSession);
+      }
+    } catch (_) { /* the pointer is best-effort; a failed claim must not fail the save */ }
+  });
 }
 
 // Restore composer draft from server onto #msg textarea.
@@ -602,6 +652,9 @@ function _clearComposerDraft(sid, text, files) {
   if (!sid) return;
   // The pending debounced save may belong to another session (e.g. after New Chat).
   if (_draftSaveTimerSid === sid) clearTimeout(_draftSaveTimer);
+  // Only this conversation's pending claim is retired: clearing A must not
+  // cancel an in-flight save claim that belongs to B (#7824 review P1).
+  _claimNewChatDraftSave(sid);
   _clearRememberedNewChatDraftSession(sid);
   if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
   else _suppressComposerDraftRestoreAfterSubmit(sid);
@@ -2330,7 +2383,14 @@ function _setNewSessionPending(pending){
   for (let i=0;i<ids.length;i++){
     const btn=$(ids[i]);
     if(!btn) continue;
-    btn.disabled=!!pending;
+    if(btn.tagName==='A'){
+      // A link has no native disabled property. Keep its pending behavior in
+      // sync with the titlebar button while creation is in flight.
+      btn.setAttribute('aria-disabled',pending?'true':'false');
+      btn.tabIndex=pending?-1:0;
+    }else{
+      btn.disabled=!!pending;
+    }
     btn.setAttribute('aria-busy',pending?'true':'false');
   }
   const statusEl=$('composerStatus');
@@ -2563,7 +2623,6 @@ async function newSession(flash, options={}){
         if(typeof _applyReasoningChip==='function') _applyReasoningChip((st&&st.reasoning_effort)||boundEffort, st||{});
       }catch(_){ /* effort is a preference; a failed apply must not fail the session */ }
     }
-    if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);
@@ -3860,10 +3919,70 @@ function _sessionSourceTabCount(filter, renderedWebuiSessionCount, renderedCliSe
   return filter === 'cli' ? renderedCliSessionCount : renderedWebuiSessionCount;
 }
 
+// The sidebar "+" is a real link so a middle/Ctrl/Meta/Shift click can open a
+// new chat in a background tab (#7824). That new tab boots with no memory of
+// the source tab's project filter, so the href carries the selected project as
+// a one-shot `project` param; the new tab applies it before creating the
+// conversation (boot.js -> _consumeNewChatProjectParamFromLocation), which
+// keeps the project's pinned workspace/model bindings instead of silently
+// creating the chat outside the project the user was looking at.
+function _newChatLinkHref(){
+  let projectId='';
+  if(_activeProject===NO_PROJECT_FILTER) projectId=NO_PROJECT_FILTER;
+  else if(_activeProject) projectId=String(_activeProject);
+  return './?action=new-chat'+(projectId?`&project=${encodeURIComponent(projectId)}`:'');
+}
+function _syncNewChatLinkHref(){
+  try{
+    const btn=(typeof $==='function')?$('btnNewChat'):null;
+    if(!btn||btn.tagName!=='A') return;
+    const href=_newChatLinkHref();
+    if(btn.getAttribute('href')!==href) btn.setAttribute('href',href);
+  }catch(_e){}
+}
+function _resolveNewChatProjectIntent(raw){
+  const value=String(raw||'');
+  if(!value) return null;
+  if(value===NO_PROJECT_FILTER) return NO_PROJECT_FILTER;
+  const projects=(typeof _allProjects!=='undefined'&&Array.isArray(_allProjects))?_allProjects:[];
+  const proj=projects.find(p=>p&&p.project_id===value);
+  if(!proj) return null;
+  // Profile boundary, same rule as newSession's binding merge: never apply a
+  // project that belongs to a different profile.
+  if(typeof _profileMatchesActiveProfile==='function'
+     && !_profileMatchesActiveProfile(proj.profile,S.activeProfile)) return null;
+  return value;
+}
+function _consumeNewChatProjectParamFromLocation(){
+  if(typeof window==='undefined'||!window.location||!window.history
+     ||typeof window.history.replaceState!=='function') return null;
+  let raw=null;
+  try{
+    const current=new URL(window.location.href);
+    if(!current.searchParams.getAll('action').includes('new-chat')) return null;
+    if(!current.searchParams.has('project')) return null;
+    raw=current.searchParams.get('project');
+    current.searchParams.delete('project');
+    const after=current.searchParams.toString();
+    window.history.replaceState(window.history.state||null,'',
+      current.pathname+(after?`?${after}`:'')+(current.hash||''));
+  }catch(_e){ return null; }
+  const applied=_resolveNewChatProjectIntent(raw);
+  if(applied){
+    _activeProject=applied;
+    if(typeof _syncNewChatLinkHref==='function')_syncNewChatLinkHref();
+  }
+  return applied;
+}
+
 function _setActiveProjectFilter(projectId) {
   const next = projectId === NO_PROJECT_FILTER ? NO_PROJECT_FILTER : (projectId || null);
-  if (_activeProject === next) return;
+  if (_activeProject === next) {
+    if (typeof _syncNewChatLinkHref === 'function') _syncNewChatLinkHref();
+    return;
+  }
   _activeProject = next;
+  if (typeof _syncNewChatLinkHref === 'function') _syncNewChatLinkHref();
   renderSessionListFromCache();
   void renderSessionList({deferWhileInteracting:false});
 }
@@ -3873,6 +3992,7 @@ function _setSessionSourceFilter(filter) {
   if (_sessionSourceFilter === next) return;
   _sessionSourceFilter = next;
   _activeProject = null;
+  if (typeof _syncNewChatLinkHref === 'function') _syncNewChatLinkHref();
   _selectedSessions.clear();
   _sessionSelectMode = false;
   try { localStorage.setItem('hermes-session-source-filter', next); } catch (_e) {}
@@ -14830,6 +14950,7 @@ async function _confirmDeleteProject(proj){
   try {
     await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id})});
     if(_activeProject===proj.project_id) _activeProject=null;
+    if(typeof _syncNewChatLinkHref==='function')_syncNewChatLinkHref();
     await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
     showToast('Project deleted');
   } catch(e) {
