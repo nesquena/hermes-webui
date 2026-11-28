@@ -594,3 +594,66 @@ def test_qwen_prefixed_alias_reasoning_detection():
             f"{model} must remain reasoning-capable (DeepSeek-R1 hybrid, "
             f"Qwen 2.x must not shadow the DeepSeek detector)"
         )
+
+
+# ── Grok / xAI ladder (#6437, PR #6497 review) ──────────────────────────────
+# Grok 4.x accepts only low|medium|high up to 4.5; 4.6+ adds xhigh. The family is
+# recognised from one strict version parse and the cap holds on BOTH xAI lanes
+# (`xai` and the OAuth lane `xai-oauth`, which does NOT alias to `xai`). That
+# same profile decides the off switch: xAI cannot disable reasoning, so the
+# composer's "None" row must be hidden and a stored 'none' must coerce away.
+
+
+def test_grok_4_without_minor_caps_at_high():
+    # Unversioned `grok-4` / `grok4` / `grok-4-fast` get no dial from the Agent (#6497).
+    for model in ("grok-4", "grok4", "grok-4-fast"):
+        efforts = cfg.resolve_model_reasoning_efforts(model, provider_id="xai")
+        assert efforts == [], f"{model}: {efforts}"
+
+
+def test_grok_45_caps_at_high_on_both_xai_lanes():
+    for provider in ("xai", "xai-oauth"):
+        assert cfg.resolve_model_reasoning_efforts(
+            "grok-4.5", provider_id=provider
+        ) == ["low", "medium", "high"], provider
+    # OpenRouter-shaped id keeps the same ceiling
+    assert cfg.resolve_model_reasoning_efforts(
+        "x-ai/grok-4.5", provider_id="xai"
+    ) == ["low", "medium", "high"]
+
+
+def test_grok_46_keeps_xhigh():
+    efforts = cfg.resolve_model_reasoning_efforts("grok-4.6", provider_id="xai")
+    assert efforts == ["low", "medium", "high", "xhigh"], efforts
+
+
+def test_grok_3_has_no_reasoning():
+    assert cfg._candidate_supports_reasoning("grok-3") is False
+    assert cfg.resolve_model_reasoning_efforts("grok-3", provider_id="xai") == []
+    # grok-3-mini is effort-capable in the Agent (#6497)
+    assert cfg._candidate_supports_reasoning("grok-3-mini") is True
+    assert cfg.resolve_model_reasoning_efforts(
+        "grok-3-mini", provider_id="xai"
+    ) == ["low", "medium", "high"]
+
+
+def test_grok_lookalikes_are_not_read_as_grok_45():
+    # `grok-45` is a multi-digit major (rejected); `grok-4.5x` shares the 4.5 prefix.
+    for model in ("grok-45", "grok45"):
+        assert cfg._grok_reasoning_profile(model) is None, model
+        assert cfg.resolve_model_reasoning_efforts(
+            model, provider_id="xai"
+        ) == [], model
+    assert cfg._grok_reasoning_profile("grok-4.5x") is not None
+    assert cfg.resolve_model_reasoning_efforts(
+        "grok-4.5x", provider_id="xai"
+    ) == ["low", "medium", "high"]
+
+
+def test_grok_45_offers_no_none_option():
+    status = cfg.get_reasoning_status(model_id="grok-4.5", provider_id="xai")
+    assert status["supported_efforts"] == ["low", "medium", "high"]
+    assert status["supports_thinking_toggle"] is False
+    assert cfg.coerce_reasoning_effort_for_model(
+        "none", model_id="grok-4.5", provider_id="xai"
+    ) == ""
