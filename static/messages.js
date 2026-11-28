@@ -2469,7 +2469,16 @@ async function send(){
   if(_ownerOnScreenAfterStart) attachLiveStream(activeSid, streamId, uploadedNames);
   else if(INFLIGHT[activeSid]){ INFLIGHT[activeSid].streamId=streamId; INFLIGHT[activeSid].reattach=true; }
 
-  }finally{ _sendInProgress=false; _sendInProgressSid=null; }
+  }finally{
+    _sendInProgress=false;
+    _sendInProgressSid=null;
+    // #7681 finding 6: clear the optimistic turn-bump marker when the send ends.
+    // Without this the marker outlives the pending turn, so the NEXT send on the
+    // same session sees `alreadyBumped` true (its own baseline is already
+    // recorded) and never advances the count again.
+    if(typeof _optimisticTurnBumpSid!=='undefined') _optimisticTurnBumpSid=null;
+    if(typeof _optimisticTurnBumpBase!=='undefined') _optimisticTurnBumpBase=null;
+  }
 }
 
 async function startRegeneration(sessionId, regenerationRevision){
