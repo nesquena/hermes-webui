@@ -179,9 +179,13 @@ def test_current_clients_always_send_the_key() -> None:
     a key-presence legacy path on the server, that would admit every genuine
     turn — #6885 all over again.
     """
-    assert "goal_continuation_id:_goalContinuationId||''" in MESSAGES_JS, (
-        "send() does not post the ID as `||''`, so the key can be dropped from "
-        "the wire body (#7855 round 9 MUST-FIX 2)"
+    assert (
+        "goal_continuation_id:(options&&options.goalContinuationId)"
+        "||_resumeContinuationId||_goalContinuationId||''" in MESSAGES_JS
+    ), (
+        "send() does not post the key with a guaranteed `||''` fallback, so it "
+        "can be dropped from the wire body (#7855 round 9 MUST-FIX 2; the "
+        "fallback chain now includes the resume-bound identity — round 3)"
     )
     assert "goal_continuation_id:_goalContinuationId||undefined" not in MESSAGES_JS, (
         "send() still posts `||undefined`; a genuine turn and a pre-upgrade "
