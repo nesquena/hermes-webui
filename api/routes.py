@@ -18940,6 +18940,9 @@ def handle_get(handler, parsed) -> bool:
                 effort_kwargs["effort_override"] = effective_session_reasoning_effort(
                     getattr(reasoning_session, "reasoning_effort", None),
                     get_hermes_home_for_profile(getattr(reasoning_session, "profile", None)),
+                    model_id=model_id,
+                    provider_id=provider_id,
+                    base_url=base_url,
                 )
         return j(
             handler,
@@ -21117,8 +21120,20 @@ def handle_post(handler, parsed) -> bool:
                         try:
                             from api.profiles import get_hermes_home_for_profile
 
+                            # #7170 (droopanu, 2026-11-06): pass the request's
+                            # model context so the per-model
+                            # ``agent.reasoning_overrides`` entry is updated on
+                            # this path too. Without it a stale override (e.g.
+                            # ``gpt-5.4: low``) kept winning for later sessions
+                            # of that model, and "Default" did not clear it.
+                            # The model/provider arguments are POSITIONAL so a
+                            # test double of the shape ``lambda effort, *_a``
+                            # keeps working.
                             write_reasoning_effort(
-                                effort, get_hermes_home_for_profile(reasoning_profile)
+                                effort,
+                                get_hermes_home_for_profile(reasoning_profile),
+                                model_id,
+                                provider_id,
                             )
                         except Exception:
                             try:
@@ -30572,6 +30587,19 @@ def _start_regeneration_stream_locked(
             "goal_related": goal_related,
         }
         worker_kwargs["regeneration"] = True
+        # #7170: same dispatch-time session-profile config snapshot as the
+        # normal /api/chat/start path — the detached gateway worker must not
+        # resolve config on its own thread (ambient profile leak).
+        from api.gateway_chat import (
+            _gateway_session_endpoint,
+            _gateway_session_env,
+            _gateway_session_owner_cfg,
+        )
+
+        worker_kwargs["session_cfg"] = _gateway_session_owner_cfg(s)
+        # Capture the address and its matching key as one decision.
+        worker_kwargs["session_base_url"], worker_kwargs["session_api_key"] = _gateway_session_endpoint(s)
+        worker_kwargs["session_env"] = _gateway_session_env(s)
     else:
         worker_kwargs = _local_agent_worker_kwargs(
             model_provider=model_provider,
@@ -31235,6 +31263,24 @@ def _start_chat_stream_for_session(
                         from api.gateway_chat import _mark_gateway_run_starting
 
                         _mark_gateway_run_starting(stream_id)
+                        # #7170: capture the session-owning profile's config
+                        # snapshot at dispatch time (the request thread) and hand
+                        # it to the detached gateway worker, which uses it for
+                        # per-model reasoning override selection and
+                        # model-capability coercion. The worker cannot resolve
+                        # config itself — a detached thread has no per-request
+                        # profile context and would read the process-global
+                        # profile instead.
+                        from api.gateway_chat import (
+                            _gateway_session_endpoint,
+                            _gateway_session_env,
+                            _gateway_session_owner_cfg,
+                        )
+
+                        worker_kwargs["session_cfg"] = _gateway_session_owner_cfg(s)
+                        # Capture the address and its matching key as one decision.
+                        worker_kwargs["session_base_url"], worker_kwargs["session_api_key"] = _gateway_session_endpoint(s)
+                        worker_kwargs["session_env"] = _gateway_session_env(s)
                     thr = threading.Thread(
                         target=worker_target,
                         args=(s.session_id, msg, model, workspace, stream_id, attachments),
