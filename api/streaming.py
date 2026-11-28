@@ -10452,34 +10452,32 @@ _EXACT_PREFIX_MODEL_FIELDS = (
     'codex_reasoning_items',
     'codex_message_items',
     'finish_reason',
+    'api_content',
 )
 
 
-def _model_row_exact_equal(actual, expected):
-    """Return True iff ``actual`` matches ``expected`` on every model-facing field.
-
-    Used by the strict projected-prefix proof. Unlike ``_message_replay_key`` /
-    ``_message_identity`` — which normalize whitespace and truncate content at
-    500 characters — this comparison is byte-exact on the wire payload the
-    provider actually receives. Two rows that differ only in whitespace or
-    past character 500 are NOT equal here, so a sanitizer rewrite or a
-    transformer that drifts from the sent projection cannot be accepted as
-    the same prefix (#7237 review ownership finding 3, nesquena-hermes
-    2026-09-26).
-    """
+def _model_row_mismatch_field(actual, expected):
+    """Return a fixed field label for the first model-facing difference."""
     if not isinstance(actual, dict) or not isinstance(expected, dict):
-        return False
+        return "malformed_row"
     for field in _EXACT_PREFIX_MODEL_FIELDS:
         if actual.get(field) != expected.get(field):
-            return False
-    # ``api_content`` is the Agent replay sidecar: include it when the
-    # projection carried one. Both sides are absent-or-equal (the projection
-    # path sets it via ``preserve_api_content=True``; the Agent's return
-    # either keeps it or strips it in lockstep).
-    if 'api_content' in expected or 'api_content' in actual:
-        if actual.get('api_content') != expected.get('api_content'):
-            return False
-    return True
+            return field
+    return None
+
+
+def _model_row_exact_equal(actual, expected):
+    return _model_row_mismatch_field(actual, expected) is None
+
+
+def _first_projected_mismatch(messages, prefix):
+    for idx, expected in enumerate(prefix):
+        if idx >= len(messages):
+            return idx, "returned_exhausted"
+        field = _model_row_mismatch_field(messages[idx], expected)
+        if field is not None:
+            return idx, field
+    return None
 
 
 def _messages_have_prefix_exact(messages, prefix):
@@ -10496,12 +10494,7 @@ def _messages_have_prefix_exact(messages, prefix):
     """
     messages = list(messages or [])
     prefix = list(prefix or [])
-    if len(messages) < len(prefix):
-        return False
-    for idx, expected in enumerate(prefix):
-        if not _model_row_exact_equal(messages[idx], expected):
-            return False
-    return True
+    return _first_projected_mismatch(messages, prefix) is None
 
 
 def _durable_tool_row_identity(msg):
@@ -10837,9 +10830,13 @@ def _proven_current_turn_suffix(projected_history, result_messages):
         # list (if any) is the current-turn suffix. An empty result is also
         # valid — the turn produced no rows.
         return list(result_messages)
-    if len(result_messages) < len(projection):
-        return None
-    if not _messages_have_prefix_exact(result_messages, projection):
+    mismatch = _first_projected_mismatch(result_messages, projection)
+    if mismatch is not None:
+        logger.info(
+            "Projected history mismatch: index=%d field=%s projected_len=%d "
+            "returned_len=%d",
+            mismatch[0], mismatch[1], len(projection), len(result_messages),
+        )
         return None
     # Proven: everything past the sent projection is this turn's output.
     # It is appended verbatim — the current turn's user row can legitimately
@@ -11103,14 +11100,6 @@ def _dedupe_replayed_context_messages(
                 len(previous_context), len(_append_rows),
             )
             return list(previous_context) + _append_rows, _protected
-        logger.info(
-            "Projected history supplied but NOT a STRICT exact prefix of the "
-            "returned list: keeping raw pre-turn context (%d rows) verbatim; "
-            "no unproven historical rows appended by stale-merge, "
-            "assistant/tool-only, checkpoint, or prompt fallbacks "
-            "(#7237 review blocker round N, nesquena-hermes 2026-09-27)",
-            len(previous_context),
-        )
         # #7237 review round-N+2 finding 3 (nesquena-hermes 2026-10-05):
         # before the non-exact projection fails closed, recognise the VERIFIED
         # tail-merge case. The installed Agent merges consecutive user rows, so
@@ -11137,6 +11126,11 @@ def _dedupe_replayed_context_messages(
                 len(previous_context), len(_tail_merge_current),
             )
             return list(previous_context) + _tail_merge_current, _tail_merge_protected
+        logger.info(
+            "Projected history not a strict exact prefix and no verified tail-merge: "
+            "failing closed, keeping raw pre-turn context (%d rows)",
+            len(previous_context),
+        )
         return list(previous_context), None
     if not _messages_have_prefix(
         result_messages,
@@ -12895,7 +12889,6 @@ def _nearest_assistant_msg_idx(messages, msg_idx: int) -> int:
 
 def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
     """Build persisted tool-call summaries from final messages plus live progress fallback."""
-    tool_calls = []
     pending_names = {}
     pending_args = {}
     pending_asst_idx = {}
@@ -12932,36 +12925,76 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
         elif role == 'tool':
             tid = m.get('tool_call_id') or m.get('tool_use_id', '')
             raw = m.get('content', '')
-            seq = {'msg_idx': msg_idx, 'raw': raw, 'resolved': False}
+            seq = {'msg_idx': msg_idx, 'raw': raw, 'tid': tid, 'resolved': False, 'summary': None}
             if tid:
                 name = pending_names.get(tid, '')
                 if name and name != 'tool':
-                    tool_calls.append({
+                    seq['summary'] = {
                         'name': name,
                         'snippet': _tool_result_snippet(raw),
                         'tid': tid,
                         'assistant_msg_idx': pending_asst_idx.get(tid, -1),
                         'args': _truncate_tool_args(pending_args.get(tid, {})),
-                    })
+                    }
                     seq['resolved'] = True
             tool_msg_sequence.append(seq)
 
     live = [tc for tc in (live_tool_calls or []) if isinstance(tc, dict) and tc.get('name') and tc.get('name') != 'clarify']
     if live:
+        # A live entry the transcript already resolved by id belongs to that row
+        # and must not be handed to a different one. When the ledger carries no
+        # id for that position (legacy agents), claim the row's own slot so the
+        # positional pairing below keeps master's alignment.
+        claimed = set()
         for seq_idx, seq in enumerate(tool_msg_sequence):
-            if seq.get('resolved'):
+            if not seq.get('resolved'):
                 continue
-            if seq_idx >= len(live):
-                break
-            live_tc = live[seq_idx]
-            tool_calls.append({
-                'name': live_tc.get('name', 'tool'),
-                'snippet': _tool_result_snippet(seq.get('raw', '')),
-                'tid': live_tc.get('tid', '') or '',
-                'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
-                'args': _truncate_tool_args(live_tc.get('args', {}), limit=4),
-            })
+            tid = seq.get('tid')
+            matched = False
+            if tid:
+                for l_idx, ltc in enumerate(live):
+                    if l_idx not in claimed and ltc.get('tid') == tid:
+                        claimed.add(l_idx)
+                        matched = True
+                        break
+            if not matched and seq_idx < len(live) and seq_idx not in claimed and not live[seq_idx].get('tid'):
+                claimed.add(seq_idx)
 
+        unresolved = [seq for seq in tool_msg_sequence if not seq.get('resolved')]
+
+        def _append_live_summary(seq, ltc, tid):
+            seq['summary'] = {
+                'name': ltc.get('name', 'tool'),
+                'snippet': _tool_result_snippet(seq.get('raw', '')),
+                'tid': tid,
+                'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
+                'args': _truncate_tool_args(ltc.get('args', {}), limit=4),
+            }
+
+        remaining = [(l_idx, ltc) for l_idx, ltc in enumerate(live) if l_idx not in claimed]
+
+        # 1. A row whose id the ledger knows takes its own entry, wherever it sits.
+        still_unresolved = []
+        for seq in unresolved:
+            tid = seq.get('tid')
+            match = None
+            if tid:
+                for pos, (_l_idx, ltc) in enumerate(remaining):
+                    if ltc.get('tid') == tid:
+                        match = pos
+                        break
+            if match is None:
+                still_unresolved.append(seq)
+                continue
+            _l_idx, ltc = remaining.pop(match)
+            _append_live_summary(seq, ltc, tid)
+
+        # 2. Every remaining row pairs with the remaining entries in order, so an
+        #    id the ledger cannot name still keeps its result row.
+        for seq, (_l_idx, ltc) in zip(still_unresolved, remaining, strict=False):
+            _append_live_summary(seq, ltc, seq.get('tid') or ltc.get('tid') or '')
+
+    tool_calls = [seq['summary'] for seq in tool_msg_sequence if seq.get('summary') is not None]
     return tool_calls
 
 
@@ -13708,6 +13741,11 @@ def _adopt_session_db_for_cached_agent(agent, new_session_db):
         return new_session_db
     existing = getattr(agent, "_session_db", None)
     if new_session_db is None:
+        # No store was built for this turn (nothing to adopt), so there is no
+        # adoption path to retry a failed bind from: keep today's behaviour
+        # and do not call the hook here. The agent stays marked as needing a
+        # rebind (_BIND_FAILED_ATTR), and the next cached turn that does have
+        # a usable store retries it; the turn itself continues on ``existing``.
         return existing
     if existing is new_session_db:
         return existing
@@ -13767,12 +13805,27 @@ def _reuse_cached_agent_session_db(agent, session_db, agent_kwargs):
 _BIND_FAILED_ATTR = "_webui_context_engine_bind_failed"
 _BIND_WARNED_ATTR = "_webui_context_engine_bind_warned"
 
+# Serializes the one-shot claim of a per-agent flag. The flag lives on the
+# agent object, so ``dict.setdefault`` does not apply; without a lock two
+# concurrent failing turns for the same agent (different request threads)
+# could both observe the flag unset and log the same failure twice.
+_BIND_FLAG_CLAIM_LOCK = threading.Lock()
+
 
 def _set_agent_flag(agent, name, value):
     try:
         setattr(agent, name, value)
     except Exception:
         pass  # best-effort bookkeeping; never fail the turn over it
+
+
+def _claim_agent_flag(agent, name):
+    """Atomically claim a one-shot per-agent flag; True only for the winner."""
+    with _BIND_FLAG_CLAIM_LOCK:
+        if getattr(agent, name, False) is True:
+            return False
+        _set_agent_flag(agent, name, True)
+        return True
 
 
 def _call_bind_session_state(bind, session_db, session_id, bind_kwargs):
@@ -13808,16 +13861,22 @@ def _rebind_context_engine_session(agent, session_db):
                 bind, session_db, getattr(agent, "session_id", ""), bind_kwargs
             )
         except Exception as exc:
-            if getattr(agent, _BIND_WARNED_ATTR, False) is not True:
-                _set_agent_flag(agent, _BIND_WARNED_ATTR, True)
+            # One WARNING per agent, and the traceback only alongside it: a
+            # hook that keeps failing is retried every cached turn, so logging
+            # ``exc_info`` unconditionally repeats the same traceback forever.
+            first_failure = _claim_agent_flag(agent, _BIND_WARNED_ATTR)
+            if first_failure:
                 logger.warning(
                     "context engine bind_session_state during cached adoption "
                     "failed (%s); retrying on the next cached turn",
                     type(exc).__name__,
                 )
             logger.debug(
-                "context engine bind_session_state during cached adoption failed",
-                exc_info=True,
+                "context engine bind_session_state during cached adoption "
+                "failed (%s: %s)",
+                type(exc).__name__,
+                exc,
+                exc_info=first_failure,
             )
             _set_agent_flag(agent, _BIND_FAILED_ATTR, True)
             return False
@@ -13908,10 +13967,14 @@ def _add_supported_run_conversation_kwarg(callable_obj, kwargs, name, value):
         parameters = inspect.signature(callable_obj).parameters
     except (TypeError, ValueError):
         return False
-    if name in parameters or any(
+    if any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in parameters.values()
     ):
+        kwargs[name] = value
+        return True
+    parameter = parameters.get(name)
+    if parameter is not None and parameter.kind is not inspect.Parameter.POSITIONAL_ONLY:
         kwargs[name] = value
         return True
     return False
@@ -15916,11 +15979,11 @@ def _run_agent_streaming(
 
                 # Modern Hermes Agent builds can call both tool_progress_callback
                 # and the structured tool_start/tool_complete callbacks for the
-                # same tool. Prefer the structured path when it is supported so
-                # the browser receives one tid-tagged tool card per real call.
+                # same tool. When structured callbacks are wired, suppress the
+                # legacy progress path so the structured path is the single owner
+                # of tool events (#4666).
                 if event_type in (None, 'tool.started') and 'tool_start_callback' in _agent_params:
                     return
-
                 if event_type in (None, 'tool.started'):
                     _live_tool_calls.append({
                         'name': name,
@@ -15968,7 +16031,6 @@ def _run_agent_streaming(
 
                 if event_type == 'tool.completed' and 'tool_complete_callback' in _agent_params:
                     return
-
                 if event_type == 'tool.completed':
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):

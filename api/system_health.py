@@ -140,8 +140,18 @@ def _memory_usage() -> dict[str, int | float]:
     }
 
 
+def _state_dir() -> Path:
+    # Lazy for the same reason as the runtime owner modules below: no eager import cycle.
+    from api import config
+
+    return Path(config.STATE_DIR)
+
+
 def _disk_usage() -> dict[str, int | float]:
-    usage = shutil.disk_usage("/")
+    # Measure the filesystem that holds the WebUI state, not "/". In a container the root is
+    # the image filesystem, so a full state volume showed 0% (#9167). A missing or unreadable
+    # state directory raises and the metric stays unavailable; never fall back to the root.
+    usage = shutil.disk_usage(_state_dir())
     total = int(usage.total)
     if total <= 0:
         raise RuntimeError("disk_unavailable")
