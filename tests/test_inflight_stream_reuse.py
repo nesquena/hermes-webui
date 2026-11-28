@@ -280,7 +280,12 @@ def test_load_session_reattaches_when_inflight_is_in_memory_and_marked_for_reatt
     # the wrong one. rfind = the substantive restore branch.
     inflight_idx = body.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = body[inflight_idx : inflight_idx + 4200]
+    # #7653 re-gate round 16: this PR's verdict-map rebuild grew the INFLIGHT
+    # restore branch, so the ``reattach`` gate (span 3793..4396 from the anchor)
+    # and the ``attachLiveStream(sid, activeStreamId`` call at 4478 fell outside
+    # the old 4200-char budget. 5200 keeps both inside with headroom — the same
+    # character-budget widening the #2518 and #4970 source-window tests needed.
+    inflight_block = body[inflight_idx : inflight_idx + 5200]
     assert "INFLIGHT[sid].reattach" in inflight_block, (
         "loadSession()'s INFLIGHT branch must gate the SSE reattach on the "
         "reattach flag so closeLiveStream()'s marking flows through"

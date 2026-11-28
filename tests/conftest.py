@@ -292,8 +292,38 @@ def pytest_sessionfinish(session, exitstatus):
             reporter.write_line(message, red=True)
         else:
             sys.stderr.write(message + "\n")
+    _report_node_argv_guard(session)
     if _SANDBOX_HOME_CREATED:
         shutil.rmtree(SANDBOX_HOME, ignore_errors=True)  # links are removed, never followed
+
+
+def _report_node_argv_guard(session):
+    """Fail the session when a node harness passed an oversized argv entry.
+
+    A single argv entry is capped at MAX_ARG_STRLEN (131072 bytes on Linux), so
+    a harness that grows past the safe line dies with OSError(E2BIG) before node
+    runs. Run it from a temporary .js file instead: tests/_node_script.py.
+    """
+    oversized = _node_argv_guard.finish()
+    if not oversized:
+        return
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    worst = max(r["max_entry"] for r in oversized)
+    lines = [
+        f"{len(oversized)} node invocation(s) passed an argv entry over "
+        f"{_node_argv_guard.ARGV_SAFE} bytes (largest {worst}; Linux caps one "
+        f"argument at {_node_argv_guard.ARGV_LIMIT}).",
+        "  execve raises OSError(E2BIG) before node starts, so the test reports",
+        "  an infrastructure error instead of the behaviour it checks.",
+        "  Run the script from a temporary .js file: tests/_node_script.run_node_script().",
+    ]
+    reporter = session.config.pluginmanager.get_plugin('terminalreporter')
+    if reporter is not None:
+        reporter.write_sep('!', 'node argv guard', red=True, bold=True)
+        for line in lines:
+            reporter.write_line(line, red=True)
+    else:
+        sys.stderr.write("\n".join(lines) + "\n")
 
 
 @pytest.fixture(autouse=True)
@@ -674,6 +704,7 @@ requires_agent_modules = pytest.mark.skipif(
 
 def pytest_configure(config):
     _repo_git_guard.pytest_configure(config)  # records --basetemp for the guard (see tests/_real_repo_git_guard.py)
+    _node_argv_guard.pytest_configure(config)  # records oversized node argv entries (see tests/_node_argv_guard.py)
     if config.getoption('basetemp', default=None):  # pytest's temp tree may sit in a scratch dir under ~/.hermes
         _hermes_root_guard.allow(pathlib.Path(config.getoption('basetemp')).expanduser())
     config.addinivalue_line("markers", "requires_agent: skip when hermes-agent dir is not found")
@@ -927,6 +958,7 @@ def allow_outbound_network(monkeypatch):
 # ── Real-checkout git guard ─────────────────────────────────────────────────
 # Installed once here, like the network guard above: see tests/_real_repo_git_guard.py.
 from tests import _real_repo_git_guard as _repo_git_guard  # noqa: E402
+from tests import _node_argv_guard  # noqa: E402
 
 from api.config import _AGENT_DIR as _PRODUCTION_AGENT_DIR  # noqa: E402  (the runtime's own discovery)
 

@@ -260,6 +260,9 @@ def test_done_defers_live_dom_removal_but_other_terminal_paths_still_clear():
     """
     clear_live = _extract("clearLiveToolCards")
     done_start = MESSAGES_JS.index("source.addEventListener('done',e=>{")
+    # Both this branch and master grow the done handler (verdict-map rebuild on
+    # this branch, the deferred-rows work upstream); 18000 keeps the
+    # clearLiveToolCards({preserveDom:...}) call inside the window with headroom.
     done = MESSAGES_JS[done_start : done_start + 18000]
     harness = textwrap.dedent(f"""
         let removed = 0;
