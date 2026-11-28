@@ -401,6 +401,7 @@ const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm|oga)$/i;
 const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
 const _CSV_EXTS=/\.csv$/i;
 const _EXCALIDRAW_EXTS=/\.excalidraw$/i;
+const _MD_EXTS=/\.(md|markdown|mdown|mkd|mkdn)$/i;
 function _dataImageHtml(){ return ''; }
 function _mediaPlayerHtml(){ return ''; }
 function _remoteImageAllowed(){ return true; }
@@ -457,7 +458,7 @@ _SETTLED_CASES = [
     "file:///home/me/x.png",                # ③ POSIX unchanged
     "file://server/share/x.png",            # ② UNC authority → explicit reject
     "file://localhost/C:/x.png",            # localhost authority → local
-    "file:///C:/Users/me/report.md",        # non-image drive-letter path
+    "file:///C:/Users/me/report.txt",       # non-image drive-letter path
     "file://server:abc/share/x.png",        # ② malformed authority (URL parse
     #                                         throws) → fail-closed reject
 ]
@@ -541,8 +542,8 @@ class TestSettledFileUriConverter:
         assert r["pathParam"] == "/C:/x.png"
 
     def test_non_image_drive_letter_path_forwards_leading_separator(self, settled_results):
-        r = settled_results["file:///C:/Users/me/report.md"]
-        assert r["pathParam"] == "/C:/Users/me/report.md"
+        r = settled_results["file:///C:/Users/me/report.txt"]
+        assert r["pathParam"] == "/C:/Users/me/report.txt"
 
 
 @_NODE_REQUIRED
@@ -594,8 +595,8 @@ class TestStreamingFileUriConverter:
         assert r["pathParam"] == "/C:/x.png"
 
     def test_non_image_drive_letter_path_forwards_leading_separator(self, streaming_results):
-        r = streaming_results["file:///C:/Users/me/report.md"]
-        assert r["pathParam"] == "/C:/Users/me/report.md"
+        r = streaming_results["file:///C:/Users/me/report.txt"]
+        assert r["pathParam"] == "/C:/Users/me/report.txt"
 
     def test_streaming_and_settled_policies_match(self, settled_results, streaming_results):
         """② UNC policy must be identical across both converters."""

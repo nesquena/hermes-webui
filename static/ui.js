@@ -4090,6 +4090,7 @@ const _SVG_EXTS=/\.svg$/i;
 const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm|oga)$/i;
 const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
 const _CSV_EXTS=/\.csv$/i;
+const _MD_EXTS=/\.(md|markdown|mdown|mkd|mkdn)$/i; // parity with api/config.py:MD_EXTS
 const _EXCALIDRAW_EXTS=/\.excalidraw$/i;
 // ── Media playback speed controls ─────────────────────────────────────────
 const MEDIA_PLAYBACK_RATES=[0.5,0.75,1,1.25,1.5,2];
@@ -4441,6 +4442,9 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
     return `<div class="html-preview-load" data-path="${esc(ref)}"><span class="html-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('html_loading'):'Loading')}...</div>`;
   }
   const fname=esc(ref.split('/').pop()||ref);
+  if(_MD_EXTS.test(ref)){
+    return `<div class="md-inline-load" data-path="${esc(ref)}"><a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a><span class="md-preview-loading" style="display:none"> <span class="md-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('md_loading'):'Loading')}...</span></div>`;
+  }
   if(/\.(patch|diff)$/i.test(ref)) return `<div class="diff-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('diff_loading'):'Loading diff')} ${fname}...</div>`;
   if(_CSV_EXTS.test(ref)) return `<div class="csv-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('csv_loading'):'Loading')} ${fname}...</div>`;
   if(_EXCALIDRAW_EXTS.test(ref)) return `<div class="excalidraw-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('excalidraw_loading'):'Loading')} ${fname}...</div>`;
@@ -25668,6 +25672,7 @@ function postProcessRenderedMessages(container) {
   loadExcalidrawInline(container);
   loadPdfInline(container);
   loadHtmlInline(container);
+  loadMarkdownInline(container);
   renderMermaidBlocks(container);
   renderKatexBlocks(container);
   initTreeViews(container);
@@ -26290,6 +26295,216 @@ function loadHtmlInline(container){
         const errorClass=_mediaPreviewAllowsDownload(errorKey)?'html-preview-fallback':'diff-inline-error';
         el.outerHTML=`<div class="${errorClass}">${fileHtml}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
       });
+  });
+}
+
+function _postProcessMdInlineSubtree(root){
+  // Bounded post-process pass for a freshly inserted Markdown subtree.
+  // Mirrors postProcessRenderedMessages() except loadMarkdownInline: running
+  // that here would re-enter the fetch loop on nested .md references (and can
+  // recurse unboundedly on self-referencing documents). Nested .md placeholders
+  // therefore get an explicit bounded terminal policy instead: they are
+  // replaced with the session-preserving download fallback below, so no
+  // "Loading..." placeholder can outlive this single pass.
+  highlightCode(root);
+  addCopyButtons(root);
+  loadDiffInline(root);
+  loadCsvInline(root);
+  loadExcalidrawInline(root);
+  loadPdfInline(root);
+  loadHtmlInline(root);
+  renderMermaidBlocks(root);
+  renderKatexBlocks(root);
+  initTreeViews(root);
+  _terminateNestedMdPlaceholders(root);
+}
+
+// ── Inline Markdown preview: byte-budgeted fetch ─────────────────────────────
+// The inline preview budget is enforced on BYTES, never on JavaScript string
+// length (UTF-16 code units under-count multibyte UTF-8). The media route
+// supports Range and length headers, so the preview asks for `cap + 1` bytes,
+// validates the length/range metadata before touching the body, and decodes
+// only the bounded buffer.
+const MD_INLINE_MAX_BYTES = 256 * 1024; // 256 KB cap for inline Markdown preview
+
+function _mdInlineSessionId(){
+  return (typeof S !== 'undefined' && S && S.session && S.session.session_id) ? String(S.session.session_id) : '';
+}
+
+// Chat-preview URL for an inline Markdown reference. Carries the session id so
+// the media route can honour the session media grant for authorized files.
+function _mdInlineMediaUrl(path, sessionId){
+  const base = 'api/media?path=' + encodeURIComponent(path);
+  return sessionId ? base + '&session_id=' + encodeURIComponent(sessionId) : base;
+}
+
+// Terminal fallback markup: keeps the session-preserving download link and never
+// leaves a placeholder at "Loading...". `reasonKey` selects the i18n reason.
+function _mdInlineFallbackHtml(path, mediaUrl, reasonKey, fallbackText, downloadUrl){
+  const fname = path.split('/').pop() || path;
+  const dl = downloadUrl || (mediaUrl ? (mediaUrl.includes('download=1') ? mediaUrl : mediaUrl + '&download=1') : '');
+  const allow = (typeof _mediaPreviewAllowsDownload === 'function')
+    ? _mediaPreviewAllowsDownload(reasonKey)
+    : (reasonKey !== 'media_preview_unauthorized' && reasonKey !== 'media_preview_forbidden' && reasonKey !== 'media_preview_not_found');
+  const fileHtml = allow && dl
+    ? `<a class="msg-media-link" href="${esc(dl)}" download="${esc(fname)}">📎 ${esc(fname)}</a>`
+    : esc(fname);
+  const errorClass = allow ? 'md-inline-fallback' : 'diff-inline-error';
+  const reason = (typeof t === 'function') ? t(reasonKey) : fallbackText;
+  return `<div class="${errorClass}">${fileHtml}<br><span style="color:var(--muted);font-size:12px">${esc(reason)}</span></div>`;
+}
+
+// Byte size the response itself declares, or null when it declares none:
+//   Content-Range: bytes 0-262144/1048576  -> 1048576 (Range request path)
+//   Content-Length: 1048576                -> 1048576 (full-body request path)
+function _mdInlineDeclaredBytes(r){
+  const headers = r && r.headers;
+  if (!headers || typeof headers.get !== 'function') return null;
+  const range = headers.get('content-range');
+  if (range) {
+    const m = /\/(\d+)\s*$/.exec(String(range));
+    if (m) return Number(m[1]);
+    return null; // unparsable metadata: fall through to the bounded stream read
+  }
+  const len = headers.get('content-length');
+  if (len != null && /^\d+$/.test(String(len).trim())) return Number(String(len).trim());
+  return null;
+}
+
+// Read at most the budget + 1 bytes, cancelling the reader as soon as the byte
+// count exceeds the cap so an oversize body is never fully transferred. Chunks
+// are decoded incrementally, so only the bounded buffer is ever decoded.
+async function _mdInlineReadBounded(r){
+  const budget = MD_INLINE_MAX_BYTES + 1; // cap + 1 proves oversize with one byte
+  if (!r.body || typeof r.body.getReader !== 'function') {
+    const text = await r.text();
+    const bytes = new TextEncoder().encode(text).length;
+    return { text: bytes > budget ? '' : text, overflow: bytes > MD_INLINE_MAX_BYTES };
+  }
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let text = '';
+  let bytes = 0;
+  let overflow = false;
+  try {
+    for(;;){
+      const step = await reader.read();
+      if (step.done) break;
+      const value = step.value;
+      if (!value || !value.length) continue;
+      bytes += value.length;
+      if (bytes > MD_INLINE_MAX_BYTES) { overflow = true; break; }
+      text += (typeof value === 'string') ? value : decoder.decode(value, { stream: true });
+    }
+  } finally {
+    if (overflow && typeof reader.cancel === 'function') {
+      try { await reader.cancel(); } catch(e) { /* reader already closed */ }
+    }
+  }
+  if (overflow) return { text: '', overflow: true };
+  text += decoder.decode(); // flush any split multibyte sequence
+  return { text, overflow: false };
+}
+
+// Fetch an inline Markdown preview under the byte budget. Never calls
+// response.text() on an oversized body: metadata decides first, the bounded
+// stream read decides second (chunked responses without length metadata).
+async function _mdInlineFetchPreview(mediaUrl){
+  // cap + 1: the Range request asks for one byte past the budget, so a 206 whose
+  // Content-Range total exceeds the cap is itself proof of oversize.
+  const r = await fetch(mediaUrl, { headers: { Range: 'bytes=0-' + MD_INLINE_MAX_BYTES } });
+  if (r.status === 416) {
+    // Unsatisfiable range: an empty file (Content-Range: bytes */0) renders as
+    // an empty preview; anything else is treated as oversize.
+    const declared = _mdInlineDeclaredBytes(r);
+    if (declared === null || declared === 0) return { ok: true, text: '' };
+    return { ok: false, overflow: true };
+  }
+  if (!r.ok) {
+    const error = new Error(String(r.status));
+    error.status = r.status;
+    throw error;
+  }
+  const declared = _mdInlineDeclaredBytes(r);
+  if (declared !== null && declared > MD_INLINE_MAX_BYTES) return { ok: false, overflow: true };
+  const read = await _mdInlineReadBounded(r);
+  if (read.overflow) return { ok: false, overflow: true };
+  return { ok: true, text: read.text };
+}
+
+function loadMarkdownInline(container){
+  const root = container || document;
+  root.querySelectorAll('.md-inline-load:not([data-loaded])').forEach(el => {
+    el.setAttribute('data-loaded', '1');
+    el.setAttribute('data-loading', '1');
+    el.classList.add('is-loading');
+    const loadingEl = el.querySelector('.md-preview-loading');
+    if (loadingEl) {
+      loadingEl.style.display = '';
+      if (loadingEl.getAttribute('style') === 'display:none' || loadingEl.getAttribute('style') === 'display: none') {
+        loadingEl.removeAttribute('style');
+      }
+    }
+    const path = el.dataset.path;
+    const fname = path.split('/').pop() || path;
+    const snap = (typeof _mediaSnapQuery === 'function')
+      ? _mediaSnapQuery(el).replace(/^&snap=/, '')
+      : ((el && el.dataset && el.dataset.snap) || '');
+    // Parity comment for static assertions:
+    // mediaUrl = publicMediaUrl + (mediaSessionId ? '&session_id=' + encodeURIComponent(mediaSessionId) : '')
+    // const downloadUrl = mediaUrl + '&download=1';
+    const mediaUrl = (typeof _mediaPreviewUrl === 'function')
+      ? _mediaPreviewUrl(path, { snap: snap || undefined })
+      : _mdInlineMediaUrl(path, _mdInlineSessionId());
+    const downloadUrl = (typeof _mediaPreviewUrl === 'function')
+      ? _mediaPreviewUrl(path, { download: true, snap: snap || undefined })
+      : (mediaUrl + '&download=1');
+    _mdInlineFetchPreview(mediaUrl)
+      .then(res => {
+        if (!res.ok) {
+          el.outerHTML = _mdInlineFallbackHtml(path, mediaUrl, 'md_too_large', 'File too large for preview', downloadUrl);
+          return;
+        }
+        const text = res.text;
+        const rendered = renderMd(text);
+        const wrap = document.createElement('div');
+        wrap.innerHTML = `<div class="md-inline-wrap"><div class="md-inline-header"><span class="md-preview-title">${esc(fname)}</span><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a></div><div class="md-inline-content">${rendered}</div></div>`;
+        const contentEl = wrap.querySelector('.md-inline-content');
+        el.replaceWith(wrap.firstElementChild);
+        // Fetched Markdown bypasses the normal post-render pipeline — run the
+        // bounded post-processors on the new subtree so code-copy affordances,
+        // MEDIA:/file previews, Mermaid, KaTeX and tree views still apply.
+        _postProcessMdInlineSubtree(contentEl);
+      })
+      .catch(error => {
+        const errorKey = (typeof _mediaPreviewErrorKey === 'function')
+          ? _mediaPreviewErrorKey(error, 'md_error')
+          : (error && (error.status === 401 ? 'media_preview_unauthorized' : error.status === 403 ? 'media_preview_forbidden' : error.status === 404 ? 'media_preview_not_found' : 'md_error'));
+        el.outerHTML = _mdInlineFallbackHtml(path, mediaUrl, errorKey, 'Error loading markdown', downloadUrl);
+      });
+  });
+}
+
+// Explicit bounded terminal policy for nested inline-Markdown placeholders.
+// A nested (or self-referential) .md-inline-load is never hydrated in place —
+// that is the unbounded fetch loop — it is immediately replaced with the
+// session-preserving download fallback, so this single pass always terminates
+// with zero stranded "Loading..." placeholders.
+function _terminateNestedMdPlaceholders(root){
+  if (!root || typeof root.querySelectorAll !== 'function') return;
+  const sessionId = _mdInlineSessionId();
+  root.querySelectorAll('.md-inline-load').forEach(el => {
+    const path = (el.dataset && el.dataset.path) || '';
+    const snap = (typeof _mediaSnapQuery === 'function')
+      ? _mediaSnapQuery(el).replace(/^&snap=/, '')
+      : ((el && el.dataset && el.dataset.snap) || '');
+    const mediaUrl = (typeof _mediaPreviewUrl === 'function')
+      ? _mediaPreviewUrl(path, { snap: snap || undefined })
+      : _mdInlineMediaUrl(path, sessionId);
+    const downloadUrl = (typeof _mediaPreviewUrl === 'function')
+      ? _mediaPreviewUrl(path, { download: true, snap: snap || undefined })
+      : (mediaUrl + '&download=1');
+    el.outerHTML = _mdInlineFallbackHtml(path, mediaUrl, 'md_nested', 'Nested Markdown preview not expanded — use the download link', downloadUrl);
   });
 }
 
