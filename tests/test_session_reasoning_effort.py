@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import tempfile
 import urllib.error
 from collections import OrderedDict
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlparse
@@ -260,6 +262,44 @@ def test_reasoning_post_failed_real_save_keeps_live_equal_to_reloaded(
     set_effort.assert_not_called()
     assert session.reasoning_effort == "high"
     assert Session.load("atomic-save").reasoning_effort == "high"
+
+
+def test_reasoning_post_skips_cli_projection_for_webui_session(
+    isolated_reasoning_profiles, tmp_path, monkeypatch
+):
+    session_id = "reasoning-native"
+    session = Session(
+        session_id=session_id, profile="default", model="gpt-5",
+        model_provider="openai", workspace=str(tmp_path), reasoning_effort="high",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    session.save(touch_updated_at=False)
+    models.SESSIONS[session_id] = session
+
+    db_path = tmp_path / "state.db"
+    with closing(sqlite3.connect(db_path)) as db, db:
+        db.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT)")
+        db.execute("INSERT INTO sessions VALUES (?, 'webui')", (session_id,))
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+
+    handler = _DummyHandler({"effort": "low", "session_id": session_id}, command="POST")
+    webui_row = {
+        "session_id": session_id,
+        "session_source": "webui",
+        "source_tag": "webui",
+        "raw_source": "webui",
+    }
+    with (
+        patch("api.routes.lookup_cli_session_row", return_value=None),
+        patch("api.routes.get_cli_sessions", return_value=[webui_row]) as cli_projection,
+        patch("api.routes.write_reasoning_effort"),
+        patch("api.routes.get_reasoning_status", return_value={"reasoning_effort": "low"}),
+    ):
+        handle_post(handler, urlparse("/api/reasoning"))
+
+    assert handler.status == 200
+    assert Session.load(session_id).reasoning_effort == "low"
+    cli_projection.assert_not_called()
 
 
 def test_reasoning_post_failed_profile_write_restores_session():
