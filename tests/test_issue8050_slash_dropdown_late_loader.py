@@ -43,7 +43,7 @@ def _run(script_body: str) -> dict:
             classList: {{ add: (c) => set.add(c), remove: (c) => set.delete(c), contains: (c) => set.has(c) }},
             appendChild(c) {{ this.children.push(c); }},
             querySelectorAll() {{ return this.children; }},
-            focus() {{}}, setSelectionRange() {{}}, dispatchEvent() {{}},
+            focus() {{}}, setSelectionRange() {{}}, dispatchEvent() {{}}, scrollIntoView() {{}},
           }};
         }};
         const msg = mkEl();
@@ -67,6 +67,7 @@ def _run(script_body: str) -> dict:
               return {{ skills: [
                 {{ name: 'gamma-live', description: 'A skill' }},
                 {{ name: 'newish-skill', description: 'A skill that shares the /ne prefix with built-ins' }},
+                {{ name: 'comp', description: 'Focused composition' }},
               ] }};
             }}
             if (path === '/api/commands') return {{ commands: [] }};
@@ -229,3 +230,123 @@ def test_boot_input_and_escape_handlers_use_the_dismissal():
     assert "slashDropdownDismissedFor(text)" in handler, (
         "the input handler's in-flight lookup must not re-open a list the user closed meanwhile"
     )
+
+
+def test_late_skill_load_keeps_an_arrowed_highlight():
+    """#9110: a skill that loads while the list is open must not pull an arrowed highlight back to row zero."""
+    result = _run(
+        f"""
+        await loadBundleCommands(true);
+        await loadAgentCommandMetadata(true);
+        __hold(true);
+        __msg.value = '/comp';
+        showCmdDropdown(await getSlashAutocompleteMatches('/comp'));
+        navigateCmdDropdown(1);
+        const before = __dd.children[_cmdSelectedIdx] && __dd.children[_cmdSelectedIdx].dataset.cmdName;
+        ensureSkillCommandsLoadedForAutocomplete();
+        __release();
+        {_TICK}
+        const names = __dd.children.map(el => el.dataset.cmdName);
+        const after = __dd.children[_cmdSelectedIdx] && __dd.children[_cmdSelectedIdx].dataset.cmdName;
+        return {{ before, after, names, open: __dd.classList.contains('open') }};
+        """
+    )
+    assert result["before"] == "compact", result
+    assert result["open"] is True
+    assert "comp" in result["names"], result
+    assert result["after"] == "compact", result
+
+
+def test_late_skill_load_keeps_unarrowed_row_zero_until_next_keystroke():
+    """#9110: without an arrow, a newly loaded exact match must not become the row Enter accepts.
+
+    The next showCmdDropdown() with no preserve flag is the keystroke path and ranks that exact match at index 0.
+    """
+    result = _run(
+        f"""
+        await loadBundleCommands(true);
+        await loadAgentCommandMetadata(true);
+        __hold(true);
+        __msg.value = '/comp';
+        showCmdDropdown(await getSlashAutocompleteMatches('/comp'));
+        ensureSkillCommandsLoadedForAutocomplete();
+        __release();
+        {_TICK}
+        const preserved = __dd.children.map(el => el.dataset.cmdName);
+        const ranked = await getSlashAutocompleteMatches('/comp');
+        selectCmdDropdownItem();
+        const composer = __msg.value;
+        showCmdDropdown(ranked);
+        const keystroke = __dd.children.map(el => el.dataset.cmdName);
+        return {{ preserved, composer, keystroke, ranked: ranked.map(m => m.name) }};
+        """
+    )
+    assert result["preserved"][0] == "compress", result
+    assert "comp" in result["preserved"] and result["preserved"].index("comp") > 0, result
+    assert result["composer"].split()[0] == "/compress", result
+    assert result["ranked"][0] == "comp", result
+    assert result["keystroke"][0] == "comp", result
+
+
+def test_late_refresh_keeps_an_arrowed_argument_row():
+    """#9110: argument rows share their parent as `name`, so a late refresh must re-select by parent and value."""
+    result = _run(
+        f"""
+        await loadBundleCommands(true);
+        await loadAgentCommandMetadata(true);
+        __msg.value = '/reasoning ';
+        const matches = await getSlashAutocompleteMatches('/reasoning ');
+        showCmdDropdown(matches);
+        const target = matches.findIndex(m => m.value === 'high');
+        for (let i = 0; i < target; i++) navigateCmdDropdown(1);
+        const label = () => {{
+          const el = __dd.children[_cmdSelectedIdx];
+          const m = el && /cmd-item-subarg">([^<]*)</.exec(el.innerHTML);
+          return m && m[1];
+        }};
+        const before = label();
+        refreshSlashCommandDropdown();
+        {_TICK}
+        return {{ before, after: label(), target, open: __dd.classList.contains('open') }};
+        """
+    )
+    assert result["target"] > 0, result
+    assert result["before"] == "high", result
+    assert result["open"] is True
+    assert result["after"] == "high", result
+
+
+def test_late_skill_load_scrolls_a_kept_arrowed_row_into_view():
+    """#9110: rows inserted above an arrowed row can push it below the fold, so the refresh must scroll it back."""
+    result = _run(
+        f"""
+        const make = document.createElement;
+        document.createElement = (...args) => {{
+          const el = make(...args);
+          el.scrollIntoView = (opts) => {{ el.__scrolled = opts; }};
+          return el;
+        }};
+        await loadBundleCommands(true);
+        await loadAgentCommandMetadata(true);
+        __hold(true);
+        __msg.value = '/comp';
+        showCmdDropdown(await getSlashAutocompleteMatches('/comp'));
+        navigateCmdDropdown(1);
+        const beforeIdx = _cmdSelectedIdx;
+        ensureSkillCommandsLoadedForAutocomplete();
+        __release();
+        {_TICK}
+        const kept = __dd.children[_cmdSelectedIdx];
+        return {{
+          beforeIdx,
+          afterIdx: _cmdSelectedIdx,
+          after: kept && kept.dataset.cmdName,
+          scrolled: kept && kept.__scrolled || null,
+          others: __dd.children.filter(el => el !== kept && el.__scrolled).length,
+        }};
+        """
+    )
+    assert result["after"] == "compact", result
+    assert result["afterIdx"] > result["beforeIdx"], "the late skill must land above the arrowed row"
+    assert result["scrolled"] == {"block": "nearest"}, "the kept row must be scrolled into view after the refresh"
+    assert result["others"] == 0, result
