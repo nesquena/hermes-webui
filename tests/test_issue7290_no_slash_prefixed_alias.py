@@ -39,6 +39,8 @@ from pathlib import Path
 
 import pytest
 
+from api import config
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -61,6 +63,12 @@ def _build_badges(active_provider, default_model, groups, fallback_providers=Non
         "cfg": {"fallback_providers": fallback_providers or []},
         "groups": groups,
         "_resolve_provider_alias": lambda provider: provider,
+        # #8732: module-level helpers the builder calls; the fallback
+        # provider stays as written, like the alias stand-in above.
+        "_configured_badge_fallback_provider": lambda entry, _cfg: str(entry.get("provider") or ""),
+        "_configured_badge_option_ids": config._configured_badge_option_ids,
+        "_configured_badge_provider_options": config._configured_badge_provider_options,
+        "_configured_badge_provider_match": config._configured_badge_provider_match,
     }
     # The live source uses a different `_norm_model_id` than the test's
     # inline; either is fine because the badge key is the **raw** candidate,
