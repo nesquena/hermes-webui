@@ -34,7 +34,9 @@ def _cut(start_marker: str, end_marker: str) -> str:
     return MESSAGES_JS[start:end]
 
 
-SEND_SRC = _cut("async function send(){", "\nasync function startRegeneration(")
+SEND_SRC = _cut(
+    "function _newSessionActionWasSuperseded(", "\nasync function startRegeneration("
+)
 CURRENT_PANE_SRC = _cut("function _isSessionCurrentPane(sid) {", "\nfunction _isSessionActivelyViewed(")
 RECOVER_COMPRESSED_SRC = _cut(
     "async function _recoverCompressedSend(", "\nfunction _restoreComposerDraftAfterFailedSend("

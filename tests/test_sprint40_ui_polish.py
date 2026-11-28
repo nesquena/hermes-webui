@@ -283,9 +283,11 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
     def test_sync_topbar_before_render_session_list(self):
         """syncTopbar() should be called before renderSessionList()
         so the chips are correct when the UI re-renders."""
-        idx = PANELS_JS.find('if (sessionInProgress)')
+        idx = PANELS_JS.find('} else if (sessionInProgress) {')
         self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        end = PANELS_JS.find('} else {', idx)
+        self.assertGreater(end, idx)
+        block = PANELS_JS[idx:end]
 
         pos_sync = block.find('syncTopbar()')
         pos_render = block.find('await renderSessionList()')

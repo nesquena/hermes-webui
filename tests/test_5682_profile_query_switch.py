@@ -651,8 +651,9 @@ console.log(JSON.stringify({{ beforeDestination, afterPreviousResponse, afterDes
     assert payload["afterPreviousResponse"] == {"effort": "", "wrapDisplay": "none"}
     assert payload["afterDestination"] == "high"
     assert payload["calls"] == 2
-    assert "refreshProfileTransitionReasoningChip" in PANELS_JS
-    assert PANELS_JS.index("refreshProfileTransitionReasoningChip") > PANELS_JS.index("S.activeProfile = data.active || name")
+    destination_refresh = "refreshProfileTransitionReasoningChip(data.default_model"
+    assert destination_refresh in PANELS_JS
+    assert PANELS_JS.index(destination_refresh) > PANELS_JS.index("S.activeProfile = data.active || name")
     background = PANELS_JS[PANELS_JS.index("function _refreshProfileSwitchBackground"):PANELS_JS.index("async function loadProfilesPanel")]
     for refresh in (
         "_ensureComposerControlVisibilityState",
@@ -700,6 +701,7 @@ global.t = value => value;
 global.assistantDisplayName = () => 'Hermes';
 global._profileSwitchPanelLoad = async () => {{}};
 global._refreshProfileSwitchBackground = () => {{}};
+global._waitForNewSessionNavigationSettlement = async () => {{}};
 var _profileSwitchGeneration = 0;
 var _skillsData = null, _workspaceList = null;
 var _currentReasoningEffort = 'low';
@@ -707,6 +709,13 @@ var _currentReasoningEffortsSupported = ['low', 'high'];
 var _profileTransitionReasoningContext = null;
 var _lastReasoningFetchKey = null;
 var _reasoningFetchSeq = 0;
+function extractContextTransitionHelpers(src) {{
+  const start = src.indexOf('let _contextTransitionGeneration=0;');
+  const end = src.indexOf('\\nconst _newSessionPendingText', start);
+  if (start < 0 || end < 0) throw new Error('context transition helpers not found');
+  return src.slice(start, end);
+}}
+eval(extractContextTransitionHelpers(sessionsSrc));
 eval(extractFunc(uiSrc, '_normalizeReasoningEffort'));
 eval(extractFunc(uiSrc, '_formatReasoningEffortLabel'));
 eval(extractFunc(uiSrc, '_reasoningEffortContext'));

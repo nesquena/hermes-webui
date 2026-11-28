@@ -369,8 +369,14 @@ class TestSwitchRaceGuards:
         ld = WORKSPACE[WORKSPACE.index("async function loadDir("):]
         ld = ld[: ld.index("\nfunction refreshWorkspacePanel(")]
         assert "const treeGen=_wsTreeGen" in ld, "loadDir must capture the tree generation at call time"
-        assert ld.count("treeGen!==_wsTreeGen") >= 2, (
-            "loadDir must re-check the tree generation after BOTH awaited /api/list points "
+        assert "treeGen===_wsTreeGen" in ld, (
+            "the current-navigation guard must retain the workspace-tree generation check"
+        )
+        assert ld.count("if(!isCurrentNavigation())") >= 2, (
+            "loadDir must invoke the current-navigation guard after BOTH awaited /api/list points "
             "(root render + expanded-dirs prefetch) and discard stale renders"
+        )
+        assert ld.count("if(isSameNavigation())return true;") >= 2, (
+            "a superseded reply for the same navigation must still count as committed"
         )
 

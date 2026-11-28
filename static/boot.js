@@ -1138,6 +1138,44 @@ function _micToastKeyForRecognitionError(error){
   return msgs[error]||null;
 }
 
+function _composerProducerOwnerState(producerHandle){
+  const input=$('msg');
+  if(!producerHandle||typeof _composerProducerContext!=='function'){
+    return {
+      sid:S.session&&S.session.session_id,profile:S.activeProfile||'default',
+      text:input?input.value:'',visible:true,
+    };
+  }
+  const context=_composerProducerContext(null,producerHandle,null);
+  if(!context||context.drop)return null;
+  const visible=typeof _composerOwnerIsVisible==='function'
+    ? _composerOwnerIsVisible(context.ownerSid,context.ownerProfile)
+    : !!(S.session&&S.session.session_id===context.ownerSid);
+  if(visible){
+    return {
+      sid:context.ownerSid,profile:context.ownerProfile,
+      text:input?input.value:'',visible:true,
+    };
+  }
+  const remembered=typeof _composerRememberedOwnerSnapshot==='function'
+    ? _composerRememberedOwnerSnapshot(context.ownerSid,context.ownerProfile)
+    : null;
+  if(remembered){
+    return {sid:context.ownerSid,profile:context.ownerProfile,text:remembered.text,visible:false};
+  }
+  if(context.ownerSid==null&&producerHandle.generation!=null
+    &&typeof _composerOwnershipTransition!=='undefined'
+    &&_composerOwnershipTransition
+    &&_composerOwnershipTransition.generation===producerHandle.generation
+    &&producerHandle.ownerRole==='destination'){
+    return {
+      sid:null,profile:context.ownerProfile,
+      text:typeof _composerPendingText==='function'?_composerPendingText():'',visible:false,
+    };
+  }
+  return null;
+}
+
 (function(){
   const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
   const _canRecordAudio=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder);
@@ -1213,6 +1251,7 @@ function _micToastKeyForRecognitionError(error){
   let audioChunks=[];
   let _finalText='';
   let _prefix='';
+  let _micComposerProducerToken='composer-mic';
   let _isRecording=false;
   // #5294 salvage — mobile composer-mic dictation continuity.
   // _speechStopRequested distinguishes an intentional stop (send/toggle) from a
@@ -1229,7 +1268,27 @@ function _micToastKeyForRecognitionError(error){
   let _micHoldActive=false;
   let _micPointerDown=false;
   let _micStartSeq=0;
+  let _micSettlementPromise=Promise.resolve();
+  // Every unfinished capture settles independently. Waiting only for the
+  // newest promise lets an older server transcription land after a profile
+  // switch saved the source draft, which drops those words (409 under the new
+  // cookie). Track the whole backlog instead.
+  const _pendingMicSettlements=new Set();
   const _micHoldThresholdMs=300;
+
+  function _beginMicSettlement(){
+    let settled=false;
+    let resolveSettlement;
+    const promise=new Promise(resolve=>{ resolveSettlement=resolve; });
+    _pendingMicSettlements.add(promise);
+    _micSettlementPromise=promise;
+    return ()=>{
+      if(settled)return;
+      settled=true;
+      _pendingMicSettlements.delete(promise);
+      resolveSettlement();
+    };
+  }
 
   function _setButtonTooltipAndKey(btn, key){
     const text = t(key);
@@ -1276,11 +1335,19 @@ function _micToastKeyForRecognitionError(error){
   }
   window._applyDictationAppendPreference=_applyDictationAppendPreference;
 
-  async function _sendRawAudio(blob){
+  function _micProducerIsCurrent(producerHandle){
+    return producerHandle===_micComposerProducerToken;
+  }
+
+  async function _sendRawAudio(blob,producerHandle=_micComposerProducerToken){
+    if(!_micProducerIsCurrent(producerHandle))return;
+    const ownerState=_composerProducerOwnerState(producerHandle);
+    if(!ownerState)return;
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
-    S.pendingFiles.push(file);
-    renderTray();
+    if(typeof _composerAddFiles==='function')_composerAddFiles([file],null,producerHandle);
+    else S.pendingFiles.push(file);
+    if(typeof _composerOwnershipTransition==='undefined'||!_composerOwnershipTransition)renderTray();
     // An explicit Send-button click while recording sets _micPendingSend — that
     // is an unambiguous send intent, so honor it even when the composer already
     // has text (mirrors the transcribe path). Otherwise (manual mic-stop): send
@@ -1288,15 +1355,21 @@ function _micToastKeyForRecognitionError(error){
     // user can keep composing.
     if(window._micPendingSend){
       window._micPendingSend=false;
-      send();
-    }else if(!ta.value.trim()){
+      if(ownerState.visible)send();
+    }else if(ownerState.visible&&!String(ownerState.text||'').trim()){
       send();
     }else{
       showToast(t('voice_raw_attached'));
     }
   }
 
-  function _commitTranscript(text, prefixOverride){
+  function _commitTranscript(text, prefixOverride, producerHandle=_micComposerProducerToken){
+    // In append mode a superseded producer's transcript still belongs to its own
+    // recorded owner (routed by _composerSetText), so a newer recording must not
+    // discard it. Replace mode stays current-producer only.
+    if(!_micProducerIsCurrent(producerHandle)&&!_dictationAppend)return;
+    const ownerState=_composerProducerOwnerState(producerHandle);
+    if(!ownerState)return;
     // `prefixOverride` is the composer content captured at recording start,
     // passed only by the async server-STT path (recorder.onstop → _transcribeBlob).
     // The sync browser-SR path doesn't call this function — it commits inline
@@ -1315,9 +1388,9 @@ function _micToastKeyForRecognitionError(error){
     const clean=(text||'').trim();
     let committed;
     if(!clean){
-      committed = ta.value;
+      committed = ownerState.text;
     }else if(_dictationAppend){
-      const base = prefixOverride !== undefined ? ta.value : (ta.value || _prefix);
+      const base = prefixOverride !== undefined ? ownerState.text : (ownerState.text || _prefix);
       if(!base){
         committed = clean;
       }else{
@@ -1329,11 +1402,14 @@ function _micToastKeyForRecognitionError(error){
       // Replace mode (explicit): dictated text overwrites the composer.
       committed = clean;
     }
-    ta.value=committed;
-    autoResize();
-    if(window._micPendingSend){
+    const rendered=typeof _composerSetText==='function'
+      ? _composerSetText(committed,clean,null,producerHandle)
+      : (ta.value=committed,true);
+    if(rendered!==false)autoResize();
+    if(_micProducerIsCurrent(producerHandle)&&window._micPendingSend){
       window._micPendingSend=false;
-      send();
+      const settledOwner=_composerProducerOwnerState(producerHandle);
+      if(settledOwner&&settledOwner.visible)send();
     }
   }
 
@@ -1349,13 +1425,13 @@ function _micToastKeyForRecognitionError(error){
     return !!(SpeechRecognition&&_getMicForceMediaRecorderStored()!=='1');
   }
 
-  async function _transcribeBlob(blob, prefixSnapshot){
+  async function _transcribeBlob(blob, prefixSnapshot, producerHandle=_micComposerProducerToken){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const form=new FormData();
     form.append('file',new File([blob],`voice-input.${ext}`,{type:blob.type||`audio/${ext}`}));
     // Snapshot is passed in from the recorder.onstop handler — taken there
     // BEFORE _setRecording(false) clears _prefix (async server STT path).
-    setComposerStatus('Transcribing…');
+    if(_micProducerIsCurrent(producerHandle))setComposerStatus('Transcribing…');
     try{
       const res=await fetch('api/transcribe',{method:'POST',body:form});
       const data=await res.json().catch(()=>({}));
@@ -1371,21 +1447,27 @@ function _micToastKeyForRecognitionError(error){
         // string left the user watching an unchanged composer, unable to tell a
         // dead mic from a quiet room.
         //
+        // An older recording's empty result must not speak for a newer one: the
+        // pending Send may have been set by a recording that started after this
+        // producer lost the composer. Reading or clearing the shared flag here
+        // would cancel that newer Send and its words would arrive unsent.
+        if(!_micProducerIsCurrent(producerHandle))return;
         // A Send click while recording is an unambiguous send intent (same rule
         // as the raw-audio path): honour it whenever the composer has anything
         // send() would accept (text, staged files or selected context), instead
         // of dropping the queued send and leaving the draft behind. The
         // "no speech" toast is only for the case where there is nothing to send.
         if(window._micPendingSend&&_composerHasContent()){
-          _commitTranscript('', prefixSnapshot);
+          _commitTranscript('', prefixSnapshot, producerHandle);
           return;
         }
         window._micPendingSend=false;
         showToast(t('mic_no_speech'));
         return;
       }
-      _commitTranscript(transcript, prefixSnapshot);
+      _commitTranscript(transcript, prefixSnapshot, producerHandle);
     }catch(err){
+      if(!_micProducerIsCurrent(producerHandle))return;
       if(_isServerSttUnavailable(err)&&_allowBrowserSttFallback()){
         window._micPendingSend=false;
         _setMicForceMediaRecorder('0');
@@ -1397,7 +1479,7 @@ function _micToastKeyForRecognitionError(error){
       window._micPendingSend=false;
       showToast(err.message||t('mic_network'));
     }finally{
-      setComposerStatus('');
+      if(_micProducerIsCurrent(producerHandle))setComposerStatus('');
     }
   }
 
@@ -1502,52 +1584,97 @@ function _micToastKeyForRecognitionError(error){
   }
   window._stopMic=_stopMic; // expose for send-guard above
 
-  function _ensureSpeechRecognition(){
+  async function _stopAndSettleComposerDictation(){
+    // Snapshot the whole backlog BEFORE stopping: the current capture's
+    // settlement is already in it, and an older recording may still be
+    // transcribing on the server.
+    const settlements=[..._pendingMicSettlements];
+    if(window._micActive||_isRecording)_stopMic();
+    await Promise.all(settlements);
+  }
+  window._stopAndSettleComposerDictation=_stopAndSettleComposerDictation;
+
+  function _ensureSpeechRecognition(producerHandle=null,settleCapture=null){
     if(!SpeechRecognition) return null;
-    const sr=recognition||new SpeechRecognition();
+    const sr=producerHandle?new SpeechRecognition():(recognition||new SpeechRecognition());
+    const lifecycleProducerHandle=producerHandle||(
+      typeof _micComposerProducerToken!=='undefined'
+        ? _micComposerProducerToken
+        : 'composer-mic'
+    );
+    let lifecycleFinalText='';
+    let _prefixForLifecycle=_prefix;
     // Desktop dictation stays one-shot (single utterance); mobile / opt-in
     // devices run continuous so a natural pause doesn't end the session (#5294).
     sr.continuous=_micDictationContinuous();
     sr.interimResults=true;
     sr.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
 
-    sr.onstart=()=>{ _finalText=''; };
+    sr.onstart=()=>{
+      lifecycleFinalText='';
+      _prefixForLifecycle=_prefix;
+      if(recognition===sr)_finalText='';
+    };
 
     sr.onresult=(event)=>{
+      if(recognition!==sr)return;
       // #5294: a real result means the continuity restarts are PRODUCTIVE, not a
       // stolen-audio-session tight loop — reset the restart budget so a long
       // dictation with many natural pauses isn't silently capped at
       // _micMaxRestarts. The cap still guards the failure case: consecutive
       // restarts that yield no speech (onend without an intervening onresult)
       // keep incrementing and trip the bound.
-      _micRestartCount=0;
+      if(recognition===sr)_micRestartCount=0;
       let interim='';
-      let final=_finalText;
+      let final=lifecycleFinalText;
       for(let i=event.resultIndex;i<event.results.length;i++){
         const t=event.results[i][0].transcript;
-        if(event.results[i].isFinal){ final+=t; _finalText=final; }
+        if(event.results[i].isFinal){
+          final+=t;
+          lifecycleFinalText=final;
+          if(recognition===sr)_finalText=final;
+        }
         else{ interim+=t; }
       }
-      ta.value=_prefix+(final||interim);
-      autoResize();
+      if(typeof _composerSetText==='function')_composerSetText(
+        _prefixForLifecycle+(final||interim),final||interim,null,lifecycleProducerHandle
+      );
+      else if(recognition===sr)ta.value=_prefixForLifecycle+(final||interim);
+      if(recognition===sr)autoResize();
     };
 
     sr.onend=()=>{
-      const committed=_finalText
-        ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
-            ? _prefix+' '+_finalText.trimStart()
-            : _prefix+_finalText)
-        : ta.value;
-      ta.value=committed;
-      autoResize();
+      if(recognition!==sr)return;
+      // The visible composer may no longer belong to this producer's owner (a New
+      // Chat or profile switch re-bound the pane while dictating). Resolve the
+      // owner's own snapshot — live text or remembered draft — instead of reading
+      // ta.value, and skip the write entirely when that owner can't be resolved.
+      const lifecycleOwner=typeof _composerProducerOwnerState==='function'
+        ? _composerProducerOwnerState(lifecycleProducerHandle)
+        : {sid:null,profile:null,text:(recognition===sr?ta.value:_prefixForLifecycle),visible:true};
+      const committed=lifecycleFinalText
+        ? (_prefixForLifecycle&&!_prefixForLifecycle.endsWith(' ')&&!_prefixForLifecycle.endsWith('\n')
+            ? _prefixForLifecycle+' '+lifecycleFinalText.trimStart()
+            : _prefixForLifecycle+lifecycleFinalText)
+        : (lifecycleOwner?lifecycleOwner.text:null);
+      if(committed!==null){
+        if(typeof _composerSetText==='function')_composerSetText(
+          committed,lifecycleFinalText||committed,null,lifecycleProducerHandle
+        );
+        else if(recognition===sr)ta.value=committed;
+        if(recognition===sr)autoResize();
+      }
+      _finalText=lifecycleFinalText;
+      _prefix=_prefixForLifecycle;
       // Mobile / opt-in continuity: a natural pause ends this recognition run but
       // the user is still dictating, so restart to keep the session alive. Desktop
       // (one-shot) and intentional stops (_speechStopRequested) skip this and
       // finalize. Bounded by _micMaxRestarts so a stolen audio session can't loop.
       if(_micShouldRestartDictation()){
-        _prefix=committed&&!committed.endsWith(' ')&&!committed.endsWith('\n')
-          ? committed+' '
-          : committed;
+        const _continuationBase=committed===null?_prefixForLifecycle:committed;
+        _prefix=_continuationBase&&!_continuationBase.endsWith(' ')&&!_continuationBase.endsWith('\n')
+          ? _continuationBase+' '
+          : _continuationBase;
         _finalText='';
         _micRestartCount++;
         try{
@@ -1564,14 +1691,19 @@ function _micToastKeyForRecognitionError(error){
       _micRestartCount=0;
       void _releaseMicWakeLock();
       _setRecording(false);
-      if(window._micPendingSend){
+      if(_micProducerIsCurrent(lifecycleProducerHandle)&&window._micPendingSend){
         window._micPendingSend=false;
-        send();
+        const settledOwner=typeof _composerProducerOwnerState==='function'
+          ? _composerProducerOwnerState(lifecycleProducerHandle)
+          : {visible:true};
+        if(settledOwner&&settledOwner.visible)send();
       }
       _applyDeferredServerSttFlip();
+      if(settleCapture)settleCapture();
     };
 
     sr.onerror=(event)=>{
+      if(recognition!==sr)return;
       // While dictating with continuity on, a no-speech/aborted error is a normal
       // pause or transient audio-session hiccup — swallow it and let onend restart
       // (bounded by _micMaxRestarts). Desktop one-shot still surfaces the toast.
@@ -1598,6 +1730,7 @@ function _micToastKeyForRecognitionError(error){
       }
       const messageKey=_micToastKeyForRecognitionError(event.error);
       showToast(messageKey?t(messageKey):t('mic_error')+event.error);
+      if(settleCapture)settleCapture();
     };
 
     return sr;
@@ -1676,13 +1809,27 @@ function _micToastKeyForRecognitionError(error){
       return;
     }
     _isRecording=true;
+    const settleCapture=typeof _beginMicSettlement==='function'
+      ?_beginMicSettlement()
+      :()=>{};
     _finalText='';
     _prefix=ta.value;
+    _micComposerProducerToken=typeof _newComposerProducerHandle==='function'
+      ? _newComposerProducerHandle('composer-mic')
+      : (typeof _newComposerProducerToken==='function'
+        ? _newComposerProducerToken('composer-mic')
+        : `composer-mic-${startSeq}`);
+    const captureProducerHandle=_micComposerProducerToken;
+    const capturePrefixSnapshot=_prefix;
     if(_micOriginNeedsSecureContext()){
       _isRecording=false;
       window._micPendingSend=false;
       showToast(t('mic_insecure_origin'));
+      settleCapture();
       return;
+    }
+    if(!_forceMediaRecorder&&!_rawAudioMode){
+      recognition=_ensureSpeechRecognition(_micComposerProducerToken,settleCapture);
     }
     if(recognition && !_forceMediaRecorder && !_rawAudioMode){
       _activeCaptureMode='speech';
@@ -1692,7 +1839,13 @@ function _micToastKeyForRecognitionError(error){
       // effect for this session (desktop stays one-shot, mobile stays continuous).
       recognition.continuous=_micDictationContinuous();
       recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
-      recognition.start();
+      try{
+        recognition.start();
+      }catch(err){
+        _isRecording=false;
+        settleCapture();
+        throw err;
+      }
       void _acquireMicWakeLock();
       _setRecording(true);
       return;
@@ -1700,13 +1853,15 @@ function _micToastKeyForRecognitionError(error){
     if(!_canRecordAudio){
       _isRecording=false;
       showToast(t('mic_network'));
+      settleCapture();
       return;
     }
     try{
       const captureStream=await navigator.mediaDevices.getUserMedia({audio:true});
       if(startSeq!==_micStartSeq||!_micButtonAvailable()||(holdRequired&&!_micHoldActive)){
-        _isRecording=false;
+        if(_micProducerIsCurrent(captureProducerHandle))_isRecording=false;
         _stopTracks(captureStream);
+        settleCapture();
         return;
       }
       mediaStream=captureStream;
@@ -1716,18 +1871,31 @@ function _micToastKeyForRecognitionError(error){
       const recorder=new MediaRecorder(captureStream,mimeType?{mimeType}:undefined);
       audioChunks=[];
       const captureChunks=audioChunks;
-      recorder.ondataavailable=e=>{if(e.data&&e.data.size)captureChunks.push(e.data);};
+      const settle=typeof settleCapture==='function'?settleCapture:()=>{};
+      recorder.ondataavailable=e=>{
+        if(!_micProducerIsCurrent(captureProducerHandle))return;
+        if(e.data&&e.data.size)captureChunks.push(e.data);
+      };
       recorder.onerror=()=>{
         const isCurrentCapture=mediaRecorder===recorder||mediaStream===captureStream;
-        _isRecording=false;
+        const isCurrentProducer=_micProducerIsCurrent(captureProducerHandle);
+        if(isCurrentProducer)_isRecording=false;
         if(mediaRecorder===recorder) mediaRecorder=null;
-        if(isCurrentCapture) _setRecording(false);
-        window._micPendingSend=false;
+        if(isCurrentCapture&&isCurrentProducer) _setRecording(false);
+        if(isCurrentProducer)window._micPendingSend=false;
         _stopTracks(captureStream);
-        showToast(t('mic_network'));
+        if(isCurrentProducer)showToast(t('mic_network'));
+        settle();
       };
       recorder.onstop=async()=>{
         const isCurrentCapture=mediaRecorder===recorder||mediaStream===captureStream;
+        const isCurrentProducer=_micProducerIsCurrent(captureProducerHandle);
+        if(!isCurrentProducer){
+          if(mediaRecorder===recorder) mediaRecorder=null;
+          _stopTracks(captureStream);
+          settle();
+          return;
+        }
         if(mediaRecorder===recorder) mediaRecorder=null;
         _isRecording=false;
         // Capture the composer prefix BEFORE _setRecording(false) clears _prefix.
@@ -1735,32 +1903,35 @@ function _micToastKeyForRecognitionError(error){
         // time _transcribeBlob is called, _prefix is already ''. Passing the
         // snapshot through keeps append-mode working on the async server-STT
         // path. See _commitTranscript() for how the snapshot is consumed.
-        const prefixSnapshot = _prefix;
+        const prefixSnapshot = capturePrefixSnapshot;
         const blob=new Blob(captureChunks,{type:recorder.mimeType||mimeType||'audio/webm'});
-        if(isCurrentCapture) _setRecording(false);
+        if(isCurrentCapture&&isCurrentProducer) _setRecording(false);
         _stopTracks(captureStream);
         if(blob.size){
           if(captureMode==='media-raw'){
-            await _sendRawAudio(blob);
+            await _sendRawAudio(blob,captureProducerHandle);
           }else{
-            await _transcribeBlob(blob, prefixSnapshot);
+            await _transcribeBlob(blob,prefixSnapshot,captureProducerHandle);
           }
         }
-        else if(window._micPendingSend){
+        else if(isCurrentProducer&&window._micPendingSend){
           window._micPendingSend=false;
         }
-        _applyDeferredServerSttFlip();
+        if(isCurrentProducer)_applyDeferredServerSttFlip();
+        settle();
       };
       _activeCaptureMode=captureMode;
       mediaRecorder=recorder;
       recorder.start();
       _setRecording(true);
     }catch(err){
+      if(startSeq!==_micStartSeq)settleCapture();
       if(startSeq!==_micStartSeq) return;
       _isRecording=false;
       window._micPendingSend=false;
       _stopTracks();
       showToast(t(_micToastKeyForRecognitionError('not-allowed')||'mic_denied'));
+      settleCapture();
     }
   }
 
@@ -2091,6 +2262,7 @@ window.renderTranscript=function(container, messages, opts){
 
   let _voiceModeState='idle'; // idle | listening | thinking | speaking
   let _recognition=null;
+  let _voiceComposerProducerToken='voice-mode';
   let _silenceTimer=null;
   // Capture the session id at thinking-time so the TTS callback won't read
   // a different session's last assistant reply if the user navigated away
@@ -2225,8 +2397,15 @@ window.renderTranscript=function(container, messages, opts){
     }
     _clearBrowserTtsRecovery();
     _setState('listening');
+    const lifecycleProducerToken=typeof _newComposerProducerHandle==='function'
+      ? _newComposerProducerHandle('voice-mode')
+      : (typeof _newComposerProducerToken==='function'
+        ? _newComposerProducerToken('voice-mode')
+        : `voice-mode-${Date.now()}`);
+    _voiceComposerProducerToken=lifecycleProducerToken;
 
     _recognition=new SpeechRecognition();
+    const lifecycleRecognition=_recognition;
     _recognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true';
     _recognition.interimResults=true;
     _recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
@@ -2236,7 +2415,8 @@ window.renderTranscript=function(container, messages, opts){
     _recognition.onstart=()=>{ _finalText=''; };
 
     _recognition.onresult=(event)=>{
-      // Reset silence timer on any result
+      if(_recognition!==lifecycleRecognition)return;
+      // Reset only this active lifecycle's silence timer on any result.
       clearTimeout(_silenceTimer);
       let interim='';
       let final=_finalText;
@@ -2245,7 +2425,10 @@ window.renderTranscript=function(container, messages, opts){
         if(event.results[i].isFinal){ final+=txt; _finalText=final; }
         else{ interim+=txt; }
       }
-      ta.value=final||interim;
+      if(typeof _composerSetText==='function')_composerSetText(
+        final||interim,final||interim,null,lifecycleProducerToken
+      );
+      else if(_recognition===lifecycleRecognition)ta.value=final||interim;
       autoResize();
 
       // Auto-send on silence after final result
@@ -2257,6 +2440,7 @@ window.renderTranscript=function(container, messages, opts){
     };
 
     _recognition.onend=()=>{
+      if(_recognition!==lifecycleRecognition)return;
       clearTimeout(_silenceTimer);
       // If we have text and haven't sent yet, send it
       if(_finalText&&_voiceModeActive&&_voiceModeState==='listening'){
@@ -2268,6 +2452,7 @@ window.renderTranscript=function(container, messages, opts){
     };
 
     _recognition.onerror=(event)=>{
+      if(_recognition!==lifecycleRecognition)return;
       clearTimeout(_silenceTimer);
       if(event.error==='no-speech'||event.error==='aborted'){
         // Restart if still active
@@ -2288,7 +2473,7 @@ window.renderTranscript=function(container, messages, opts){
       }
     };
 
-    try{ _recognition.start(); }catch(e){
+    try{ lifecycleRecognition.start(); }catch(e){
       // Already started or other error — retry shortly
       setTimeout(()=>{ if(_voiceModeActive) _startListening(); },1000);
     }
@@ -2296,20 +2481,66 @@ window.renderTranscript=function(container, messages, opts){
 
   function _voiceModeSend(){
     if(!_voiceModeActive) return;
-    const text=(ta.value||'').trim();
-    if(!text){
-      ta.value='';
+    const producerHandle=_voiceComposerProducerToken;
+    const resolveOwner=()=>_composerProducerOwnerState(producerHandle);
+    const retireStaleSend=()=>{
+      _voiceModeThinkingSid=null;
+      try{if(_recognition)_recognition.abort();}catch(_){}
+      _recognition=null;
+      _startListening();
+    };
+    const initialOwner=resolveOwner();
+    const pendingDestination=!!(
+      initialOwner&&!initialOwner.visible&&producerHandle
+      &&producerHandle.generation!=null&&producerHandle.ownerRole==='destination'
+      &&typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight
+    );
+    if(!initialOwner||(!initialOwner.visible&&!pendingDestination)){
+      retireStaleSend();return;
+    }
+    const text=String(initialOwner.text||'').trim();
+    // While a New Session handoff is pending, recognised speech is buffered.
+    const pendingText=!text&&typeof _composerPendingText==='function'
+      ? String(_composerPendingText()||'').trim() : '';
+    if(!text&&!pendingText){
+      if(typeof _composerSetText==='function')_composerSetText(
+        '','',null,_voiceComposerProducerToken
+      );
+      else ta.value='';
       setTimeout(()=>{ if(_voiceModeActive) _startListening(); },300);
       return;
     }
     _setState('thinking');
-    // Pin the active session id so the TTS callback won't speak a different
-    // session's reply if the user navigates away mid-stream.
-    _voiceModeThinkingSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
-    // send() is global from boot.js
-    if(typeof send==='function') send();
+    const commitSend=()=>{
+      const settledOwner=resolveOwner();
+      if(!settledOwner||!settledOwner.visible){retireStaleSend();return;}
+      const settled=String(settledOwner.text||'').trim()||(typeof _composerPendingText==='function'
+        ? String(_composerPendingText()||'').trim() : '');
+      if(!settled){ setTimeout(()=>{ if(_voiceModeActive) _startListening(); },300); return; }
+      // Pin the receiving session so TTS won't speak another session's reply.
+      _voiceModeThinkingSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
+      // send() is global from boot.js
+      if(typeof send==='function') send();
+    };
+    if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight){
+      // Let the handoff settle first: its drained transcript is what send() captures.
+      Promise.resolve(_newSessionInFlight).then(result=>{
+        if(!_voiceModeActive)return;
+        if(typeof _newSessionResultWasSuperseded==='function'
+          &&_newSessionResultWasSuperseded(result)){
+          _voiceModeThinkingSid=null;
+          _startListening();
+          return;
+        }
+        commitSend();
+      },()=>{
+        if(_voiceModeActive)retireStaleSend();
+      });
+      return;
+    }
+    commitSend();
   }
 
   function _speakResponse(){
@@ -2641,19 +2872,28 @@ window.renderTranscript=function(container, messages, opts){
   // We override autoReadLastAssistant so that if voice mode is active, we use our
   // own speak-and-resume flow instead of the default auto-read.
   const _origAutoRead=(typeof autoReadLastAssistant==='function')?autoReadLastAssistant:null;
-  window.autoReadLastAssistant=function(){
+  const _voiceAutoReadHook=function(){
     if(_voiceModeActive&&_voiceModeState==='thinking'){
       _speakResponse();
       return;
     }
     if(_origAutoRead) _origAutoRead.apply(this,arguments);
   };
+  // The hook has to outlive both _deactivate() and a context switch. Removing it
+  // leaves the next _activate() without a completion signal, so the following
+  // reply would never leave 'thinking'. Re-installing is idempotent: the wrapper
+  // is a pass-through while Voice Mode is inactive.
+  function _installAutoReadHook(){
+    window.autoReadLastAssistant=_voiceAutoReadHook;
+  }
+  _installAutoReadHook();
 
   function _activate(){
     if(_micOriginNeedsSecureContext()){
       showToast(t('mic_insecure_origin'));
       return;
     }
+    _installAutoReadHook();
     _voiceModeActive=true;
     modeBtn.classList.add('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle_active'));
@@ -2682,11 +2922,42 @@ window.renderTranscript=function(container, messages, opts){
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     if(typeof stopTTS==='function') stopTTS();
-    // Restore original autoReadLastAssistant
-    if(_origAutoRead) window.autoReadLastAssistant=_origAutoRead;
+    // Keep the completion hook installed: _activate() relies on it, and it is a
+    // pass-through while Voice Mode is inactive.
+    _installAutoReadHook();
     // Clear textarea if it was only voice input
-    ta.value='';
+    if(typeof _composerSetText==='function')_composerSetText(
+      '','',null,_voiceComposerProducerToken
+    );
+    else ta.value='';
     autoResize();
+  }
+
+  // A profile/chat switch persists the composer draft before changing the
+  // cookie. Voice Mode must stop listening before that snapshot: a result
+  // landing during the awaited save writes text the save never sees. Unlike
+  // _deactivate(), this keeps the composer text: those words are exactly the
+  // draft the switch is about to persist.
+  function _suspendForContextSwitch(){
+    const wasActive=_voiceModeActive;
+    _voiceModeActive=false;
+    _voiceModeState='idle';
+    _voiceModeThinkingSid=null;
+    _browserTtsSuppressNextErrorRearm=false;
+    if(wasActive){
+      modeBtn.classList.remove('active');
+      _setButtonTooltip(modeBtn, t('voice_mode_toggle'));
+      bar.style.display='none';
+    }
+    clearTimeout(_silenceTimer);
+    _clearBrowserTtsRecovery();
+    _clearVoiceMicRearm();
+    try{ if(_recognition) _recognition.abort(); }catch(_){}
+    _recognition=null;
+    if(typeof stopTTS==='function') stopTTS();
+    // A context switch only suspends recognition. The completion hook stays
+    // installed so a later _activate() still resumes listening on the next reply.
+    _installAutoReadHook();
   }
 
   modeBtn.onclick=()=>{
@@ -2701,6 +2972,7 @@ window.renderTranscript=function(container, messages, opts){
   // Expose for external use
   window._voiceModeActive=()=>_voiceModeActive;
   window._voiceModeDeactivate=_deactivate;
+  window._voiceModeSuspendForContextSwitch=_suspendForContextSwitch;
   window._voiceModeImmediateSend=_voiceModeSend;
 })();
 function _currentSessionIsReusableEmptyChat(){
@@ -2962,6 +3234,9 @@ $('modelSelect').onchange=async()=>{
 };
 $('msg').addEventListener('input',()=>{
   updateSendBtn();
+  if(typeof _resumeQueuedSessionMessageIfComposerEmpty==='function'){
+    _resumeQueuedSessionMessageIfComposerEmpty();
+  }
   scheduleComposerAutoResize();
   // Persist composer draft to server (debounced in _saveComposerDraft).
   const sid = S && S.session && S.session.session_id;
@@ -3333,7 +3608,11 @@ $('msg').addEventListener('paste',e=>{
   _attachLargePastedText(pastedTextFile);
 });
 document.querySelectorAll('.suggestion').forEach(btn=>{
-  btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
+  btn.onclick=()=>{
+    if(typeof _composerSetText==='function')_composerSetText(btn.dataset.msg||'');
+    else $('msg').value=btn.dataset.msg;
+    send();
+  };
 });
 
 function applyEmptyStateSuggestionPref(){

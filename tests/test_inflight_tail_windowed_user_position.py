@@ -334,6 +334,8 @@ def _fork_harness(index_helpers: str, helper_src: str, fork_src: str, oldest_idx
 const assert = require('assert');
 var S = {{session:{{session_id:'s1', pending_started_at:100}}, messages:[], busy:{'true' if busy else 'false'}}};
 let _oldestIdx = {oldest_idx};
+// Module state the merged session helpers read at module scope.
+let _paneNavigationGeneration = 0;
 {index_helpers}
 {helper_src}
 const forkPayloads = [];

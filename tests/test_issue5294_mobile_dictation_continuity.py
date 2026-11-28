@@ -101,6 +101,10 @@ function _setRecording(on) {
 }
 function _releaseMicWakeLock() { _micWakeLock = null; return Promise.resolve(); }
 function _acquireMicWakeLock() { return Promise.resolve(); }
+// The production dictation lifecycle now validates its immutable composer
+// producer before honoring a deferred Send.  This focused harness has one
+// producer for its entire lifetime, so model that owner as current.
+function _micProducerIsCurrent() { return true; }
 
 // ── The real functions under test ───────────────────────────────────────────
 eval(extractFunc('_micDictationContinuous'));

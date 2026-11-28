@@ -715,6 +715,8 @@ function _profilePanelLoad(){ return Promise.resolve(); }
 function _isDesktopWidth(){ return true; }
 function _profileMatchesActiveProfile(){ return true; }
 function _clearPersistedModelState(){}
+// The real switch runs inside the serialized context-transition coordinator.
+function _runContextTransition(kind,intent,fn){ return fn(intent); }
 """
         # The switch POST is refused by the server: Alpha stays active.
         + canonical.replace(

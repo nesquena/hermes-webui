@@ -11,12 +11,14 @@ def _source(rel: str) -> str:
 def test_new_session_reuses_inflight_request_before_posting_again():
     src = _source("static/sessions.js")
     assert "let _newSessionInFlight=null" in src
-    assert "if(_newSessionInFlight){" in src
-    assert "return _newSessionInFlight;" in src, (
-        "newSession() must return the existing create promise so rapid clicks do "
-        "not enqueue multiple /api/session/new requests"
+    assert "let _newSessionRequest=null" in src
+    assert "if(_newSessionRequest){" in src
+    assert "return await _newSessionRequest.promise;" in src, (
+        "newSession() must join the centralized request promise so rapid or nested "
+        "callers do not enqueue multiple /api/session/new requests"
     )
-    assert "_newSessionInFlight=(async()=>" in src
+    assert "_newSessionInFlight=request.promise;" in src
+    assert "_newSessionRequest=null;" in src
     assert "_newSessionInFlight=null;" in src
 
 
