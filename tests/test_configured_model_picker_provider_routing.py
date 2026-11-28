@@ -35,8 +35,35 @@ function extractFunction(source, name) {
   throw new Error('unterminated: ' + name);
 }
 
+function extractConstDotted(name) {
+  // Single-line top-level const, re-spelled var so sloppy-mode eval'd
+  // functions can reach it (lexical consts stay inside eval's own scope).
+  const re = new RegExp('^const ' + name + '=.*$', 'm');
+  const m = uiSrc.match(re);
+  if (!m) throw new Error('not found: ' + name);
+  return m[0].replace(/^const /, 'var ');
+}
+
+eval(extractConstDotted('_PY_WS_CLASS'));
+eval(extractConstDotted('_CUSTOM_SLUG_TRIM_RE'));
+eval(extractConstDotted('_CUSTOM_SLUG_HOST_REJECT_RE'));
+eval(extractConstDotted('MODEL_STATE_KEY'));
 eval([
+  '_customSlugIsEndpointAuthority',
+  '_parseQualifiedCustomId',
+  '_optionDeclaredProviderId',
+  '_dynamicProviderIds',
+  '_clientProviderAuthorityForModel',
+  '_storedModelProvider',
+  '_readPersistedModelState',
+  '_persistedProviderAuthorityForModel',
+  '_dynamicProviderAuthorityForQualifiedCustomId',
+  '_qualifiedCustomIdNeedsBackendAuthority',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_qualifiedCustomIdNeedsBackendAuthority',
   '_getOptionProviderId',
+  '_parseQualifiedCustomId',
   '_providerFromModelValue',
   '_modelPickerOptionIdentity',
   '_deduplicateModelPickerOptions',
@@ -45,10 +72,27 @@ eval([
   '_applyModelToDropdown',
   '_ensureModelOptionInDropdown',
   '_readModelOverflowData',
-].map(name => extractFunction(uiSrc, name)).join('\n'));
+].map(name => {
+  if (name === '_dynamicProviderIds') {
+    const re = new RegExp('^let ' + name + '=.*$', 'm');
+    const m = uiSrc.match(re);
+    if (!m) throw new Error('not found: ' + name);
+    return m[0].replace(/^let /, 'var ');
+  }
+  return extractFunction(uiSrc, name);
+}).join('\n'));
 
+// Production storage (empty): the persisted-state lane
+// (_readPersistedModelState via MODEL_STATE_KEY) must execute its real path
+// against real storage — with no storage defined at all, the ReferenceError
+// is swallowed by _persistedProviderAuthorityForModel's catch and a missing
+// dependency silently reads as "no authority" (#6657 review).
+globalThis.localStorage = {getItem: () => null, setItem: () => {}, removeItem: () => {}};
 globalThis._refreshOpenModelDropdown = () => {};
 globalThis.syncModelChip = () => {};
+globalThis._dynamicProviderIds = {};
+// Production global the authority chain reads (ui.js always has it).
+globalThis.S = {session: null};
 
 globalThis.document = {
   createElement(tag) {
@@ -65,6 +109,9 @@ globalThis.getModelLabel = value => String(value || '');
 globalThis.window = { _configuredModelBadges: {
   '@custom:backup:model-a': {provider: 'custom:backup', role: 'fallback', label: 'Fallback 1'},
 } };
+// The identity heuristics delegate to the shared parser (#6657), which reads
+// the server-reported provider-id set; empty here = pure shape grammar.
+globalThis._dynamicProviderIds = {};
 
 const primary = {
   value: 'model-a',
@@ -254,11 +301,61 @@ function extractFunction(source, name) {
   throw new Error('unterminated: ' + name);
 }
 
+function extractConstDotted(name) {
+  // Single-line top-level const, re-spelled var so sloppy-mode eval'd
+  // functions can reach it (lexical consts stay inside eval's own scope).
+  const re = new RegExp('^const ' + name + '=.*$', 'm');
+  const m = uiSrc.match(re);
+  if (!m) throw new Error('not found: ' + name);
+  return m[0].replace(/^const /, 'var ');
+}
+
+eval(extractConstDotted('_PY_WS_CLASS'));
+eval(extractConstDotted('_CUSTOM_SLUG_TRIM_RE'));
+eval(extractConstDotted('_CUSTOM_SLUG_HOST_REJECT_RE'));
+eval(extractConstDotted('MODEL_STATE_KEY'));
 eval([
+  '_customSlugIsEndpointAuthority',
+  '_parseQualifiedCustomId',
+  '_optionDeclaredProviderId',
+  '_dynamicProviderIds',
+  '_clientProviderAuthorityForModel',
+  '_storedModelProvider',
+  '_readPersistedModelState',
+  '_persistedProviderAuthorityForModel',
+  '_dynamicProviderAuthorityForQualifiedCustomId',
+  '_qualifiedCustomIdNeedsBackendAuthority',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_qualifiedCustomIdNeedsBackendAuthority',
   '_getOptionProviderId',
+  '_parseQualifiedCustomId',
   '_providerFromModelValue',
   '_modelStateForSelect',
-].map(name => extractFunction(uiSrc, name)).join('\n'));
+  '_modelProviderForSend',
+].map(name => {
+  if (name === '_dynamicProviderIds') {
+    const re = new RegExp('^let ' + name + '=.*$', 'm');
+    const m = uiSrc.match(re);
+    if (!m) throw new Error('not found: ' + name);
+    return m[0].replace(/^let /, 'var ');
+  }
+  return extractFunction(uiSrc, name);
+}).join('\n'));
+
+// Production storage, recording: the no-client-authority calls below
+// (_modelStateForSelect for missing options and _modelProviderForSend) reach
+// the persisted-state lane (_readPersistedModelState via MODEL_STATE_KEY).
+// The production catches swallow a missing helper as "no authority", so the
+// driver records the reads: persistedLaneRan proves the lane actually
+// executed — a missing dependency turns the run fatal instead of silently
+// passing for the wrong reason (#6657 review).
+const __persistedReads = [];
+globalThis.localStorage = {
+  getItem(key) { __persistedReads.push(String(key)); return null; },
+  setItem() {},
+  removeItem() {},
+};
 
 globalThis.document = {
   createElement(tag) {
@@ -273,6 +370,10 @@ globalThis.document = {
 };
 globalThis.getModelLabel = value => String(value || '');
 globalThis.window = { _configuredModelBadges: {} };
+globalThis.S = { session: null };  // _modelProviderForSend reads S.session
+// The identity heuristics delegate to the shared parser (#6657), which reads
+// the server-reported provider-id set; empty here = pure shape grammar.
+globalThis._dynamicProviderIds = {};
 
 const group = {tagName: 'OPTGROUP', dataset: {provider: 'custom:hetmer.net'}};
 const luna = {
@@ -314,12 +415,65 @@ const select = {
   set value(value) {},
 };
 
+// Reviewer identity cases (deep-review 2026-09-27): a single-label LAN host
+// and a bracketed-IPv6 endpoint must parse to the SAME provider/model split
+// pre-hydration (no option metadata at all) and when hydrated, for both the
+// persisted state and the send path.
+const hostPortGroup = {tagName: 'OPTGROUP', dataset: {provider: 'custom:llm:8080'}};
+const qwen3opt = {
+  value: '@custom:llm:8080:qwen3',
+  textContent: 'qwen3',
+  dataset: {},  // normal catalog render path — no data-model
+  parentElement: hostPortGroup,
+};
+const hostPortSelect = {
+  id: 'modelSelect',
+  options: [qwen3opt],
+  querySelectorAll() { return []; },
+  get selectedOptions() { return [qwen3opt]; },
+  get value() { return qwen3opt.value; },
+  set value(value) {},
+};
+const ipv6Group = {tagName: 'OPTGROUP', dataset: {provider: 'custom:[::1]:11434'}};
+const qwen3v6opt = {
+  value: '@custom:[::1]:11434:qwen3',
+  textContent: 'qwen3',
+  dataset: {},
+  parentElement: ipv6Group,
+};
+const ipv6Select = {
+  id: 'modelSelect',
+  options: [qwen3v6opt],
+  querySelectorAll() { return []; },
+  get selectedOptions() { return [qwen3v6opt]; },
+  get value() { return qwen3v6opt.value; },
+  set value(value) {},
+};
+
 process.stdout.write(JSON.stringify({
   nonDefault: _modelStateForSelect(select, '@custom:hetmer.net:sol'),
   defaultUnprefixed: _modelStateForSelect(select, 'luna'),
   colonBearingModel: _modelStateForSelect(select, '@custom:hetmer.net:model-a:free'),
   localhostEndpoint: _modelStateForSelect(select, '@custom:localhost:11434:llama3.2'),
   missingOptionCustomInput: _modelStateForSelect(select, '@custom:localhost:11434:mistral-custom'),
+  // Proof the persisted-state lane executed through its REAL dependency:
+  // _readPersistedModelState reads localStorage[MODEL_STATE_KEY]. If the
+  // extraction drops that helper, the production catch converts the
+  // ReferenceError to empty authority and no read is recorded — the Python
+  // assertion on persistedLaneRan then fails the run (#6657 review).
+  persistedLaneRan: __persistedReads.includes(MODEL_STATE_KEY),
+  preHydrationHostPort: {
+    provider: _providerFromModelValue('@custom:llm:8080:qwen3'),
+    model: _parseQualifiedCustomId('@custom:llm:8080:qwen3').model,
+  },
+  hydratedHostPort: _modelStateForSelect(hostPortSelect, '@custom:llm:8080:qwen3'),
+  sentHostPort: _modelProviderForSend('@custom:llm:8080:qwen3'),
+  preHydrationIpv6: {
+    provider: _providerFromModelValue('@custom:[::1]:11434:qwen3'),
+    model: _parseQualifiedCustomId('@custom:[::1]:11434:qwen3').model,
+  },
+  hydratedIpv6: _modelStateForSelect(ipv6Select, '@custom:[::1]:11434:qwen3'),
+  sentIpv6: _modelProviderForSend('@custom:[::1]:11434:qwen3'),
 }));
 """
 
@@ -360,10 +514,49 @@ def test_non_default_named_custom_provider_model_strips_qualified_prefix():
         "model": "llama3.2",
         "model_provider": "custom:localhost:11434",
     }
+    # Missing-option + no client authority: the endpoint-shaped qualified id is
+    # genuinely ambiguous pre-hydration (named slug vs endpoint), so the picker
+    # defers to the backend verbatim (#6657 authority contract, same result as
+    # the composed authority-chain oracle in test_custom_provider_model_identity).
     assert payload["missingOptionCustomInput"] == {
-        "model": "mistral-custom",
-        "model_provider": "custom:localhost:11434",
+        "model": "@custom:localhost:11434:mistral-custom",
+        "model_provider": None,
     }
+    # The persisted-state lane RAN through its real dependency chain: with
+    # _readPersistedModelState missing from the extraction, the production
+    # catch swallows the ReferenceError, no localStorage read happens, and
+    # this assertion fails — a missing dependency is fatal, not a silent
+    # no-authority pass (#6657 review, blocker 2).
+    assert payload["persistedLaneRan"] is True
+    # Deep-review 2026-09-27, #6657 defect 2: the single-label host and the
+    # bracketed-IPv6 endpoint must split the SAME way pre-hydration (no
+    # option metadata) and when hydrated — state and send included. The
+    # legacy localhost/dotted-only heuristics parsed `@custom:llm:8080:qwen3`
+    # as provider `custom:llm` and collapsed the IPv6 provider even earlier.
+    assert payload["preHydrationHostPort"] == {
+        "provider": "custom:llm:8080",
+        "model": "qwen3",
+    }
+    assert payload["hydratedHostPort"] == {
+        "model": "qwen3",
+        "model_provider": "custom:llm:8080",
+    }
+    # Send path, pre-hydration with NO client authority: the endpoint-shaped
+    # id is ambiguous (named slug `custom:llm` vs endpoint `custom:llm:8080`),
+    # so the real authority chain defers to the backend's config-aware parser
+    # (same contract as the composed authority-chain oracle in
+    # test_custom_provider_model_identity). The old isolated run returned the
+    # shape guess only because the helpers were absent from the sandbox.
+    assert payload["sentHostPort"] is None
+    assert payload["preHydrationIpv6"] == {
+        "provider": "custom:[::1]:11434",
+        "model": "qwen3",
+    }
+    assert payload["hydratedIpv6"] == {
+        "model": "qwen3",
+        "model_provider": "custom:[::1]:11434",
+    }
+    assert payload["sentIpv6"] is None
 
 
 # Round-trip: send -> persist -> restore for a colon-bearing named
@@ -557,12 +750,34 @@ async function selectModelFromDropdown(value, provider) {
   window.__picked=_modelStateForSelect(modelSelect,modelSelect.value);
 }
 
+// Production globals the authority chain reads (ui.js always has these).
+var S = { session: null };
+eval(new RegExp('^const _PY_WS_CLASS=.*$', 'm').exec(ui)[0].replace(/^const /, 'var '));
+eval(new RegExp('^const _CUSTOM_SLUG_TRIM_RE=.*$', 'm').exec(ui)[0].replace(/^const /, 'var '));
+eval(new RegExp('^const _CUSTOM_SLUG_HOST_REJECT_RE=.*$', 'm').exec(ui)[0].replace(/^const /, 'var '));
+eval(new RegExp('^let _dynamicProviderIds=.*$', 'm').exec(ui)[0].replace(/^let /, 'var '));
 for (const name of [
+  '_customSlugIsEndpointAuthority',
+  '_parseQualifiedCustomId',
+  '_optionDeclaredProviderId',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_dynamicProviderAuthorityForQualifiedCustomId',
+  '_qualifiedCustomIdNeedsBackendAuthority',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_qualifiedCustomIdNeedsBackendAuthority',
   '_modelPickerOptionIdentity',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
+  '_dynamicProviderAuthorityForQualifiedCustomId',
+  '_qualifiedCustomIdNeedsBackendAuthority',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
   '_isEquivalentConfiguredModelEntry',
   '_getOptionProviderId',
+  '_parseQualifiedCustomId',
+  '_providerFromModelValue',
   '_modelStateForSelect',
   '_findModelInDropdown',
   '_applyModelToDropdown',
@@ -571,6 +786,9 @@ for (const name of [
 ]) {
   eval(extractFunc(name));
 }
+
+// ui.js state (a `let`, not a function) the extracted chain reads.
+globalThis._dynamicProviderIds = {};
 
 // Send path: the picked state carries the bare, intact model id.
 const sent = _modelStateForSelect(modelSelect, '@custom:hetmer.net:model-a:free');
@@ -900,11 +1118,29 @@ async function selectModelFromDropdown(value, provider) {
   window.__picked=_modelStateForSelect(modelSelect,modelSelect.value);
 }
 
+// Production globals the authority chain reads (ui.js always has these).
+var S = { session: null };
+eval(new RegExp('^const _PY_WS_CLASS=.*$', 'm').exec(ui)[0].replace(/^const /, 'var '));
+eval(new RegExp('^const _CUSTOM_SLUG_TRIM_RE=.*$', 'm').exec(ui)[0].replace(/^const /, 'var '));
+eval(new RegExp('^const _CUSTOM_SLUG_HOST_REJECT_RE=.*$', 'm').exec(ui)[0].replace(/^const /, 'var '));
+eval(new RegExp('^let _dynamicProviderIds=.*$', 'm').exec(ui)[0].replace(/^let /, 'var '));
 for (const name of [
+  '_customSlugIsEndpointAuthority',
+  '_parseQualifiedCustomId',
+  '_optionDeclaredProviderId',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_dynamicProviderAuthorityForQualifiedCustomId',
+  '_qualifiedCustomIdNeedsBackendAuthority',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_qualifiedCustomIdNeedsBackendAuthority',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
   '_isEquivalentConfiguredModelEntry',
   '_getOptionProviderId',
+  '_parseQualifiedCustomId',
+  '_providerFromModelValue',
   '_modelStateForSelect',
   '_findModelInDropdown',
   '_applyModelToDropdown',
@@ -913,6 +1149,9 @@ for (const name of [
 ]) {
   eval(extractFunc(name));
 }
+
+// ui.js state (a `let`, not a function) the extracted chain reads.
+globalThis._dynamicProviderIds = {};
 
 const initialSelection=_modelStateForSelect(modelSelect,modelSelect.value);
 renderModelDropdown();
@@ -1233,9 +1472,43 @@ async function selectModelFromDropdown(value, provider) {
   window.__picked = _modelStateForSelect(modelSelect, modelSelect.value);
 }
 
+const _CUSTOM_SLUG_TRIM_RE = /^[\u0009-\u000D\u0020]+|[\u0009-\u000D\u0020]+$/g;
+const _CUSTOM_SLUG_HOST_REJECT_RE = /[\s\/@?#\[\]\\]/;
+var S = {session: null};
+const store = new Map();
+const localStorage = { getItem(k){return store.has(k)?store.get(k):null;}, setItem(k,v){store.set(k,String(v));}, removeItem(k){store.delete(k);} };
+const sessionStore = new Map();
+const sessionStorage = { getItem(k){return sessionStore.has(k)?sessionStore.get(k):null;}, setItem(k,v){sessionStore.set(k,String(v));}, removeItem(k){sessionStore.delete(k);} };
+const MODEL_STATE_KEY = 'hermes-webui-model-state';
 for (const name of [
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
+  '_compareModelPickerEntries',
+  '_customModelFromQualifiedId',
+  '_customSlugIsEndpointAuthority',
+  '_getOptionProviderId',
+  '_modelPickerCompareContract',
+  '_modelPickerCompareRuns',
+  '_modelPickerContractRuns',
+  '_modelPickerOptionIdentity',
+  '_modelPickerSortableId',
+  '_optionDeclaredProviderId',
+  '_parseQualifiedCustomId',
+  '_providerFromModelValue',
+  '_sortModelPickerEntries',
+  '_storedModelProvider',
+  '_readPersistedModelState',
+  '_pickerExplicitPickKey',
+  '_readExplicitPickerPick',
+  '_rememberExplicitPickerPick',
+  '_clearExplicitPickerPick',
+  '_customSlugIsEndpointAuthority',
+  '_optionDeclaredProviderId',
+  '_qualifiedCustomIdNeedsBackendAuthority',
+  '_dynamicProviderAuthorityForQualifiedCustomId',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_parseQualifiedCustomId',
   '_providerFromModelValue',
   '_modelPickerOptionIdentity',
   '_isEquivalentConfiguredModelEntry',
@@ -1248,6 +1521,13 @@ for (const name of [
 ]) {
   eval(extractFunc(name));
 }
+
+// ui.js state (a `let`, not a function) the extracted chain reads.
+globalThis._dynamicProviderIds = {};
+
+// The fork's dynamic-provider registry is ui.js state, not a function the
+// extractor can lift; the dedup path only reads it.
+globalThis._dynamicProviderIds = {};
 
 // Ensure the backup fallback is present before rendering
 _ensureModelOptionInDropdown('@custom:backup:model-a', modelSelect, 'custom:backup');

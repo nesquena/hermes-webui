@@ -238,19 +238,63 @@ class TestFrontendPreferredProviderMatch(unittest.TestCase):
         import pathlib
         return (pathlib.Path(__file__).parent.parent / "static" / "ui.js").read_text()
 
-    def test_find_model_prefers_matching_provider_for_slash_collision(self):
+    @staticmethod
+    def _extract_chain(src):
+        """Extract the REAL production dependency chain of _findModelInDropdown
+        from ui.js — not a re-spelled copy.
+
+        _getOptionProviderId delegates to _optionDeclaredProviderId and, for
+        @custom: values, to _parseQualifiedCustomId (the shared qualified-ID
+        grammar), which closes over the whitespace regex consts and
+        _dynamicProviderIds. Extracting only the two entry functions made this
+        harness ReferenceError on every CI shard after the grammar unification
+        (#6657): the production catch in _persistedProviderAuthorityForModel
+        did not apply here, so node exited 1. Extracting the real chain keeps
+        any future ui.js dependency addition fatal (ReferenceError ->
+        CalledProcessError) instead of silently testing a stale copy.
+        """
         import re
+
+        def fn(name):
+            m = re.search(r"function %s\(" % re.escape(name), src)
+            assert m, f"{name}() not found in ui.js"
+            start = m.start()
+            i = src.index("{", m.end() - 1)
+            depth = 1
+            i += 1
+            while depth and i < len(src):
+                if src[i] == "{":
+                    depth += 1
+                elif src[i] == "}":
+                    depth -= 1
+                i += 1
+            assert depth == 0, f"{name}() braces unbalanced in ui.js"
+            return src[start:i]
+
+        def const_ln(name):
+            m = re.search(r"^(?:const|let)\s+%s=.*$" % re.escape(name), src, re.M)
+            assert m, f"{name} not found in ui.js"
+            return m.group(0)
+
+        return "\n".join([
+            const_ln("_PY_WS_CLASS"),
+            const_ln("_CUSTOM_SLUG_TRIM_RE"),
+            const_ln("_CUSTOM_SLUG_HOST_REJECT_RE"),
+            # Static harness: no live discovery has run, so the dynamic
+            # provider-id table is empty — the value ui.js ships with.
+            "let _dynamicProviderIds={};",
+            fn("_customSlugIsEndpointAuthority"),
+            fn("_parseQualifiedCustomId"),
+            fn("_optionDeclaredProviderId"),
+            fn("_getOptionProviderId"),
+            fn("_findModelInDropdown"),
+        ])
+
+    def test_find_model_prefers_matching_provider_for_slash_collision(self):
         import subprocess
 
-        src = self._read_js()
-        helper = re.search(r"function _getOptionProviderId\(opt\)\{.*?\n\}", src, re.S)
-        finder = re.search(r"function _findModelInDropdown\(modelId, sel, preferredProviderId\)\{.*?\n\}", src, re.S)
-        assert helper, "_getOptionProviderId() not found in ui.js"
-        assert finder, "_findModelInDropdown() not found in ui.js"
-
         script = f"""
-{helper.group(0)}
-{finder.group(0)}
+{self._extract_chain(self._read_js())}
 const sel = {{
   options: [
     {{ value: 'google/gemma-4-27b', parentElement: {{ tagName: 'OPTGROUP', dataset: {{ provider: 'custom:alpha' }} }} }},
@@ -263,18 +307,10 @@ console.log(_findModelInDropdown('google/gemma-4-27b', sel, 'custom:beta') || ''
         assert resolved.stdout.strip() == "@custom:beta:google/gemma-4-27b"
 
     def test_find_model_returns_no_match_for_missing_qualified_same_suffix_sibling(self):
-        import re
         import subprocess
 
-        src = self._read_js()
-        helper = re.search(r"function _getOptionProviderId\(opt\)\{.*?\n\}", src, re.S)
-        finder = re.search(r"function _findModelInDropdown\(modelId, sel, preferredProviderId\)\{.*?\n\}", src, re.S)
-        assert helper, "_getOptionProviderId() not found in ui.js"
-        assert finder, "_findModelInDropdown() not found in ui.js"
-
         script = f"""
-{helper.group(0)}
-{finder.group(0)}
+{self._extract_chain(self._read_js())}
 const sel = {{
   options: [
     {{ value: 'vendor-b/catalog/deepseek-v4-pro', parentElement: {{ tagName: 'OPTGROUP', dataset: {{ provider: 'custom:beta' }} }} }},
