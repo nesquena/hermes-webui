@@ -1,0 +1,5 @@
+# Sidebar cancellation owner evidence
+
+Before: unchanged Core62e4d7b9e2560f9d49c0c29c2dc1414fbd4e2d12. After: the scoped cancellation-owner patch. Actual production cancelSessionStream and ui.js recovery helpers run in headless native Chromium, with real browser localStorage. Synthetic same-SID stream replacement is installed during an earlier request; that controlled response then arrives. Before it clears active/busy/recovery state; after all replacement identities remain. DOM snapshots at1280,768 and390px have zero page errors. External network is blocked.
+
+This is a diagnostic UI projection of production cancellation state. Fetch is a controlled promise only for these screenshots; actual HTTP Handler/GET/backend race proof is separately covered by test_cancel_session_stream_owner_guard.py and the independent extension audit. UI paint/setBusy and transport teardown hooks are fixture seams; this does not certify full chat/SSE/provider/native Electron or populated extension-pane layout. No layout or extension code changed.

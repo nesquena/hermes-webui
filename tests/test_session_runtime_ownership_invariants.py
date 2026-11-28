@@ -50,10 +50,14 @@ class TestSessionOwnedRuntimeInvariants:
             "Sidebar row cancellation must target the row-owned active_stream_id, "
             "not the currently viewed pane's S.activeStreamId."
         )
-        assert "S.activeStreamId" not in body[: body.index("if(S.session&&S.session.session_id===sid)")], (
+        owner_guard = "const activeSession=S.session&&S.session.session_id===sid;"
+        assert owner_guard in body
+        assert "S.activeStreamId" not in body[: body.index(owner_guard)], (
             "cancelSessionStream must not read or clear active-pane stream state until "
             "it has proved the row session is the active pane."
         )
+        assert "(activeSession&&(S.activeStreamId!==streamId||" in body
+        assert "if(activeSession&&S.activeStreamId===streamId)" in body
 
     def test_done_event_does_not_clear_unrelated_active_pane_busy_state(self):
         messages = read("static/messages.js")

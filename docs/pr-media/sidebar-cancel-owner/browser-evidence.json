@@ -1,0 +1,92 @@
+[
+  {
+    "source": "before",
+    "width": 1280,
+    "state": {
+      "active": null,
+      "sessionActive": null,
+      "busy": false,
+      "recovery": null,
+      "stored": null
+    },
+    "pageErrors": []
+  },
+  {
+    "source": "before",
+    "width": 768,
+    "state": {
+      "active": null,
+      "sessionActive": null,
+      "busy": false,
+      "recovery": null,
+      "stored": null
+    },
+    "pageErrors": []
+  },
+  {
+    "source": "before",
+    "width": 390,
+    "state": {
+      "active": null,
+      "sessionActive": null,
+      "busy": false,
+      "recovery": null,
+      "stored": null
+    },
+    "pageErrors": []
+  },
+  {
+    "source": "after",
+    "width": 1280,
+    "state": {
+      "active": "new",
+      "sessionActive": "new",
+      "busy": true,
+      "recovery": {
+        "streamId": "new"
+      },
+      "stored": {
+        "synthetic-B": {
+          "streamId": "new"
+        }
+      }
+    },
+    "pageErrors": []
+  },
+  {
+    "source": "after",
+    "width": 768,
+    "state": {
+      "active": "new",
+      "sessionActive": "new",
+      "busy": true,
+      "recovery": {
+        "streamId": "new"
+      },
+      "stored": {
+        "synthetic-B": {
+          "streamId": "new"
+        }
+      }
+    },
+    "pageErrors": []
+  },
+  {
+    "source": "after",
+    "width": 390,
+    "state": {
+      "active": "new",
+      "sessionActive": "new",
+      "busy": true,
+      "recovery": {
+        "streamId": "new"
+      },
+      "stored": {
+        "synthetic-B": {
+          "streamId": "new"
+        }
+      }
+    },
+    "pageErrors": []
+  }
+]
