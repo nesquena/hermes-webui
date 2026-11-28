@@ -2186,7 +2186,7 @@ async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot, captureU
   // Snapshot successful request-owned identities before acceptance clears the
   // retry cache. Partial uploads contribute only successfully stored files.
   if(typeof captureUploadedPaths==='function')captureUploadedPaths(previewFiles.map(f=>({...f})));
-  const note=`[Attached files for this steer: ${paths.join(', ')}]\nUse the file tools/read_file to inspect these documents if needed.`;
+  const note=`[Attached files for this steer: ${JSON.stringify(paths)}]\nUse the file tools/read_file to inspect these documents if needed.`;
   return base?`${base}\n\n${note}`:note;
 }
 

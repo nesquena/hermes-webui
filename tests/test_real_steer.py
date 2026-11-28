@@ -441,7 +441,7 @@ class TestFrontendWiring:
               const delivered = await _trySteer('hint', false);
               assert.strictEqual(delivered, true);
               assert.strictEqual(indicatorText, 'hint');
-              assert.ok(apiPayload.text.includes('[Attached files for this steer: /tmp/a.pdf]'));
+              assert.ok(apiPayload.text.includes('[Attached files for this steer: ["/tmp/a.pdf"]]'));
               assert.ok(!indicatorText.includes('Attached files'));
               assert.ok(!indicatorText.includes('file tools/read_file'));
             }})().catch(err=>{{console.error(err); process.exit(1);}});
@@ -493,7 +493,7 @@ class TestFrontendWiring:
               // Attachment-only steer: no text; the staged files render as chips.
               assert.strictEqual(indicatorText, '');
               assert.deepStrictEqual(indicatorFiles, [{{path:'/tmp/a.pdf',name:'a.pdf'}}]);
-              assert.ok(apiPayload.text.includes('[Attached files for this steer: /tmp/a.pdf]'));
+              assert.ok(apiPayload.text.includes('[Attached files for this steer: ["/tmp/a.pdf"]]'));
               assert.ok(!indicatorText.includes('file tools/read_file'));
             }})().catch(err=>{{console.error(err); process.exit(1);}});
             """

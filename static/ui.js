@@ -11694,7 +11694,7 @@ const _STEER_OOB_CLOSE_RE=/\n\s*\[\/OUT-OF-BAND\s+USER\s+MESSAGE\]\s*$/i;
 const _STEER_OOB_ANY_OPEN_RE=/\[OUT-OF-BAND\s+USER\s+MESSAGE(?:\s*(?:—|-)[^\]\n]*)?\]/gi;
 const _STEER_OOB_ANY_CLOSE_RE=/\[\/OUT-OF-BAND\s+USER\s+MESSAGE\]/gi;
 // Exact suffix composed by _steerTextWithPendingFiles (static/commands.js).
-const _STEER_ATTACH_NOTE_RE=/(?:^|\n\n)\[Attached files for this steer: ([^\]\n]+)\]\nUse the file tools\/read_file to inspect these documents if needed\.\s*$/;
+const _STEER_ATTACH_NOTE_RE=/(?:^|\n\n)\[Attached files for this steer: ([^\n]+)\]\nUse the file tools\/read_file to inspect these documents if needed\.\s*$/;
 
 function _isSteerDisplayMessage(m){
   return !!(m&&m.role==='user'&&m.display_kind==='steer');
@@ -11720,7 +11720,18 @@ function _steerDisplayParts(content){
   let files=[];
   const note=text.match(_STEER_ATTACH_NOTE_RE);
   if(note){
-    files=note[1].split(',').map(p=>p.trim()).filter(Boolean);
+    if(note[1].startsWith('[')){
+      try{
+        files=JSON.parse(note[1]);
+      }catch(_){return {text,files:[]};}
+      if(!Array.isArray(files)||!files.every(p=>typeof p==='string'&&p.length)){
+        return {text,files:[]};
+      }
+    }else{
+      // Older rows used comma-space between absolute upload paths. A comma
+      // inside a directory/name is not a separator unless another root follows.
+      files=note[1].split(/,\s+(?=\/|[A-Za-z]:[\\/]|\\\\)/).map(p=>p.trim()).filter(Boolean);
+    }
     text=text.slice(0,note.index);
   }
   return {text:text.trim(),files};

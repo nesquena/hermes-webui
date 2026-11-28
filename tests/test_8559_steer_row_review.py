@@ -64,7 +64,7 @@ def test_request_owned_destinations_survive_sanitization_collision_partial_and_r
         const enriched = await _steerTextWithPendingFiles('choose B','sid',staged,p=>{live=p;});
         assert.deepEqual(live,[{path:'/s/report_1.pdf',name:'Original report'},
                                {path:'/s/unsafe_name.txt',name:'Sanitized upload'}]);
-        assert.match(enriched,/report_1.pdf, \/s\/unsafe_name.txt/);
+        assert.deepEqual(_steerDisplayParts(enriched),{text:'choose B',files:['/s/report_1.pdf','/s/unsafe_name.txt']});
         const html = _steerRowInnerHtml('choose B',live,'','sid');
         assert.match(html,/path=%2Fs%2Freport_1.pdf/);
         assert.match(html,/path=%2Fs%2Funsafe_name.txt/);

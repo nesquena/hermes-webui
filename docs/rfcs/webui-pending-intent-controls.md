@@ -421,6 +421,11 @@ Implementation PRs should include focused tests for:
   irreversible
 - accepted Steer renders as a user message in the live transcript
 - accepted Steer remains visible after session switch and replay
+- Steer attachment notes serialize destinations as JSON string arrays, preserving
+  punctuation and escaped newlines through save/reload. Legacy comma-space notes
+  split only before absolute path roots; historical root-looking delimiters
+  inside filenames are inherently ambiguous. Malformed JSON remains visible
+  text rather than creating guessed links.
 - accepted Steer is not duplicated as a normal next-turn user message
 - accepted Steer is not still editable as Queue
 - delivered Steer remains inspectable in settled Activity / Worklog
