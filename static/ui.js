@@ -16104,10 +16104,18 @@ function _fmtDateSep(d){
   // hwc: same strings as the sidebar day buckets, already in every locale.
   if(diffDays===0) return t('session_time_bucket_today');
   if(diffDays===1) return t('session_time_bucket_yesterday');
-  if(diffDays>0 && diffDays<7) return dStart.toLocaleDateString([], {weekday:'long'});
+  // #9204: format the weekday / short-date in the active interface language,
+  // not the browser's default locale. _locale._speech is the BCP 47 tag
+  // setLocale() applied (same source boot.js feeds SpeechRecognition.lang).
+  // Guard the read and validate the tag: an unset or invalid tag falls back to
+  // the browser default so a bad tag can never throw a RangeError here.
+  const _sepTag=(typeof _locale!=='undefined'&&_locale._speech)||'';
+  let _sepLocale=[];
+  if(_sepTag){ try{ new Intl.DateTimeFormat(_sepTag); _sepLocale=[_sepTag]; }catch(_){ _sepLocale=[]; } }
+  if(diffDays>0 && diffDays<7) return dStart.toLocaleDateString(_sepLocale, {weekday:'long'});
   const opts={month:'short', day:'numeric'};
   if(todayStart.getFullYear()!==dStart.getFullYear()) opts.year='numeric';
-  return dStart.toLocaleDateString([], opts);
+  return dStart.toLocaleDateString(_sepLocale, opts);
 }
 const _ERR_MSG_RE=/^(?:\*\*error\b|error:|connection lost|no response received)/i;
 function _messageHasReasoningPayload(m){
