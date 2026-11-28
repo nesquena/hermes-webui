@@ -5,6 +5,7 @@ import base64 as _base64
 import binascii as _binascii
 import errno
 import functools
+import hashlib as _hashlib
 import json as _json
 import logging
 import os
@@ -1030,21 +1031,95 @@ def _redaction_policy_namespace_of(lru):
     return ns if isinstance(ns, (dict, MappingProxyType)) else _NO_REDACTION_POLICY
 
 
+_VAULT_FINGERPRINT_SALT = os.urandom(32)
+
+# Policy identity of an Agent that has NO vault-value registry at all (CI, a
+# stripped install, an Agent predating the registry). Absence is a known state:
+# nothing can register against a registry that does not exist, so the payload
+# cache and the #8847 marker fast path stay live. It cannot collide with the
+# digest above, and if the registry appears at runtime the digest replaces it,
+# which moves the policy identity and invalidates everything primed before.
+_VAULT_REGISTRY_ABSENT = "<no-vault-redaction-registry>"
+
+
+def _vault_registry_state():
+    """``(fingerprint, present)`` for the profile-scoped vault value registry.
+
+    ``register_vault_redaction_value()`` (browser-vault fills, MCP transport) pushes
+    the exact secret bytes into a per-profile registry that the redactor consults on
+    every call, and it does so **without rotating** the prefix-pattern globals that
+    ``_current_redaction_policy()`` watches. Two consequences follow, and both are
+    closed here:
+
+    * a masked payload cached before that registration keeps serving the value while
+      every other policy identity in the key stays equal (#8990 review, P1);
+    * marker-free text still short-circuits the prefilter, because the fixed marker
+      table cannot know an arbitrary password, so the value never reached the
+      redactor at all.
+
+    The fingerprint is the owning profile plus a salted digest of the registered
+    values in registry order: it moves when the bucket changes, it never carries the
+    secret bytes, and the per-process salt makes the digest useless as an offline
+    oracle.
+
+    Three states, and they are not interchangeable:
+
+    * **absent** — no ``agent.redact`` in this process, or an Agent that predates
+      the registry: nothing can register against a registry that does not exist,
+      so the identity is the known constant :data:`_VAULT_REGISTRY_ABSENT` and
+      ``present=False``. Reporting this as unknown would disable the payload
+      cache and re-open the marker fast path (#8847) on every install that has no
+      vault registry;
+    * **readable** — the digest and ``present=bool(values)``;
+    * **unreadable** — the registry name exists but its scope, lock or contents
+      cannot be read: ``present=True`` (fail closed) with a ``None`` fingerprint,
+      and callers treat ``None`` as "do not cache".
+    """
+    try:
+        from agent import redact as agent_redact
+    except Exception:
+        return (_VAULT_REGISTRY_ABSENT, False)
+    registry = getattr(agent_redact, "_VAULT_REDACTION_VALUES", _REDACTION_POLICY_MISSING)
+    if registry is _REDACTION_POLICY_MISSING:
+        return (_VAULT_REGISTRY_ABSENT, False)
+    try:
+        scope = agent_redact._vault_scope()
+        lock = agent_redact._VAULT_REDACTION_LOCK
+    except Exception:
+        return (None, True)
+    try:
+        with lock:
+            values = tuple((registry.get(scope) or {}))
+    except Exception:
+        return (None, True)
+    digest = _hashlib.sha256(_VAULT_FINGERPRINT_SALT)
+    digest.update(str(scope).encode("utf-8", "surrogatepass"))
+    for value in values:
+        raw = str(value).encode("utf-8", "surrogatepass")
+        digest.update(len(raw).to_bytes(4, "big"))
+        digest.update(raw)
+    return (digest.hexdigest(), bool(values))
+
+
 def _redaction_policy_state_for(lru):
-    """``(lru, policy_ns.get, _PREFIX_RE, _PREFIX_SUBSTRINGS, has_plugin_patterns)`` as seen now.
+    """``(lru, policy_ns.get, _PREFIX_RE, _PREFIX_SUBSTRINGS, has_runtime_authorities,
+    vault_fingerprint)`` as seen now.
 
     The state holds strong references to the fingerprint objects, so their
     identities cannot be recycled while they are compared with ``is``.
 
-    ``has_plugin_patterns`` (#8847) is recomputed only when the fingerprint
-    moves, so it needs no invalidation of its own. It is read AFTER the
-    fingerprint: every registry shape (a list, later a per-source dict) is
-    mutated before ``_rebuild_prefix_matcher()`` rebinds the fingerprint, so a
-    state holding the new fingerprint has seen the new registry. If the
-    registry name is absent but plugins can still register patterns (the
-    Agent renamed its private registry), WebUI can't tell, so it reports True
-    and fails closed. Without either name (an Agent that predates the
-    registry, or no policy namespace) it reports False: today's prefilter.
+    ``has_runtime_authorities`` (#8847, extended by #8990) is True when the prefix
+    machinery has plugin patterns **or** when the profile-scoped vault registry
+    holds registered values: in both cases the fixed marker table cannot recognise
+    the secrets, so marker-free text must still go to the Agent. It is recomputed
+    only when the fingerprint moves, so it needs no invalidation of its own. It is
+    read AFTER the fingerprint: every registry shape (a list, later a per-source
+    dict) is mutated before ``_rebuild_prefix_matcher()`` rebinds the fingerprint, so
+    a state holding the new fingerprint has seen the new registry. If the registry
+    name is absent but plugins can still register patterns (the Agent renamed its
+    private registry), WebUI can't tell, so it reports True and fails closed.
+    Without either name (an Agent that predates the registry, or no policy
+    namespace) it reports False: today's prefilter.
     """
     get = _redaction_policy_namespace_of(lru).get
     prefix_re, prefix_substrings = get("_PREFIX_RE"), get("_PREFIX_SUBSTRINGS")
@@ -1054,7 +1129,15 @@ def _redaction_policy_state_for(lru):
     else:  # the registry can't be read: fail closed if plugins can register
         register = get("register_redaction_patterns", _REDACTION_POLICY_MISSING)
         has_plugin_patterns = register is not _REDACTION_POLICY_MISSING
-    return (lru, get, prefix_re, prefix_substrings, has_plugin_patterns)
+    vault_fingerprint, vault_present = _vault_registry_state()
+    return (
+        lru,
+        get,
+        prefix_re,
+        prefix_substrings,
+        bool(has_plugin_patterns or vault_present),
+        vault_fingerprint,
+    )
 
 
 _redaction_policy_lock = threading.Lock()
@@ -1077,7 +1160,11 @@ def _sync_redaction_policy():
         state = _redaction_policy_state
         current = _redaction_policy_state_for(lru)
         if lru is state[0]:
-            if current[2] is state[2] and current[3] is state[3]:
+            if (
+                current[2] is state[2]
+                and current[3] is state[3]
+                and current[5] == state[5]
+            ):
                 return state  # another thread already synced this policy
             try:
                 maxsize = lru.cache_info().maxsize
@@ -1098,11 +1185,22 @@ def _sync_redaction_policy():
 
 
 def _current_redaction_policy():
-    """The policy state for the memo and Agent policy in force now (#8844)."""
+    """The policy state for the memo and Agent policy in force now (#8844).
+
+    The fingerprint is the rotating prefix memo **plus** the profile-scoped vault
+    registry digest: a vault registration rebinds neither ``_PREFIX_RE`` nor
+    ``_PREFIX_SUBSTRINGS``, so watching only those would leave both the memo and
+    every masked payload cached under the old policy (#8990 review, P1).
+    """
     lru = _redact_fn_lru
     state = _redaction_policy_state
     policy_get = state[1]
-    if lru is state[0] and policy_get("_PREFIX_RE") is state[2] and policy_get("_PREFIX_SUBSTRINGS") is state[3]:
+    if (
+        lru is state[0]
+        and policy_get("_PREFIX_RE") is state[2]
+        and policy_get("_PREFIX_SUBSTRINGS") is state[3]
+        and _vault_registry_state()[0] == state[5]
+    ):
         return state
     return _sync_redaction_policy()
 
@@ -1111,6 +1209,36 @@ def _redact_fn_cached(text):
     if len(text) > _REDACT_CACHE_MAX_TEXT_LEN:
         return _redact_fn_uncached(text)
     return _current_redaction_policy()[0](text)
+
+
+def redaction_policy_fingerprint():
+    """Identity of the redaction policy in force, or None when unreadable.
+
+    ``agent.redact.register_redaction_patterns()`` rebinds the two globals the
+    redactor reads on every call, and ``_current_redaction_policy()`` rotates
+    the memo on exactly that change, so the identity of the rotating memo is an
+    O(1) fingerprint of the runtime-mutable policy (#8844). Any cache that
+    stores a MASKED payload must include it in its validity key: an entry
+    primed before a registration would otherwise keep serving the
+    newly-registered secret intact (#8990 review) — the same rule that keeps
+    large strings out of the string memo.
+
+    The rotating memo is not the whole policy: the profile-scoped vault registry
+    changes in place, under the same memo, so its identity is the second half of
+    the fingerprint (see :func:`_vault_registry_fingerprint`). Both halves are
+    compared by value, and either being unreadable returns None.
+    """
+    try:
+        state = _current_redaction_policy()
+    except Exception:
+        return None
+    first = state[0] if state else None
+    if not callable(first):
+        return None
+    vault = state[5] if len(state) > 5 else None
+    if vault is None:
+        return None
+    return (first, vault)
 
 
 _SENSITIVE_CASE_MARKERS = (
@@ -2029,20 +2157,27 @@ def _redact_nested_message_containers(value, *, _enabled: bool):
     return result
 
 
-def public_session_projection(session_dict: dict) -> dict:
-    """Return a public session payload with redaction and alias stripping.
+# The gateway-chat presentation keys derive from process-level configuration
+# (the supported ``HERMES_WEBUI_CHAT_BACKEND`` override, the gateway config
+# files) rather than from the session sidecar, so no sidecar signature can
+# fingerprint them. Any cache of a projected payload must therefore recompute
+# them from the current policy on every response instead of storing them
+# (#8990 review): a store-time exclusion cannot invalidate an entry that was
+# published before the transition, and that entry would keep the old controls.
+GATEWAY_CHAT_CONTROL_KEYS = (
+    "chat_read_only_reason",
+    "chat_read_only_can_connect",
+    "chat_via_gateway_session",
+)
 
-    Callers use this for every response/export/SSE session payload.  It never
-    mutates the in-memory session or the caller's dictionary.
-    """
-    result = redact_session_data(session_dict)
-    from api.gateway_chat import gateway_session_chat_read_only_reason
 
-    result.pop("chat_read_only_reason", None)
-    result.pop("chat_read_only_can_connect", None)
-    result.pop("chat_via_gateway_session", None)
+def apply_gateway_chat_controls(result: dict) -> dict:
+    """Populate the gateway-chat keys from the policy in force right now."""
+    for key in GATEWAY_CHAT_CONTROL_KEYS:
+        result.pop(key, None)
+    from api.gateway_chat import gateway_session_chat_read_only_reason, webui_gateway_chat_enabled
     from api.gateway_sessions import configured, config_for_session, external_session
-    from api.gateway_chat import webui_gateway_chat_enabled
+
     config = config_for_session(result) if external_session(result) else None
     if config is not None and webui_gateway_chat_enabled(config) and configured(result, config):
         result["chat_via_gateway_session"] = True
@@ -2052,6 +2187,73 @@ def public_session_projection(session_dict: dict) -> dict:
         if external_session(result):
             result["chat_read_only_can_connect"] = True
     return result
+
+
+# Session-payload fields whose authority is NOT the sidecar/state.db
+# generation: the live run journal (files written by the agent loop) and the
+# gateway-chat controls (process-level backend/override policy). They are
+# re-derived from the request on every response, so a memoized payload never
+# carries them (#14515).
+SESSION_PROJECTION_LIVE_KEYS = (
+    "runtime_journal",
+    "runtime_journal_snapshot",
+    *GATEWAY_CHAT_CONTROL_KEYS,
+)
+
+
+def public_session_projection_stable(session_dict: dict) -> dict:
+    """Return the cacheable part of the public session payload.
+
+    This is the expensive half — the deep copy plus credential masking — minus
+    ``SESSION_PROJECTION_LIVE_KEYS``. Those keys derive from the live run
+    journal and the process-level gateway-chat policy, neither of which any
+    sidecar/state.db generation can fingerprint, so callers that memoize this
+    result must re-attach them from the current request
+    (``apply_session_projection_live``). It never mutates the input.
+    """
+    stable = redact_session_data(session_dict)
+    for key in SESSION_PROJECTION_LIVE_KEYS:
+        stable.pop(key, None)
+    return stable
+
+
+def apply_session_projection_live(result: dict, session_dict: dict) -> dict:
+    """Re-attach the live projection keys and the gateway-chat controls.
+
+    ``session_dict`` is the raw (unprojected) payload the response is built
+    from, so the live keys are masked by the same rules they get on a cache
+    miss. The result keeps ``session_dict``'s key order, which makes
+    ``stable + live`` byte-identical to a single-shot projection.
+    """
+    if not isinstance(result, dict):
+        return result
+    source = session_dict if isinstance(session_dict, dict) else {}
+    live = {key: source[key] for key in SESSION_PROJECTION_LIVE_KEYS if key in source}
+    projected = redact_session_data(live) if live else {}
+    merged = {}
+    for key in source:
+        if key in result:
+            merged[key] = result[key]
+        elif key in projected:
+            merged[key] = projected[key]
+    for key, value in result.items():
+        if key not in merged:
+            merged[key] = value
+    return apply_gateway_chat_controls(merged)
+
+
+def public_session_projection(session_dict: dict) -> dict:
+    """Return a public session payload with redaction and alias stripping.
+
+    Callers use this for every response/export/SSE session payload.  It never
+    mutates the in-memory session or the caller's dictionary. The payload is
+    the stable (cacheable) half plus the live keys re-derived from
+    ``session_dict``; GET /api/session memoizes the stable half and re-applies
+    the live half on every response.
+    """
+    return apply_session_projection_live(
+        public_session_projection_stable(session_dict), session_dict
+    )
 
 
 def strip_public_internal_fields(value, *, message_records: bool = False):

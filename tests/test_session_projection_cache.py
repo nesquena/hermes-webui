@@ -1,0 +1,968 @@
+"""Validity tests for the memoized GET /api/session projected payload.
+
+GET /api/session runs ``public_session_projection()`` on every request, which
+deep-copies and credential-masks the whole transcript (0.74 s for a
+500-message session). ``_session_projection_cache`` memoizes that payload. These
+tests drive the real HTTP handler (like the neighbouring session-GET tests) and
+assert the properties the cache must have to be safe:
+
+1. an unchanged session reuses the projection and returns the same payload;
+2. any sidecar write invalidates the entry;
+3. an active/streaming or pending session IS cached (that is the case #14515
+   measured at 2-5 s per poll) while its live journal keys and live metadata
+   stay fresh, and a changed active_stream_id / pending turn / anchor scene /
+   runtime counter invalidates the entry;
+4. the two live-state keys are refreshed on a hit instead of being frozen;
+5. the LRU is bounded and evicts oldest-first;
+6. state.db growth invalidates the entry even when the sidecar is untouched;
+7. an unstable state.db read (a commit landing between the bracketing probes)
+   disables caching for that request instead of planting a stale entry;
+8. a sidecar save landing after the session was loaded but before the key is
+   built never caches the older body under the newer signature (a later GET
+   would replay the old transcript);
+9. a same-model config refresh that only changes the resolved context window is
+   not served from an entry keyed under the old values;
+10. a redaction-policy rotation (the rotate-on-registration path a plugin's
+   ``register_redaction_patterns()`` triggers) is not served the pre-registration
+   mask, and the real installed registry is honoured end to end where available;
+11. a write to a stitched snapshot parent — child sidecar untouched — is not
+   served the parent rows the entry was built from;
+12. a supported backend transition that changes the gateway-chat controls
+   reaches the payload even though the transcript is unchanged.
+"""
+
+from __future__ import annotations
+
+import json
+from io import BytesIO
+from urllib.parse import urlparse
+
+import pytest
+
+
+class _Handler:
+    """Minimal BaseHTTPRequestHandler stand-in that captures the JSON body."""
+
+    def __init__(self):
+        self.status = None
+        self.response_headers = []
+        self.wfile = BytesIO()
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        self.response_headers.append((key, value))
+
+    def end_headers(self):
+        pass
+
+    def payload(self):
+        return json.loads(self.wfile.getvalue().decode() or "{}")
+
+
+class _Env:
+    """Test rig: temp session dir, patched handler dependencies, call counter."""
+
+    def __init__(self, tmp_path, monkeypatch):
+        import api.helpers as helpers
+        import api.models as models
+        import api.routes as routes
+        import api.session_ops as session_ops
+
+        self.models = models
+        self.routes = routes
+        self.sess_dir = tmp_path / "sessions"
+        self.sess_dir.mkdir()
+        monkeypatch.setattr(models, "SESSION_DIR", self.sess_dir)
+        monkeypatch.setattr(models, "SESSION_INDEX_FILE", self.sess_dir / "_index.json")
+        monkeypatch.setattr(routes, "SESSION_DIR", self.sess_dir)
+        models.SESSIONS.clear()
+
+        # Process-global caches: every test starts from an empty, deterministic
+        # state. The assertions below never read them; they go through the
+        # handler so the public behaviour is what is under test.
+        for _name in ("_session_projection_cache", "_lineage_display_cache", "_display_merge_cache"):
+            _cache = getattr(routes, _name, None)
+            if _cache is not None:
+                _cache.clear()
+
+        self.projection_calls = 0
+        self.memory_status = {"value": {"level": "ok", "detail": "gen-1"}}
+        self.regeneration_revision = {"value": "rev-1"}
+        self.db_sig = {"value": ("db", 1), "sequence": None}
+        self.state_db_rows = {"value": []}
+
+        real_projection = helpers.public_session_projection_stable
+
+        def _counting_projection(raw):
+            self.projection_calls += 1
+            return real_projection(raw)
+
+        def _db_signature(session_id, profile=None):
+            sequence = self.db_sig.get("sequence")
+            if sequence is not None:
+                return next(sequence)
+            return self.db_sig["value"]
+
+        monkeypatch.setattr(routes, "public_session_projection_stable", _counting_projection)
+        monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda profile, handler: True)
+        monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda session: None)
+        monkeypatch.setattr(
+            routes,
+            "get_state_db_session_messages",
+            lambda sid, **kwargs: list(self.state_db_rows["value"]),
+        )
+        monkeypatch.setattr(routes, "_state_db_session_signature", _db_signature)
+        monkeypatch.setattr(
+            routes,
+            "session_memory_status",
+            lambda sid, session=None: self.memory_status["value"],
+        )
+        monkeypatch.setattr(session_ops, "regeneration_state", lambda session: ([], {}))
+        monkeypatch.setattr(
+            session_ops,
+            "regeneration_authority",
+            lambda session, **kwargs: self.regeneration_revision["value"],
+        )
+
+    def save(self, sid, contents, **attrs):
+        """Persist a session sidecar the way a real save would."""
+        timestamp_base = attrs.pop("_timestamp_base", 1_700_000_000.0)
+        messages = [
+            {"role": "user" if index % 2 == 0 else "assistant", "content": text,
+             "timestamp": timestamp_base + index}
+            for index, text in enumerate(contents)
+        ]
+        session = self.models.Session(
+            session_id=sid,
+            title=f"Session {sid}",
+            messages=messages,
+            context_length=200_000,
+            **attrs,
+        )
+        session.save()
+        self.models.SESSIONS.pop(sid, None)
+        return session
+
+    def get(self, sid, extra="", resolve_model=0):
+        handler = _Handler()
+        url = (
+            f"/api/session?session_id={sid}&messages=1"
+            f"&resolve_model={int(resolve_model)}{extra}"
+        )
+        self.routes.handle_get(handler, urlparse(url))
+        assert handler.status in (None, 200), f"unexpected status {handler.status}"
+        payload = handler.payload()
+        assert "session" in payload, payload
+        return payload["session"]
+
+    @staticmethod
+    def contents(session_payload):
+        return [m.get("content") for m in session_payload.get("messages") or []]
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    return _Env(tmp_path, monkeypatch)
+
+
+def test_repeated_get_reuses_projection_and_returns_identical_payload(env):
+    env.save("proj_idle", ["hello", "hi there"])
+
+    first = env.get("proj_idle")
+    assert env.projection_calls == 1
+
+    second = env.get("proj_idle")
+    assert env.projection_calls == 1, "an unchanged session must reuse the projection"
+    assert second == first, "cache hit must return the exact payload of the miss"
+    assert env.contents(second) == ["hello", "hi there"]
+
+
+def test_cache_hit_does_not_replay_the_transcript_redaction(env, monkeypatch):
+    """A hit re-masks only the live keys, never the transcript (#14515).
+
+    The whole point of the split: the deep copy + credential masking of the
+    messages must run once, and a poll must not redo it.
+    """
+    import api.helpers as helpers
+
+    calls = {"messages": 0}
+    real_redact_messages = helpers._redact_messages
+
+    def _counting_redact_messages(*args, **kwargs):
+        calls["messages"] += 1
+        return real_redact_messages(*args, **kwargs)
+
+    monkeypatch.setattr(helpers, "_redact_messages", _counting_redact_messages)
+
+    env.save("proj_expensive", ["one", "two"])
+    env.get("proj_expensive")
+    assert calls["messages"] >= 1
+
+    before = calls["messages"]
+    env.get("proj_expensive")
+    assert calls["messages"] == before, (
+        "a cache hit must not re-run the transcript redaction"
+    )
+
+
+def test_stable_projection_plus_live_keys_matches_the_public_projection(monkeypatch):
+    """The split is a refactor, not a behaviour change: same payload, same order."""
+    import api.helpers as helpers
+
+    session = {
+        "session_id": "split_id",
+        "title": "key sk-abcdef0123456789 in the title",
+        "messages": [
+            {"role": "user", "content": "my key is sk-abcdef0123456789",
+             "api_content": "internal replay alias"},
+            {"role": "assistant", "content": [{"type": "text", "text": "noted"}],
+             "tool_calls": [{"id": "c1", "function": {"name": "x", "arguments": "{}"}}]},
+        ],
+        "context_messages": [{"role": "system", "content": "sys"}],
+        "tool_calls": [{"id": "c1", "_source": "replay"}],
+        "todo_state": {"todos": [{"content": "do it", "status": "pending"}]},
+        "memory_status": {"level": "ok"},
+        "runtime_journal": {"run_id": "r1", "last_seq": 7},
+        "runtime_journal_snapshot": {
+            "messages": [{"role": "assistant", "content": "step"}],
+            "tool_calls": [],
+        },
+        "chat_via_gateway_session": True,
+        "chat_read_only_reason": "stale reason",
+        "chat_read_only_can_connect": True,
+        "workspace": "/tmp/workspace",
+    }
+
+    stable = helpers.public_session_projection_stable(session)
+    for key in helpers.SESSION_PROJECTION_LIVE_KEYS:
+        assert key not in stable, f"{key} must not be part of the cached half"
+
+    combined = helpers.apply_session_projection_live(dict(stable), session)
+    reference = helpers.public_session_projection(session)
+
+    assert combined == reference, "stable + live must equal the single-shot projection"
+    assert list(combined) == list(reference), (
+        "the split must not reorder the payload keys"
+    )
+    assert helpers.public_session_projection_stable(session) == stable, (
+        "the stable half must be deterministic"
+    )
+    assert session["messages"][0]["content"].endswith("sk-abcdef0123456789"), (
+        "the projection must never mutate its input"
+    )
+
+
+def test_sidecar_write_invalidates_projection(env):
+    env.save("proj_write", ["first question", "first reply"])
+    first = env.get("proj_write")
+    assert env.projection_calls == 1
+    assert env.contents(first) == ["first question", "first reply"]
+
+    # A real write changes the sidecar's stat signature (and, in memory, the
+    # transcript the payload is built from).
+    env.save("proj_write", ["first question", "first reply", "second question",
+                            "a much longer second reply that changes the file size"])
+    second = env.get("proj_write")
+
+    assert env.projection_calls == 2, "a sidecar write must not reuse the cached projection"
+    assert env.contents(second)[-2:] == ["second question",
+                                        "a much longer second reply that changes the file size"]
+
+
+def _prime_live_run(monkeypatch, *, run_id="run-live-1", seq=1, snapshot_text=None):
+    """Make ``run_id`` a live run and expose a controllable journal + snapshot."""
+    import api.routes as routes
+
+    state = {
+        "summary": {
+            "session_id": "proj_stream",
+            "run_id": run_id,
+            "last_seq": seq,
+            "last_event_id": f"evt-{seq}",
+            "last_event": "tool_output",
+            "terminal": False,
+        },
+        "snapshot": {
+            "session_id": "proj_stream",
+            "run_id": run_id,
+            "messages": [{"role": "assistant", "content": snapshot_text or "step-1"}],
+            "tool_calls": [],
+            "last_seq": seq,
+        },
+    }
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: {run_id})
+    monkeypatch.setattr(routes, "find_run_summary", lambda stream_id: dict(state["summary"]))
+    monkeypatch.setattr(
+        routes,
+        "_run_journal_live_snapshot",
+        lambda stream_id, handler=None: dict(state["snapshot"]),
+    )
+    return state
+
+
+def test_active_turn_is_cached_and_carries_fresh_live_state(env, monkeypatch):
+    """An active turn must reuse the cached transcript AND see live state.
+
+    The journal keys (runtime_journal*, fresh chat controls) are re-derived from
+    the request on every response, so the expensive redaction can be memoized
+    during a turn — the case that polled it hardest (#14515).
+    """
+    env.save("proj_stream", ["start"])
+    env.get("proj_stream")
+    assert env.projection_calls == 1
+
+    session = env.models.get_session("proj_stream")
+    session.active_stream_id = "run-live-1"
+    session.pending_user_message = "do the thing"
+    session.pending_started_at = 1_700_000_100.0
+    env.models.SESSIONS["proj_stream"] = session
+    state = _prime_live_run(monkeypatch, seq=1, snapshot_text="step-1")
+
+    first = env.get("proj_stream")
+    assert env.projection_calls == 2, "an active turn's first poll still projects"
+    assert first["runtime_journal"]["last_seq"] == 1
+    assert first["runtime_journal_snapshot"]["messages"][0]["content"] == "step-1"
+
+    # The run advances: the journal files move, no signature of the transcript.
+    state["summary"]["last_seq"] = 2
+    state["summary"]["last_event_id"] = "evt-2"
+    state["snapshot"]["messages"] = [{"role": "assistant", "content": "step-2"}]
+    state["snapshot"]["last_seq"] = 2
+
+    second = env.get("proj_stream")
+    assert env.projection_calls == 2, "an unchanged transcript must reuse the projection"
+    assert second["runtime_journal"]["last_seq"] == 2, (
+        "a cache hit during an active turn must carry the live journal, not the "
+        "one the entry was built from"
+    )
+    assert second["runtime_journal_snapshot"]["messages"][0]["content"] == "step-2", (
+        "a cache hit during an active turn must carry the live journal snapshot"
+    )
+    assert second["active_stream_id"] == "run-live-1"
+    assert _Env.contents(second) == ["start"]
+
+    # A different run is a different payload: the key carries active_stream_id.
+    session.active_stream_id = "run-live-2"
+    env.models.SESSIONS["proj_stream"] = session
+    _prime_live_run(monkeypatch, run_id="run-live-2", seq=3)
+    third = env.get("proj_stream")
+    assert env.projection_calls == 3, "a changed active_stream_id must not reuse the entry"
+    assert third["active_stream_id"] == "run-live-2"
+
+
+def test_pending_turn_is_cached_but_keyed_on_its_identity(env):
+    """A pending turn reuses the transcript, and a new turn invalidates it."""
+    env.save("proj_pending", ["start"])
+
+    session = env.models.get_session("proj_pending")
+    session.pending_user_message = "waiting for the agent"
+    session.pending_started_at = 1_700_000_100.0
+    env.models.SESSIONS["proj_pending"] = session
+
+    first = env.get("proj_pending")
+    assert env.projection_calls == 1
+    assert first["pending_user_message"] == "waiting for the agent"
+    assert first["pending_started_at"] == 1_700_000_100.0
+
+    second = env.get("proj_pending")
+    assert env.projection_calls == 1, "an unchanged pending turn must reuse the projection"
+    assert second["pending_user_message"] == "waiting for the agent"
+
+    # Same turn, but the pending prompt it carries is rewritten in memory.
+    session.pending_user_message = "waiting for the agent, edited"
+    env.models.SESSIONS["proj_pending"] = session
+    third = env.get("proj_pending")
+    assert env.projection_calls == 2, "live metadata is part of the cache key"
+    assert third["pending_user_message"] == "waiting for the agent, edited"
+
+    # A new turn (new pending_started_at) is a new payload.
+    session.pending_started_at = 1_700_000_200.0
+    env.models.SESSIONS["proj_pending"] = session
+    fourth = env.get("proj_pending")
+    assert env.projection_calls == 3, "a new pending turn must not reuse the entry"
+    assert fourth["pending_started_at"] == 1_700_000_200.0
+
+
+def test_live_runtime_counters_invalidate_the_projection(env):
+    """In-memory runtime fields that the payload carries are keyed, not frozen."""
+    env.save("proj_counters", ["hello"])
+    first = env.get("proj_counters")
+    assert env.projection_calls == 1
+    assert first["input_tokens"] == 0
+
+    session = env.models.get_session("proj_counters")
+    session.input_tokens = 4242
+    session.last_prompt_tokens = 4000
+    env.models.SESSIONS["proj_counters"] = session
+
+    second = env.get("proj_counters")
+    assert env.projection_calls == 2, (
+        "a token counter the payload carries must not be served from the cache"
+    )
+    assert second["input_tokens"] == 4242
+
+
+def test_live_anchor_scenes_invalidate_the_projection(env):
+    """In-memory scene energy hydrates the rows, so it must move the key."""
+    env.save("proj_scenes", ["hello"])
+    env.get("proj_scenes")
+    assert env.projection_calls == 1
+
+    session = env.models.get_session("proj_scenes")
+    session.anchor_activity_scenes = {"anchor-0": {"energy": "high"}}
+    env.models.SESSIONS["proj_scenes"] = session
+
+    env.get("proj_scenes")
+    assert env.projection_calls == 2, (
+        "anchor activity scenes hydrate the transcript, so they are part of the key"
+    )
+
+
+def test_volatile_keys_reflect_live_state_on_cache_hit(env):
+    env.save("proj_volatile", ["hello"])
+    first = env.get("proj_volatile")
+    assert first["memory_status"] == {"level": "ok", "detail": "gen-1"}
+    assert first["regeneration_revision"] == "rev-1"
+    assert env.projection_calls == 1
+
+    env.memory_status["value"] = {"level": "warn", "detail": "gen-2"}
+    env.regeneration_revision["value"] = "rev-2"
+
+    second = env.get("proj_volatile")
+    assert env.projection_calls == 1, "the transcript is unchanged, so this must be a cache hit"
+    assert second["memory_status"] == {"level": "warn", "detail": "gen-2"}, (
+        "memory_status must come from live agent state, not the cached payload"
+    )
+    assert second["regeneration_revision"] == "rev-2", (
+        "regeneration_revision must come from live agent state, not the cached payload"
+    )
+    assert env.contents(second) == ["hello"]
+
+    # A key that disappears from live state must disappear from the payload too.
+    env.memory_status["value"] = None
+    third = env.get("proj_volatile")
+    assert "memory_status" not in third
+
+
+def test_state_db_growth_invalidates_projection(env):
+    env.save("proj_db", ["hello"])
+    env.get("proj_db")
+    assert env.projection_calls == 1
+
+    # Rows commit before the debounced sidecar save: the sidecar is untouched,
+    # only the state.db revision moves.
+    env.state_db_rows["value"] = [
+        {"role": "user", "content": "committed before the save", "timestamp": 1_700_000_500.0}
+    ]
+    env.db_sig["value"] = ("db", 2)
+    payload = env.get("proj_db")
+
+    assert env.projection_calls == 2, "state.db growth must invalidate the cached projection"
+    assert "committed before the save" in env.contents(payload)
+
+
+def test_unstable_state_db_read_disables_caching(env):
+    env.save("proj_unstable", ["hello"])
+    # A commit lands between the before/after probes on every request.
+    env.db_sig["sequence"] = iter([("db", 1), ("db", 2)] * 10)
+
+    env.get("proj_unstable")
+    env.get("proj_unstable")
+
+    assert env.projection_calls == 2, (
+        "an unbracketed state.db read must not populate the cache"
+    )
+
+
+def test_cache_is_bounded_and_evicts_oldest_first(env):
+    import api.routes as routes
+
+    # Hardcoded: the advertised bound is 8 entries.
+    bound = 8
+    assert routes._SESSION_PROJECTION_CACHE_MAX == bound
+
+    sids = [f"proj_lru_{index}" for index in range(bound + 1)]
+    for sid in sids:
+        env.save(sid, [f"content for {sid}"])
+        env.get(sid)
+    assert env.projection_calls == len(sids)
+
+    # One entry over the bound: the oldest (the first sid) must be gone.
+    env.get(sids[0])
+    assert env.projection_calls == len(sids) + 1, "the oldest entry must have been evicted"
+    assert len(routes._session_projection_cache) <= bound
+
+    # A recently used entry survives.
+    env.get(sids[-1])
+    assert env.projection_calls == len(sids) + 1, "the newest entry must still be cached"
+
+
+def test_a_save_after_the_load_never_caches_the_older_body(env, monkeypatch):
+    """#8990 review 1: the entry is bound to the generation actually read.
+
+    ``Session.load`` hands back the two-message transcript; a real ``save()``
+    lands right after it. The request therefore built its body from generation
+    N while the sidecar already holds N+1. Caching under the N+1 signature would
+    make every later GET (which loads N+1) replay the two-message body.
+    """
+    import api.routes as routes
+
+    env.save("proj_race", ["first question", "first reply"])
+    real_get_session = env.models.get_session
+
+    def _racing_get_session(sid, metadata_only=False):
+        session = real_get_session(sid, metadata_only=metadata_only)
+        if sid == "proj_race":
+            # A concurrent writer commits the next two turns while this
+            # request already holds the previous generation in memory.
+            env.save(
+                "proj_race",
+                ["first question", "first reply", "second question", "second reply"],
+            )
+        return session
+
+    monkeypatch.setattr(routes, "get_session", _racing_get_session)
+
+    raced = env.get("proj_race")
+    assert env.contents(raced) == ["first question", "first reply"], (
+        "the raced request may only serve the generation it read"
+    )
+    assert routes._session_projection_cache == {}, (
+        "a body built from a superseded generation must never be published"
+    )
+
+    monkeypatch.setattr(routes, "get_session", real_get_session)
+    later = env.get("proj_race")
+
+    assert env.contents(later) == [
+        "first question", "first reply", "second question", "second reply",
+    ], "the next GET must show the transcript that is now on disk"
+    assert env.projection_calls == 2, "a mismatch must also disable reuse for that request"
+
+
+def test_same_model_config_refresh_is_not_served_from_the_old_window(env, monkeypatch):
+    """#8990 review 2: a cached hit must not freeze the resolved context window.
+
+    Same model, same provider, unchanged sidecar — only the real config's
+    context window moves 200k -> 400k, exactly what a normal config reload
+    does. The uncached path returns the new window, so a hit must too.
+    """
+    import api.routes as routes
+
+    env.save(
+        "proj_window",
+        ["hello"],
+        model="deepseek-v4",
+        model_provider="opencode-go",
+        threshold_tokens=160_000,
+    )
+    window = {"value": 200_000}
+
+    monkeypatch.setattr(
+        routes,
+        "_session_context_length_lookup_state",
+        lambda model, provider: (model, provider, None, None),
+    )
+    monkeypatch.setattr(routes, "_session_context_lookup_uses_chat_route", lambda provider: False)
+    monkeypatch.setattr(
+        routes, "_resolve_effective_session_model_for_display", lambda session: "deepseek-v4"
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_effective_session_model_provider_for_display",
+        lambda session: "opencode-go",
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_context_length_for_session_model",
+        lambda model, provider, **kwargs: window["value"],
+    )
+
+    first = env.get("proj_window", resolve_model=1)
+    assert (first["context_length"], first["threshold_tokens"]) == (200_000, 160_000)
+    assert env.projection_calls == 1
+
+    window["value"] = 400_000
+    second = env.get("proj_window", resolve_model=1)
+
+    assert (second["context_length"], second["threshold_tokens"]) == (400_000, 320_000), (
+        "a config refresh must reach the payload even when the transcript is unchanged"
+    )
+    assert env.projection_calls == 2, "the old window must not be reused"
+
+
+# A token shape the WebUI's fixed redactor patterns do not own, embedded in a
+# string the prefilter trips on (the URL marker), so "masked" can only mean
+# "the policy in force knows it".
+_POLICY_TOKEN = "nvapi-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6A7b8C9d0"
+_POLICY_TEXT = f"see https://example.invalid/docs then pasted {_POLICY_TOKEN} into chat"
+
+
+def test_redaction_policy_rotation_invalidates_the_projection(env, monkeypatch):
+    """#8990 review 3.1: a primed payload must not outlive the mask that built it.
+
+    ``register_redaction_patterns()`` rotates the redaction memo to a fresh LRU
+    exactly like the rebind simulated here; the payload an entry was masked
+    under must stop being served the moment the policy in force changes.
+    """
+    import functools
+
+    import api.helpers as helpers
+
+    assert helpers._might_contain_sensitive_text(_POLICY_TEXT), (
+        "the probe text must reach the redactor, or this test proves nothing"
+    )
+    env.save("proj_policy", [_POLICY_TEXT])
+
+    first = env.get("proj_policy")
+    assert _POLICY_TOKEN in env.contents(first)[0], "the priming mask did not know the token"
+    assert env.projection_calls == 1
+
+    def _masking_policy(text):
+        return helpers._redact_fn_uncached(text).replace(_POLICY_TOKEN, "***")
+
+    fresh = functools.lru_cache(maxsize=helpers._REDACT_CACHE_MAXSIZE)(_masking_policy)
+    monkeypatch.setattr(helpers, "_redact_fn_lru", fresh)
+    _fingerprint = helpers.redaction_policy_fingerprint()
+    assert _fingerprint is not None and _fingerprint[0] is fresh, (
+        "the policy fingerprint must follow the rotated memo"
+    )
+    assert _POLICY_TOKEN not in helpers._redact_fn_cached(_POLICY_TOKEN), (
+        "the new policy is not effective, so the test proves nothing"
+    )
+
+    second = env.get("proj_policy")
+
+    assert env.projection_calls == 2, (
+        "a policy rotation must not be served the pre-rotation projection"
+    )
+    assert _POLICY_TOKEN not in env.contents(second)[0], (
+        "the payload still carries the pre-registration mask"
+    )
+
+
+def test_registered_agent_pattern_reaches_a_primed_payload(env):
+    """#8990 review 3.1, production registry: prime, register, next GET masks.
+
+    Skipped where ``agent.redact`` is not importable; the rotation test above
+    covers the same invalidation without the installed registry.
+    """
+    redact = pytest.importorskip("agent.redact", reason="hermes-agent not installed")
+    register = getattr(redact, "register_redaction_patterns", None)
+    reset = getattr(redact, "_reset_plugin_redaction_patterns", None)
+    if register is None or reset is None:
+        pytest.skip("installed agent.redact has no runtime pattern registry")
+
+    import api.helpers as helpers
+
+    pattern = r"nvapi-[A-Za-z0-9]{60}"
+    assert helpers._might_contain_sensitive_text(_POLICY_TEXT)
+
+    reset()
+    try:
+        env.save("proj_registry", [_POLICY_TEXT])
+        first = env.get("proj_registry")
+        assert _POLICY_TOKEN in env.contents(first)[0]
+        assert env.projection_calls == 1
+
+        assert register([pattern], source="test-8990") == 1
+
+        # Oracle: the registry is effective for this text shape.
+        assert _POLICY_TOKEN not in helpers._redact_fn_uncached(_POLICY_TEXT)
+
+        second = env.get("proj_registry")
+        assert _POLICY_TOKEN not in env.contents(second)[0], (
+            "a registered pattern did not reach a previously primed payload"
+        )
+        assert env.projection_calls == 2
+    finally:
+        reset()
+
+
+def test_parent_only_update_is_not_served_from_the_old_projection(env):
+    """#8990 review 3.2: rows stitched from a snapshot parent are part of the key.
+
+    Only the parent sidecar moves; the child's own signature, its sidecar and
+    the state.db rows are untouched. The uncached path re-reads the parent, so a
+    hit that replays the entry's parent rows is a stale display.
+    """
+    env.save("proj_parent", ["parent question", "parent answer"], pre_compression_snapshot=True)
+    env.save(
+        "proj_child",
+        ["continuation question", "continuation answer"],
+        parent_session_id="proj_parent",
+        _timestamp_base=1_700_000_100.0,
+    )
+
+    first = env.get("proj_child")
+    assert env.contents(first) == [
+        "parent question",
+        "parent answer",
+        "continuation question",
+        "continuation answer",
+    ]
+    assert env.projection_calls == 1
+
+    # A writer updates the archived parent transcript only.
+    env.save("proj_parent", ["parent question", "parent answer, corrected"], pre_compression_snapshot=True)
+
+    second = env.get("proj_child")
+
+    assert env.projection_calls == 2, (
+        "a parent snapshot write must invalidate the child's cached projection"
+    )
+    assert env.contents(second) == [
+        "parent question",
+        "parent answer, corrected",
+        "continuation question",
+        "continuation answer",
+    ], "the payload still carries the parent rows the entry was built from"
+
+
+def test_backend_transition_reaches_a_cached_payload(env, monkeypatch):
+    """#8990 review 3.3: the gateway-chat controls are recomputed, never frozen.
+
+    The supported backend override is process-level configuration no sidecar key
+    can fingerprint, so a payload primed under the legacy backend must not keep
+    its unflagged controls after the switch. The transcript is unchanged: this
+    is deliberately a cache hit.
+    """
+    import api.gateway_chat as gateway_chat
+
+    env.save("proj_backend", ["hello"])
+    monkeypatch.setattr(
+        gateway_chat, "gateway_session_chat_read_only_reason", lambda *a, **k: None
+    )
+
+    first = env.get("proj_backend")
+    assert "chat_read_only_reason" not in first
+    assert env.projection_calls == 1
+
+    reason = "This session is read-only: the gateway backend owns chat"
+    monkeypatch.setattr(
+        gateway_chat, "gateway_session_chat_read_only_reason", lambda *a, **k: reason
+    )
+
+    second = env.get("proj_backend")
+
+    assert second.get("chat_read_only_reason") == reason, (
+        "a backend transition must reach the payload even on a cache hit"
+    )
+    assert env.projection_calls == 1, "the transcript is unchanged: this must be a cache hit"
+
+def test_vault_registry_registration_invalidates_a_primed_payload(env):
+    """A vault-value registration must not be served the pre-registration payload.
+
+    ``register_vault_redaction_value()`` changes the profile-scoped exact-value
+    registry in place and does **not** rotate the prefix-pattern memo that
+    ``_current_redaction_policy()`` watches, so the prefix half of the policy
+    identity stays equal while the mask the redactor produces changes. Priming a
+    GET, registering an inert synthetic value, and asking again is the exact
+    schedule the review replayed: on the unfixed head the second GET is a cache
+    hit and still carries the value.
+    """
+    import api.helpers as helpers
+
+    agent_redact = pytest.importorskip(
+        "agent.redact", reason="the installed Agent owns the vault registry"
+    )
+    if not hasattr(agent_redact, "register_vault_redaction_value"):
+        pytest.skip("installed Agent has no vault-value registry")
+
+    secret = "vault-synthetic-value-9f13c7ab"
+    agent_redact.clear_vault_redaction_values()
+    try:
+        before = helpers.redaction_policy_fingerprint()
+        assert before is not None, "the policy fingerprint must be resolvable here"
+
+        env.save("proj_vault", [f"the value is {secret} and it is inert " + "x" * 17000, "second"])
+        first = env.get("proj_vault")
+        assert env.projection_calls == 1
+        assert secret in " ".join(str(c) for c in _Env.contents(first)), (
+            "the priming payload must carry the value before it is registered, "
+            "or this test proves nothing"
+        )
+
+        agent_redact.register_vault_redaction_value(secret)
+
+        after = helpers.redaction_policy_fingerprint()
+        assert after is not None and after != before, (
+            "the policy fingerprint must move when the vault registry does: the "
+            "registry changes under the same rotating memo, so a prefix-only "
+            "identity keeps serving the pre-registration mask"
+        )
+
+        second = env.get("proj_vault")
+        assert env.projection_calls == 2, (
+            "a vault registration must not be served the pre-registration projection"
+        )
+        assert secret not in " ".join(str(c) for c in _Env.contents(second)), (
+            "the payload still carries a value the registry now masks"
+        )
+    finally:
+        agent_redact.clear_vault_redaction_values()
+
+
+def test_unreadable_vault_registry_disables_the_cache(env, monkeypatch):
+    """When the registry's identity cannot be established, the cache must not run.
+
+    The reviewer's accepted fallback: cover the authority, or bypass the caching
+    when it cannot be covered. A fingerprint of None already means "do not cache",
+    and the two halves are independent — losing only the vault half must be enough.
+    """
+    import api.helpers as helpers
+
+    env.save("proj_unreadable", ["hello", "again"])
+    first = env.get("proj_unreadable")
+    assert env.projection_calls == 1
+    assert _Env.contents(first) == ["hello", "again"]
+
+    monkeypatch.setattr(helpers, "_vault_registry_state", lambda: (None, True))
+    assert helpers.redaction_policy_fingerprint() is None, (
+        "an unreadable vault registry must make the whole policy identity unknown"
+    )
+
+    second = env.get("proj_unreadable")
+    assert env.projection_calls == 2, (
+        "an unknown policy identity must disable reuse rather than risk a stale mask"
+    )
+    assert _Env.contents(second) == ["hello", "again"]
+
+
+def _stub_agent_redact(**attrs):
+    """A stand-in ``agent`` package exposing ``agent.redact`` with exactly the
+    attributes given (a ``module`` parent, so ``from agent import redact``
+    resolves to the stub rather than a child mock)."""
+    import types
+
+    module = types.ModuleType("agent.redact")
+    for name, value in attrs.items():
+        setattr(module, name, value)
+    package = types.ModuleType("agent")
+    package.redact = module
+    return package, module
+
+
+def test_display_merge_generation_moves_the_projection_key(env):
+    """A rebuilt display-merge entry must move the projection key.
+
+    The merged rows, the returned window and the summary all come from that
+    entry, and it is rebuilt by invalidations the key cannot see elsewhere: a
+    hidden-row display setting, a settings toggle, a direct clear (the upstream
+    session-GET fixtures clear it between cases while their DB signature stub
+    stays constant). The payload must not outlive the generation it was built
+    from — and an unchanged generation must still reuse.
+    """
+    import api.routes as routes
+
+    env.save("proj_gen", ["hello", "again"])
+
+    def _entry(stored_at):
+        return {"key": ("gen", 1), "messages": [], "summary": {}, "stored_at": stored_at}
+
+    query = "&msg_limit=30"
+    with routes._display_merge_cache_lock:
+        routes._display_merge_cache["proj_gen"] = _entry(1.0)
+    try:
+        env.get("proj_gen", extra=query)
+        assert env.projection_calls == 1
+        env.get("proj_gen", extra=query)
+        assert env.projection_calls == 1, "an unchanged merge generation must still reuse"
+
+        with routes._display_merge_cache_lock:
+            routes._display_merge_cache["proj_gen"] = _entry(2.0)
+        env.get("proj_gen", extra=query)
+        assert env.projection_calls == 2, (
+            "a rebuilt display-merge entry must not be served the projection "
+            "built from the old one"
+        )
+
+        with routes._display_merge_cache_lock:
+            routes._display_merge_cache.pop("proj_gen", None)
+        env.get("proj_gen", extra=query)
+        assert env.projection_calls == 3, (
+            "no display-merge entry in force means no generation to validate: "
+            "the load must not use the projection cache"
+        )
+    finally:
+        with routes._display_merge_cache_lock:
+            routes._display_merge_cache.pop("proj_gen", None)
+
+
+def test_absent_vault_registry_is_a_known_state_not_an_unknown(env):
+    """An Agent with no vault registry must keep the policy identity known.
+
+    Absence is not "unreadable": there is no registry to register into, so the
+    fingerprint is the constant :data:`_VAULT_REGISTRY_ABSENT`, ``present`` is
+    False (today's #8847 marker fast path) and the payload cache keeps working.
+    Treating it as unknown would disable reuse and re-send every string to the
+    Agent on every install without a vault registry (CI has no agent package at
+    all).
+    """
+    import sys
+    from unittest import mock
+
+    import api.helpers as helpers
+
+    stub = _stub_agent_redact()  # no _VAULT_REDACTION_VALUES, no _vault_scope
+    package, module = stub
+    with mock.patch.dict(sys.modules, {"agent": package, "agent.redact": module}):
+        fingerprint, present = helpers._vault_registry_state()
+        assert present is False, "an absent registry must not claim registered values"
+        assert fingerprint == helpers._VAULT_REGISTRY_ABSENT, (
+            "an absent registry is a known policy, not an unknown one"
+        )
+
+        env.save("proj_absent", ["hello", "again"])
+        first = env.get("proj_absent")
+        assert env.projection_calls == 1
+        assert _Env.contents(first) == ["hello", "again"]
+
+        second = env.get("proj_absent")
+
+        assert helpers.redaction_policy_fingerprint() is not None, (
+            "a known-absent vault registry must not make the policy identity unknown"
+        )
+        assert env.projection_calls == 1, (
+            "a known-absent vault registry must not disable cache reuse"
+        )
+        assert _Env.contents(second) == ["hello", "again"]
+
+
+def test_unreadable_vault_registry_names_fail_closed(env):
+    """A registry that exists but cannot be read is an unknown, not an absence.
+
+    The registry name is present, so a registration is possible; if its scope
+    helper raises, the identity cannot be established and the cache must not run.
+    """
+    import sys
+    from unittest import mock
+
+    import api.helpers as helpers
+
+    def _broken_scope():
+        raise RuntimeError("vault scope unavailable")
+
+    stub = _stub_agent_redact(
+        _VAULT_REDACTION_VALUES={},
+        _VAULT_REDACTION_LOCK=None,
+        _vault_scope=_broken_scope,
+    )
+    package, module = stub
+    with mock.patch.dict(sys.modules, {"agent": package, "agent.redact": module}):
+        fingerprint, present = helpers._vault_registry_state()
+        assert present is True, "a registry that exists but is unreadable must fail closed"
+        assert fingerprint is None
+        assert helpers.redaction_policy_fingerprint() is None, (
+            "an unreadable registry must make the whole policy identity unknown"
+        )
+
+        env.save("proj_unreadable_stub", ["hello"])
+        env.get("proj_unreadable_stub")
+        env.get("proj_unreadable_stub")
+
+        assert env.projection_calls == 2, (
+            "an unknown policy identity must disable reuse rather than risk a stale mask"
+        )
