@@ -106,3 +106,31 @@ def test_german_glossary_wording_is_used():
     joined = " ".join(DE_VALUES.values())
     for term in ("Arbeitsbereich", "Anbieter", "Gedächtnis", "Skill", "Prompt", "Chat"):
         assert term in joined, f"expected German glossary term {term!r} in the de block"
+
+
+# The session action menu kept these labels in English long after the rest of
+# the block was translated: they were added to `de` as English copies rather
+# than left to the `en` fallback, so they never showed up as missing keys.
+# Six of them were reported in the #8787 review; `session_unpin` had the same
+# shape (the menu shows either pin or unpin depending on state).
+SESSION_MENU_KEYS = (
+    "session_pin",
+    "session_unpin",
+    "session_move_project",
+    "session_archive",
+    "session_duplicate",
+    "session_export_html",
+    "session_delete",
+)
+
+
+def test_german_session_menu_is_not_pasted_english():
+    untranslated = {
+        key: DE_VALUES[key]
+        for key in SESSION_MENU_KEYS
+        if key in DE_VALUES and DE_VALUES[key] == EN_VALUES.get(key)
+    }
+    assert not untranslated, (
+        "these session-menu keys carry the English source text in the German "
+        f"block instead of a translation: {sorted(untranslated)}"
+    )
