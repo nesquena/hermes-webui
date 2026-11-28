@@ -1866,6 +1866,7 @@ class Session:
                  reasoning_effort=None,
                  messages=None, created_at=None, updated_at=None,
                  tool_calls=None, pinned: bool=False, archived: bool=False,
+                 auto_archived: bool=False,
                  project_id: str=None, profile=None,
                  input_tokens: int=0, output_tokens: int=0, estimated_cost=None,
                  cache_read_tokens: int=0, cache_write_tokens: int=0,
@@ -1969,6 +1970,11 @@ class Session:
         self.updated_at = updated_at or time.time()
         self.pinned = bool(pinned)
         self.archived = bool(archived)
+        # Provenance of an archive, not a policy of its own: the agent's idle sweep
+        # stamps this on the rows it hides, and a deliberate archive clears it. The
+        # sidebar shows the two differently (#9366). Older agent schemas have no
+        # such column, so a missing value means "deliberate or unknown".
+        self.auto_archived = bool(auto_archived)
         self.project_id = project_id or None
         self.profile = profile
         self.input_tokens = input_tokens or 0
@@ -2232,7 +2238,7 @@ class Session:
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
             'session_id', 'title', 'workspace', 'created_workspace', 'model', 'model_provider', 'reasoning_effort', 'model_explicit_pick_signature', 'created_at', 'updated_at',
-            'pinned', 'archived', 'project_id', 'profile',
+            'pinned', 'archived', 'auto_archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
@@ -2929,6 +2935,7 @@ class Session:
             **({'truncation_boundary': self.truncation_boundary} if self.truncation_boundary else {}),
             'pinned': self.pinned,
             'archived': self.archived,
+            'auto_archived': self.auto_archived,
             'project_id': self.project_id,
             'profile': self.profile,
             'input_tokens': self.input_tokens,

@@ -6116,6 +6116,12 @@ main.main > #mainPlugin{display:none;}
 /* ── Archived sessions ── */
 .session-item.archived{opacity:.5;}
 .session-item.archived .session-title{font-style:italic;}
+/* An idle-sweep archive is not the user's decision: the agent un-hides it on
+   resume or compression, so the row stays legible and carries a marker (#9366).
+   A deliberate archive keeps the dimmed, italic treatment above. */
+.session-item.archived.auto-archived{opacity:.75;}
+.session-item.archived.auto-archived .session-title{font-style:normal;}
+.session-auto-archived-badge{display:inline-flex;align-items:center;height:16px;font-size:10px;font-weight:600;padding:0 6px;border-radius:999px;background:rgba(148,163,184,.14);color:var(--muted);margin-left:6px;flex-shrink:0;user-select:none;cursor:default;white-space:nowrap;}
 
 /* ── Subagent session tree (#494) ── */
 .session-lineage-count{display:inline-flex;align-items:center;justify-content:center;height:16px;font-size:10px;font-weight:600;padding:0 6px;border-radius:999px;background:rgba(148,163,184,.14);color:var(--muted);margin-left:6px;flex-shrink:0;user-select:none;cursor:default;}
