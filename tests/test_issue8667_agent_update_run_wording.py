@@ -196,8 +196,19 @@ def test_agent_refusal_cross_profile_warning_scope(monkeypatch):
         upd, "get_active_profile_gateway_running_pid", lambda profile=None: 1234
     )
 
-    # 1. Endpoints compartilhados: alpha e beta resolvem par idêntico
-    assert gateway_chat._gateway_endpoint_for_profile("alpha") == gateway_chat._gateway_endpoint_for_profile("beta")
+    # 1. Shared listener: alpha and beta route through one Gateway process
+    # (same scheme/host/port) on their own /p/<profile> paths.
+    from urllib.parse import urlsplit
+
+    url_alpha = urlsplit(gateway_chat._gateway_endpoint_for_profile("alpha")[0])
+    url_beta = urlsplit(gateway_chat._gateway_endpoint_for_profile("beta")[0])
+    assert (url_alpha.scheme, url_alpha.hostname, url_alpha.port) == (
+        url_beta.scheme,
+        url_beta.hostname,
+        url_beta.port,
+    )
+    assert url_alpha.path == "/p/alpha"
+    assert url_beta.path == "/p/beta"
 
     with cfg.ACTIVE_RUNS_LOCK:
         old_active = dict(cfg.ACTIVE_RUNS)
