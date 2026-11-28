@@ -31,6 +31,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 STYLE_CSS = (Path(__file__).parents[1] / "static" / "style.css").read_text(encoding="utf-8")
+# Per-skin files carry the skin-specific overrides (static/skins/<key>.css); the
+# base composer rule stays in style.css. Read both so a skin's composer metrics
+# are found instead of silently falling back to the stylesheet defaults.
+SKIN_CSS = "\n".join(
+    p.read_text(encoding="utf-8")
+    for p in sorted((Path(__file__).parents[1] / "static" / "skins").glob("*.css"))
+)
+ALL_CSS = STYLE_CSS + "\n" + SKIN_CSS
 
 
 def _declarations(rules: list[str]) -> dict[str, str]:
@@ -89,9 +97,17 @@ _FONT_SIZE_OVERRIDES = {
 _SKIN_OVERRIDES = {
     name: _declarations([body])
     for name, body in re.findall(
-        r':root\[data-skin="([\w-]+)"\]\s*textarea#msg\{([^}]*)\}', STYLE_CSS
+        r':root\[data-skin="([\w-]+)"\]\s*textarea#msg\{([^}]*)\}', ALL_CSS
     )
 }
+
+# Fail loudly instead of quietly using the 16px default: the Graphite fixture is
+# the only skin composer config, and a silent fallback would hide a moved rule.
+assert "font-size" in _SKIN_OVERRIDES.get("graphite", {}) and \
+       "line-height" in _SKIN_OVERRIDES.get("graphite", {}), (
+    "graphite composer override not found in static/skins/graphite.css — "
+    f"skins with a composer rule: {sorted(_SKIN_OVERRIDES)}"
+)
 
 
 @dataclass(frozen=True)

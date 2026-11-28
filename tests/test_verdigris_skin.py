@@ -3,7 +3,9 @@
 from pathlib import Path
 
 REPO = Path(__file__).parent.parent
-CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
+from tests.skin_css import read_base_css, read_skin_css
+
+CSS = read_base_css() + read_skin_css("verdigris")
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 CONFIG_PY = (REPO / "api" / "config.py").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
