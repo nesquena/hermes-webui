@@ -347,10 +347,15 @@ def _is_default_profile_home(profile_home: Path) -> bool:
 def _remote_terminal_cwd(profile: str | Path | None = None) -> str | None:
     """Return target-side terminal cwd for a remote profile, without local stat()."""
     try:
-        from api.config import get_config_for_profile_home
+        if profile is not None:
+            # Isolated owner authority: a remote backend declared by
+            # ANOTHER profile (e.g. root's ambient config) must never
+            # classify this profile's local paths as target-side.
+            terminal_cfg = _profile_owned_config(profile).get('terminal', {})
+        else:
+            from api.config import get_config
 
-        profile_home = _resolve_profile_home_param(profile)
-        terminal_cfg = get_config_for_profile_home(profile_home).get('terminal', {})
+            terminal_cfg = get_config().get('terminal', {})
 
         if not _is_remote_terminal_backend(terminal_cfg):
             return None
@@ -1156,6 +1161,266 @@ def resolve_trusted_workspace(path: str | Path | None = None, profile: str | Pat
     )
 
 
+# ── #7217: agent-visible → WebUI-local workspace translation ─────────────────
+
+# Per-profile mapping table, declared in <profile_home>/config.yaml as:
+#   webui:
+#     workspace_path_maps:
+#       - agent: /workspace           # root the agent container sees
+#         webui: /workspaces/alice    # same physical dir, WebUI-container side
+_WORKSPACE_PATH_MAPS_KEYS = ("webui", "workspace_path_maps")
+
+
+def _profile_owned_config(profile: str | Path) -> dict:
+    """Read *profile*'s own config under that profile's isolated authority.
+
+    The per-profile translation settings (``webui.workspace_path_maps``)
+    and the remote-backend classification that feeds them are
+    profile-owned state: a session must only ever consume the settings
+    its OWNER profile declared. A plain
+    ``get_config_for_profile_home(home)`` read is not enough — when the
+    requested home is also the ACTIVE home it defers to the ambient
+    ``get_config()``, whose file is the process-level
+    ``HERMES_CONFIG_PATH`` override. A boot-time launcher pointing that
+    override at the ROOT profile's config.yaml therefore let a named
+    profile's session consume the ROOT profile's translation settings
+    (the #8450 re-gate blocker: the native file-reader probe returned
+    bytes from the wrong owner-selected root).
+
+    ``isolate_config_override=True`` closes that path: a named profile
+    reads its own ``config.yaml`` and ignores an override outside its
+    home, while the root profile keeps an external override that is not
+    under ``<root>/profiles`` (the documented rule — an external
+    override is the root profile's config) and never consumes one that
+    lives under a named profile's home.
+    """
+    from api.config import get_config_for_profile_home
+
+    home = _resolve_profile_home_param(profile)
+    return get_config_for_profile_home(home, isolate_config_override=True) or {}
+
+
+def _workspace_path_map(profile: str | Path | None) -> list[tuple[PurePosixPath, Path]] | None:
+    """Per-profile agent→WebUI workspace root maps, longest agent prefix first.
+
+    Returns ``None`` when the profile declares no map (the single-container
+    default), so the translation tier stays completely inert and existing
+    behaviour is preserved byte-for-byte.
+
+    The map is read from THIS profile's own config only — never derived from
+    sibling profiles and never from a process-global allow-root set — so a
+    caller can only ever name roots its own profile declared (the invariant
+    Dragonk called load-bearing in #7217). The read runs under the profile's
+    isolated authority (:func:`_profile_owned_config`), so a supported
+    ambient configuration override belonging to another profile is never
+    consumed as this profile's translation settings.
+    """
+    if profile in (None, ""):
+        return None
+    try:
+        node = _profile_owned_config(profile)
+        for key in _WORKSPACE_PATH_MAPS_KEYS:
+            node = node.get(key) if isinstance(node, dict) else None
+            if node is None:
+                return None
+        if not isinstance(node, list):
+            return None
+        maps: list[tuple[PurePosixPath, Path]] = []
+        for entry in node:
+            if not isinstance(entry, dict):
+                continue
+            agent_posix = _as_posix_path(entry.get("agent"))
+            webui_raw = entry.get("webui")
+            if agent_posix is None or not webui_raw:
+                continue
+            webui_root = _safe_resolve(_expanduser_path(str(webui_raw)))
+            if webui_root in (Path("/"),) or _is_blocked_workspace_path(webui_root, str(webui_raw)):
+                continue
+            maps.append((agent_posix, webui_root))
+        if not maps:
+            return None
+        # Longest agent prefix wins so overlapping maps resolve deterministically.
+        maps.sort(key=lambda pair: len(pair[0].parts), reverse=True)
+        return maps
+    except Exception:
+        logger.debug("workspace path map: unreadable for profile %r", profile, exc_info=True)
+        return None
+
+
+def _translate_agent_workspace(
+    workspace: str | Path, maps: list[tuple[PurePosixPath, Path]]
+) -> Path | None:
+    """Map an agent-visible path onto its WebUI-local root, or None if unmapped.
+
+    The agent side is matched POSIX-normalized (it names a path inside the
+    agent container, which this host may not be able to stat); the WebUI side
+    is a real host path. Sub-paths translate with their relative tail.
+    """
+    parts = _translate_agent_workspace_parts(workspace, maps)
+    if parts is None:
+        return None
+    webui_root, tail = parts
+    return webui_root / tail if tail else webui_root
+
+
+def _translate_agent_workspace_parts(
+    workspace: str | Path, maps: list[tuple[PurePosixPath, Path]]
+) -> tuple[Path, str] | None:
+    """Like :func:`_translate_agent_workspace`, but split into root + tail.
+
+    Returns ``(webui_root, relative_tail)`` for the matched map entry, or
+    ``None`` when no map matches. The tail is POSIX-style (it names a path
+    inside the agent container); the root is a real host path.
+
+    Splitting the two lets the caller validate the MAPPED ROOT against the
+    profile's trust rules once, and then accept the translated sub-path as
+    long as it stays INSIDE that trusted root — instead of demanding that
+    each sub-directory be trusted in its own right.
+    """
+    raw_posix = _as_posix_path(workspace)
+    if raw_posix is None:
+        return None
+    for agent_root, webui_root in maps:
+        if raw_posix == agent_root:
+            return webui_root, ''
+        if _posix_is_within(raw_posix, agent_root):
+            return webui_root, raw_posix.relative_to(agent_root).as_posix()
+    return None
+
+
+def workspace_translation_applies(
+    workspace: str | Path | None, profile: str | Path | None
+) -> bool:
+    """True when a declared per-profile map actually translates *workspace*.
+
+    Consumers that ask a host-local existence question about a session's
+    workspace must NOT stat a translated session's agent-visible name: in a
+    multi-container deployment that path is absent on the WebUI host by
+    design, and recovery tiers would mistake it for a deleted directory —
+    overwriting the agent-visible binding with a WebUI-local fallback. For
+    such sessions the WebUI-local view (resolved fail-closed by
+    :func:`resolve_webui_workspace`) answers the existence question instead.
+
+    Returns False for profile-less sessions, profiles with no declared map,
+    and agent paths outside every mapped prefix — those keep the pre-existing
+    direct-path semantics byte-for-byte.
+    """
+    if profile in (None, "") or workspace in (None, ""):
+        return False
+    maps = _workspace_path_map(profile)
+    if maps is None:
+        return False
+    return _translate_agent_workspace(workspace, maps) is not None
+
+
+def resolve_webui_workspace(
+    workspace: str | Path | None = None,
+    *,
+    profile: str | Path | None = None,
+    session=None,
+    rel: str | Path | None = None,
+):
+    """Resolve a session workspace for WebUI-LOCAL file operations (#7217).
+
+    In a multi-container profile deployment the same physical workspace has two
+    names: the agent-visible path stored on ``session.workspace`` (and sent to
+    the gateway) and the WebUI-container path the local filesystem actually
+    serves. This function is the single translation tier between them:
+
+      1. an explicit *profile* is mandatory (falling back to ``session.profile``
+         only when the caller passes a session object) — an ambient profile is
+         never substituted implicitly;
+      2. an empty workspace keeps the boot-default semantics of
+         :func:`resolve_trusted_workspace`;
+      3. remote/SSH profiles bypass translation entirely (target-side paths
+         have no WebUI-local form);
+      4. a declared per-profile map translates the agent root (exact or
+         sub-path) onto its WebUI-local root, which is THEN re-validated by
+         :func:`resolve_trusted_workspace` — a map entry can never widen trust
+         beyond what the profile already allows; a mapped profile naming an
+         unmapped path (e.g. a sibling mount) fails closed rather than
+         passing through just because this process can see it;
+      5. a profile with NO declared map keeps the pre-existing direct-path
+         contract byte-for-byte (single-container behaviour unchanged);
+
+    ``session.workspace`` itself is NEVER rewritten: the return value is the
+    local root (plus, with *rel*, the safe-resolved target), and every failure
+    raises ``ValueError`` — nothing degrades into a pass-through.
+
+    With *rel* given, returns ``(root, target)`` where target is
+    :func:`safe_resolve_ws`-validated inside the translated root, so callers
+    cannot re-stitch a mistranslated path afterwards.
+    """
+    if profile in (None, "") and session is not None:
+        profile = getattr(session, "profile", None)
+    if profile in (None, ""):
+        raise ValueError("resolve_webui_workspace requires an explicit profile")
+
+    if workspace in (None, ""):
+        root = resolve_trusted_workspace(None, profile)
+        return (root, safe_resolve_ws(root, str(rel))) if rel not in (None, "") else root
+
+    # (3) Remote/SSH target-side paths: no WebUI-local form exists; keep the
+    #     non-stat'ed candidate exactly as resolve_trusted_workspace would.
+    remote_candidate = _remote_terminal_workspace_candidate(workspace, profile=profile)
+    if remote_candidate is not None:
+        return (remote_candidate, safe_resolve_ws(remote_candidate, str(rel))) if rel not in (None, "") else remote_candidate
+
+    # (4) Declared map: translate, then RE-VALIDATE under the profile's trust.
+    maps = _workspace_path_map(profile)
+    if maps is None:
+        # Single-container profile: no map declared, so the translation tier is
+        # inert and the pre-existing direct-path contract is preserved
+        # byte-for-byte (maintainer scope: single-container behaviour unchanged).
+        root = _resolve_path(workspace, profile) if profile is not None else _resolve_path(workspace)
+        return (root, safe_resolve_ws(root, str(rel))) if rel not in (None, "") else root
+    parts = _translate_agent_workspace_parts(workspace, maps)
+    if parts is not None:
+        webui_root, tail = parts
+        if _is_blocked_workspace_path(webui_root, str(webui_root)):
+            raise ValueError(f"Path points to a system directory: {webui_root}")
+        # #8450: validate the MAPPED ROOT against the profile's trust rules
+        # once, then accept the translated sub-path as long as it stays
+        # INSIDE that trusted root.
+        #
+        # resolve_trusted_workspace() admits a saved workspace by EXACT
+        # match, so a session working BELOW a mapped root (e.g. /workspace
+        # -> /data/alice, session cwd /workspace/project) had its translated
+        # sub-directory rejected as an untrusted path — a valid session
+        # could not read or write its own files. Trusting the mapped root
+        # and requiring the sub-path to stay inside it is the same
+        # containment the translation already implies.
+        trusted_root = resolve_trusted_workspace(webui_root, profile)
+        if tail:
+            # The sub-path must EXIST inside the trusted root: a missing
+            # local counterpart stays fail-closed (it is never silently
+            # coerced to the root, which would open the whole root).
+            # It does NOT have to be trusted in its own right — being
+            # inside the trusted mapped root is what admits it.
+            #
+            # safe_resolve_ws() resolves the tail and re-checks that it
+            # stays inside the root, so a symlink inside the mapped root
+            # pointing outside it is refused here rather than escaping.
+            resolved = safe_resolve_ws(trusted_root, tail)
+            if not resolved.exists():
+                raise ValueError(
+                    f"Path does not exist: {resolved}"
+                )
+            if not resolved.is_dir():
+                raise ValueError(
+                    f"Path is not a directory: {resolved}"
+                )
+            return (resolved, safe_resolve_ws(resolved, str(rel))) if rel not in (None, "") else resolved
+        root = trusted_root
+        return (root, safe_resolve_ws(root, str(rel))) if rel not in (None, "") else root
+
+    # (5) Mapped profile, unmapped path: fail closed on untrusted paths — a
+    #     sibling mount named directly must not pass just because this process
+    #     can see it (the reviewer's load-bearing invariant).
+    root = resolve_trusted_workspace(workspace, profile)
+    return (root, safe_resolve_ws(root, str(rel))) if rel not in (None, "") else root
+
+
 def resolve_implicit_workspace_with_recovery(
     candidate: str | Path | None,
     fallback: str | Path | None | Callable[[], str | Path | None],
@@ -1185,15 +1450,16 @@ def resolve_implicit_workspace_with_recovery(
         # never prove target-side deletion. Config-read uncertainty also fails
         # closed by preserving the original validation error.
         try:
-            from api.config import get_config, get_config_for_profile_home
+            from api.config import get_config
 
             if profile is not None:
                 # Classify the backend from THIS profile's own config, never the
                 # ambient one: a remote profile without terminal.cwd must still be
                 # recognized as remote when loaded under a different ambient home.
-                terminal_cfg = get_config_for_profile_home(
-                    _resolve_profile_home_param(profile)
-                ).get("terminal", {})
+                # Read under the profile's isolated authority so a remote backend
+                # declared by another profile's ambient override cannot flip this
+                # profile's local paths into target-side candidates.
+                terminal_cfg = _profile_owned_config(profile).get("terminal", {})
             else:
                 terminal_cfg = get_config().get("terminal", {})
         except Exception:

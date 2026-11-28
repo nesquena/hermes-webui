@@ -1859,6 +1859,22 @@ def _normalize_skill_provenance(value) -> dict[str, int]:
 
 
 class Session:
+    @property
+    def local_workspace(self) -> Path | None:
+        """WebUI-LOCAL workspace root attached by get_session_for_file_ops (#7217).
+
+        Backed by the underscore attribute ``_local_workspace`` so
+        ``Session.save()``'s public-attribute serialization never persists it
+        (a value set on a cached, shared Session object is an in-memory,
+        per-request translation only). ``None`` means "no translation" and
+        file-manager handlers fall back to the unchanged ``workspace`` field.
+        """
+        return getattr(self, "_local_workspace", None)
+
+    @local_workspace.setter
+    def local_workspace(self, value: Path | None) -> None:
+        self._local_workspace = value
+
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
                  model=DEFAULT_MODEL,
@@ -8632,18 +8648,28 @@ def state_db_has_session(sid: str) -> bool:
 class _ExternalSessionView:
     """Minimal session-shaped view for external (Telegram/CLI) sessions.
 
-    Only exposes the fields file-manager handlers need (``session_id`` and
-    ``workspace``). The workspace falls back to the WebUI's last-used
-    workspace because state.db does not persist a per-session workspace path
-    and the file browser is intentionally workspace-scoped, not
-    session-storage-scoped (issue #3280).
+    Only exposes the fields file-manager handlers need (``session_id``,
+    ``profile``, ``workspace`` and the attached ``local_workspace``).
+    ``workspace`` is the session's AGENT-VISIBLE path (the CLI row's
+    workspace, i.e. the owner profile's last-used workspace — state.db
+    does not persist a per-session workspace path and the file browser
+    is intentionally workspace-scoped, not session-storage-scoped, issue
+    #3280); ``profile`` is the OWNER profile that row named. The
+    WebUI-local root the handlers operate on rides on ``local_workspace``
+    only, so the agent-visible name is never rewritten.
+
+    When no owner identity is discoverable (no CLI row, or a profile-less
+    row such as Claude Code) the view falls back to the WebUI's last-used
+    workspace with no profile — the pre-#7217 behaviour, preserved
+    byte-for-byte.
     """
 
-    __slots__ = ("session_id", "workspace")
+    __slots__ = ("session_id", "workspace", "local_workspace", "profile")
 
-    def __init__(self, session_id: str, workspace: str):
+    def __init__(self, session_id: str, workspace: str, profile: str | None = None):
         self.session_id = session_id
         self.workspace = workspace
+        self.profile = profile
 
 
 class WorkspaceBindingPersistenceError(ValueError):
@@ -8931,15 +8957,195 @@ def persist_recovered_workspace_binding(
         return cached or session
 
 
+class SessionWorkspaceUnavailable(KeyError):
+    """#7217: a profile-scoped session's workspace cannot be resolved locally.
+
+    Subclasses KeyError so the file-manager handlers' existing
+    ``except KeyError`` (answering 404) covers it without touching every
+    call site — and so the failure can never be mistaken for a pass-through.
+    """
+
+
+def _attach_local_workspace(session):
+    """Attach the WebUI-LOCAL workspace root for file-manager handlers (#7217).
+
+    Runs the profile-scoped agent→WebUI translation on the session's
+    agent-visible ``workspace`` and stashes the result on ``local_workspace``.
+    Never rewrites ``session.workspace``, never persists, never triggers
+    serialization.
+
+    Failure policy (fail-closed, the reviewer's load-bearing invariant):
+      * no profile on the session (legacy rows, external views) -> no
+        translation attempted; ``local_workspace`` stays None and handlers
+        keep the pre-existing direct-path behaviour (explicitly deferred in
+        the #7217 PR);
+      * a profile IS present but the translation is rejected -> raise
+        :class:`SessionWorkspaceUnavailable` (a KeyError subclass, so the
+        handlers' existing ``except KeyError`` answers 404). Falling back to
+        the raw agent-visible path here would re-open exactly the
+        sibling-mount escape the translation tier exists to close.
+    """
+    from api.workspace import resolve_webui_workspace
+
+    profile = getattr(session, "profile", None) or None
+    if not profile:
+        session.local_workspace = None
+        return session
+    try:
+        session.local_workspace = resolve_webui_workspace(
+            getattr(session, "workspace", None),
+            profile=profile,
+        )
+    except Exception as exc:
+        raise SessionWorkspaceUnavailable(
+            f"session workspace is not usable on this host: {exc}"
+        ) from exc
+    return session
+
+
+def attach_local_workspace_view(session):
+    """Attach the WebUI-local file-ops view to *session* (#7217).
+
+    Returns ``(session, translated)``:
+
+    * *translated* is True when a declared per-profile map actually
+      translated the agent-visible workspace. Callers that ask a host-local
+      existence question (recovery tiers) must then use the attached
+      ``local_workspace`` — validated fail-closed inside
+      :func:`_attach_local_workspace` — instead of stat'ing the agent-side
+      name, which is absent on the WebUI host by design.
+    * The agent-visible ``workspace`` field is never rewritten and nothing
+      is persisted.
+
+    Raises :class:`SessionWorkspaceUnavailable` (a KeyError subclass, so
+    callers answer 404) when the session's profile rejects the translation.
+    """
+    from api.workspace import workspace_translation_applies
+
+    stored_workspace = getattr(session, "workspace", None)
+    _attach_local_workspace(session)
+    translated = workspace_translation_applies(
+        stored_workspace, getattr(session, "profile", None) or None
+    )
+    return session, translated
+
+
+def _external_session_owner_row(session_id: str) -> dict:
+    """Resolve an external session's owner-profile row (#7217/#8450).
+
+    Same lookup chain ``api.routes._lookup_cli_session_metadata`` uses
+    (parity contract, pinned by tests): the producer's cached snapshot
+    for the active profile, then for every profile, then the full
+    enumeration, then the by-id fallback for sources kept out of the
+    default projection. All building blocks live in this module, so the
+    file-ops path never needs to import ``api.routes``.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return {}
+    for all_profiles in (False, True):
+        try:
+            row = lookup_cli_session_row(sid, all_profiles=all_profiles)
+        except Exception:
+            logger.debug("external session row lookup failed", exc_info=True)
+            row = {}
+        if row:
+            return row
+    for all_profiles in (False, True):
+        try:
+            for row in get_cli_sessions(all_profiles=all_profiles):
+                if row.get("session_id") == sid:
+                    return row
+        except Exception:
+            logger.debug("external session enumeration failed", exc_info=True)
+    # Sources kept out of the default projection with no bounded pass of
+    # their own; a session the user explicitly opens stays reachable by id.
+    for source in tuple(
+        s for s in INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES if s not in BACKGROUND_CLI_SOURCES
+    ):
+        try:
+            row = get_cli_session_by_id(sid, source, all_profiles=True)
+        except Exception:
+            row = {}
+        if row:
+            return row
+    return {}
+
+
+def _attach_external_session_workspace(sid: str):
+    """File-ops view for a state.db-only (external) session (#7217/#8450).
+
+    Listing, reading and mutation must resolve ONE local root for every
+    supported session origin. For an external session that root comes
+    from the session's OWNER profile, exactly as ``/api/list`` and
+    ``/api/git-info`` resolve it:
+
+      * the owner profile's declared map translates the agent-visible
+        workspace onto its WebUI-local root (re-validated fail-closed
+        inside :func:`api.workspace.resolve_webui_workspace`);
+      * otherwise the owner profile's trusted resolution answers (a CLI
+        session's workspace is a host path unless the owner declares a
+        map, so a path outside the owner's trust fails closed instead of
+        being inspected).
+
+    The agent-visible workspace stays on the view; only
+    ``local_workspace`` carries the WebUI-local root. Resolution failures
+    raise :class:`SessionWorkspaceUnavailable` (a KeyError subclass, so
+    the handlers answer 404) — never a pass-through to the raw path.
+
+    With no discoverable owner identity (no CLI row, or a profile-less
+    row) the pre-existing ambient view is kept byte-for-byte (#3280).
+    """
+    row = _external_session_owner_row(sid)
+    profile = str((row or {}).get("profile") or "").strip()
+    agent_workspace = str((row or {}).get("workspace") or "").strip()
+    if not profile or not agent_workspace:
+        return _attach_local_workspace(
+            _ExternalSessionView(str(sid), str(get_last_workspace()))
+        )
+
+    from api.workspace import (
+        resolve_trusted_workspace,
+        resolve_webui_workspace,
+        workspace_translation_applies,
+    )
+
+    view = _ExternalSessionView(str(sid), agent_workspace, profile=profile)
+    try:
+        if workspace_translation_applies(agent_workspace, profile):
+            view.local_workspace = resolve_webui_workspace(
+                agent_workspace, profile=profile
+            )
+        else:
+            try:
+                view.local_workspace = resolve_trusted_workspace(
+                    agent_workspace, profile=profile
+                )
+            except TypeError:
+                # A resolver without a profile kwarg keeps the pre-existing
+                # direct-path semantics.
+                view.local_workspace = resolve_trusted_workspace(agent_workspace)
+    except SessionWorkspaceUnavailable:
+        raise
+    except Exception as exc:
+        raise SessionWorkspaceUnavailable(
+            f"external session workspace is not usable on this host: {exc}"
+        ) from exc
+    return view
+
+
 def get_session_for_file_ops(sid: str):
     """Return a profile-authorized session-like object for file-manager handlers.
 
     Tries ``get_session`` first (preserves all existing behavior for WebUI
     sessions) and only returns that session when its stored profile belongs to
     the active request profile.  If that lookup fails, checks state.db; when the
-    session exists there, returns an ``_ExternalSessionView`` whose ``workspace``
-    is the active WebUI workspace. If neither has the session, re-raises
-    ``KeyError`` so callers continue to return their existing 404.
+    session exists there, returns an external session view resolved through the
+    session's OWNER profile (translation tier when a declared map applies, else
+    the owner profile's trusted resolution) — the same local-root contract
+    ``/api/list`` uses, so a listing and the file actions it feeds can never
+    disagree about the root (#8450 re-gate). If neither has the session,
+    re-raises ``KeyError`` so callers continue to return their existing 404.
     """
     try:
         session = get_session(sid, metadata_only=True)
@@ -8947,7 +9153,7 @@ def get_session_for_file_ops(sid: str):
         raise  # #9019: a file exists for sid; never serve the state.db view instead
     except KeyError:
         if state_db_has_session(sid):
-            return _ExternalSessionView(str(sid), str(get_last_workspace()))
+            return _attach_external_session_workspace(sid)
         raise
 
     from api.profiles import _profiles_match, get_active_profile_name
@@ -8964,9 +9170,30 @@ def get_session_for_file_ops(sid: str):
         )
         raise KeyError(sid)
     try:
-        from api.workspace import resolve_implicit_workspace_with_recovery
+        from api.workspace import (
+            resolve_implicit_workspace_with_recovery,
+            workspace_translation_applies,
+        )
 
         stored_workspace = getattr(session, "workspace", None)
+        # #7217 re-gate: resolve the WebUI-local operation view BEFORE the
+        # recovery tier's host-local existence check. A mapped session's
+        # agent-side path is absent on this host by design — judging it a
+        # deleted directory overwrites the agent-visible binding with the
+        # fallback and routes every operation there (the reviewer's
+        # replayed regression: create 200 into the fallback, cached and
+        # persisted session.workspace replaced). _attach_local_workspace
+        # already fails closed (SessionWorkspaceUnavailable, a KeyError
+        # subclass the handlers answer 404) when the translated local root
+        # is itself unusable, so a translated session never reaches
+        # recovery with a genuinely missing root.
+        session = _attach_local_workspace(session)
+        if workspace_translation_applies(stored_workspace, session_profile or None):
+            # Translated session: the existence question is about the
+            # WebUI-local root, answered fail-closed at attach time. Never
+            # run host-local recovery on the agent-visible name, and never
+            # persist a WebUI-local fallback into it (R1 pollution).
+            return session
         workspace, recovered = resolve_implicit_workspace_with_recovery(
             stored_workspace,
             get_last_workspace,
@@ -8975,14 +9202,16 @@ def get_session_for_file_ops(sid: str):
     except ValueError:
         # Preserve the existing file-handler behavior for non-missing trust or
         # access errors. Recovery is deliberately limited to deleted paths.
-        return session
+        return _attach_local_workspace(session)
     if recovered:
-        return persist_recovered_workspace_binding(
-            session,
-            workspace,
-            expected_workspace=stored_workspace,
+        return _attach_local_workspace(
+            persist_recovered_workspace_binding(
+                session,
+                workspace,
+                expected_workspace=stored_workspace,
+            )
         )
-    return session
+    return _attach_local_workspace(session)
 
 
 def _active_state_db_path() -> Path:
@@ -11745,6 +11974,58 @@ def _load_cli_sessions_uncached(
                 _cli_workspace_cache[0] = str(get_last_workspace())
         return _cli_workspace_cache[0]
 
+    # #8450: the agent-visible working directory of the session itself.
+    #
+    # get_last_workspace() resolves the ACTIVE workspace of the WebUI host and
+    # rejects any path that does not exist there — but a session created by an
+    # agent in another container names a path that is absent on this host by
+    # design (e.g. ``/workspace``). Such a row used to be projected with the
+    # host-local fallback, so the file-ops view later resolved (and read, and
+    # deleted) inside an unrelated project directory.
+    #
+    # The agent's own choice is preserved instead, but ONLY when it names a
+    # path this host can honour: an unmapped or untrusted agent path falls
+    # back to the previous behaviour rather than widening the trust boundary.
+    # The AGENT-VISIBLE name is what the row carries (the file-ops view
+    # translates it under the owner profile's authority, exactly like every
+    # other agent-visible workspace), so this tier only decides WHICH name
+    # the row shows — never where the bytes live.
+    _agent_workspace_cache: dict = {}
+    def _row_workspace(row: dict) -> str:
+        """The agent-visible workspace of *row*, or the host-local fallback."""
+        agent_cwd = str((row or {}).get('cwd') or '').strip()
+        if not agent_cwd:
+            return _cli_workspace()
+        cached = _agent_workspace_cache.get(agent_cwd)
+        if cached is not None:
+            return cached or _cli_workspace()
+        resolved = ''
+        try:
+            from api.workspace import (
+                resolve_trusted_workspace,
+                resolve_webui_workspace,
+                workspace_translation_applies,
+            )
+            if workspace_translation_applies(agent_cwd, _cli_profile):
+                # A declared map translates the agent root onto its WebUI-local
+                # root; resolve_webui_workspace() re-validates it under the
+                # profile's trust, so a map entry can never widen it.
+                resolve_webui_workspace(agent_cwd, profile=_cli_profile)
+                resolved = agent_cwd
+            else:
+                try:
+                    resolve_trusted_workspace(agent_cwd, profile=_cli_profile)
+                except TypeError:
+                    resolve_trusted_workspace(agent_cwd)
+                resolved = agent_cwd
+        except Exception:
+            # An unusable agent path keeps the pre-existing host-local
+            # behaviour: the row is still listed, and the file-ops view keeps
+            # its own fail-closed answer for it.
+            resolved = ''
+        _agent_workspace_cache[agent_cwd] = resolved
+        return resolved or _cli_workspace()
+
     _webhook_pid_cache: list[str | None] = [None]
     def _webhook_pid():
         if _webhook_pid_cache[0] is None:
@@ -12454,7 +12735,7 @@ def _load_cli_sessions_uncached(
         cli_session = {
             'session_id': sid,
             'title': _display_title,
-            'workspace': _cli_workspace(),
+            'workspace': _row_workspace(row),
             'model': row['model'] or None,
             'message_count': row['message_count'] or row['actual_message_count'] or 0,
             'created_at': row['started_at'],
@@ -12557,7 +12838,7 @@ def _load_cli_sessions_uncached(
                 cli_sessions.append({
                     'session_id': sid,
                     'title': _display_title,
-                    'workspace': _cli_workspace(),
+                    'workspace': _row_workspace(row),
                     'model': row['model'] or None,
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],
@@ -12626,7 +12907,7 @@ def _load_cli_sessions_uncached(
                 cli_sessions.append({
                     'session_id': sid,
                     'title': _display_title,
-                    'workspace': _cli_workspace(),
+                    'workspace': _row_workspace(row),
                     'model': row['model'] or None,
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],
@@ -12693,7 +12974,7 @@ def _load_cli_sessions_uncached(
                 cli_sessions.append({
                     'session_id': sid,
                     'title': _title or 'Kanban Session',
-                    'workspace': _cli_workspace(),
+                    'workspace': _row_workspace(row),
                     'model': row['model'] or None,
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],

@@ -28,7 +28,7 @@ def test_folder_download_uses_safe_resolve():
     handler_idx = src.index("def _handle_folder_download")
     end_idx = src.index("\n\ndef ", handler_idx + 1)
     body = src[handler_idx:end_idx]
-    assert "safe_resolve(Path(s.workspace), rel)" in body
+    assert "safe_resolve(_file_ops_ws_root(s), rel)" in body
     assert "ValueError" in body
 
 
