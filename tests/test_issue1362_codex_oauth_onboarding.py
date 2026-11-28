@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -201,6 +202,8 @@ def test_codex_credentials_written_to_active_profile_auth_json(monkeypatch, tmp_
     active_home.mkdir()
     realish_home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: realish_home)
+    # No Agent in this test run; persistence needs its auth.json lock.
+    monkeypatch.setattr(oauth, "_agent_auth_store_lock", lambda _path: contextlib.nullcontext())
 
     auth_path = oauth._persist_codex_credentials(
         active_home,
