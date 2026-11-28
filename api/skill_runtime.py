@@ -22,13 +22,15 @@ logger = logging.getLogger(__name__)
 
 # The tokenizer ``os.path.expandvars`` compiles, per platform, so the profile-bound
 # expansion gives the same result the Agent would get from the process environment
-# (#9321). They are ``posixpath._varpattern`` and ``ntpath._varpattern``; both are
-# byte-identical on CPython 3.11-3.14, so the behaviour does not depend on the
-# interpreter the WebUI happens to run under.
-#   POSIX:   $name over ``\w+`` (so a bare ``$1abc`` is a reference) and ${name}.
-#   Windows: additionally %NAME% (hyphens included), bare hyphenated $NAME,
-#            ``$$`` -> ``$`` and ``%%`` -> ``%``, and single-quoted runs untouched.
-_POSIX_EXPAND_VAR = re.compile(r'\$(\w+|\{[^}]*\}?)', re.ASCII)
+# (#9321).
+#   POSIX:   $name over ``\w+`` (so a bare ``$1abc`` is a reference) and ${name},
+#            the braced form requiring its closing brace exactly as
+#            ``posixpath.expandvars`` does: an unmatched ``${`` is plain text, so a
+#            later ``$name`` in the same entry still expands (#9336).
+#   Windows: ``ntpath._varpattern`` byte-identical — %NAME% (hyphens included), bare
+#            hyphenated $NAME, ``$$`` -> ``$`` and ``%%`` -> ``%``, and single-quoted
+#            runs untouched.
+_POSIX_EXPAND_VAR = re.compile(r'\$(\w+|\{[^}]*\})', re.ASCII)
 _WINDOWS_EXPAND_VAR = re.compile(r"'[^']*'?|%(%|[^%]*%?)|\$(\$|[-\w]+|\{[^}]*\}?)", re.ASCII)
 
 
