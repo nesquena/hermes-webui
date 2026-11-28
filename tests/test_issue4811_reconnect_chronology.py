@@ -51,6 +51,7 @@ const funcNames = [
 	  '_anchorSceneTextKey',
 	  '_anchorSceneContentText',
 	  '_anchorSceneMessageHasContentToolUse',
+	  '_anchorSceneMessageShowsTextInline',
 	  '_anchorSceneSafePayload',
 	  '_anchorSceneToolId',
 	  '_anchorSceneToolName',

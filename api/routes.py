@@ -5833,7 +5833,8 @@ def _anchor_scene_message_text(message) -> str:
         parts = []
         for part in content:
             if isinstance(part, dict):
-                parts.append(str(part.get("text") or part.get("content") or part.get("input_text") or ""))
+                output = part.get("output_text") if part.get("type") == "output_text" else None
+                parts.append(str(part.get("text") or part.get("content") or part.get("input_text") or output or ""))
             else:
                 parts.append(str(part or ""))
         return "\n".join(parts)
@@ -6420,6 +6421,55 @@ def _anchor_scene_matching_content_tool_row_index(
     return None
 
 
+_ANCHOR_SCENE_INTERIM_PROSE_MIN_CHARS = 200
+
+
+def _anchor_scene_message_inline_text(message) -> str:
+    """Mirror the body projection: strings are visible, but only typed text
+    parts from a content list are visible. Preserve the renderer's separators
+    and empty parts because the whole segment determines the fold threshold."""
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        str(part.get("text") or part.get("content") or "")
+        for part in content
+        if isinstance(part, dict) and part.get("type") == "text"
+    ).strip()
+
+
+def _anchor_scene_prose_row_shown_inline(inline_text, row_text) -> bool:
+    """A settled Compact rail may omit a row only if its inline copy survives."""
+    # JS String.length measures UTF-16 units, including surrogate pairs.
+    units = len(inline_text.encode("utf-16-le", errors="surrogatepass")) // 2
+    if units < _ANCHOR_SCENE_INTERIM_PROSE_MIN_CHARS:
+        return False
+    row = _anchor_scene_clean_text(row_text)
+    return bool(row) and row in _anchor_scene_clean_text(inline_text)
+
+
+def _anchor_scene_row_owning_message(row, messages, message_offset):
+    if not isinstance(row, dict) or not isinstance(messages, list):
+        return None
+    group = row.get("group")
+    payload = row.get("payload")
+    abs_idx = None
+    if isinstance(group, dict):
+        abs_idx = group.get("assistant_msg_idx")
+    if abs_idx is None and isinstance(payload, dict):
+        abs_idx = payload.get("assistant_msg_idx")
+    if not isinstance(abs_idx, int) or isinstance(abs_idx, bool):
+        return None
+    local = abs_idx - int(message_offset or 0)
+    if 0 <= local < len(messages) and isinstance(messages[local], dict):
+        return messages[local]
+    return None
+
+
 def _anchor_scene_content_rows(message, order_index, message_index, stream_id="", *, is_final_message=False):
     if not _anchor_scene_message_has_content_tool_use(message):
         return None
@@ -6435,7 +6485,10 @@ def _anchor_scene_content_rows(message, order_index, message_index, stream_id=""
                 continue
             text = _anchor_scene_content_text(part)
             if _anchor_scene_clean_text(text):
-                rows.append(_anchor_scene_prose_row(text, order_index + len(rows), message_index, stream_id))
+                row = _anchor_scene_prose_row(text, order_index + len(rows), message_index, stream_id)
+                # Match the live projector: msgContent() only joins typed text parts.
+                row["_inline_prose_visible"] = False
+                rows.append(row)
             continue
         part_type = part.get("type")
         if part_type in ("text", "input_text", "output_text"):
@@ -6443,7 +6496,10 @@ def _anchor_scene_content_rows(message, order_index, message_index, stream_id=""
                 continue
             text = _anchor_scene_content_text(part)
             if _anchor_scene_clean_text(text):
-                rows.append(_anchor_scene_prose_row(text, order_index + len(rows), message_index, stream_id))
+                row = _anchor_scene_prose_row(text, order_index + len(rows), message_index, stream_id)
+                if part_type != "text":
+                    row["_inline_prose_visible"] = False
+                rows.append(row)
             continue
         if part_type in ("thinking", "reasoning"):
             text = _anchor_scene_content_text(part)
@@ -6989,6 +7045,24 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
     for row in scene.get("activity_rows") or []:
         if isinstance(row, dict) and row.get("role") == "terminal":
             push(row)
+    # Match the settled renderer: prefer the message body and fall back to
+    # the scene's final answer only when the final message has no body.
+    from api.streaming import _extract_inline_thinking_from_content
+
+    inline_by_owner = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get("role") != "prose":
+            continue
+        owner = _anchor_scene_row_owning_message(row, messages, message_offset)
+        owner_key = id(owner)
+        if owner_key not in inline_by_owner:
+            inline = _anchor_scene_message_inline_text(owner)
+            if not inline and owner is final_message:
+                inline = final_answer
+            inline_by_owner[owner_key] = _extract_inline_thinking_from_content(inline)[0].strip()
+        row["_inline_prose_visible"] = _anchor_scene_prose_row_shown_inline(
+            inline_by_owner[owner_key], row.get("text") or ""
+        )
     repaired = copy.deepcopy(scene)
     repaired["version"] = "activity_scene_v1"
     repaired["mode"] = repaired.get("mode") or "compact_worklog"

@@ -62,7 +62,7 @@ function extractFunc(src, name) {
 }
 const messagesFns = [
 		  '_anchorSceneMessageText','_anchorSceneCleanText','_anchorSceneTextKey',
-		  '_anchorSceneContentText','_anchorSceneContentVisibleText','_anchorSceneMessageHasContentToolUse',
+		  '_anchorSceneContentText','_anchorSceneContentVisibleText','_anchorSceneMessageHasContentToolUse','_anchorSceneMessageShowsTextInline',
           '_anchorSceneFinalAnswerText',
 		  '_anchorSceneSafePayload','_anchorSceneToolId','_anchorSceneToolName',
 	  '_anchorSceneToolArgs','_anchorSceneContentTool','_anchorSceneStringPayload','_anchorSceneRowBase',
