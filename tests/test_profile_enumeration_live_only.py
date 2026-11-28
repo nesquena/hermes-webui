@@ -82,6 +82,27 @@ def test_fast_path_skips_tombstoned_and_markerless_dirs(tmp_path, monkeypatch):
     assert "shellprof" not in names
 
 
+def test_fast_path_does_not_list_profiles_default_dir_twice(tmp_path, monkeypatch):
+    from api import profiles as webui_profiles
+    import hermes_cli.profiles as upstream
+
+    home, profiles, live, ghost, shell = _make_homes(tmp_path)
+    dup = profiles / "default"
+    dup.mkdir()
+    (dup / "config.yaml").write_text("model: z\n", encoding="utf-8")
+    monkeypatch.setattr(upstream, "_get_default_hermes_home", lambda: home)
+    monkeypatch.setattr(upstream, "_get_profiles_root", lambda: profiles)
+    webui_profiles._invalidate_list_profiles_cache()
+
+    rows = webui_profiles._build_profile_rows_fast()
+
+    # Only the default row is asserted on: whether marker-less homes are also
+    # listed depends on the installed Agent exporting the identity helper.
+    defaults = [row for row in rows if row["name"] == "default"]
+    assert len(defaults) == 1
+    assert defaults[0]["path"] == str(home)
+
+
 def test_cron_read_predicate_skips_non_live_named_homes(tmp_path):
     """`/api/crons` gates every home with this predicate before calling list_jobs()."""
     from api import profiles as webui_profiles

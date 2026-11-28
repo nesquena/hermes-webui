@@ -3111,10 +3111,16 @@ def _build_profile_rows_fast() -> list | None:
     # fast path (a None return drops the listing to the slow alias-scanning
     # path on every request). When a helper is absent, skip only the check it
     # would have performed — matching the producer that is actually installed.
+    # Each helper is imported on its own: some Agent builds export only one of
+    # the two, and a single combined import would lose the one that exists.
     try:
-        from hermes_cli.profiles import named_profile_has_identity, named_profile_is_deleted
+        from hermes_cli.profiles import named_profile_has_identity
     except Exception:
-        named_profile_has_identity = named_profile_is_deleted = None
+        named_profile_has_identity = None
+    try:
+        from hermes_cli.profiles import named_profile_is_deleted
+    except Exception:
+        named_profile_is_deleted = None
 
     def _row(home: Path, name: str, is_default: bool) -> dict:
         try:
@@ -3167,6 +3173,9 @@ def _build_profile_rows_fast() -> list | None:
             try:
                 if not entry.is_dir():
                     continue
+                if entry.name == 'default':
+                    # The base home is already listed above as 'default'.
+                    continue
                 if not _UPSTREAM_PROFILE_ID_RE.match(entry.name):
                     continue
                 # Upstream `_iter_named_profile_dirs()` lists a dir as a profile only when it
@@ -3182,7 +3191,9 @@ def _build_profile_rows_fast() -> list | None:
                 if named_profile_is_deleted is not None and named_profile_is_deleted(entry):
                     continue
                 rows.append(_row(entry, entry.name, False))
-            except OSError:
+            except Exception as exc:
+                # Skip only this entry, but leave a trace of why it is missing.
+                logger.debug("Skipping profile dir %s in fast listing: %s", entry.name, exc)
                 continue
 
     return rows
