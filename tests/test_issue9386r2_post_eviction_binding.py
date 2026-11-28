@@ -41,10 +41,22 @@ def _reset_identity_record():
 
 
 class _FakeEnv:
-    """Terminal environment stand-in that records its teardown calls."""
+    """Terminal environment stand-in that records its teardown calls.
 
-    def __init__(self, label="env"):
+    ``env_type`` and the endpoint fields mirror what ``_create_environment`` stamps on every
+    environment it builds, so a stand-in can carry the creation evidence a real backend exposes.
+    """
+
+    def __init__(self, label="env", *, env_type=None, host=None, user=None, port=None):
         self.label = label
+        if env_type is not None:
+            self.env_type = env_type
+        if host is not None:
+            self.host = host
+        if user is not None:
+            self.user = user
+        if port is not None:
+            self.port = port
         self.cleanup_calls = 0
         self.stop_calls = 0
         self.terminate_calls = 0
@@ -162,7 +174,7 @@ def test_requesting_backend_binds_its_own_new_environment_without_churn(monkeypa
     streaming._invalidate_stale_terminal_environments(identity_a)
     assert "default" not in environments
 
-    created_a = _FakeEnv("ssh-a-created")
+    created_a = _FakeEnv("ssh-a-created", env_type="ssh", host="host-a", user="root", port=22)
     environments["default"] = created_a
 
     streaming._invalidate_stale_terminal_environments(identity_a)

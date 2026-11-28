@@ -14282,9 +14282,16 @@ _TERMINAL_BACKEND_IDENTITY_FIELDS: tuple[str, ...] = (
     'TERMINAL_MODAL_IMAGE',
     'TERMINAL_DAYTONA_IMAGE',
 )
+_TERMINAL_BACKEND_IDENTITY_DEFAULTS: dict[str, str] = {
+    'TERMINAL_SSH_PORT': '22',
+}
 
-_TERMINAL_ENV_IDENTITY_BY_KEY: dict[str, tuple[object | None, tuple[str, ...] | None]] = {}
-# Record format: (exact_environment_object_or_None, identity_or_None).
+_TERMINAL_ENV_IDENTITY_BY_KEY: dict[
+    str,
+    tuple[object | None, tuple[str, ...] | None]
+    | tuple[object | None, tuple[str, ...] | None, tuple[tuple[str, ...], ...]],
+] = {}
+# Record format: (exact_environment_object_or_None, identity_or_None, claims_tuple).
 # A None object slot represents a pending expectation for the backend that last displaced
 # an environment under that cache key, awaiting binding upon recreation.
 _TERMINAL_ENV_IDENTITY_LOCK = threading.Lock()
@@ -14361,12 +14368,16 @@ def _terminal_environment_creator_state(
         else:
             return 'unknown'
 
-        if len(creator_id) != len(req_id):
+        if len(creator_id) != len(req_id) or len(creator_id) != len(_TERMINAL_BACKEND_IDENTITY_FIELDS):
             return 'unknown'
 
         has_unknown = False
-        for c_val, r_val in zip(creator_id, req_id, strict=True):
+        for field, c_val, r_val in zip(_TERMINAL_BACKEND_IDENTITY_FIELDS, creator_id, req_id, strict=True):
             if r_val == '':
+                effective_default = _TERMINAL_BACKEND_IDENTITY_DEFAULTS.get(field, '')
+                if effective_default != '' and c_val != '':
+                    if c_val != effective_default:
+                        return 'mismatch'
                 continue
             if c_val != '':
                 if c_val != r_val:
@@ -14420,30 +14431,59 @@ def _invalidate_stale_terminal_environments(identity: tuple[str, ...] | dict | N
                 # An absent cache entry leaves a pending expectation for the requesting backend
                 # so its own next creation can be bound without falling back to first-sight adoption.
                 with _TERMINAL_ENV_IDENTITY_LOCK:
-                    _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (None, identity)
+                    entry = _TERMINAL_ENV_IDENTITY_BY_KEY.get(key)
+                    if isinstance(entry, tuple) and len(entry) >= 2 and entry[0] is not None:
+                        claims = (identity,)
+                    else:
+                        if isinstance(entry, tuple) and len(entry) >= 3 and isinstance(entry[2], (tuple, list)):
+                            prev_claims = tuple(entry[2])
+                        elif isinstance(entry, tuple) and len(entry) >= 2 and entry[1] is not None:
+                            prev_claims = (entry[1],)
+                        else:
+                            prev_claims = ()
+                        new_claims = list(prev_claims)
+                        if identity not in new_claims:
+                            new_claims.append(identity)
+                        claims = tuple(new_claims)
+                    _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (None, identity, claims)
                 continue
 
             with _TERMINAL_ENV_IDENTITY_LOCK:
                 if key not in _TERMINAL_ENV_IDENTITY_BY_KEY:
                     # Adopting the current identity on first sight preserves any pre-existing
                     # environment already running for the active backend while establishing a baseline.
-                    _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (inspected, identity)
+                    _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (inspected, identity, ())
                     continue
                 entry = _TERMINAL_ENV_IDENTITY_BY_KEY[key]
-                if isinstance(entry, tuple) and len(entry) == 2:
-                    recorded_env, recorded_identity = entry
+                if isinstance(entry, tuple) and len(entry) >= 2:
+                    recorded_env = entry[0]
+                    recorded_identity = entry[1]
+                    if len(entry) >= 3 and isinstance(entry[2], (tuple, list)):
+                        claims = tuple(entry[2])
+                    elif recorded_identity is not None:
+                        claims = (recorded_identity,)
+                    else:
+                        claims = ()
                 else:
-                    recorded_env, recorded_identity = None, None
+                    recorded_env, recorded_identity, claims = None, None, ()
 
                 if recorded_env is None:
-                    # Decide ownership from creator evidence rather than request expectation (#9386 round 3).
+                    # Decide ownership from creator evidence rather than request expectation (#9386 round 3 & 4).
                     creator_state = _terminal_environment_creator_state(inspected, identity)
-                    if (
-                        (creator_state == 'match' or (creator_state == 'unknown' and recorded_identity == identity))
-                        and active_envs.get(key) is inspected
-                    ):
-                        _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (inspected, identity)
-                        continue
+                    if creator_state == 'match':
+                        if active_envs.get(key) is inspected:
+                            _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (inspected, identity, ())
+                            continue
+                    elif creator_state == 'mismatch':
+                        pass
+                    elif creator_state == 'unknown':
+                        if (
+                            len(claims) == 1
+                            and claims[0] == identity
+                            and active_envs.get(key) is inspected
+                        ):
+                            _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (inspected, identity, ())
+                            continue
                     # Otherwise the object belongs to another backend or remains unverified; evict it.
                 elif recorded_env is inspected and recorded_identity == identity:
                     continue
@@ -14464,13 +14504,13 @@ def _invalidate_stale_terminal_environments(identity: tuple[str, ...] | dict | N
                     evicted_keys.append(key)
                     removed_objects.append(inspected)
                     with _TERMINAL_ENV_IDENTITY_LOCK:
-                        _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (None, identity)
+                        _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (None, identity, (identity,))
                 else:
                     with _TERMINAL_ENV_IDENTITY_LOCK:
                         if current is None:
-                            _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (None, identity)
+                            _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (None, identity, (identity,))
                         else:
-                            _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (current, None)
+                            _TERMINAL_ENV_IDENTITY_BY_KEY[key] = (current, None, ())
 
         # Cleanup runs outside all locks to prevent blocking concurrent turns or deadlocking with teardown.
         cleaned_ids: set[int] = set()
