@@ -2760,48 +2760,23 @@ $('btnExportJSON').onclick=()=>{
   a.download=`hermes-${S.session.session_id}.json`;a.click();
 };
 $('btnShareSession').onclick=async()=>{
-  if(!S.session) return;
+  // Bind the action to the conversation on screen at click time. The shared helper
+  // never reads S.session to pick its target, and requireActive drops the dialog's
+  // answer if another conversation was opened while the dialog was up.
+  const session=S.session;
+  if(!session) return;
   try{
-    const existing=(S.session&&S.session.share_token)?new URL(`/share/${encodeURIComponent(S.session.share_token)}`,location.origin).href:null;
-    if(existing){
-      const reuse=await showConfirmDialog({
-        title:t('share_session'),
-        message:t('share_session_existing_confirm'),
-        confirmLabel:t('share_session_copy_existing'),
-        cancelLabel:t('share_session_refresh_snapshot'),
-      });
-      if(reuse){
-        await _copyText(existing);
-        showToast(t('share_session_link_copied'));
-        window.open(existing,'_blank','noopener');
-        return;
-      }
-    }
-    const res=await api('/api/share/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
-    if(res&&res.session) S.session=res.session;
-    const href=new URL(String(res&&res.share&&res.share.url||''),location.origin).href;
-    await _copyText(href);
-    showToast(t('share_session_created'));
-    if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
-    window.open(href,'_blank','noopener');
+    await _createOrRefreshSessionShare(session,{requireActive:true});
   }catch(err){
     showToast(t('share_session_failed')+(err&&err.message?err.message:String(err||'')),4000,'error');
   }
 };
 $('btnStopSharingSession').onclick=async()=>{
-  if(!S.session||!S.session.share_token) return;
-  const ok=await showConfirmDialog({
-    title:t('stop_sharing_session'),
-    message:t('stop_sharing_session_confirm'),
-    confirmLabel:t('stop_sharing_session'),
-    danger:true,
-  });
-  if(!ok) return;
+  // Bound to the conversation on screen at click time, like Share above.
+  const session=S.session;
+  if(!session||!session.share_token) return;
   try{
-    const res=await api('/api/share/revoke',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
-    if(res&&res.session) S.session=res.session;
-    showToast(t('share_session_revoked'));
-    if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
+    await _revokeSessionShare(session,{requireActive:true});
   }catch(err){
     showToast(t('share_session_revoke_failed')+(err&&err.message?err.message:String(err||'')),4000,'error');
   }
@@ -3226,6 +3201,8 @@ document.addEventListener('keydown',async e=>{
     const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
     if(isText) return;
     e.preventDefault();
+    // A shared app dialog is modal: never open a new chat underneath it.
+    if(typeof _isAppDialogOpen==='function'&&_isAppDialogOpen()) return;
     // If the current session has no messages AND nothing is in flight, just focus
     // the composer rather than creating another empty session that will clutter
     // the sidebar list (#1171). See the matching guard in $('btnNewChat').onclick
@@ -3327,12 +3304,25 @@ $('msg').addEventListener('paste',e=>{
     const pasteTs=Date.now();
     const files=imageItems.map((i,idx)=>{
       const blob=i.getAsFile();
+      // A clipboard can advertise an image item whose data never materialized
+      // (delayed-render screenshot tools, cloud clipboards, some browser
+      // implementations). Two shapes occur in practice: `getAsFile()` returns
+      // null, or it returns a zero-length Blob — real browsers do the latter
+      // for a declared image with no payload. `new File([null], ...)` and
+      // `new File([emptyBlob], ...)` both yield a broken attachment whose name
+      // still looks like a screenshot, so skip both rather than fabricate one.
+      // A legitimate image is never zero bytes.
+      if(!blob||blob.size===0)return null;
       const ext=i.type.split('/')[1]||'png';
       const suffix=imageItems.length>1?`-${idx+1}`:'';
       return new File([blob],`screenshot-${pasteTs}${suffix}.${ext}`,{type:i.type});
-    });
-    addFiles(files);
-    setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));
+    }).filter(Boolean);
+    if(files.length){
+      addFiles(files);
+      setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));
+    }else{
+      setStatus(t('image_paste_failed'),'error');
+    }
     return;
   }
   const plainText=e.clipboardData?.getData('text/plain')||'';
