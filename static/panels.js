@@ -5600,7 +5600,14 @@ async function toggleSkill(name, currentlyEnabled, owner) {
     }
   } catch(e) {
     showToast(t('skill_toggle_failed') + e.message, 'error');
-    if (e && e.status === 409) { _skillsData = null; await loadSkills(); }  // #9077: reload the stale list
+    if (e?.status === 409) {
+      let conflict;
+      try { conflict = JSON.parse(e.body); } catch {}
+      if (conflict?.code === 'profile_mismatch') {
+        _skillsData = null;
+        await loadSkills();
+      }
+    }
   }
 }
 
