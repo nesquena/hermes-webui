@@ -1,0 +1,114 @@
+"""Regression coverage for the four 2026-11-18 #8668 review findings.
+
+1. `_restoreSettledSession()` painted the recovered transcript while `S.busy`
+   was still true, hiding Edit/Regenerate.
+2. A machine with Playwright but no Chromium exited 1 (driver error) instead
+   of the documented skip (exit 2).
+3. The apperror gate never asserted the previous answer survived and let the
+   error-frame wait expire silently.
+4. Both DOM-outcome tests launched the full browser suite.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[1]
+MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+DRIVER_PATH = REPO / "tests" / "browser_8643_busy_message_actions.py"
+DRIVER_SOURCE = DRIVER_PATH.read_text(encoding="utf-8")
+TEST_SOURCE = (REPO / "tests" / "test_issue8643_busy_message_actions.py").read_text(
+    encoding="utf-8"
+)
+
+
+def _load_driver():
+    spec = importlib.util.spec_from_file_location(
+        "browser_8643_busy_message_actions_under_test", DRIVER_PATH
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_recovered_session_render_clears_busy_first():
+    start = MESSAGES_JS.index("async function _restoreSettledSession")
+    end = MESSAGES_JS.index("\n  function _handleStreamError", start)
+    body = MESSAGES_JS[start:end]
+    busy_at = body.index("S.busy=false;")
+    render_at = body.index("renderMessages({preserveScroll:true})")
+    assert busy_at < render_at, (
+        "the recovery render must paint from the idle state; S.busy is still "
+        "true here and renderMessages derives Edit/Regenerate from it"
+    )
+
+
+@pytest.mark.parametrize(
+    ("message", "exit_code"),
+    [
+        ("BrowserType.launch: Executable doesn't exist at /example/chromium", 2),
+        ("BrowserType.launch: Timeout 30000ms exceeded", 1),
+        ("BrowserType.launch: Chromium crashed at startup", 1),
+    ],
+)
+def test_chromium_launch_errors_distinguish_missing_executable(monkeypatch, capsys, message, exit_code):
+    from contextlib import nullcontext
+
+    driver = _load_driver()
+
+    def fail_launch(**_kwargs):
+        raise RuntimeError(message)
+
+    fake_api = types.ModuleType("playwright.sync_api")
+    browser = types.SimpleNamespace(launch=fail_launch)
+    fake_api.sync_playwright = lambda: nullcontext(types.SimpleNamespace(chromium=browser))
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_api)
+    monkeypatch.setattr(driver, "_start_webui_server", lambda *_: (None, None, None, ""))
+
+    assert driver.main() == exit_code
+    stderr = capsys.readouterr().err
+    if exit_code == 2:
+        assert "chromium executable is unavailable" in stderr
+    else:
+        assert message in stderr and "GATE FAILED" in stderr
+
+
+@pytest.mark.parametrize(
+    ("row", "unexpected"), [("errorText", "wait expired"), ("previousAnswerText", "previous answer is gone")],
+)
+def test_apperror_gate_requires_the_text_in_each_owning_row(row, unexpected):
+    driver = _load_driver()
+    state = {
+        "previousAnswerText": driver.APPERROR_PREVIOUS_ANSWER_PROSE,
+        "errorText": driver.APPERROR_FRAME["message"],
+        "copyCount": 2,
+        "busy": False,
+        "regenerate": [driver.APPERROR_ERROR_ASSISTANT_IDX],
+        "edit": [driver.APPERROR_PENDING_USER_IDX],
+    }
+    result = {"renderBusy": [True, False], "afterError": state}
+    assert driver._failures_apperror_terminal(result) == []
+    # The wrong row is still nonempty and the controls (including Copy) are
+    # unchanged. A page-wide text or button-count check would not catch this.
+    state[row] = "Unrelated assistant prose"
+    problems = driver._failures_apperror_terminal(result)
+    assert len(problems) == 1 and unexpected in problems[0], problems
+
+
+def test_browser_suite_is_launched_once():
+    assert TEST_SOURCE.count("result = _run_driver()") == 1, (
+        "the browser suite must run once, from the module-scoped fixture; the "
+        "per-test calls repeated the whole server + Chromium run"
+    )
+    assert "@pytest.fixture(scope=\"module\")" in TEST_SOURCE
+    assert "def test_busy_turn_paints_no_dead_action_buttons(driver_result)" in TEST_SOURCE
+    assert (
+        "def test_rejected_regeneration_restores_the_action_buttons(driver_result)"
+        in TEST_SOURCE
+    )

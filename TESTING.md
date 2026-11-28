@@ -489,6 +489,17 @@ Run it locally with
 `python tests/browser_file_tree_keyboard.py`; add `--screenshots DIR` to write
 the Files tab with keyboard focus on a row at 1440x900 and 390x844.
 
+## Running-turn message actions (#8643)
+
+With Playwright and Chromium installed, run
+`python tests/browser_8643_busy_message_actions.py --screenshots <dir>`.
+The isolated server and real page cover 1440×900 desktop, 820×900 narrow,
+and 390×844 with touch and no hover. Use the same driver, viewport and fixture
+on both revisions for before/after evidence. It controls replies at the HTTP
+boundary, not a live provider. Rejected and error terminals, disconnect recovery,
+and a sidebar-first recovery that keeps the same message count must restore
+Edit and Regenerate without a manual reload.
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic

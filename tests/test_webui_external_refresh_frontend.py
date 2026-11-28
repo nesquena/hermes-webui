@@ -4,6 +4,8 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+import pytest
+
 
 SESSIONS_JS = Path("static/sessions.js").read_text(encoding="utf-8")
 UI_JS = Path("static/ui.js").read_text(encoding="utf-8")
@@ -68,7 +70,7 @@ def test_active_session_external_refresh_uses_metadata_then_force_reload():
     assert "function ensureActiveSessionExternalRefreshPoll()" in SESSIONS_JS
     assert "async function refreshActiveSessionIfExternallyUpdated(reason)" in SESSIONS_JS
     assert "messages=0&resolve_model=0" in SESSIONS_JS
-    assert "if(remoteCount !== localCount)" in SESSIONS_JS
+    assert "if(remoteCount !== localCount || strandedPrompt)" in SESSIONS_JS
     assert "else if(remoteLast > localLast)" in SESSIONS_JS
     assert "if(S.busy || S.activeStreamId) return;" in SESSIONS_JS
     assert "document.hidden" in SESSIONS_JS
@@ -83,12 +85,11 @@ def test_active_session_external_refresh_skips_destructive_reload_on_metadata_on
     condition called `loadSession(..., {force:true})` for that metadata-only
     bump; `loadSession(force)` clears S.messages before async message fetches,
     so the whole transcript visibly disappeared and reappeared with no new
-    content. Only a message_count CHANGE should force-reload the transcript;
-    timestamp-only bumps update local metadata and refresh the lightweight
-    sidebar list.
+    content. Without separate evidence of a stranded prompt, only a count
+    change reloads the transcript; timestamp-only bumps refresh metadata.
     """
     assert "remoteCount > localCount || remoteLast > localLast" not in SESSIONS_JS
-    assert "if(remoteCount !== localCount){" in SESSIONS_JS
+    assert "if(remoteCount !== localCount || strandedPrompt){" in SESSIONS_JS
     assert "await loadSession(sid, {force:true, externalRefreshReason:reason||'poll', keepStaleUntilLoaded:_keepStaleUntilLoaded});" in SESSIONS_JS
     assert "}else if(remoteLast > localLast){" in SESSIONS_JS
     assert "S.session.last_message_at = remoteLast" in SESSIONS_JS
@@ -106,11 +107,59 @@ def test_active_session_external_refresh_force_reloads_on_count_decrease():
     re-syncs.
     """
     # The force-reload branch must trigger on ANY count change, not just growth.
-    assert "if(remoteCount !== localCount){" in SESSIONS_JS
+    assert "if(remoteCount !== localCount || strandedPrompt){" in SESSIONS_JS
     assert "if(remoteCount > localCount){" not in SESSIONS_JS
     # The metadata-only branch must be gated on an unchanged count (the else of
     # the count-change check), never reachable when the count differs.
     assert "}else if(remoteLast > localLast){" in SESSIONS_JS
+
+
+@pytest.mark.parametrize(
+    ("reason", "pending", "remote", "next_sid", "reload"),
+    [
+        ("idle-reconcile", True, {}, "current", True),
+        ("idle-reconcile", False, {}, "current", False),
+        ("idle-reconcile", True, {"active_stream_id": "new-stream"}, "current", False),
+        ("idle-reconcile", True, {"session_id": "other"}, "current", False),
+        ("idle-reconcile", True, {}, "other", False),
+        ("poll", True, {}, "current", False),
+    ],
+    ids=["stranded", "settled", "running", "foreign-metadata", "switched", "poll"],
+)
+def test_same_count_recovery_replaces_only_the_stranded_current_prompt(reason, pending, remote, next_sid, reload):
+    functions = "\n".join(
+        _function_body(SESSIONS_JS, name)
+        for name in ("_isServerIdleSessionRow", "refreshActiveSessionIfExternallyUpdated")
+    )
+    fixture = json.dumps({"reason": reason, "pending": pending, "remote": remote, "nextSid": next_sid})
+    result = _run_node(f"const fixture = {fixture};\n" + functions + r"""
+const reloads = [];
+const S = {
+  session: {session_id: 'current', message_count: 4},
+  messages: [{role: 'user', _pending: fixture.pending}],
+  busy: false, activeStreamId: null,
+};
+let _activeSessionExternalRefreshInFlight = false, _loadingSessionId = null;
+function _isExternalSession() { return true; }
+function _drainSessionUpdatedPendingCount() {}
+async function api() {
+  await Promise.resolve();
+  S.session.session_id = fixture.nextSid;
+  return {session: {session_id: 'current', message_count: 4, ...fixture.remote}};
+}
+async function loadSession(sid, opts) { reloads.push({sid, ...opts}); }
+(async () => {
+  const outcome = await refreshActiveSessionIfExternallyUpdated(fixture.reason);
+  process.stdout.write(JSON.stringify({outcome, reloads}));
+})();
+""")
+    assert result == {
+        "outcome": "reloaded" if reload else "skipped" if next_sid != "current" else "unchanged",
+        "reloads": [{
+            "sid": "current", "force": True, "externalRefreshReason": "idle-reconcile",
+            "keepStaleUntilLoaded": True,
+        }] if reload else [],
+    }
 
 
 def test_webui_source_never_counts_as_external_session():
