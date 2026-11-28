@@ -3010,6 +3010,8 @@ async function loadSession(sid){
     if (currentSid && currentSid !== sid && typeof closeOtherLiveStreams === 'function') {
       closeOtherLiveStreams(sid);
     }
+    // Invalidate any in-flight older-page continuation before the lock is released.
+    if (typeof _bumpMessagesGeneration === 'function') _bumpMessagesGeneration();
     _loadingOlder = false;
     const _msgInner = $('msgInner');
     if (_msgInner && currentSid !== sid) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
@@ -4470,6 +4472,8 @@ async function _ensureMessagesLoaded(sid, opts) {
     _pendingCarryForwardSnapshot = null;
   }
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
+  // Poison any continuation started during the api() round-trip before publishing fresh transcript.
+  if (typeof _bumpMessagesGeneration === 'function') _bumpMessagesGeneration();
   S.messages = msgs;
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.
