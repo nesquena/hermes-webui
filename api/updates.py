@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+import http.client
 import urllib.error
 import urllib.request
 from collections import OrderedDict
@@ -1037,17 +1038,38 @@ def _read_agent_source_version(agent_dir: Path) -> str | None:
 
 
 def _gateway_health_base_url() -> str:
-    """Return the configured/default Hermes Agent gateway base URL."""
-    raw = (
-        os.environ.get('GATEWAY_HEALTH_URL')
-        or os.environ.get('HERMES_GATEWAY_HEALTH_URL')
-        or 'http://hermes-agent:8642'
-    ).strip()
-    if raw.endswith('/health/detailed'):
-        raw = raw[: -len('/health/detailed')]
-    elif raw.endswith('/health'):
-        raw = raw[: -len('/health')]
-    return raw.rstrip('/')
+    """Return the configured/default Hermes Agent gateway base URL.
+
+    Falls back through the same env-var chain used by agent_health.py
+    (#6150): GATEWAY_HEALTH_URL → HERMES_GATEWAY_HEALTH_URL →
+    HERMES_API_URL → HERMES_WEBUI_GATEWAY_BASE_URL → Docker default.
+
+    Each candidate is stripped *before* the precedence decision and a blank
+    one is skipped, so a whitespace-only high-priority variable cannot shadow
+    a valid lower-priority URL (or the Docker default) and leave an empty base
+    with no probe at all (#6289, mirrors ``api.agent_health``). The health-path
+    suffix list is the canonical one, so a gateway configured at
+    ``.../v1/health`` or ``.../status`` is not probed at ``/status/health``.
+    """
+    raw = ''
+    for var in (
+        'GATEWAY_HEALTH_URL',
+        'HERMES_GATEWAY_HEALTH_URL',
+        'HERMES_API_URL',
+        'HERMES_WEBUI_GATEWAY_BASE_URL',
+    ):
+        candidate = os.environ.get(var, '').strip()
+        if candidate:
+            raw = candidate
+            break
+    if not raw:
+        raw = 'http://hermes-agent:8642'
+    base = raw.rstrip('/')
+    for suffix in ('/health/detailed', '/health', '/v1/health', '/status'):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    return base.rstrip('/')
 
 
 def _version_from_gateway_health_payload(payload: object) -> str | None:
@@ -1066,24 +1088,261 @@ def _version_from_gateway_health_payload(payload: object) -> str | None:
     return None
 
 
-def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | None:
-    """Best-effort cross-container gateway API fallback for Agent version."""
-    base = _gateway_health_base_url()
-    if not base:
-        return None
-    parsed = urlparse(base)
-    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
-        return None
+_GATEWAY_AGENT_VERSION_DEADLINE = 1.5
+_GATEWAY_AGENT_VERSION_CHUNK_SIZE = 1
+_GATEWAY_AGENT_VERSION_MAX_BYTES = 8192
+
+
+def _cap_socket_timeout(resp: object, timeout_val: float) -> None:
+    """Cap the socket timeout of ``resp`` so one read cannot outlive the budget.
+
+    ``urlopen(timeout=...)`` only sets the timeout once, at connect time; a
+    server that trickles one byte at a time keeps every individual read under
+    that timeout and the response never ends.  Re-arming the timeout with the
+    budget that is actually left is what makes the deadline binding on reads.
+    Responses without an inspectable socket (test doubles, file-like objects)
+    are left alone.
+    """
+    try:
+        sock = getattr(resp, 'sock', None)
+        if sock is None:
+            raw = getattr(getattr(resp, 'fp', None), 'raw', None)
+            sock = getattr(raw, '_sock', None)
+        if sock is None:
+            sock = getattr(getattr(resp, 'fp', None), '_sock', None)
+        if sock is not None and hasattr(sock, 'settimeout'):
+            sock.settimeout(max(0.001, timeout_val))
+    except Exception:
+        pass
+
+
+def _probe_gateway_version_worker(
+    base: str,
+    timeout: float,
+    deadline: float,
+) -> str | None:
+    """Perform the blocking gateway probe across /health and /health/detailed.
+
+    Executed inside a self-terminating daemon worker thread so slow socket
+    operations (connection, status line, header trickles) cannot stretch the
+    probe past _GATEWAY_AGENT_VERSION_DEADLINE (#6289 r6).
+    """
     for path in ('/health', '/health/detailed'):
+        now = time.monotonic()
+        if now >= deadline:
+            return None
+        remaining = deadline - now
+        req_timeout = min(timeout, remaining)
         try:
-            with urllib.request.urlopen(f'{base}{path}', timeout=timeout) as resp:
-                payload = json.loads(resp.read().decode('utf-8'))
-        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
+            with urllib.request.urlopen(f'{base}{path}', timeout=req_timeout) as resp:
+                chunks: list[bytes] = []
+                total_bytes = 0
+                while True:
+                    now = time.monotonic()
+                    if now >= deadline:
+                        return None
+                    rem = deadline - now
+                    # Re-arm the socket timeout with the budget that is left
+                    # before every single-byte read, so one read can no
+                    # longer perform several receives, each allowed the
+                    # full per-operation timeout (#6289).
+                    _cap_socket_timeout(resp, min(timeout, rem))
+                    try:
+                        chunk = resp.read(_GATEWAY_AGENT_VERSION_CHUNK_SIZE)
+                    except TypeError:
+                        # A caller-supplied file-like object may expose
+                        # read() without a size argument; that call reads to
+                        # EOF by contract, and the capped socket timeout
+                        # plus the deadline check still bound it.
+                        whole = resp.read()
+                        if whole:
+                            chunks.append(whole)
+                        break
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    total_bytes += len(chunk)
+                    if total_bytes > _GATEWAY_AGENT_VERSION_MAX_BYTES:
+                        return None
+                if time.monotonic() >= deadline:
+                    return None
+                payload = json.loads(b''.join(chunks).decode('utf-8'))
+        except (
+            OSError,
+            urllib.error.URLError,
+            TimeoutError,
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            http.client.HTTPException,
+            ValueError,
+        ):
             continue
         version = _version_from_gateway_health_payload(payload)
         if version:
             return version
     return None
+
+
+class _GatewayProbeWorker:
+    """Tracks a single background probe thread for one gateway base URL."""
+
+    def __init__(self, base: str, timeout: float, deadline: float) -> None:
+        self.base = base
+        self.timeout = timeout
+        self.deadline = deadline
+        self.done = threading.Event()
+        self.result: str | None = None
+        self.error: BaseException | None = None
+        self.abandoned = False
+        self.thread = threading.Thread(
+            target=self._run,
+            name=f"gateway-probe-{base}",
+            daemon=True,
+        )
+
+    def _run(self) -> None:
+        try:
+            self.result = _probe_gateway_version_worker(
+                self.base, self.timeout, self.deadline
+            )
+        except BaseException as exc:
+            self.error = exc
+        finally:
+            self.done.set()
+
+    def start(self) -> None:
+        self.thread.start()
+
+
+_gateway_probe_workers: dict[str, _GatewayProbeWorker] = {}
+
+
+def _detect_agent_version_from_gateway_health(
+    timeout: float = 0.75,
+    base_url: str | None = None,
+) -> str | None:
+    """Best-effort cross-container gateway API fallback for Agent version.
+
+    Bounded by a total time budget (_GATEWAY_AGENT_VERSION_DEADLINE) shared
+    across probe paths (/health and /health/detailed).  The blocking network
+    call runs in a self-terminating daemon thread, bounding header parsing,
+    connect latency, and slow-trickle responses to at most the remaining
+    budget (#6289 r6).  ``base_url`` lets the caller pin the endpoint it
+    already resolved for the cache key, so the URL that is probed is always
+    the URL the result is published under.
+    """
+    try:
+        base = base_url if base_url is not None else _gateway_health_base_url()
+        if not base:
+            return None
+        parsed = urlparse(base)
+        if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+            return None
+        deadline = time.monotonic() + _GATEWAY_AGENT_VERSION_DEADLINE
+
+        with _gateway_version_lock:
+            worker = _gateway_probe_workers.get(base)
+            if worker is None or not worker.thread.is_alive():
+                worker = _GatewayProbeWorker(base, timeout, deadline)
+                _gateway_probe_workers[base] = worker
+                worker.start()
+
+        rem = max(0.0, deadline - time.monotonic())
+        finished = worker.done.wait(timeout=rem)
+        if not finished:
+            worker.abandoned = True
+            return None
+
+        if worker.error is not None:
+            raise worker.error
+
+        if worker.abandoned:
+            return None
+
+        return worker.result
+    except Exception:
+        return None
+
+
+# Cache so /api/settings doesn't block on every page load when the gateway is
+# unreachable (#6150, #6289).  Negative results (None) are cached with a
+# shorter TTL so a recovering gateway is picked up promptly.
+#
+# The cache maps each resolved gateway base URL (``_gateway_health_base_url``)
+# to ONE immutable ``(value, completed_at)`` entry.  A refresh publishes a new
+# mapping in a single assignment, so a lock-free reader that captured the old
+# entry can never pair one generation's value with another's timestamp, and a
+# gateway switch never serves the previous gateway's version (#6289).
+_GATEWAY_AGENT_VERSION_CACHE: dict[str, tuple[str | None, float]] = {}
+_GATEWAY_AGENT_VERSION_TTL = 30.0
+_GATEWAY_AGENT_VERSION_NEGATIVE_TTL = 5.0
+# Guards the per-gateway lock table (and the publication step) only; the probe
+# itself runs under the gateway's own lock, so a slow gateway never serializes
+# a caller of a different gateway.
+_gateway_version_lock = threading.Lock()
+_gateway_locks: dict[str, threading.Lock] = {}
+
+
+def _fresh_gateway_version(snapshot: tuple[str | None, float] | None,
+                           now: float) -> tuple[bool, str | None]:
+    """Return ``(is_fresh, cached_value)`` from a SINGLE consult of ``snapshot``.
+
+    The fast path may consult a captured generation only once: a second read
+    could pair one generation's value with another's completed_at (#6289).
+    """
+    if snapshot is None:
+        return (False, None)
+    cached, cached_at = snapshot
+    ttl = (
+        _GATEWAY_AGENT_VERSION_NEGATIVE_TTL
+        if cached is None
+        else _GATEWAY_AGENT_VERSION_TTL
+    )
+    if bool(cached_at) and (now - cached_at) < ttl:
+        return (True, cached)
+    return (False, None)
+
+
+def _gateway_probe_lock(key: str) -> threading.Lock:
+    """Return the single-flight lock for one resolved gateway base URL."""
+    with _gateway_version_lock:
+        lock = _gateway_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _gateway_locks[key] = lock
+        return lock
+
+
+def _cached_agent_version_from_gateway() -> str | None:
+    """Return a cached gateway agent version, refreshing at most once per TTL.
+
+    Keyed by the resolved gateway base URL, so two gateways (or a profile
+    switch that changes the URL) never serve each other's version.  Single
+    flight is per key: concurrent callers of the same gateway produce one
+    probe, and a probe of gateway A never blocks a caller of gateway B (#6289).
+    """
+    global _GATEWAY_AGENT_VERSION_CACHE
+    key = _gateway_health_base_url()
+    now = time.monotonic()
+    fresh, value = _fresh_gateway_version(_GATEWAY_AGENT_VERSION_CACHE.get(key), now)
+    if fresh:
+        return value
+
+    with _gateway_probe_lock(key):
+        # Double-check: another thread may have refreshed while we waited.
+        now = time.monotonic()
+        fresh, value = _fresh_gateway_version(_GATEWAY_AGENT_VERSION_CACHE.get(key), now)
+        if fresh:
+            return value
+
+        result = _detect_agent_version_from_gateway_health(timeout=0.75, base_url=key)
+        entry = (result, time.monotonic())
+        # Publish one entry per gateway in ONE assignment.
+        with _gateway_version_lock:
+            entries = dict(_GATEWAY_AGENT_VERSION_CACHE)
+            entries[key] = entry
+            _GATEWAY_AGENT_VERSION_CACHE = entries
+    return result
 
 
 def _detect_agent_version() -> str:

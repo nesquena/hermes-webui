@@ -10236,6 +10236,16 @@ function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
     : 'No override';
 }
 
+function _agentVersionBadgeText(settings){
+  const s = settings || {};
+  const source = (s.agent_version || 'not detected').toString().trim() || 'not detected';
+  const gateway = s.agent_gateway_version ? s.agent_gateway_version.toString().trim() : '';
+  if(!gateway || gateway === source){
+    return `Agent: ${source}`;
+  }
+  return `Agent: ${source} · gateway ${gateway}`;
+}
+
 async function loadSettingsPanel(){
   try{
     const settings=await api('/api/settings');
@@ -10260,8 +10270,7 @@ async function loadSettingsPanel(){
     }
     const agentBadge = $('settings-agent-version-badge');
     if(agentBadge){
-      const agentVersion = (settings.agent_version || 'not detected').toString().trim() || 'not detected';
-      agentBadge.textContent = `Agent: ${agentVersion}`;
+      agentBadge.textContent = _agentVersionBadgeText(settings);
     }
     // Hydrate appearance controls first so a slow /api/models request
     // cannot overwrite an in-progress theme/skin selection.
