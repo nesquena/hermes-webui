@@ -1,0 +1,364 @@
+"""Focused coverage for the lightweight GET /api/session/turns index."""
+
+from collections import OrderedDict
+from types import SimpleNamespace
+from unittest.mock import patch
+from urllib.parse import urlparse
+
+import time
+
+import pytest
+
+from api import config, models, routes
+from tests.conftest import requires_agent_modules
+
+
+def test_empty_session():
+    assert routes._session_turn_index([]) == {"turns": [], "total_messages": 0}
+
+
+def test_three_turns_have_absolute_indices_and_following_row_counts():
+    messages = [
+        {"role": "user", "content": "one", "timestamp": 1.25},
+        {"role": "assistant", "content": "a"},
+        {"role": "tool", "content": "t"},
+        {"role": "user", "content": "two", "timestamp": 2},
+        {"role": "assistant", "content": "b"},
+        {"role": "user", "content": "three"},
+        {"role": "assistant", "content": "c"},
+        {"role": "tool", "content": "t"},
+    ]
+    result = routes._session_turn_index(messages)
+    assert result["total_messages"] == 8
+    assert result["turns"] == [
+        {"k": 0, "msg_idx": 0, "ts": 1.25, "preview": "one", "n_msgs": 2},
+        {"k": 1, "msg_idx": 3, "ts": 2.0, "preview": "two", "n_msgs": 1},
+        {"k": 2, "msg_idx": 5, "ts": None, "preview": "three", "n_msgs": 2},
+    ]
+
+
+def test_hidden_user_rows_do_not_start_turns_but_keep_absolute_indices():
+    hidden = {"role": "user", "content": "hidden", "_source": "delegation_wakeup"}
+    messages = [
+        {"role": "user", "content": "visible"},
+        hidden,
+        {"role": "assistant", "content": "answer"},
+        {"role": "user", "content": "next"},
+    ]
+    result = routes._session_turn_index(messages)
+    assert [(t["msg_idx"], t["n_msgs"]) for t in result["turns"]] == [(0, 2), (3, 0)]
+
+
+def test_rows_before_first_visible_user_are_ignored():
+    messages = [
+        {"role": "assistant", "content": "leading"},
+        {"role": "user", "content": "hidden", "_source": "delegation_wakeup"},
+        {"role": "user", "content": "first"},
+    ]
+    assert routes._session_turn_index(messages)["turns"] == [
+        {"k": 0, "msg_idx": 2, "ts": None, "preview": "first", "n_msgs": 0}
+    ]
+
+
+def test_preview_joins_text_parts_truncates_and_redacts(monkeypatch):
+    monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
+    secret = "sk-" + "a" * 40
+    messages = [
+        {"role": "user", "content": [
+            {"type": "text", "text": "  token\n" + secret},
+            {"type": "image", "source": "ignored"},
+            {"type": "text", "text": "tail"},
+        ]},
+        {"role": "user", "content": "b" * 100},
+    ]
+    turns = routes._session_turn_index(messages)["turns"]
+    assert secret not in turns[0]["preview"]
+    assert turns[0]["preview"].startswith("token sk-aaa...")
+    assert turns[0]["preview"].endswith("tail")
+    assert turns[1]["preview"] == "b" * 80
+
+
+@requires_agent_modules
+@pytest.mark.parametrize("separator", [" ", "\t", "\n"], ids=["space", "tab", "newline"])
+def test_preview_normalizes_bearer_headers_before_redaction(monkeypatch, separator):
+    monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
+    synthetic_bearer = "synthetic-turn-index-bearer-token-1234567890"
+    text = f"Authorization:{separator}Bearer{separator}{synthetic_bearer} trailing text"
+
+    preview = routes._session_turn_index([{"role": "user", "content": text}])["turns"][0]["preview"]
+
+    assert synthetic_bearer not in preview
+    assert preview == routes._redact_text(
+        f"Authorization: Bearer {synthetic_bearer} trailing text"
+    )[:80]
+    assert len(preview) <= 80
+
+
+def test_preview_normalizes_bearer_headers_when_redaction_is_disabled(monkeypatch):
+    monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": False})
+    synthetic_bearer = "synthetic-turn-index-bearer-token-1234567890"
+    text = f"Authorization:\tBearer\n{synthetic_bearer} trailing " + "x" * 100
+
+    preview = routes._session_turn_index([{"role": "user", "content": text}])["turns"][0]["preview"]
+
+    assert preview == (
+        f"Authorization: Bearer {synthetic_bearer} trailing " + "x" * 100
+    )[:80]
+    assert len(preview) <= 80
+
+
+def test_preview_normalizes_and_truncates_ordinary_text():
+    text = "  ordinary\ttext\nwith whitespace  " + "x" * 100
+
+    preview = routes._session_turn_index([{"role": "user", "content": text}])["turns"][0]["preview"]
+
+    assert preview == ("ordinary text with whitespace " + "x" * 100)[:80]
+    assert len(preview) <= 80
+
+
+def test_preview_redactor_sees_raw_then_normalized_text_everywhere(monkeypatch):
+    monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
+    calls = []
+
+    def record_redaction(text):
+        calls.append(text)
+        return text
+
+    monkeypatch.setattr(routes, "_redact_text", record_redaction)
+    raw = "first line\nsecond\tline"
+    preview = routes._session_turn_index([{"role": "user", "content": raw}])["turns"][0]["preview"]
+
+    assert calls == [raw, "first line second line"]
+    assert preview == "first line second line"
+
+
+@pytest.mark.parametrize("prefix_length", [60, 61, 70])
+def test_preview_redacts_complete_credentials_before_truncation(monkeypatch, prefix_length):
+    monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
+    synthetic_access_key = "AKIAIOSFODNN7EXAMPLE"
+    text = "x" * prefix_length + synthetic_access_key + " trailing text"
+
+    preview = routes._session_turn_index([{"role": "user", "content": text}])["turns"][0]["preview"]
+
+    assert preview.startswith("x" * prefix_length + "AKIAIO...")
+    assert len(preview) <= 80
+
+
+@requires_agent_modules
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "password=supersecretvalue-123456",
+        "export password=supersecretvalue-654321",
+        "api_key: supersecretvalue-abcdef",
+    ],
+    ids=["password", "export-password", "api-key-yaml"],
+)
+def test_preview_redacts_line_starting_secrets_across_whitespace_collapse(monkeypatch, assignment):
+    monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
+    secret = assignment.split("=", 1)[-1].split(":", 1)[-1].strip()
+    text = f"first line\n{assignment} trailing text"
+
+    preview = routes._session_turn_index([{"role": "user", "content": text}])["turns"][0]["preview"]
+
+    # Collapsing newlines before redacting defeats line-start-anchored
+    # redactor patterns: the raw text is redacted first, and the normalized
+    # text again, so a later-line secret never reaches the preview.
+    assert secret not in preview
+    assert preview.startswith("first line ")
+    assert "..." in preview
+    assert len(preview) <= 80
+
+
+@requires_agent_modules
+def test_preview_redacts_line_starting_secret_in_second_text_part(monkeypatch):
+    monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
+    secret = "supersecretvalue-second-text-part"
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "ordinary first part"},
+            {"type": "image", "source": "ignored"},
+            {"type": "text", "text": f"password={secret} trailing text"},
+        ],
+    }]
+
+    preview = routes._session_turn_index(messages)["turns"][0]["preview"]
+
+    assert secret not in preview
+    assert preview.startswith("ordinary first part ")
+    assert len(preview) <= 80
+
+
+def test_preview_line_starting_secrets_pass_through_when_redaction_is_disabled(monkeypatch):
+    monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": False})
+    text = "first line\npassword=supersecretvalue-123456 trailing text"
+
+    preview = routes._session_turn_index([{"role": "user", "content": text}])["turns"][0]["preview"]
+
+    assert preview == "first line password=supersecretvalue-123456 trailing text"[:80]
+
+
+def _session_fixture(monkeypatch, tmp_path, messages):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    for module in (config, models):
+        monkeypatch.setattr(module, "SESSION_DIR", session_dir)
+        monkeypatch.setattr(module, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "turn-test")
+    session = models.Session(
+        session_id="turn-index-fixture",
+        profile="turn-test",
+        messages=messages,
+        created_at=1.0,
+        updated_at=2.0,
+    )
+    session.save(touch_updated_at=False)
+    return session
+
+
+def _get_payload(path):
+    with patch.object(routes, "j") as response, patch("api.helpers.j", response):
+        routes.handle_get(SimpleNamespace(_safe_webui_print=lambda *_: None), urlparse(path))
+    return response.call_args.kwargs.get("status", 200), response.call_args.args[1]
+
+
+def test_route_msg_idx_agrees_with_full_session_positions(monkeypatch, tmp_path):
+    messages = [
+        {"role": "assistant", "content": "ignored"},
+        {"role": "user", "content": "first", "timestamp": 10},
+        {"role": "user", "content": "hidden", "_source": "delegation_wakeup"},
+        {"role": "assistant", "content": "answer"},
+        {"role": "user", "content": "second", "timestamp": 20},
+    ]
+    _session_fixture(monkeypatch, tmp_path, messages)
+    status, turns_payload = _get_payload("/api/session/turns?session_id=turn-index-fixture")
+    full_status, full_payload = _get_payload(
+        "/api/session?session_id=turn-index-fixture&msg_limit=all&resolve_model=0"
+    )
+    assert (status, full_status) == (200, 200)
+    assert turns_payload["session_id"] == "turn-index-fixture"
+    assert turns_payload["total_messages"] == len(full_payload["session"]["messages"])
+    assert [t["msg_idx"] for t in turns_payload["turns"]] == [
+        i for i, m in enumerate(full_payload["session"]["messages"])
+        if m["role"] == "user" and m.get("_source") != "delegation_wakeup"
+    ] == [1, 4]
+    assert "messages" not in turns_payload
+
+
+def _foreign_session_fixture():
+    sid = "foreign-turn-index"
+    messages = [
+        {"role": "user", "content": "foreign-user-alpha", "timestamp": 1},
+        {"role": "assistant", "content": "foreign-assistant-alpha"},
+        {"role": "user", "content": "foreign-user-beta", "timestamp": 2},
+        {"role": "assistant", "content": "foreign-assistant-beta"},
+    ]
+    session = models.Session(
+        session_id=sid,
+        profile="turn-test",
+        messages=messages,
+        created_at=1.0,
+        updated_at=2.0,
+        title="Synthetic foreign session",
+        workspace="/synthetic/foreign",
+        is_cli_session=True,
+        source_tag="cli",
+        raw_source="cli",
+        session_source="cli",
+        source_label="CLI",
+        read_only=True,
+    )
+    metadata = {
+        "session_id": sid,
+        "profile": session.profile,
+        "source_tag": session.source_tag,
+        "raw_source": session.raw_source,
+    }
+    return sid, session, metadata
+
+
+def test_valid_foreign_session_returns_turn_index_and_ordinary_full_envelope(monkeypatch):
+    sid, synth, metadata = _foreign_session_fixture()
+    monkeypatch.setattr(routes, "_refuse_cross_profile_before_load", lambda *_, **__: False)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "turn-test")
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: metadata)
+
+    def no_sidecar(*_, **__):
+        raise KeyError(sid)
+
+    monkeypatch.setattr(routes, "get_session", no_sidecar)
+    monkeypatch.setattr(
+        routes,
+        "_claim_or_synthesize_cli_session",
+        lambda *_args, **_kwargs: (synth, "not_claimable"),
+    )
+
+    status, payload = _get_payload(f"/api/session/turns?session_id={sid}")
+    assert status == 200
+    assert payload == {
+        "turns": [
+            {"k": 0, "msg_idx": 0, "ts": 1.0, "preview": "foreign-user-alpha", "n_msgs": 1},
+            {"k": 1, "msg_idx": 2, "ts": 2.0, "preview": "foreign-user-beta", "n_msgs": 1},
+        ],
+        "total_messages": 4,
+        "session_id": sid,
+    }
+    assert "session" not in payload
+    assert "messages" not in payload
+
+    full_status, full_payload = _get_payload(f"/api/session?session_id={sid}&resolve_model=0")
+    assert full_status == 200
+    assert full_payload["session"]["messages"] == synth.messages
+
+
+def test_foreign_cross_profile_refusal_discloses_no_index_or_transcript(monkeypatch):
+    sid, _synth, metadata = _foreign_session_fixture()
+    metadata["profile"] = "other-profile"
+    monkeypatch.setattr(routes, "_refuse_cross_profile_before_load", lambda *_, **__: False)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "turn-test")
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: metadata)
+
+    def no_sidecar(*_, **__):
+        raise KeyError(sid)
+
+    monkeypatch.setattr(routes, "get_session", no_sidecar)
+    with patch.object(routes, "_claim_or_synthesize_cli_session") as synthesize:
+        status, payload = _get_payload(f"/api/session/turns?session_id={sid}")
+
+    assert status == 409
+    assert payload == {
+        "error": "Session belongs to a different profile",
+        "code": "session_profile_mismatch",
+        "session_id": sid,
+        "profile": "other-profile",
+    }
+    assert "turns" not in payload
+    assert "session" not in payload
+    assert "messages" not in payload
+    synthesize.assert_not_called()
+
+
+def test_unknown_session_uses_session_404(monkeypatch):
+    monkeypatch.setattr(routes, "_refuse_cross_profile_before_load", lambda *_, **__: False)
+    def missing_session(*_, **__):
+        raise KeyError("unknown")
+
+    monkeypatch.setattr(routes, "get_session", missing_session)
+    status, payload = _get_payload("/api/session/turns?session_id=unknown")
+    assert status == 404
+    assert payload == {"error": "Session not found"}
+
+
+def test_five_thousand_message_single_turn_is_fast():
+    messages = [{"role": "user", "content": "only"}] + [
+        {"role": "assistant", "content": str(i)} for i in range(4999)
+    ]
+    start = time.perf_counter()
+    result = routes._session_turn_index(messages)
+    elapsed = time.perf_counter() - start
+    assert len(result["turns"]) == 1
+    assert result["turns"][0]["n_msgs"] == 4999
+    assert result["total_messages"] == 5000
+    assert elapsed < 1.0
