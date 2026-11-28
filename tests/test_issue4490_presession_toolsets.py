@@ -63,7 +63,12 @@ def test_toggle_toolsets_dropdown_opens_without_session_guard():
     toggle = _function_body(UI_JS, "function toggleToolsetsDropdown")
 
     assert "!S.session" not in toggle
-    assert "chip.offsetParent === null" in toggle
+    # The visibility guard was generalised from the chip to any rendered entry
+    # point by the #1431 redesign (see test_issue1431_toolsets_chip_responsive).
+    # What THIS test protects is unchanged: the toggle's only guard is
+    # visibility, never the absence of a session, so toolsets can be staged
+    # before a session exists.
+    assert "_activeToolsetsTrigger()" in toggle
     assert "_populateToolsetsDropdown();" in toggle
 
 
