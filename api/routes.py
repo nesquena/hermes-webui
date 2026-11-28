@@ -22031,7 +22031,16 @@ def handle_post(handler, parsed) -> bool:
             # /clear wiped s.messages but left the watermark unset, so the
             # append-only state.db merge treated it as "keep everything" and the
             # cleared history resurrected on the next /api/session read (#5532).
-            from api.session_ops import truncate_session_at_keep
+            from api.session_ops import (
+                save_intentional_shrink,
+                snapshot_intentional_shrink_state,
+                truncate_session_at_keep,
+            )
+            # #9029: the clear is a shrink producer too. Snapshot what the
+            # truncation owns so a failed save hands the transcript back instead
+            # of leaving a shorter in-memory copy that would be served and then
+            # persisted by the next save.
+            shrink_snapshot = snapshot_intentional_shrink_state(s)
             truncate_session_at_keep(s, 0)
             s.tool_calls = []
             # A compressed-continuation child keeps its archived transcript in a
@@ -22072,7 +22081,7 @@ def handle_post(handler, parsed) -> bool:
             # again (#3542 lifecycle gap).
             from api.session_ops import apply_session_title_rename
             apply_session_title_rename(s, "Untitled")
-            s.save()
+            save_intentional_shrink(s, shrink_snapshot)
             persisted_clear = False
             try:
                 persisted = json.loads(s.path.read_text(encoding="utf-8"))
@@ -22136,10 +22145,18 @@ def handle_post(handler, parsed) -> bool:
                 s = None
             if s is None:
                 return bad(handler, "Session not found", 404)
-            from api.session_ops import truncate_session_at_keep
-
+            from api.session_ops import (
+                save_intentional_shrink,
+                snapshot_intentional_shrink_state,
+                truncate_session_at_keep,
+            )
+            # #9029: same publication contract as retry/undo. Snapshot the
+            # shrink-owned state first, then persist through the helper, which
+            # clears the pending marker only after the write lands and rolls the
+            # truncation back in memory if it does not.
+            shrink_snapshot = snapshot_intentional_shrink_state(s)
             old_msg_count, old_ctx_count = truncate_session_at_keep(s, keep)
-            s.save()
+            save_intentional_shrink(s, shrink_snapshot)
             _publish_saved_session(body["session_id"], s)
             logger.info(
                 "truncate %s: messages %d→%d, context_messages %d→%d, watermark=%.2f",

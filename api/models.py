@@ -2264,14 +2264,29 @@ class Session:
             'skill_provenance',
             'skill_provenance_generation',
         ]
-        guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
+        # #9029: capture the generation token and the transcript rows it
+        # describes as ONE snapshot, under the fence shrink producers mutate
+        # both in (see _INTENTIONAL_SHRINK_LOCK). Reading the token here and the
+        # rows through a later getattr() let a shrink land between the two: the
+        # save then persisted the OLD rows with the NEW token, and the startup
+        # recovery path (api/session_recovery.py) read that as an intentional
+        # shrink and refused to restore the longer backup. The rows reference is
+        # captured, not copied; the dedup below reads only this snapshot, so a
+        # rebind after the snapshot cannot change what this save writes.
+        with _INTENTIONAL_SHRINK_LOCK:
+            written_shrink_generation = getattr(self, 'intentional_shrink_generation', None)
+            captured_messages = self.messages
+        guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(captured_messages)
         if exact_replay_rows_removed:
             logger.warning(
                 "Removed %d exact stable replay messages from persisted snapshot for session %s",
                 exact_replay_rows_removed,
                 self.session_id,
             )
-        meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
+        meta = {
+            k: (written_shrink_generation if k == 'intentional_shrink_generation' else getattr(self, k, None))
+            for k in METADATA_FIELDS
+        }
         written_reasoning_effort = meta.get('reasoning_effort')
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
@@ -2572,6 +2587,24 @@ class Session:
         self._reasoning_effort_saved = written_reasoning_effort
         self._share_token_saved = self.share_token
         self._share_created_at_saved = self.share_created_at
+        # #9029: close the pending-shrink window only AFTER the truncated
+        # transcript is on disk, and only for the shrink this save captured.
+        # The same fence that produced the snapshot guards the clear: a newer
+        # shrink replaces the token AND the rows together, so matching both
+        # proves this save persisted exactly the state it observed and that the
+        # marker waiting to be closed is that state's. A failed save never
+        # reaches this point, and the producer rolls its in-memory shrink back
+        # (api/session_ops.save_intentional_shrink), so a marker can never
+        # outlive a shrink that did not land -- while it lived,
+        # _cached_session_lags_disk() would refuse to reload the longer sidecar.
+        with _INTENTIONAL_SHRINK_LOCK:
+            if (
+                isinstance(written_shrink_generation, str)
+                and written_shrink_generation.strip()
+                and getattr(self, 'intentional_shrink_generation', None) == written_shrink_generation
+                and self.messages is captured_messages
+            ):
+                self._intentional_shrink_pending_count = None
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
@@ -6246,6 +6279,35 @@ def _message_content_text(message) -> str:
     return ''
 
 
+def _pending_intentional_shrink_snapshot(cached) -> tuple[int, str, int] | None:
+    """Return (pending, generation, cached_count) if cached owns an in-flight shrink.
+
+    A cached object owns a valid in-flight intentional shrink only when:
+    1. pending parses as a non-negative int;
+    2. generation is a non-empty string token; and
+    3. pending >= cached_count (the cache has not grown past the pre-shrink
+       snapshot this marker records; an append after the shrink invalidates it).
+    A real in-flight shrink always has pending > cached_count; the equality case
+    is kept so the freshness path can still drop the marker once disk reaches
+    parity with the snapshot.
+    """
+    if cached is None:
+        return None
+    with LOCK:
+        cached_count = len(getattr(cached, 'messages', None) or [])
+        pending = _parse_nonnegative_int(
+            getattr(cached, '_intentional_shrink_pending_count', None)
+        )
+        generation = getattr(cached, 'intentional_shrink_generation', None)
+        if pending is None:
+            return None
+        if not isinstance(generation, str) or not generation.strip():
+            return None
+        if pending < cached_count:
+            return None
+        return (pending, generation, cached_count)
+
+
 def _inactive_cache_tail_needs_disk_check(cached) -> bool:
     if cached is None:
         return False
@@ -6254,7 +6316,11 @@ def _inactive_cache_tail_needs_disk_check(cached) -> bool:
     return _last_non_tool_role(getattr(cached, 'messages', None) or []) == 'user'
 
 
-def _cache_has_stale_unsaved_user_tail(cached, disk_session) -> bool:
+def _cache_has_stale_unsaved_user_tail(
+    cached,
+    disk_session,
+    pending_shrink_snapshot: tuple[int, str, int] | None = None,
+) -> bool:
     """Return True when an inactive cached session has an unsaved user tail.
 
     A completed turn is saved to the sidecar before the browser reloads it.  In
@@ -6275,6 +6341,15 @@ def _cache_has_stale_unsaved_user_tail(cached, disk_session) -> bool:
     if _last_non_tool_role(disk_messages) != 'assistant':
         return False
     if len(cached_messages) < len(disk_messages):
+        snapshot = (
+            pending_shrink_snapshot
+            if pending_shrink_snapshot is not None
+            else _pending_intentional_shrink_snapshot(cached)
+        )
+        if snapshot is not None:
+            pending, _gen, _count = snapshot
+            if len(disk_messages) <= pending:
+                return False
         return True
     if len(cached_messages) == len(disk_messages):
         # Same-length divergence is still stale: a completed assistant turn can
@@ -6598,6 +6673,25 @@ def _session_persist_lock(sid):
             lock = threading.RLock()
             _SESSION_PERSIST_LOCKS[key] = lock
         return lock
+
+
+# #9029: the intentional-shrink generation token and the transcript rows it
+# describes are ONE publication. Shrink producers (api/session_ops.py: retry,
+# undo, truncate, regeneration) replace the rows and stamp the token as a single
+# unit under this fence, and Session.save() captures (token, rows) under the
+# same fence, so the generation a sidecar records always describes the rows
+# written with it -- a shrink landing mid-save can neither leak its token onto an
+# older transcript nor keep its pending marker while older rows land without the
+# token.
+#
+# LOCK cannot serve as this fence: save() also runs while its caller already
+# holds LOCK (the first-draft owner record in api/routes.py), and LOCK is a plain
+# threading.Lock. The per-session persist lock cannot either: producers mutate
+# before they save, so they would have to hold it across the whole mutation.
+# Lock order: LOCK -> _INTENTIONAL_SHRINK_LOCK (producers), and save() takes it
+# on its own inside the persist lock. Nothing takes LOCK or the persist lock
+# while holding it.
+_INTENTIONAL_SHRINK_LOCK = threading.Lock()
 
 
 # The source-identity fields CLI materialization stamps on a session, and the
@@ -6930,6 +7024,23 @@ def _session_scene_updated_at(session) -> float:
     return _anchor_scene_records_updated_at(session)
 
 
+def _drop_pending_shrink_generation(cached, generation, message_count) -> None:
+    """Clear the #9029 pending-shrink marker only if it is still this shrink.
+
+    The freshness check snapshots the marker under LOCK but decides to clear it
+    after the disk read, with LOCK released, so a newer shrink (or a concurrent
+    append) may have replaced it in between. Re-check the generation token and
+    the message count under LOCK before clearing so an older observation can
+    never drop a newer marker.
+    """
+    with LOCK:
+        if getattr(cached, 'intentional_shrink_generation', None) != generation:
+            return
+        if len(getattr(cached, 'messages', None) or []) != message_count:
+            return
+        cached._intentional_shrink_pending_count = None
+
+
 def _cached_session_lags_disk(cached) -> bool:
     """Return True when a cached full session is older than its sidecar.
 
@@ -6955,10 +7066,43 @@ def _cached_session_lags_disk(cached) -> bool:
     sid = getattr(cached, 'session_id', None)
     if not sid:
         return False
-    cached_count = len(getattr(cached, 'messages', None) or [])
+    # #9029: retry/undo (and the truncate route) shrink the cached transcript
+    # under LOCK, release it, and save afterwards. In that window the cache is
+    # deliberately SHORTER than its sidecar, which otherwise looks exactly like
+    # a cache that lags the disk: the old file was reloaded into SESSIONS and
+    # the removed reply came back. The in-memory pending count records the
+    # pre-shrink snapshot the cache branched from. While disk still holds that
+    # snapshot (or anything older), the shorter cache is the newer state and
+    # must win.
+    #
+    # Read the count and the marker TOGETHER under LOCK. Shrinks also mutate
+    # under LOCK, so a lock-free read can pair a pre-shrink count with a
+    # post-shrink marker; disk at the old count would then look like the
+    # shrink's save landed and the marker would be dropped before the save
+    # (Greptile P1 on PR #9273). The generation is the token that lets a clear
+    # prove it still refers to the shrink this snapshot observed.
+    shrink_snapshot = _pending_intentional_shrink_snapshot(cached)
+    if shrink_snapshot is not None:
+        pending_shrink, pending_generation, cached_count = shrink_snapshot
+    else:
+        pending_shrink = pending_generation = None
+        with LOCK:
+            cached_count = len(getattr(cached, 'messages', None) or [])
     # Fast path: prefix read of just the metadata header.
     disk_count = _persisted_message_count(sid)
     if disk_count is not None:
+        if pending_shrink is not None:
+            if disk_count == cached_count:
+                # The shrink's save landed (or disk otherwise reached parity):
+                # the window is over, drop the marker so it cannot outlive it.
+                _drop_pending_shrink_generation(cached, pending_generation, cached_count)
+            elif disk_count <= pending_shrink:
+                return False
+            else:
+                # A real writer moved the sidecar past the snapshot this shrink
+                # branched from (e.g. a stream checkpoint appended a message).
+                # Disk is genuinely ahead; let the normal check below decide.
+                _drop_pending_shrink_generation(cached, pending_generation, cached_count)
         if disk_count > cached_count:
             return True
         # Disk is at most as far as cache. Even when counts match, anchor scene
@@ -7488,8 +7632,13 @@ def _resolve_session_once(
             if not allow_full_load:
                 raise _FullSessionResolveRequired
             try:
+                pre_load_shrink_snapshot = _pending_intentional_shrink_snapshot(cached)
                 disk_session = Session.load(sid)
-                if _cache_has_stale_unsaved_user_tail(cached, disk_session):
+                if _cache_has_stale_unsaved_user_tail(
+                    cached,
+                    disk_session,
+                    pending_shrink_snapshot=pre_load_shrink_snapshot,
+                ):
                     with LOCK:
                         SESSIONS[sid] = disk_session
                         if promote_cache:

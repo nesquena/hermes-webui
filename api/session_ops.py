@@ -19,7 +19,12 @@ from bisect import bisect_left
 from typing import Any
 
 from api.config import LOCK, _get_session_agent_lock
-from api.models import get_session, SESSIONS
+from api.models import (
+    SESSIONS,
+    _INTENTIONAL_SHRINK_LOCK,
+    _parse_nonnegative_int,
+    get_session,
+)
 from api.agent_sessions import normalize_agent_session_source
 from api.process_event_utils import is_hidden_transcript_row
 
@@ -760,13 +765,117 @@ def _truncation_watermark_for(messages):
 
 
 def _stamp_intentional_shrink_generation(session, old_message_count: int, new_message_count: int) -> bool:
-    """Stamp a new generation only when the visible message list shrinks."""
+    """Stamp a new generation only when the visible message list shrinks.
+
+    The pending count is the pre-shrink transcript the cache branched from, and
+    it is what lets ``models._cached_session_lags_disk()`` keep serving a
+    deliberately shorter cache while the sidecar still holds the longer file.
+    It must therefore describe the FIRST unsaved shrink, not the last one: a
+    second shrink landing before the first save reports a smaller
+    ``old_message_count``, and overwriting the marker with it lets a GET reload
+    the sidecar -- resurrecting the turns the first shrink removed. Keep the
+    widest baseline until a save actually lands and clears it.
+    """
     if new_message_count >= old_message_count:
         return False
     session.intentional_shrink_generation = uuid.uuid4().hex
     session.transcript_generation = max(0, int(getattr(session, 'transcript_generation', 0) or 0)) + 1
     session.transcript_generation_baseline = max(0, int(new_message_count))
+    # #9029: in-memory only (never persisted). The cached object is now
+    # intentionally shorter than the sidecar until the caller saves; record the
+    # pre-shrink snapshot so the cache-freshness check can tell this window
+    # apart from a cache that lags the disk. Producers close it through
+    # save_intentional_shrink(); models._cached_session_lags_disk also clears it
+    # once disk reaches parity.
+    pending = _parse_nonnegative_int(
+        getattr(session, '_intentional_shrink_pending_count', None)
+    )
+    baseline = max(0, int(old_message_count))
+    if pending is not None:
+        baseline = max(pending, baseline)
+    session._intentional_shrink_pending_count = baseline
     return True
+
+
+def _replace_transcript_with_shrink(session, new_messages, old_message_count: int) -> None:
+    """Replace the rows and stamp the generation as ONE publication.
+
+    Callers must hold ``LOCK`` (the reader side of the freshness check reads
+    count + marker under it). The rows and the generation token move together
+    under ``_INTENTIONAL_SHRINK_LOCK`` so ``Session.save()`` can capture the pair
+    coherently and a GET can never observe a new token over old rows (or the
+    reverse).
+    """
+    with _INTENTIONAL_SHRINK_LOCK:
+        session.messages = new_messages
+        _stamp_intentional_shrink_generation(
+            session, old_message_count, len(new_messages or [])
+        )
+
+
+# The transcript state an intentional shrink owns. snapshotted before the
+# mutation so a save that fails can hand the pre-shrink transcript back.
+_INTENTIONAL_SHRINK_STATE_ATTRS = (
+    'messages',
+    'context_messages',
+    'truncation_watermark',
+    'truncation_boundary',
+    'delegation_cutoff_ts',
+    '_metadata_message_count',
+    '_metadata_visible_message_count',
+    'intentional_shrink_generation',
+    'transcript_generation',
+    'transcript_generation_baseline',
+)
+
+
+def snapshot_intentional_shrink_state(session) -> dict[str, Any]:
+    """Capture the state an intentional shrink is about to replace."""
+    return {name: getattr(session, name, None) for name in _INTENTIONAL_SHRINK_STATE_ATTRS}
+
+
+def restore_intentional_shrink_state(session, snapshot: dict[str, Any]) -> None:
+    """Hand back the pre-shrink transcript and close any pending window.
+
+    Must be called with ``LOCK`` and ``_INTENTIONAL_SHRINK_LOCK`` held: the rows
+    being restored are the ones a GET would otherwise read next.
+    """
+    for name, value in snapshot.items():
+        setattr(session, name, value)
+    session._intentional_shrink_pending_count = None
+
+
+def save_intentional_shrink(session, snapshot: dict[str, Any]) -> None:
+    """Persist a shrink and close its pending window only if the write landed.
+
+    This is the publication contract every shrink producer (retry, undo,
+    truncate, clear) shares:
+
+    * success -> the sidecar holds the shorter transcript, so the pending marker
+      that kept a GET from reloading the longer file is cleared -- under the
+      same fence the marker was stamped in, and only for the generation this
+      save wrote;
+    * failure -> the shrink is rolled back in memory before the error leaves
+      this call. A shrink that never reached disk must be neither served (the
+      marker would make ``_cached_session_lags_disk()`` prefer the shorter
+      cache over the intact sidecar) nor persisted by the next ordinary save
+      (which would write those rows and make the loss look intentional to
+      startup recovery).
+
+    Regeneration (``apply_regeneration_plan``) is the same contract one layer
+    up: its caller snapshots the whole session and restores it when the turn
+    cannot be started, which is a superset of this narrow rollback.
+    """
+    generation = getattr(session, 'intentional_shrink_generation', None)
+    try:
+        session.save()
+    except BaseException:
+        with LOCK, _INTENTIONAL_SHRINK_LOCK:
+            restore_intentional_shrink_state(session, snapshot)
+        raise
+    with _INTENTIONAL_SHRINK_LOCK:
+        if getattr(session, 'intentional_shrink_generation', None) == generation:
+            session._intentional_shrink_pending_count = None
 
 
 def truncate_context_for_display_keep(
@@ -1074,31 +1183,39 @@ def truncate_context_for_display_keep(
 
 
 def truncate_session_at_keep(session, keep: int) -> tuple[int, int]:
-    """Truncate display + context; set watermark/boundary. Returns old counts."""
-    full_messages = list(session.messages or [])
-    old_msg_count = len(full_messages)
-    old_ctx_count = len(getattr(session, 'context_messages', None) or [])
-    session.messages = full_messages[:keep]
-    # The live array is now the whole transcript. The load-time sidecar counts
-    # describe the pre-truncation file, and compact() prefers them over the
-    # live array, so the clear route (keep=0, save, return s.compact()) used to
-    # answer with the old total. Drop them: compact() then counts the live
-    # array, exactly as for a session that was never loaded. Nothing is
-    # re-assigned at save time, so concurrent saves cannot race a stale value
-    # back in (#8310 /status "Total messages" row).
-    session._metadata_message_count = None
-    session._metadata_visible_message_count = None
-    _stamp_intentional_shrink_generation(session, old_msg_count, len(session.messages))
-    if isinstance(getattr(session, 'context_messages', None), list):
-        session.context_messages = truncate_context_for_display_keep(
-            session.context_messages,
-            full_messages,
-            keep,
-        )
-    session.truncation_watermark = _truncation_watermark_for(session.messages)
-    session.truncation_boundary = session.truncation_watermark
-    # Gateway delegation results delivered before this point are cleared away with the transcript.
-    session.delegation_cutoff_ts = time.time()
+    """Truncate display + context; set watermark/boundary. Returns old counts.
+
+    Runs under ``LOCK`` because it is a shrink producer: the freshness check
+    reads the cached count and the pending marker together under that lock, and
+    /api/session/truncate and /api/session/clear call this helper while holding
+    only the per-session agent lock. The rows and the generation token are
+    published as one unit (``_INTENTIONAL_SHRINK_LOCK``) so a concurrent save or
+    GET can never pair one with the other's predecessor.
+    """
+    with LOCK:
+        full_messages = list(session.messages or [])
+        old_msg_count = len(full_messages)
+        old_ctx_count = len(getattr(session, 'context_messages', None) or [])
+        _replace_transcript_with_shrink(session, full_messages[:keep], old_msg_count)
+        # The live array is now the whole transcript. The load-time sidecar counts
+        # describe the pre-truncation file, and compact() prefers them over the
+        # live array, so the clear route (keep=0, save, return s.compact()) used to
+        # answer with the old total. Drop them: compact() then counts the live
+        # array, exactly as for a session that was never loaded. Nothing is
+        # re-assigned at save time, so concurrent saves cannot race a stale value
+        # back in (#8310 /status "Total messages" row).
+        session._metadata_message_count = None
+        session._metadata_visible_message_count = None
+        if isinstance(getattr(session, 'context_messages', None), list):
+            session.context_messages = truncate_context_for_display_keep(
+                session.context_messages,
+                full_messages,
+                keep,
+            )
+        session.truncation_watermark = _truncation_watermark_for(session.messages)
+        session.truncation_boundary = session.truncation_watermark
+        # Gateway delegation results delivered before this point are cleared away with the transcript.
+        session.delegation_cutoff_ts = time.time()
     return old_msg_count, old_ctx_count
 
 
@@ -1155,8 +1272,8 @@ def retry_last(session_id: str) -> dict[str, Any]:
 
             last_user_text = _extract_text(history[last_user_idx].get('content', ''))
             removed_count = len(history) - last_user_idx
-            s.messages = history[:last_user_idx]
-            _stamp_intentional_shrink_generation(s, len(history), len(s.messages))
+            shrink_snapshot = snapshot_intentional_shrink_state(s)
+            _replace_transcript_with_shrink(s, history[:last_user_idx], len(history))
             s.truncation_watermark = _truncation_watermark_for(s.messages)
             # Persist the original truncate cutoff so empty-sidecar recovery
             # can distinguish legitimate prefix from deleted suffix.
@@ -1181,7 +1298,9 @@ def retry_last(session_id: str) -> dict[str, Any]:
                     s.context_messages = _context_prefix_before_last_user(
                         s.context_messages
                     )
-        s.save()
+        # Same publication contract as the truncate/clear routes: the shrink is
+        # served only once its save landed, and rolled back if it did not.
+        save_intentional_shrink(s, shrink_snapshot)
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
 
@@ -1221,8 +1340,8 @@ def undo_last(session_id: str) -> dict[str, Any]:
 
             removed_text = _extract_text(history[last_user_idx].get('content', ''))
             removed_count = len(history) - last_user_idx
-            s.messages = history[:last_user_idx]
-            _stamp_intentional_shrink_generation(s, len(history), len(s.messages))
+            shrink_snapshot = snapshot_intentional_shrink_state(s)
+            _replace_transcript_with_shrink(s, history[:last_user_idx], len(history))
             s.truncation_watermark = _truncation_watermark_for(s.messages)
             # Persist the original truncate cutoff.
             s.truncation_boundary = s.truncation_watermark
@@ -1242,7 +1361,9 @@ def undo_last(session_id: str) -> dict[str, Any]:
                     s.context_messages = _context_prefix_before_last_user(
                         s.context_messages
                     )
-        s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
+        # Same publication contract as retry (save outside LOCK -- save()
+        # re-acquires LOCK via _write_session_index()).
+        save_intentional_shrink(s, shrink_snapshot)
     preview = (removed_text[:40] + '...') if len(removed_text) > 40 else removed_text
     return {
         'removed_count': removed_count,
