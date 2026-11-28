@@ -1369,6 +1369,30 @@ def _is_session_lease_wait_message(kind: str, message: str) -> bool:
     return any(marker in m for marker in _SESSION_LEASE_WAIT_MARKERS)
 
 
+def _is_memory_recall_status(kind: str, message: str, agent) -> bool:
+    """Return True for the Agent's per-turn memory recall indicator.
+
+    Right after an external memory provider injects context, hermes-agent emits
+    ``MemoryManager.describe_recall()`` through ``_emit_status`` (kind
+    ``lifecycle``), e.g. "🧠 Honcho — recalled 3 memories". The line has no
+    marker of its own, so instead of matching its wording this compares it with
+    the value the agent's own memory manager reports for the same turn: user
+    text or any other lifecycle notice can never be promoted, and a provider
+    that words its label differently still matches.
+    """
+    if str(kind or '').strip().lower() != 'lifecycle':
+        return False
+    text = str(message or '').strip()
+    describe = getattr(getattr(agent, '_memory_manager', None), 'describe_recall', None)
+    if not text or not callable(describe):
+        return False
+    try:
+        expected = str(describe() or '').strip()
+    except Exception:
+        return False
+    return bool(expected) and expected == text
+
+
 def _is_agent_compression_start_status(kind: str, message: str) -> bool:
     """Return True only for real Hermes context-compression start notices.
 
@@ -3519,6 +3543,22 @@ def _persist_cancelled_turn(
         session.messages.append(_marker)
 
 
+def _stamp_cancel_marker_memory_recall(session, stream_id, *owner_session_ids) -> None:
+    """Keep the stopped run's recall on this turn's cancel marker."""
+    from api.models import _stamp_marker_memory_recall
+
+    for row in reversed(getattr(session, 'messages', None) or []):
+        if not isinstance(row, dict):
+            continue
+        if row.get('role') == 'user':
+            return
+        if row.get('role') == 'assistant' and row.get('_error') is True:
+            content = str(row.get('content') or '').strip().lower()
+            if any(pattern in content for pattern in _CANCEL_MARKER_PATTERNS):
+                _stamp_marker_memory_recall(session, stream_id, row, *owner_session_ids)
+                return
+
+
 def _cleanup_ephemeral_cancelled_turn(session) -> None:
     """Remove transient /btw session state after a cancel without saving it."""
     session.active_stream_id = None
@@ -3718,6 +3758,7 @@ def _finalize_cancelled_turn(
             message=message,
             partial_stream_id=stream_id if preserve_partials else None,
         )
+    _stamp_cancel_marker_memory_recall(session, stream_id)
     try:
         session.save()
     except Exception:
@@ -3969,6 +4010,24 @@ def _capture_turn_served_model(s, agent) -> str | None:
     if s is not None:
         s.last_used_model = (_used_model[:240]) if _used_model else None
     return _used_model
+
+
+def _stamp_settled_turn_memory_recall(messages, identity, recall) -> None:
+    """Stamp the recall on this turn's last assistant row, never on an older turn's."""
+    if not recall or not messages:
+        return
+    checkpoint = _active_turn_checkpoint_index(messages, identity)
+    start = -1 if checkpoint is None else checkpoint
+    for idx in range(len(messages) - 1, start, -1):
+        row = messages[idx]
+        if not isinstance(row, dict):
+            continue
+        if row.get('role') == 'assistant':
+            # A copy: settlement can share the row with context_messages.
+            messages[idx] = {**row, '_memoryRecall': recall}
+            return
+        if checkpoint is None and row.get('role') == 'user':
+            return
 
 
 def _active_turn_checkpoint_index(messages, identity) -> int | None:
@@ -15092,12 +15151,17 @@ def _run_agent_streaming(
     # write without nonlocal) so it can seed `_last_err` and let the classifier
     # surface the real, actionable cause (model_not_found / auth_mismatch).
     _captured_terminal_error = [None]
+    # The memory recall line the Agent emitted for this turn. Stamped on the
+    # settled assistant row as ``_memoryRecall``, next to ``_turnTps``, so the
+    # turn header keeps showing it after the stream ends and on reload.
+    _turn_memory_recall = [None]
 
     def _agent_status_callback(kind, message):
         """Bridge Agent lifecycle status into WebUI SSE.
 
-        Passes compression events as 'compressing' events and rate-limit/fallback
-        events as 'warning' events so the frontend can surface them to the user.
+        Passes compression events as 'compressing' events, rate-limit/fallback
+        events as 'warning' events and the memory recall indicator as a
+        'memory_recall' event so the frontend can surface them to the user.
         Also captures a terminal non-retryable provider error (#5940) so the
         turn-completion classifier can report the real cause instead of the
         generic no_response fallback. All other lifecycle messages are dropped.
@@ -15129,6 +15193,12 @@ def _run_agent_streaming(
         # use the same channel so a delayed turn explains itself.
         if _is_session_lease_wait_message(_kind, _message):
             put('warning', {'type': 'session_lease_wait', 'message': _message})
+            return
+        # Which external memory provider fed this turn ("🧠 <provider> — recalled
+        # N memories"). Other surfaces (CLI, messaging gateway) already show it.
+        if _is_memory_recall_status(_kind, _message, agent):
+            _turn_memory_recall[0] = _message
+            put('memory_recall', {'session_id': session_id, 'message': _message})
             return
         _is_fallback_notice = _is_fallback_lifecycle_message(_kind, _message)
         if _is_fallback_notice:
@@ -17901,6 +17971,9 @@ def _run_agent_streaming(
                         }
                         if _turn_duration is not None:
                             _error_message['_turnDuration'] = _turn_duration
+                        # The recall happened even though the turn failed.
+                        if _turn_memory_recall[0]:
+                            _error_message['_memoryRecall'] = _turn_memory_recall[0]
                         if _err_type == 'compression_exhausted':
                             _recovery = stamp_compression_exhausted_recovery(
                                 s,
@@ -18194,6 +18267,8 @@ def _run_agent_streaming(
                             _dm['_turnDuration'] = round(_turn_duration_seconds, 3)
                             if _turn_tps is not None:
                                 _dm['_turnTps'] = _turn_tps
+                            if _turn_memory_recall[0]:
+                                _dm['_memoryRecall'] = _turn_memory_recall[0]
                             if _gateway_routing:
                                 _dm['_gatewayRouting'] = _gateway_routing
                             _ttft_ms = meter().get_ttft_ms(stream_id)
@@ -19321,6 +19396,10 @@ def _run_agent_streaming(
                                     # ``finally`` cannot re-materialize this user
                                     # turn and append a spurious "Response
                                     # interrupted" marker after the settled answer.
+                                    # This branch returns before the common settle step.
+                                    _stamp_settled_turn_memory_recall(
+                                        s.messages, _active_turn_identity, _turn_memory_recall[0],
+                                    )
                                     s.tool_calls = _extract_tool_calls_from_messages(
                                         s.messages,
                                         live_tool_calls=_live_tool_calls,
@@ -19524,6 +19603,9 @@ def _run_agent_streaming(
                 }
                 if _turn_duration is not None:
                     _error_message['_turnDuration'] = _turn_duration
+                # The recall happened even though the turn failed.
+                if _turn_memory_recall[0]:
+                    _error_message['_memoryRecall'] = _turn_memory_recall[0]
                 if _exc_type == 'compression_exhausted':
                     _recovery = stamp_compression_exhausted_recovery(
                         s,
@@ -20638,6 +20720,9 @@ def _cancel_stream_impl(
                     if _cancel_by_server:
                         _cancel_marker['cancel_initiator'] = CANCEL_INITIATOR_SERVER
                     _cs.messages.append(_cancel_marker)
+                _stamp_cancel_marker_memory_recall(
+                    _cs, stream_id, _snap_owner_session_id, active_run_session_id,
+                )
 
                 # A journal-only turn has no in-memory partial to carry into the
                 # cancel save. Persist an exact-stream recovery capability on

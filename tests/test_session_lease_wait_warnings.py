@@ -57,7 +57,7 @@ def test_session_lease_wait_classification(kind, text, expected):
     assert streaming._is_session_lease_wait_message(kind, text) is expected
 
 
-def _build_status_callback():
+def _build_status_callback(agent=None):
     """Extract ``_agent_status_callback`` from ``_run_agent_streaming`` and bind
     it to a recording ``put`` so the real relay logic is exercised."""
     src = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
@@ -88,9 +88,12 @@ def _build_status_callback():
         "put": lambda event, data: events.append((event, data)),
         "session_id": "sid-1",
         "_captured_terminal_error": [None],
+        "_turn_memory_recall": [None],
         "_is_agent_compression_start_status": streaming._is_agent_compression_start_status,
         "_is_fallback_lifecycle_message": streaming._is_fallback_lifecycle_message,
         "_is_session_lease_wait_message": streaming._is_session_lease_wait_message,
+        "_is_memory_recall_status": streaming._is_memory_recall_status,
+        "agent": agent,
     }
     exec(compile(module, "streaming_status_callback", "exec"), ns)
     return ns["_status_callback_scope"](), events

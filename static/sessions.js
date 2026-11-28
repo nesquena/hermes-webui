@@ -1946,6 +1946,7 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
     journalSnapshot:true,
     lastAssistantText,
     lastReasoningText,
+    memoryRecall:String(snapshot.memory_recall||snapshot.memoryRecall||''),
     lastRunJournalSeq:Number.isFinite(replayAfterSeq)?Math.max(0,replayAfterSeq):0,
     lastRunJournalEventId:String(snapshot.last_event_id||snapshot.lastEventId||''),
     anchorActivityScene,
@@ -3302,6 +3303,7 @@ async function loadSession(sid){
         reattach:true,
         lastAssistantText:String(stored.lastAssistantText||''),
         lastReasoningText:String(stored.lastReasoningText||''),
+        memoryRecall:String(stored.memoryRecall||''),
         lastRunJournalSeq:Number(stored.lastRunJournalSeq||0)||0,
         lastRunJournalEventId:String(stored.lastRunJournalEventId||''),
         journalReplayFromStart:!!stored.journalReplayFromStart,
@@ -3330,8 +3332,19 @@ async function loadSession(sid){
     ? _serverLiveSnapshotInflight(S.session.runtime_journal_snapshot, S.session.pending_attachments||[])
     : null;
   const hadLiveRecoveryInflight=!!INFLIGHT[sid];
+  // Both recovery sources resume after the memory_recall event, so either may
+  // lend the line to the winner, but only between sources that own the active
+  // stream: a snapshot the selector rejected for its stream lends nothing.
+  const _ownsActiveStream=source=>!!source&&!!activeStreamId&&String(source.streamId||'')===String(activeStreamId);
+  const _localMemoryRecall=_ownsActiveStream(INFLIGHT[sid])?String(INFLIGHT[sid].memoryRecall||''):'';
   const liveRecoveryInflight=_selectLiveRecoveryInflight(INFLIGHT[sid], serverLiveSnapshot, activeStreamId);
   if(liveRecoveryInflight){
+    if(activeStreamId&&!_ownsActiveStream(liveRecoveryInflight)){
+      if(liveRecoveryInflight.memoryRecall) liveRecoveryInflight.memoryRecall='';
+    }else if(!liveRecoveryInflight.memoryRecall){
+      const _recall=_localMemoryRecall||(_ownsActiveStream(serverLiveSnapshot)?String(serverLiveSnapshot.memoryRecall||''):'');
+      if(_recall) liveRecoveryInflight.memoryRecall=_recall;
+    }
     INFLIGHT[sid]=liveRecoveryInflight;
     _notifyRunJournalSideEffectRecoveryTruncation(
       liveRecoveryInflight,sid,activeStreamId

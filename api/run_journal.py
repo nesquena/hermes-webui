@@ -1897,6 +1897,77 @@ def runtime_model_from_events(session_id: str, stream_id: str, events: Iterable[
     return observed
 
 
+def memory_recall_from_events(session_id: str, stream_id: str, events: Iterable[dict]) -> str:
+    """Return the memory recall line relayed for this journal owner, if any.
+
+    A reload resumes the stream after the snapshot cursor, past the
+    ``memory_recall`` event, so the live snapshot carries the line itself.
+    """
+    recall = ""
+    for event in events:
+        if not isinstance(event, dict) or event.get("session_id") != session_id or event.get("run_id") != stream_id:
+            continue
+        if event.get("event") != "memory_recall":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        message = payload.get("message")
+        if isinstance(message, str) and message.strip():
+            recall = message.strip()
+    return recall
+
+
+def _journaled_recall_rows(session_id: str, run_id: str) -> list[dict]:
+    """Return a run's ``memory_recall`` rows without parsing the rest of it.
+
+    Stop reads this under the session lock, with or without a memory provider,
+    and a validated read of a long run takes hundreds of milliseconds. Only an
+    archived run needs the full reader.
+    """
+    path = _run_path(session_id, run_id)
+    rows = []
+    try:
+        with path.open("rb") as lines:
+            for line in lines:
+                # Quotes inside payload text are escaped, so prose does not match.
+                if b'"memory_recall"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)  # rejects a torn last row
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and row.get("event") == "memory_recall":
+                    rows.append(row)
+    except FileNotFoundError:
+        pass
+    if not rows:
+        archive = _archive_path_for(path)
+        if archive is not None and archive.exists():
+            return read_run_events(session_id, run_id, validated_recovery=True).get("events") or []
+    return rows
+
+
+def memory_recall_for_run(stream_id: str | None, *owner_session_ids) -> str:
+    """Return the recall journaled for exactly this run, or "".
+
+    Only journals of the given owner sessions are read. Compression rotates the
+    session while the run keeps journaling under the id it started with, so
+    callers pass the parent next to the current session.
+    """
+    if not isinstance(stream_id, str) or not stream_id:
+        return ""
+    for sid in dict.fromkeys(o for o in owner_session_ids if isinstance(o, str) and o):
+        try:
+            recall = memory_recall_from_events(sid, stream_id, _journaled_recall_rows(sid, stream_id))
+        except Exception:
+            logger.debug("Failed to read the memory recall of run %s", stream_id, exc_info=True)
+            continue
+        if recall:
+            return recall
+    return ""
+
+
 def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -> dict:
     ordered = [event for event in events if isinstance(event, dict)]
     last = ordered[-1] if ordered else None
