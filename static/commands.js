@@ -1814,7 +1814,7 @@ function _showSteerIndicator(text){
   if(typeof scrollToBottom==='function') scrollToBottom();
 }
 
-function _showSteerRecovery(msg, explicitSteer, fallback) {
+function _showSteerRecovery(msg, explicitSteer, fallback, restoreText) {
   const inner = document.getElementById('msgInner');
   if (!inner) return;
   const old = inner.querySelector('.steer-recovery');
@@ -1831,16 +1831,29 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
   retryBtn.addEventListener('click', () => {
     el.remove();
     if(_steerFallbackIsDeadRun(fallback)&&typeof send==='function'){
+      // #7781 review 2026-11-23 [CORE]: a dead-run retry must start the next
+      // turn with the SAME skill body. `literalSlash` skips the plugin
+      // resolver, so restoring only the short command dropped the assembled
+      // payload and the new turn ran without its skill. When the payload
+      // differs from the visible text, restore and send the PAYLOAD itself —
+      // it no longer parses as a plugin command, so send() passes it through
+      // untouched. Only the plain (unresolved) case keeps literalSlash's
+      // verbatim behaviour.
+      const assembled=String(msg||'');
+      const visible=String(restoreText!=null?restoreText:msg||'');
+      const payload=(explicitSteer&&assembled&&assembled!==visible)?assembled:null;
       if(explicitSteer){
         const inp=$('msg');
         if(inp){
-          inp.value=String(msg||'').trim();
+          // The visible/restored text is the short command the user typed;
+          // `msg` may be the assembled skill payload.
+          inp.value=(payload||visible).trim();
           if(typeof autoResize==='function')autoResize();
         }
       }
-      void send({literalSlash:true}).catch(console.error);
+      void send(payload?{}:{literalSlash:true}).catch(console.error);
     }else{
-      void _trySteer(msg, explicitSteer).catch(console.error);
+      void _trySteer(msg, explicitSteer, {restoreText:restoreText!=null?restoreText:undefined}).catch(console.error);
     }
   });
   el.appendChild(retryBtn);
@@ -2167,9 +2180,14 @@ async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot){
   return base?`${base}\n\n${note}`:note;
 }
 
-async function _trySteer(msg, explicitSteer){
+async function _trySteer(msg, explicitSteer, opts){
   let result=null;
   const originalMsg=String(msg||'').trim();
+  // #7781 review 2026-11-23: a plugin-qualified invocation steers the skill
+  // directive + body, but every draft/indicator/recovery surface must keep
+  // the SHORT command the user typed. Callers pass it as opts.restoreText;
+  // callers without opts keep the pre-existing behaviour unchanged.
+  const restoreMsg=String(opts&&opts.restoreText!=null?opts.restoreText:originalMsg).trim();
   const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
   const ownerStreamId=(typeof S!=='undefined'&&(S.activeStreamId||(S.session&&S.session.active_stream_id)))||null;
   const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
@@ -2185,12 +2203,12 @@ async function _trySteer(msg, explicitSteer){
     if(_steerOwnerIsCurrent(ownerSid)){
       const inp=$('msg');
       if(inp){
-        inp.value=_steerRestoreText(originalMsg,explicitSteer);
+        inp.value=_steerRestoreText(restoreMsg,explicitSteer);
         if(typeof autoResize==='function')autoResize();
       }
       if(typeof renderTray==='function')renderTray();
     }else{
-      await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
+      await _steerPersistDraftForOwner(ownerSid,restoreMsg,explicitSteer,pendingFilesSnapshot);
     }
     _steerSetComposerStatusForOwner(ownerSid,'');
     showToast(`${t('upload_failed')}${e&&e.message?e.message:e}`,3500);
@@ -2200,12 +2218,12 @@ async function _trySteer(msg, explicitSteer){
     if(_steerOwnerIsCurrent(ownerSid)){
       const inp=$('msg');
       if(inp){
-        inp.value=_steerRestoreText(originalMsg,explicitSteer);
+        inp.value=_steerRestoreText(restoreMsg,explicitSteer);
         if(typeof autoResize==='function')autoResize();
       }
       if(typeof renderTray==='function')renderTray();
     }else{
-      await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
+      await _steerPersistDraftForOwner(ownerSid,restoreMsg,explicitSteer,pendingFilesSnapshot);
     }
     showToast(t('cmd_steer_no_msg'));
     return false;
@@ -2237,9 +2255,9 @@ async function _trySteer(msg, explicitSteer){
     if(_steerDraftRevision(ownerSid)===inflight.rev){
       // No draft saved since submit: clear like an accepted steer (also drops a
       // debounced prefix of the submitted text).
-      if(typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
+      if(typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(restoreMsg,explicitSteer),pendingFilesSnapshot);
     }else{
-      _steerRetireOwnedDraft(ownerSid,{text:_steerRestoreText(originalMsg,explicitSteer),files:pendingFilesSnapshot,rev:_steerDraftRevision(ownerSid)});
+      _steerRetireOwnedDraft(ownerSid,{text:_steerRestoreText(restoreMsg,explicitSteer),files:pendingFilesSnapshot,rev:_steerDraftRevision(ownerSid)});
     }
     return true;
   }
@@ -2255,7 +2273,7 @@ async function _trySteer(msg, explicitSteer){
       acc.push(steerText);
       _steerAcceptedBySid.set(ownerSid,acc);
     }
-    if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
+    if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(restoreMsg,explicitSteer),pendingFilesSnapshot);
     // Show a transient steer indicator in the chat (NOT in S.messages — it must
     // survive the done event's S.messages=d.session.messages replacement).
     // The indicator self-removes when the turn completes (done/cancel/error
@@ -2269,7 +2287,7 @@ async function _trySteer(msg, explicitSteer){
         const _remaining=S.pendingFiles.filter(f=>!_delivered.has(f));
         if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
       }
-      _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
+      _showSteerIndicator(_steerIndicatorText(restoreMsg,pendingFilesSnapshot));
     }
     showToast(t('cmd_steer_delivered'),2500);
     return true;
@@ -2277,14 +2295,16 @@ async function _trySteer(msg, explicitSteer){
   if(result&&result.fallback==='gateway_steer_queued'&&typeof queueSessionMessage==='function'){
     _steerUploadCache=null;
     queueSessionMessage(ownerSid,{
-      text:originalMsg,
+      // #7781: keep the SHORT command so the queue drain re-enters send()'s
+      // idle resolver and attaches the skill body losslessly.
+      text:restoreMsg,
       files:pendingFilesSnapshot,
       model:ownerModelState.model,
       model_provider:ownerModelState.model_provider,
       profile:ownerProfile,
     });
     if(typeof updateQueueBadge==='function')updateQueueBadge(ownerSid);
-    if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
+    if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(restoreMsg,explicitSteer),pendingFilesSnapshot);
     if(_steerOwnerIsCurrent(ownerSid)&&typeof S!=='undefined'&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length&&pendingFilesSnapshot.length){
       const _queued=new Set(pendingFilesSnapshot);
       const _remaining=S.pendingFiles.filter(f=>!_queued.has(f));
@@ -2299,7 +2319,7 @@ async function _trySteer(msg, explicitSteer){
   const fallbackCode = result && result.fallback;
   const deadRunFallback = _steerFallbackIsDeadRun(fallbackCode);
   const applyCurrentFailure = !deadRunFallback||_steerOwnerStreamIsCurrent(ownerSid,ownerStreamId);
-  const restoreText=_steerRestoreText(originalMsg,explicitSteer);
+  const restoreText=_steerRestoreText(restoreMsg,explicitSteer);
   // A draft saved or typed during the request is newer than the steer: keep it.
   let restored=_steerDraftRevision(ownerSid)===inflight.rev;
   if(_steerOwnerIsCurrent(ownerSid)&&applyCurrentFailure){
@@ -2312,7 +2332,7 @@ async function _trySteer(msg, explicitSteer){
     }
     if(typeof renderTray==='function')renderTray();
   }else if(restored){
-    await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
+    await _steerPersistDraftForOwner(ownerSid,restoreMsg,explicitSteer,pendingFilesSnapshot);
   }
   if(uncertain){
     // rev identifies the restored draft itself; later saves are newer drafts.
@@ -2325,7 +2345,7 @@ async function _trySteer(msg, explicitSteer){
   }
   const clearedDeadRun=deadRunFallback&&_steerClearCurrentOwnerDeadRun(ownerSid,ownerStreamId);
   if(!deadRunFallback||applyCurrentFailure)showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
-  if(_steerOwnerIsCurrent(ownerSid)&&(!deadRunFallback||clearedDeadRun)) _showSteerRecovery(originalMsg, explicitSteer, fallbackCode);
+  if(_steerOwnerIsCurrent(ownerSid)&&(!deadRunFallback||clearedDeadRun)) _showSteerRecovery(originalMsg, explicitSteer, fallbackCode, restoreMsg);
   return false;
 }
 
@@ -2808,7 +2828,34 @@ function _buildSkillCommandEntry(skill){
   const slug=_skillCommandSlug(skillName);
   if(!slug)return null;
   if(_getReservedSlashCommandSlugs().has(slug)) return null;
-  return{name:slug,desc:String(skill&&skill.description||'').trim()||t('slash_skill_desc'),source:'skill',skillName};
+  // Registry-qualified names (``namespace:skill``) are the plugin manager's
+  // canonical identity: send() and cmdUse() match them verbatim against the
+  // /api/skills rows, so the picker must insert the qualified name EXACTLY
+  // as registered — but ONLY for plugin rows. A directory skill saved with a
+  // colon in its name (the save endpoint accepts ``local:under_score``) is
+  // not a qualified identity: the installed agent resolves the master slug
+  // spelling (``/localunder-score``), and the verbatim
+  // ``/local:under_score`` entry dispatched a literal no skill row resolves
+  // (PR #7781 re-gate, SILENT). Slug-normalization (``_``→``-``, ``:``
+  // stripping) therefore still applies to every non-plugin row, and the
+  // typed autocomplete matches either separator spelling via
+  // _slashCommandSlugVariants.
+  const entryName=skill&&skill.source==='plugin'?skillName:slug;
+  // Carry the plugin namespace through so the picker can render a
+  // ``Plugin: <namespace>`` hint and the dropdown labels plugin skills
+  // distinctly. The ``source`` field stays ``"skill"`` (the picker badge
+  // renders the same way for directory and plugin skills), while
+  // ``plugin`` is the namespace extracted from the qualified name (#7770).
+  // A colon-bearing DIRECTORY skill must not be tagged: it is not
+  // plugin-registered, and the ``Plugin:`` hint would misattribute it.
+  const entry={name:entryName,desc:String(skill&&skill.description||'').trim()||t('slash_skill_desc'),source:'skill',skillName};
+  if(skill&&skill.source==='plugin'&&skill.plugin){
+    entry.plugin=String(skill.plugin);
+  }else if(skill&&skill.source==='plugin'&&skillName.includes(':')){
+    const ns=skillName.split(':',1)[0];
+    if(ns) entry.plugin=ns;
+  }
+  return entry;
 }
 function _buildBundleCommandEntry(bundle){
   const slug=_skillCommandSlug(bundle&&bundle.name);
@@ -2965,12 +3012,20 @@ function showCmdDropdown(matches){
       : '';
     if(c.source==='skill') el.classList.add('cmd-item-skill');
     if(isPath) el.classList.add('cmd-item-path');
+    // Surface the plugin namespace inline so users see where the skill comes
+    // from without losing the row to a separate column. The qualified name
+    // (``superpowers:brainstorming``) is already the visible label, so the
+    // description only needs a ``Plugin: <ns>`` tag when the namespace is
+    // not obvious from the label itself (#7770).
+    const descText=c.source==='skill'&&c.plugin&&!String(c.name||'').startsWith(`${c.plugin}:`)
+      ? `${c.desc||''} · Plugin: ${esc(c.plugin)}`.trim()
+      : (c.desc||'');
     const nameHtml=isPath
       ? `<div class="cmd-item-name"><span class="cmd-item-path-value">${esc(c.value)}</span></div>`
       : isSubArg
       ? `<div class="cmd-item-name"><span class="cmd-item-parent">/${esc(c.parent)}</span> <span class="cmd-item-subarg">${esc(c.value)}</span></div>`
       : `<div class="cmd-item-name">/${esc(c.name)}${usage}${badge}</div>`;
-    const descHtml=`<div class="cmd-item-desc">${esc(c.desc)}</div>`;
+    const descHtml=`<div class="cmd-item-desc">${esc(descText)}</div>`;
     el.innerHTML=`${nameHtml}${descHtml}`;
     el.onmousedown=(e)=>{
       e.preventDefault();

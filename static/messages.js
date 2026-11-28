@@ -1317,6 +1317,42 @@ function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
   return true;
 }
 
+// #7781 review 2026-11-23: resolve one plugin-qualified slash name against
+// /api/skills and return {name, content} for the registered plugin skill, or
+// null when the name does not match a plugin row — including a listing outage,
+// where callers must fall through to master's literal-text behaviour. A
+// matched row whose content is unreadable THROWS so each caller decides how to
+// surface it: the idle send() path answers with a "Plugin skill error" bubble,
+// the busy steer path keeps the composer intact instead.
+async function _loadPluginSkillForCommand(cmdName, sessionId){
+  const name=String(cmdName||'');
+  if(!name||name.indexOf(':')<0) return null;
+  let match=null;
+  try{
+    const data=await api('/api/skills');
+    match=(Array.isArray(data&&data.skills)?data.skills:[])
+      .find(s=>String(s.name||'').toLowerCase()===name.toLowerCase()&&s.source==='plugin')||null;
+  }catch(e){match=null;}
+  if(!match) return null;
+  const detail=await api('/api/skills/content?name='+encodeURIComponent(match.name)
+    +(sessionId?`&session_id=${encodeURIComponent(sessionId)}`:''));
+  const content=detail&&typeof detail.content==='string'?detail.content.trim():'';
+  if(!content) throw new Error(`Skill \`${match.name}\` has no readable content.`);
+  if(sessionId&&typeof _refreshSessionSkillUsageForOwner==='function'){
+    void _refreshSessionSkillUsageForOwner(sessionId);
+  }
+  return {name:match.name,content};
+}
+
+// Same directive/context shape the idle send() path assembles, so a busy
+// steer and a queued-then-drained send present the skill identically.
+function _buildPluginSkillSteerPayload(resolved,args){
+  const directive=`[USER OVERRIDE] You MUST follow the skill '${resolved.name}' content provided below before responding to the next message.`;
+  const block=`[FORCED SKILL CONTEXT: ${resolved.name}]\n${resolved.content}\n[/FORCED SKILL CONTEXT]`;
+  const tail=String(args||'').trim();
+  return `${directive}\n\n${block}${tail?`\n\n${tail}`:''}`;
+}
+
 function _runOptionalPreStartUiStep(label, fn){
   try{
     return typeof fn==='function'?fn():undefined;
@@ -1590,6 +1626,106 @@ function _setComposerAfterCliOnlyExplainer(value,owner){
   }
 }
 
+// #7781 (P1, greptile 2026-11-26): a send() that cleared the composer and then
+// stopped — the user switched chats, or the skill fetch failed — must not lose
+// the command. Hand it back to the chat that issued it: into its composer when
+// that chat is still open and nothing new was typed, and onto its saved draft
+// either way. The chat on screen never has its composer or draft rewritten.
+//
+// Three findings shape the draft write:
+//  ① A NEWER draft may exist on the owning chat. While the skill loaded the
+//    user can retype the composer, and the switch that follows saves that
+//    newer draft (loadSession() persists the departing text+files). The save
+//    here must compare the owner's draft revision against the one captured by
+//    send() and leave the newer text alone — only a files-only save (empty
+//    text, staged attachments) still takes the command back.
+//  ② The restore used to persist `files: []`, wiping the staged attachments
+//    that the switch saved with the departing draft. Both the save and the
+//    failure path carry the owning chat's captured file list instead.
+//  ③ (P1, greptile 2026-11-26) A staged attachment can be REMOVED while the
+//    skill loads. loadSession() saves the updated (removed-down-to-empty)
+//    file list with the departing draft, but writing the send-time snapshot
+//    back resurrected the removed attachment — the old guard compared only
+//    saved text, so an empty composer let the removed file back in. The
+//    restore must therefore keep the owning chat's LATEST saved files (the
+//    user's current attachment edits) rather than always the send-time list.
+function _ownerChatSavedDraftPayload(ownerSid){
+  // sessions.js keeps the last payload signature per sid ({"text","files"}).
+  // Read it defensively: the helper is useless (and must not disable the
+  // restore) when that module is not loaded.
+  try{
+    if(typeof _composerDraftLastPayloadBySid==='undefined'||!_composerDraftLastPayloadBySid
+       ||typeof _composerDraftLastPayloadBySid.get!=='function') return null;
+    const signature=_composerDraftLastPayloadBySid.get(ownerSid);
+    if(typeof signature!=='string'||!signature) return null;
+    const payload=JSON.parse(signature);
+    return payload&&typeof payload==='object'
+      ?{text:typeof payload.text==='string'?payload.text:null,
+        files:Array.isArray(payload.files)?payload.files:[]}
+      :null;
+  }catch(_error){ return null; }
+}
+
+function _restoreCommandToOwnerChat(ownerSid, commandText, ownerFiles, capturedDraftSignature){
+  const cmd=String(commandText==null?'':commandText);
+  if(!ownerSid||!cmd) return;
+  const capturedFiles=Array.isArray(ownerFiles)?ownerFiles.filter(Boolean).slice():[];
+  // ①/③: did the owning chat's saved draft move past the send-time snapshot?
+  // ANY save during the park — a retyped draft, a switched-away departing
+  // save, or a staged-file REMOVAL saved as an empty payload — rewrites the
+  // last-payload signature in sessions.js (the revision only moves for
+  // non-empty differing payloads, which is why it missed the removal save).
+  // Compare the signature (null-normalized: a chat nobody had saved yet has
+  // no entry, so an entry appearing at restore time is itself a save).
+  const capturedSig=(typeof capturedDraftSignature==='string')?capturedDraftSignature:null;
+  let currentSig=null;
+  if(typeof _composerDraftLastPayloadBySid!=='undefined'&&_composerDraftLastPayloadBySid
+     &&typeof _composerDraftLastPayloadBySid.get==='function'){
+    const sig=_composerDraftLastPayloadBySid.get(ownerSid);
+    currentSig=(typeof sig==='string'&&sig)?sig:null;
+  }
+  let savedPayload=null;
+  if(currentSig!==capturedSig) savedPayload=_ownerChatSavedDraftPayload(ownerSid);
+  if(savedPayload){
+    const savedText=savedPayload.text;
+    if(savedText&&savedText.trim()&&savedText.trim()!==cmd.trim()) return;
+  }
+  // The file list the command writes back with: the owning chat's latest
+  // saved files when a save happened during the park (respects a mid-load
+  // removal/re-staging — ③), else the send-time capture. And when the owner
+  // chat is still on screen, its LIVE staged files are the most current edit
+  // of all: the tray the user sees (and already pruned) is what the draft
+  // must mirror, not an older capture.
+  const currentSid=S.session&&S.session.session_id||null;
+  let files=(savedPayload&&Array.isArray(savedPayload.files))
+    ?savedPayload.files.filter(Boolean)
+    :capturedFiles;
+  if(currentSid===ownerSid&&typeof S!=='undefined'&&Array.isArray(S.pendingFiles)){
+    files=S.pendingFiles.filter(Boolean).slice();
+  }
+  if(currentSid===ownerSid){
+    const el=$('msg');
+    if(el&&String(el.value||'').trim()) return;   // the user moved on: keep their input
+    if(el){
+      el.value=cmd;
+      if(typeof autoResize==='function')autoResize();
+    }
+  }
+  if(typeof _saveComposerDraftNow!=='function') return;
+  const onFail=(error)=>{
+    // ②: the failure path must keep the same file list the save writes — a
+    // retry path that re-members an empty list loses the attachment just as
+    // the save would.
+    if(typeof _handleComposerDraftPostFailure==='function') _handleComposerDraftPostFailure(error,ownerSid,cmd,/* ② */files);
+  };
+  try{
+    const result=_saveComposerDraftNow(ownerSid,cmd,/* ② */files);
+    if(result&&typeof result.catch==='function') result.catch(onFail);
+  }catch(error){
+    onFail(error);
+  }
+}
+
 async function send(){
   if(S.session&&S.session.chat_read_only_reason){
     return;
@@ -1731,10 +1867,73 @@ async function send(){
         // TTL) — on master the loop continued on the next turn, so steering it
         // here is a step back. A continuation falls through to the queue
         // branches, which carry the token.
-        $('msg').value='';autoResize();
+        //
+        // #7781 review 2026-11-23 [CORE]: a plugin-qualified slash picked from
+        // the autocomplete is a SKILL INVOCATION, not chat text. This busy
+        // branch returns before send()'s idle-path plugin resolver (:1981),
+        // so without the block below the literal command was steered into the
+        // running turn and the skill body never reached the model. The
+        // busy-control commands were intercepted above (their precedence is
+        // unchanged) and literalSlash keeps master's verbatim behaviour.
+        let _busySteerPayload=text;
+        let _busySteerRestoreText=text;
+        // Owner fence: snapshot the issuing session BEFORE clearing anything.
+        // #7781 (P1, greptile 2026-11-26): the clear used to run unconditionally
+        // ahead of this snapshot, so a send that resumed after a chat switch had
+        // already wiped the other chat's composer draft.
+        const _busyOwnerSid=S.session&&S.session.session_id||null;
+        // #7781 (P1, greptile 2026-11-26): snapshot the owning chat's draft
+        // payload signature before anything clears. ANY save on that chat
+        // during the park — a retyped draft, a switch's departing save, or a
+        // staged-attachment REMOVAL saved as an empty payload — moves the
+        // signature; comparing it on restore is what keeps later attachment
+        // edits (③) from being replaced by the send-time snapshot. Revision
+        // alone misses the empty removal save, which never bumps it.
+        const _busyOwnerDraftSignature=(typeof _composerDraftLastPayloadBySid!=='undefined'
+          &&_composerDraftLastPayloadBySid
+          &&typeof _composerDraftLastPayloadBySid.get==='function')
+          ?(_composerDraftLastPayloadBySid.get(_busyOwnerSid)||null):null;
+        // #7781 review 2026-11-23 [SHOULD-FIX]: clear the composer BEFORE the
+        // first await. Holding the text across the skill-content fetch let an
+        // edit typed meanwhile be wiped by the later clear, and a second Enter
+        // queued a duplicate next to this steer.
+        if((S.session&&S.session.session_id||null)===_busyOwnerSid){$('msg').value='';}
+        if(typeof autoResize==='function')autoResize();
+        if(!literalSlash&&text.startsWith('/')){
+          const _busyCmd=typeof parseCommand==='function'&&parseCommand(text);
+          if(_busyCmd&&String(_busyCmd.name||'').indexOf(':')>=0){
+            let _busyResolved=null;
+            let _busySkillError=null;
+            try{
+              _busyResolved=await _loadPluginSkillForCommand(_busyCmd.name,_busyOwnerSid);
+            }catch(e){_busySkillError=e;}
+            if((S.session&&S.session.session_id||null)!==_busyOwnerSid){
+              // #7781 (P1, greptile 2026-11-26): the composer was cleared and
+              // the chat is gone. Keep the command on the draft of the chat
+              // that issued it — a switch must not lose an unsent command.
+              _restoreCommandToOwnerChat(_busyOwnerSid,_busySteerRestoreText,/* ② */_failedSendFilesSnapshot,/* ① */_busyOwnerDraftSignature);
+              hideCmdDropdown();return;
+            }
+            if(_busySkillError){
+              // Nothing was steered: the composer was cleared before the
+              // fetch, so put the command back — but only when the same chat
+              // is still current and nothing new was typed meanwhile.
+              showToast(`Plugin skill error: ${_busySkillError&&_busySkillError.message||_busySkillError}`,3500);
+              // Nothing was steered: the composer was cleared before the
+              // fetch, so put the command back. _restoreCommandToOwnerChat
+              // also persists it on this chat's draft (#7781 P1).
+              _restoreCommandToOwnerChat(_busyOwnerSid,_busySteerRestoreText,/* ② */_failedSendFilesSnapshot,/* ① */_busyOwnerDraftSignature);
+              hideCmdDropdown();
+              return;
+            }
+            if(_busyResolved){
+              _busySteerPayload=_buildPluginSkillSteerPayload(_busyResolved,_busyCmd.args);
+            }
+          }
+        }
         // Do NOT clear pendingFiles yet — _trySteer uploads with clearPending=false,
         // and a failed steer must keep staged files available for the user's next explicit action.
-        await _trySteer(text, /*explicitSteer=*/false);
+        await _trySteer(_busySteerPayload, /*explicitSteer=*/false, {restoreText:_busySteerRestoreText});
         // _trySteer clears staged files only after /api/chat/steer accepts, and
         // only when the visible session still matches the captured owner sid.
       } else if(defaultMessageMode==='interrupt'){
@@ -1783,7 +1982,17 @@ async function send(){
   // captured before the metadata awaits in the intercept below. Composer
   // writes after those awaits go through
   // _setComposerAfterCliOnlyExplainer(value,_slashOwner).
-  const _slashOwner={sid:S.session&&S.session.session_id||null,text};
+  // #7781 (P1, greptile 2026-11-26): also capture the owning chat's draft
+  // payload signature and staged files, so a restore after the awaits can
+  // (a) tell whether ANY new save (newer text OR a staged-file edit/removal
+  // → ③) happened while this send was parked and (b) carry the staged
+  // attachments with the command instead of writing files: [].
+  const _slashOwnerSid=S.session&&S.session.session_id||null;
+  const _slashOwner={sid:_slashOwnerSid,text,
+    _draftSig:(typeof _composerDraftLastPayloadBySid!=='undefined'&&_composerDraftLastPayloadBySid
+      &&typeof _composerDraftLastPayloadBySid.get==='function')
+      ?(_composerDraftLastPayloadBySid.get(_slashOwnerSid)||null):null,
+    _files:[...(S.pendingFiles||[])]};
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -1979,6 +2188,109 @@ async function send(){
           $('msg').value='';autoResize();hideCmdDropdown();return;
         }
       }
+      // Plugin skills surface in the slash picker as qualified
+      // `/namespace:skill` names (#7770). No COMMANDS entry or bundle handles
+      // them, so send() used to forward the literal text as a chat message and
+      // the skill body never reached the agent. Resolve qualified names here:
+      // match the plugin row in /api/skills, load its content, and feed it to
+      // the same forced-skill-directive mechanism /use relies on so the body
+      // rides on this turn's message — keeping whatever the user typed after
+      // the command. Non-plugin qualified commands fall through unchanged.
+      //
+      // This resolution runs BEFORE the #7683 fail-closed registry guard below,
+      // and a positive plugin match is exempted from that guard: qualified
+      // `plugin:skill` names never exist in the command registry, so during a
+      // /api/commands outage the guard would otherwise answer "metadata
+      // temporarily unavailable" and drop a skill the user can see in the
+      // picker.
+      let _pluginSkillResolved=false;
+      if(_parsedCmd.name.includes(':')&&!_bundleCmd){
+        // #7781 (P1, greptile 2026-11-26): clear only while the chat that
+        // issued the command is still on screen. A switch during the metadata
+        // waits above must not erase the other chat's draft — the owner fence
+        // below would stop this send anyway.
+        if((S.session&&S.session.session_id||null)!==(_slashOwner&&_slashOwner.sid||null)){
+          hideCmdDropdown();return;
+        }
+        // #7781 review 2026-11-23 [SHOULD-FIX]: the resolver awaits below
+        // hold the composer's text. Clear it before the first await so an
+        // edit typed meanwhile is not wiped later and a second Enter cannot
+        // queue a duplicate next to this turn.
+        $('msg').value='';autoResize();
+        // #7781 [CORE]: both fetches below park this send across awaits while
+        // the user is free to switch chats. Reuse the #8718 _slashOwner
+        // snapshot — captured before send()'s first metadata await — and stop
+        // WITHOUT touching the composer or the transcript as soon as the
+        // viewed session is no longer the chat that issued the command.
+        // Without the guard a send started in chat A finished in chat B: the
+        // forced-skill directive POSTed into B and B's composer draft was
+        // wiped, and a failed content fetch wrote its "Plugin skill error"
+        // bubble into whichever chat happened to be open.
+        //
+        // #7781 should-fix: the listing fetch gets its OWN try. A /api/skills
+        // outage must fall through to master's behaviour (forward the literal
+        // text) instead of answering "Plugin skill error" and swallowing the
+        // command — the previous single try wrapped the listing fetch too.
+        let _match=null;
+        try{
+          const _skillsData=await api('/api/skills');
+          _match=(Array.isArray(_skillsData&&_skillsData.skills)?_skillsData.skills:[])
+            .find(s=>String(s.name||'').toLowerCase()===_parsedCmd.name.toLowerCase()&&s.source==='plugin')||null;
+        }catch(e){_match=null;}
+        if((S.session&&S.session.session_id||null)!==_slashOwner.sid){
+          // #7781 (P1, greptile 2026-11-26): the composer was already cleared;
+          // keep the command on its own chat's draft so a switch cannot lose it.
+          _restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text,/* ② */_slashOwner&&_slashOwner._files,/* ① */_slashOwner&&_slashOwner._draftSig);
+          hideCmdDropdown();return;
+        }
+        if(_match){
+          try{
+            // #7781 review 2026-11-18: pass the owning session id so the
+            // content endpoint records the skill in the conversation's
+            // "Skills Used" list (the server skips
+            // _record_session_skill_usage without it). A brand-new chat has
+            // no id yet — create the session first, exactly as /use does.
+            let _pluginSkillSessionId=_slashOwner.sid;
+            if(!_pluginSkillSessionId){
+              if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+              _slashOwner.sid=S.session&&S.session.session_id||null;
+              _pluginSkillSessionId=_slashOwner.sid;
+            }
+            const _detail=await api('/api/skills/content?name='+encodeURIComponent(_match.name)
+              +(_pluginSkillSessionId?`&session_id=${encodeURIComponent(_pluginSkillSessionId)}`:''));
+            if((S.session&&S.session.session_id||null)!==_slashOwner.sid){
+              // #7781 (P1, greptile 2026-11-26): the composer was already cleared;
+              // keep the command on its own chat's draft so a switch cannot lose it.
+              _restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text,/* ② */_slashOwner&&_slashOwner._files,/* ① */_slashOwner&&_slashOwner._draftSig);
+              hideCmdDropdown();return;
+            }
+            const _content=_detail&&typeof _detail.content==='string'?_detail.content.trim():'';
+            if(!_content) throw new Error(`Skill \`${_match.name}\` has no readable content.`);
+            if(_pluginSkillSessionId&&typeof _refreshSessionSkillUsageForOwner==='function'){
+              void _refreshSessionSkillUsageForOwner(_pluginSkillSessionId);
+            }
+            _forcedSkillDirectivePending={sessionId:_slashOwner.sid,promise:Promise.resolve({name:_match.name,directive:`[USER OVERRIDE] You MUST follow the skill '${_match.name}' content provided below before responding to the next message.`,content:_content})};
+            _slashDisplayTextOverride=text;
+            text=_parsedCmd.args||'';
+            _pluginSkillResolved=true;
+          }catch(e){
+            if((S.session&&S.session.session_id||null)!==_slashOwner.sid){
+              // #7781 (P1, greptile 2026-11-26): the composer was already cleared;
+              // keep the command on its own chat's draft so a switch cannot lose it.
+              _restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text,/* ② */_slashOwner&&_slashOwner._files,/* ① */_slashOwner&&_slashOwner._draftSig);
+              hideCmdDropdown();return;
+            }
+            if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+            S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+            S.messages.push({role:'assistant',content:`Plugin skill error: ${e&&e.message||e}`,_ts:Date.now()/1000});
+            renderMessages();
+            // The composer was cleared before the fetch: put the command back
+            // on this chat's draft too, so it survives even a later switch.
+            _restoreCommandToOwnerChat(_slashOwner&&_slashOwner.sid,text,/* ② */_slashOwner&&_slashOwner._files,/* ① */_slashOwner&&_slashOwner._draftSig);
+            hideCmdDropdown();return;
+          }
+        }
+      }
       // #7683 [CORE]: the fail-closed guard runs LAST, after every dispatch
       // branch above has had its chance. `_agentCmdName` is only meaningful
       // once those branches have run, and a bundle command that resolved must
@@ -2012,7 +2324,7 @@ async function send(){
         && typeof loadSkillCommands === 'function'
           ? (await loadSkillCommands()).find(skill => _skillVariants.includes(skill.name))
           : null;
-      if(_commandShapedSlashName&&!_bundleCmd&&!_skillCmd&&_registryUnavailable&&_agentCmdName!=='moa'){
+      if(_commandShapedSlashName&&!_bundleCmd&&!_skillCmd&&!_pluginSkillResolved&&_registryUnavailable&&_agentCmdName!=='moa'){
         if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:'Command metadata is temporarily unavailable — please try again.',_ts:Date.now()/1000});

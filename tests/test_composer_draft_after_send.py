@@ -336,7 +336,11 @@ def test_busy_send_paths_clear_persisted_composer_draft():
     assert busy_body.count("_clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);") >= 2
     assert "_clearComposerDraft(S.session.session_id,text" not in busy_body
     try_steer_body = _block(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
-    assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in try_steer_body, (
+    # #7781: the cleared payload is the SHORT restore text (opts.restoreText,
+    # defaulting to the submitted text) — a busy plugin-skill steer keeps the
+    # typed command as the draft signature while the wire payload carries the
+    # directive + skill body.
+    assert "_clearComposerDraft(ownerSid,_steerRestoreText(restoreMsg,explicitSteer),pendingFilesSnapshot)" in try_steer_body, (
         "delivered steer must clear the captured owner draft with the submitted payload signature"
     )
 
