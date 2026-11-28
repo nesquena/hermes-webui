@@ -21,6 +21,7 @@ Note: `window._mirrorSpeechSettingsFromServer` (boot.js) is intentionally left
 undefined here so the test measures the panels.js hydration path only.
 """
 
+import os
 import pathlib
 import subprocess
 
@@ -504,11 +505,19 @@ _REGRESSION_HARNESS = r"""
 const assert = require('assert');
 
 let REFUSE = true;
+// Controlled quota model: while REFUSE_LONGER is on, a value that would grow an
+// existing entry is refused, but rewriting the same (shorter) value still lands.
+// This is the shape reported on #9242: the server voice is longer, so its mirror
+// is refused, while the stale shorter cache value can be rewritten successfully.
+let REFUSE_LONGER = false;
 const store = new Map();
 class Storage {
   getItem(key){ return store.has(key) ? store.get(key) : null; }
   setItem(key, value){
     if(REFUSE) throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    if(REFUSE_LONGER && store.has(key) && String(value).length > String(store.get(key)).length){
+      throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    }
     store.set(key, String(value));
   }
   removeItem(key){ store.delete(key); }
@@ -1124,6 +1133,15 @@ function hydrateNative(engine, voice){
 """
 
 
+def _node_env():
+    """Node children must not inherit the agent runtime's NODE_CHANNEL_FD —
+    node tears down a channel it does not own and dies with SIGABRT after the
+    probe already printed its output."""
+    env = dict(os.environ)
+    env.pop("NODE_CHANNEL_FD", None)
+    return env
+
+
 def _run_native_select_scenario(body):
     marker = "// 1. Conflicting obsolete cache in store"
     harness_base = _REGRESSION_HARNESS[: _REGRESSION_HARNESS.index(marker)]
@@ -1139,7 +1157,14 @@ def _run_native_select_scenario(body):
         .replace("/*__HYDRATION__*/", _speech_hydration())
         .replace("/*__HEAD__*/", _font_size_hydration())
     )
-    result = subprocess.run(["node", "-"], input=script, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(
+        ["node", "-"],
+        input=script,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=_node_env(),
+    )
     if result.returncode != 0:
         raise AssertionError(
             "native select harness failed\n--- stdout ---\n%s\n--- stderr ---\n%s"

@@ -312,6 +312,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Cron completion alerts -- toast notifications and unread badges scoped to the active profile on the Tasks tab and session sidebar
 - Background agent error alerts -- banner when a non-active session encounters an error
 - Approval and clarification browser alerts notify once per pending owner when its session is not actively viewed. Local approval dismissal hides attention without resolving the prompt; resolution, replacement, and cancellation retire that owner's alert state. Denied or failed notification delivery can retry while the prompt remains pending.
+- TTS engine preference when the browser refuses the local write (storage full or disabled): the Settings voice list follows the engine you selected, while spoken playback keeps using the engine that is currently in effect — the last value successfully written to the browser cache — until the write succeeds. The engine control carries an "unapplied" note for as long as the two differ.
 
 ### Slash commands
 - Type `/` in the composer for autocomplete dropdown
