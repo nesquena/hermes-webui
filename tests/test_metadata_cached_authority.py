@@ -3,8 +3,10 @@
 These are Node VM behavior tests, not a rendered/login browser or provider run.
 """
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -35,6 +37,12 @@ def _source():
         "_captureSameSessionForceReloadHint",
         "_clearSameSessionForceReloadHint",
         "_messageReloadLimitForSession",
+        # #7925 re-gate (2026-11-02, proof-gated fast path): the reload flow
+        # gates the append-only fast path on per-row provenance, so the three
+        # helpers it calls travel with the extracted loader.
+        "_markPrefixProvenRows",
+        "_heldRowsArePrefixProven",
+        "_adoptPrefixProof",
     )
     functions = [extract_function(sessions, name) for name in names]
     for name in ("loadSession", "_ensureMessagesLoaded", "_ensureAllMessagesLoaded"):
@@ -68,6 +76,10 @@ const c={
   _loadingSessionId:null, _loadSessionGeneration:0,
   _messagesTruncated:spec.offset>0, _oldestIdx:spec.offset, _loadingOlder:false,
   _sameSessionForceReloadHint:null, _pendingCarryForwardSnapshot:null,
+  // #7925 re-gate (2026-11-02): the per-row provenance store the proof-gated
+  // fast path reads. No digest is seeded here, so the fast path stays skipped
+  // and every reload takes the replace path this harness asserts on.
+  _sessionPrefixFp:'', _sessionPrefixFpEnd:-1, _prefixProvenRows:new WeakSet(),
   _INITIAL_MSG_LIMIT:30,_MSG_LIMIT_MAX:500,_msgLimitMax:spec.ceiling||500,
   localStorage:{setItem:(k,v)=>stored.set(k,v),getItem:k=>stored.get(k)||null,removeItem:k=>stored.delete(k)},
   $:id=>id==='msg'?composer:id==='msgInner'?msgInner:null,
@@ -192,10 +204,26 @@ def _run_case(**options):
     assert shutil.which("node"), "node is required for client behavior tests"
     spec = {"mode": "navigation", "total": 80, "initialTotal": 80, "offset": 0, **options}
     script = HARNESS.replace("SPEC", json.dumps(spec)).replace("SOURCE", json.dumps(_source()))
-    result = subprocess.run(
-        ["node", "--max-old-space-size=96", "-e", script],
-        cwd=ROOT, capture_output=True, text=True, timeout=15,
-    )
+    # `-e` puts the whole harness in one argv entry; Linux caps that at
+    # MAX_ARG_STRLEN (131072 bytes). Write to a temp file instead. Also strip
+    # NODE_CHANNEL_FD / NODE_OPTIONS — a launcher may export either, and both
+    # make a fresh node abort on exit with SIGABRT after writing correct
+    # output (returncode -6, empty stderr, easily read as a harness bug).
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("NODE_CHANNEL_FD", "NODE_OPTIONS")}
+    fd, script_path = tempfile.mkstemp(suffix=".js", prefix="metadata-authority-", dir=str(ROOT))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(script)
+        result = subprocess.run(
+            ["node", "--max-old-space-size=96", script_path],
+            cwd=ROOT, capture_output=True, text=True, timeout=15, env=env,
+        )
+    finally:
+        try:
+            os.unlink(script_path)
+        except OSError:
+            pass
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 

@@ -103,7 +103,7 @@ function createTab(server, name, overrides = null, extraSrc = []) {
   const toasts = [];
   const held = [];
   const base = {
-    console, Promise, JSON, Object, Array, Number, String, Boolean, Set, Map, Date, Math, Error, RegExp, URL,
+    console, Promise, JSON, Object, Array, Number, String, Boolean, Set, Map, WeakSet, Date, Math, Error, RegExp, URL,
     encodeURIComponent, decodeURIComponent, setTimeout: () => 0, clearTimeout() {},
     localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
     sessionStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
