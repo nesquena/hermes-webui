@@ -12,7 +12,12 @@ inherits it.
 
 The test drives the real function out of `static/messages.js` in a Node VM with
 a minimal DOM, so it fails on the actual control flow rather than on a source
-grep.
+grep. Two lifecycle arms keep the harness faithful to a real `EventSource`:
+
+* mid-stream: switch away and back while tokens are still arriving; the next
+  token rebuilds the bubble from the accumulated answer.
+* completion: `done` closes the `EventSource`, so no later token can be
+  delivered and the ephemeral answer is not restored by switching back later.
 """
 from __future__ import annotations
 
@@ -61,96 +66,118 @@ function extractFn(text, name) {
 
 const src = extractFn(raw, 'attachBtwStream');
 
-let root;
-function mkEl(tag) {
-  const e = {
-    tag, children: [], parent: null, className: '', dataset: {},
-    textContent: '', _html: '',
-    appendChild(c) { c.parent = this; this.children.push(c); return c; },
-    remove() {
-      if (this.parent) {
-        this.parent.children = this.parent.children.filter((x) => x !== this);
-        this.parent = null;
-      }
+// One browser-ish world per arm: its own #msgInner, its own EventSource.
+function boot(sessionId) {
+  function mkEl(tag) {
+    const e = {
+      tag, children: [], parent: null, className: '', dataset: {},
+      textContent: '', _html: '',
+      appendChild(c) { c.parent = this; this.children.push(c); return c; },
+      remove() {
+        if (this.parent) {
+          this.parent.children = this.parent.children.filter((x) => x !== this);
+          this.parent = null;
+        }
+      },
+      get isConnected() {
+        let p = this;
+        while (p.parent) p = p.parent;
+        return p === root;
+      },
+      set innerHTML(v) {
+        this.children.forEach((c) => { c.parent = null; });
+        this.children = [];
+        this._html = v;
+      },
+      get innerHTML() { return this._html; },
+      querySelector(sel) {
+        const cls = sel.slice(1);
+        const st = [...this.children];
+        while (st.length) {
+          const c = st.shift();
+          if (c.className.split(' ').includes(cls)) return c;
+          st.push(...c.children);
+        }
+        return null;
+      },
+      scrollIntoView() {},
+    };
+    return e;
+  }
+
+  const root = mkEl('root');
+  const msgInner = mkEl('div');
+  root.appendChild(msgInner);
+
+  let es;
+  const ctx = {
+    S: { session: { session_id: sessionId } },
+    $: (id) => (id === 'msgInner' ? msgInner : null),
+    t: (k) => k,
+    renderMd: (s) => s,
+    showToast: () => {},
+    document: { createElement: mkEl, baseURI: 'http://x/' },
+    location: { href: 'http://x/' },
+    URL,
+    EventSource: function () {
+      this.h = {};
+      this.closed = false;
+      this.addEventListener = (n, f) => { this.h[n] = f; };
+      // A real EventSource stops delivering events once closed.
+      this.close = () => { this.closed = true; };
+      es = this;
     },
-    get isConnected() {
-      let p = this;
-      while (p.parent) p = p.parent;
-      return p === root;
-    },
-    set innerHTML(v) {
-      this.children.forEach((c) => { c.parent = null; });
-      this.children = [];
-      this._html = v;
-    },
-    get innerHTML() { return this._html; },
-    querySelector(sel) {
-      const cls = sel.slice(1);
-      const st = [...this.children];
-      while (st.length) {
-        const c = st.shift();
-        if (c.className.split(' ').includes(cls)) return c;
-        st.push(...c.children);
-      }
-      return null;
-    },
-    scrollIntoView() {},
   };
-  return e;
+
+  vm.createContext(ctx);
+  vm.runInContext(src + '\nattachBtwStream("A","s1","what is 2+2?");', ctx);
+
+  const btwRows = () => msgInner.children.filter((c) => c.dataset.btw === '1');
+  const emit = (name, payload) => {
+    if (es.closed) return false;  // the browser would not call the handler
+    es.h[name]({ data: JSON.stringify(payload) });
+    return true;
+  };
+  // renderMessages() empties #msgInner when the visible session changes.
+  const switchTo = (sid) => {
+    ctx.S.session = { session_id: sid };
+    msgInner.innerHTML = '';
+  };
+  return { btwRows, emit, switchTo, get closed() { return es.closed; } };
 }
 
-root = mkEl('root');
-const msgInner = mkEl('div');
-root.appendChild(msgInner);
-
-let es;
-const ctx = {
-  S: { session: { session_id: 'A' } },
-  $: (id) => (id === 'msgInner' ? msgInner : null),
-  t: (k) => k,
-  renderMd: (s) => s,
-  showToast: () => {},
-  document: { createElement: mkEl, baseURI: 'http://x/' },
-  location: { href: 'http://x/' },
-  URL,
-  EventSource: function () {
-    this.h = {};
-    this.addEventListener = (n, f) => { this.h[n] = f; };
-    this.close = () => {};
-    es = this;
-  },
-};
-
-vm.createContext(ctx);
-vm.runInContext(src + '\nattachBtwStream("A","s1","what is 2+2?");', ctx);
-
-const btwRows = () => msgInner.children.filter((c) => c.dataset.btw === '1');
-const tok = (t) => es.h.token({ data: JSON.stringify({ text: t }) });
 const out = {};
 
-// The asking chat renders the bubble while it is on screen.
-tok('Hello ');
-out.askingChatRows = btwRows().length;
+// Arm 1: switch away and back before the stream completes. The answer is
+// ephemeral, so the only rebuild trigger is the next live token.
+const mid = boot('A');
+mid.emit('token', { text: 'Hello ' });
+out.askingChatRows = mid.btwRows().length;
 
-// Switching away clears #msgInner (that is what renderMessages() does). A token
-// that lands afterwards must not rebuild the bubble in the other chat.
-ctx.S.session = { session_id: 'B' };
-msgInner.innerHTML = '';
-tok('world');
-out.otherChatRowsAfterToken = btwRows().length;
+mid.switchTo('B');
+mid.emit('token', { text: 'world' });
+out.otherChatRowsAfterToken = mid.btwRows().length;
 
-// Nor may `done` paint there.
-es.h.done({ data: JSON.stringify({ answer: 'Hello world' }) });
-out.otherChatRowsAfterDone = btwRows().length;
-
-// Coming back to the asking chat rebuilds the bubble with the full answer,
-// because `answer` is accumulated in the closure.
-ctx.S.session = { session_id: 'A' };
-tok('!');
-const back = btwRows();
+mid.switchTo('A');
+mid.emit('token', { text: '!' });
+const back = mid.btwRows();
 out.askingChatRowsAfterReturn = back.length;
 const ans = back.length ? back[0].querySelector('.msg-btw-answer') : null;
 out.askingChatAnswerAfterReturn = ans ? ans.innerHTML : null;
+out.returnHappenedWhileStreamOpen = !mid.closed;
+
+// Arm 2: the stream completes while another chat is on screen. `done` closes
+// the EventSource, so a late token is not deliverable at all.
+const away = boot('A');
+away.emit('token', { text: 'Hello ' });
+away.switchTo('B');
+away.emit('token', { text: 'world' });
+out.doneAwayRowsAfterToken = away.btwRows().length;
+
+away.emit('done', { answer: 'Hello world' });
+out.doneAwayRowsAfterDone = away.btwRows().length;
+out.doneAwayStreamClosed = away.closed;
+out.tokenAfterCloseDelivered = away.emit('token', { text: '!' });
 
 console.log(JSON.stringify(out));
 """
@@ -190,21 +217,41 @@ def test_token_does_not_paint_into_another_chat(observed):
         "that did not ask the question (#9390). The guard has to live in "
         "`_ensureBtwRow()` so the `token` handler inherits it."
     )
+    assert observed["doneAwayRowsAfterToken"] == 0, (
+        "the same cross-chat token guard must hold when the asking chat is "
+        "away and the stream later completes there"
+    )
 
 
 def test_done_does_not_paint_into_another_chat(observed):
-    assert observed["otherChatRowsAfterDone"] == 0, (
+    assert observed["doneAwayRowsAfterDone"] == 0, (
         "the /btw `done` handler painted the side-answer bubble into a chat "
         "that did not ask the question (#9390)"
     )
 
 
-def test_returning_to_the_asking_chat_restores_the_answer(observed):
+def test_switching_back_mid_stream_restores_the_answer(observed):
+    assert observed["returnHappenedWhileStreamOpen"] is True, (
+        "this recovery path only exists while the stream is live: `done` "
+        "closes the EventSource, so there is no later event to rebuild the "
+        "bubble from"
+    )
     assert observed["askingChatRowsAfterReturn"] == 1, (
-        "switching back to the asking chat must rebuild the bubble from the "
-        "answer accumulated in the stream closure"
+        "switching back to the asking chat mid-stream must rebuild the bubble "
+        "from the answer accumulated in the stream closure"
     )
     assert observed["askingChatAnswerAfterReturn"] == "Hello world!", (
         "the rebuilt bubble must carry the whole accumulated answer, "
         f"observed {observed['askingChatAnswerAfterReturn']!r}"
+    )
+
+
+def test_harness_models_event_source_close(observed):
+    assert observed["doneAwayStreamClosed"] is True, (
+        "`done` must close the EventSource; a no-op mock would let the test "
+        "drive an event sequence a browser cannot deliver"
+    )
+    assert observed["tokenAfterCloseDelivered"] is False, (
+        "the harness delivered a token after `EventSource.close()`; real "
+        "streams cannot emit one, so that sequence must not be testable"
     )
