@@ -22,9 +22,19 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_profile_secret_scope_isolation import AGENT_DIR, _write, needs_agent_scopes
+from tests.test_profile_secret_scope_isolation import (
+    AGENT_DIR,
+    DARWIN_BLANKS,
+    GLIBC_BLANKS,
+    _write,
+    bash_truncates_at_nul,
+    bash_utf8_blanks,
+    needs_agent_scopes,
+)
 
 REPO = Path(__file__).resolve().parents[1]
+# The PATH the launcher runs with (no Homebrew bash on an Apple silicon Mac: /bin/bash 3.2 there).
+LAUNCH_PATH = "/usr/local/bin:/usr/bin:/bin"
 
 CHILD = r'''
 import json, os, sys
@@ -113,7 +123,8 @@ EXPECTED_LIVE = {
 }
 
 
-def _launcher_script(launcher: str) -> str:
+def _launcher_script(launcher: str, exports: str = "OPERATOR_ONLY_TOKEN=DUMMY_OPERATOR_OVERRIDE") -> str:
+    """Sources the .env file named by ``$1`` as *launcher* does, then exports each of *exports* (the operator's)."""
     if launcher == "ctl_sh":
         body = re.search(r"\n(_apply_env_file_safely\(\) \{.*?\n\})\n", (REPO / "ctl.sh").read_text(encoding="utf-8"),
                          re.S)
@@ -121,19 +132,20 @@ def _launcher_script(launcher: str) -> str:
         source = body.group(1) + '\n_apply_env_file_safely "$1"\n'
     else:
         source = 'set -a; . "$1"; set +a\n'
-    return source + 'export OPERATOR_ONLY_TOKEN=DUMMY_OPERATOR_OVERRIDE\nshift\nexec "$@"\n'
+    return source + "".join(f"export {item}\n" for item in exports.split()) + 'shift\nexec "$@"\n'
 
 
-def _run_named_launch_root_active(tmp_path, launcher, child=CHILD, *, alpha_env=ALPHA_ENV, active="root", others=None):
-    """Server launched under ``alpha`` by *launcher*, which sources alpha's ``.env`` first; *active* is the saved
-    active profile (root by default); *others* maps further profile names to their ``.env`` text."""
+def _run_named_launch_root_active(tmp_path, launcher, child=CHILD, *, alpha_env: str | bytes = ALPHA_ENV, active="root",
+                                  others=None, launch="alpha", root_env="ROOT_OWN_KEY=DUMMY_ROOT_KEY\n", exports=None):
+    """Server launched under *launch* (``alpha`` by default, or ``root``) by *launcher*, which sources that home's
+    ``.env`` first; *active* is the saved active profile (root by default); *others* maps further profile names to
+    their ``.env`` (text, or bytes written as they are); *exports* are the operator's exports after the source."""
     run = tmp_path / "run"
     root = run / "home" / ".hermes"
-    alpha = root / "profiles" / "alpha"
     for d in (root, run / "tmp", run / "state"):
         d.mkdir(parents=True, exist_ok=True)
     _write(root / "config.yaml", ROOT_CONFIG)
-    _write(root / ".env", "ROOT_OWN_KEY=DUMMY_ROOT_KEY\n")
+    _write(root / ".env", root_env)
     if active != "root":
         _write(root / "active_profile", active + "\n")
     for name, text in {"alpha": alpha_env, **(others or {})}.items():
@@ -141,18 +153,22 @@ def _run_named_launch_root_active(tmp_path, launcher, child=CHILD, *, alpha_env=
         for sub in ("memories", "sessions", "skills", "logs", "cron", "workspace"):
             (home / sub).mkdir(parents=True, exist_ok=True)
         _write(home / "config.yaml", "model:\n  default: dummy-model\n")
-        _write(home / ".env", text)
+        if isinstance(text, bytes):
+            (home / ".env").write_bytes(text)
+        else:
+            _write(home / ".env", text)
+    launch_home = root if launch == "root" else root / "profiles" / launch
     script = run / "launch.sh"
-    _write(script, _launcher_script(launcher))
+    _write(script, _launcher_script(launcher) if exports is None else _launcher_script(launcher, exports))
     env = {
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "PATH": LAUNCH_PATH,
         "HOME": str(run / "home"),
         "TMPDIR": str(run / "tmp"),
         "LANG": "C.UTF-8",
         "PYTHONDONTWRITEBYTECODE": "1",
         "HERMES_DISABLE_LAZY_INSTALLS": "1",
         "HERMES_WEBUI_STATE_DIR": str(run / "state"),
-        "HERMES_HOME": str(alpha),
+        "HERMES_HOME": str(launch_home),
         # Any HTTP client the child might construct goes to a closed local port.
         "HTTP_PROXY": "http://127.0.0.1:9",
         "HTTPS_PROXY": "http://127.0.0.1:9",
@@ -161,7 +177,7 @@ def _run_named_launch_root_active(tmp_path, launcher, child=CHILD, *, alpha_env=
     if AGENT_DIR is not None:
         env["HERMES_WEBUI_AGENT_DIR"] = str(AGENT_DIR)
     cp = subprocess.run(
-        ["bash", str(script), str(alpha / ".env"), sys.executable, "-c", child, str(REPO)],
+        ["bash", str(script), str(launch_home / ".env"), sys.executable, "-c", child, str(REPO)],
         env=env, cwd=str(REPO), capture_output=True, text=True, timeout=180,
     )
     lines = [line for line in cp.stdout.splitlines() if line.startswith("RESULT ")]
@@ -228,23 +244,248 @@ def test_startup_records_the_agent_reading_before_a_later_edit_of_the_launch_pro
     assert obs["alpha_values"] == [], "a value the shell sourced from alpha's .env reaches operator_env()"
 
 
+def _record_launch_home(monkeypatch, profiles, home):
+    """The launch-home state ``api.profiles`` records at import, as if it started with ``HERMES_HOME`` = *home*."""
+    env_file = home / ".env"
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME", str(home))
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME_ENV_BYTES", env_file.read_bytes(), raising=False)
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME_DOTENV", profiles._read_dotenv_values(env_file))
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME_LAUNCHER_DOTENV", profiles._launcher_dotenv_values(env_file))
+    if hasattr(profiles, "_INITIAL_HERMES_HOME_LAUNCHER_UNICODE_DOTENV"):  # recorded since the Unicode reading
+        monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME_LAUNCHER_UNICODE_DOTENV",
+                            profiles._launcher_dotenv_values(env_file, unicode_spaces=True))
+    if hasattr(profiles, "_INITIAL_HERMES_HOME_LAUNCHER_NUL_TRUNCATED_DOTENVS"):  # recorded since bash 3.2's reading
+        monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME_LAUNCHER_NUL_TRUNCATED_DOTENVS",
+                            profiles._launcher_nul_truncated_readings(env_file.read_bytes()))
+    monkeypatch.setattr(profiles, "_NAMED_LAUNCH_HOME_AGENT_READINGS", {})
+
+
 def test_a_fallback_reading_is_not_reused_once_the_agent_reader_is_available(monkeypatch, tmp_path):
     from api import profiles
 
     alpha = tmp_path / "profiles" / "alpha"
     _write(alpha / ".env", 'ANTHROPIC_API_KEY="DUMMY_KEY\\tPROFILE_A" # provider key\n')
     shell_export = "DUMMY_KEY\\tPROFILE_A"  # what `set -a; . file` exports: the escape stays literal
-    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME", str(alpha))
-    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME_DOTENV", profiles._read_dotenv_values(alpha / ".env"))
-    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME_LAUNCHER_DOTENV",
-                        profiles._launcher_dotenv_values(alpha / ".env"))
-    monkeypatch.setattr(profiles, "_NAMED_LAUNCH_HOME_AGENT_READINGS", {})
+    _record_launch_home(monkeypatch, profiles, alpha)
     # Called before the Agent is importable: WebUI's fallback reader.
     monkeypatch.setattr(profiles, "_agent_env_file_reader", lambda: profiles._read_dotenv_values)
     assert not profiles._matches_launch_home_env("ANTHROPIC_API_KEY", shell_export), "precondition: WebUI's reading"
     # The Agent's reader is available afterwards (stand-in with the Agent's reading of that line).
     monkeypatch.setattr(profiles, "_agent_env_file_reader", lambda: lambda path: {"ANTHROPIC_API_KEY": shell_export})
     assert profiles._matches_launch_home_env("ANTHROPIC_API_KEY", shell_export), "the fallback reading was reused"
+
+
+def test_a_late_agent_reading_is_of_the_launch_profile_env_as_it_was_at_startup(monkeypatch, tmp_path):
+    """The Agent's reader is importable only after startup, by which time alpha's .env was edited in Settings: the
+    reading taken then is not of the edited file, so a value added since is not taken for one the launcher sourced."""
+    import api.paths as paths
+    from api import profiles
+
+    alpha = tmp_path / "profiles" / "alpha"
+    _write(alpha / ".env", "ALPHA_OWN_KEY=DUMMY_KEY_PROFILE_A\n")
+    _record_launch_home(monkeypatch, profiles, alpha)
+    operator_only = {"OPERATOR_ONLY_TOKEN": "DUMMY_OPERATOR_TOKEN"}
+    monkeypatch.setattr(paths, "STARTUP_ENV", {"ALPHA_OWN_KEY": "DUMMY_KEY_PROFILE_A", **operator_only})
+    monkeypatch.setattr(profiles, "_agent_env_file_reader", lambda: profiles._read_dotenv_values)  # not importable
+    assert profiles.operator_env() == operator_only, "precondition: alpha's value is left out"
+    _write(alpha / ".env", "ALPHA_OWN_KEY=DUMMY_KEY_PROFILE_A\nOPERATOR_ONLY_TOKEN=DUMMY_OPERATOR_TOKEN\n")
+    # The Agent's reader is importable now (stand-in that reads the file it is given).
+    monkeypatch.setattr(profiles, "_agent_env_file_reader", lambda: lambda path: profiles._read_dotenv_values(path))
+    assert profiles.operator_env() == operator_only, \
+        "a value added to alpha's .env after startup is taken for one the launcher sourced from it"
+
+
+def test_an_empty_agent_reading_of_the_launch_profile_env_is_not_kept(monkeypatch, tmp_path):
+    """The Agent's reader returns nothing for a file that has values (a read error at startup): that is not kept as
+    its reading, and the next call takes it."""
+    from api import profiles
+
+    alpha = tmp_path / "profiles" / "alpha"
+    _write(alpha / ".env", 'ANTHROPIC_API_KEY="DUMMY_KEY\\tPROFILE_A" # provider key\n')
+    shell_export = "DUMMY_KEY\\tPROFILE_A"  # what `set -a; . file` exports: the escape stays literal
+    _record_launch_home(monkeypatch, profiles, alpha)
+    reads = []
+
+    def agent_reader(path):  # stand-in with the Agent's reading of that line; its first read fails
+        reads.append(path)
+        return {} if len(reads) == 1 else {"ANTHROPIC_API_KEY": shell_export}
+
+    monkeypatch.setattr(profiles, "_agent_env_file_reader", lambda: agent_reader)
+    monkeypatch.setattr(profiles, "_agent_bytes_parser", lambda: None)  # an Agent without the byte parser
+    assert not profiles._matches_launch_home_env("ANTHROPIC_API_KEY", shell_export), "precondition: the read failed"
+    assert profiles._matches_launch_home_env("ANTHROPIC_API_KEY", shell_export), "the empty reading was kept"
+
+
+def test_the_agent_reading_is_of_the_startup_bytes_even_after_an_edit(monkeypatch, tmp_path):
+    """Where the Agent exposes its byte parser, its reading is taken from the bytes read at import: a value only
+    that reading matches still matches after the file is edited, and the file's current bytes are never parsed."""
+    from api import profiles
+
+    alpha = tmp_path / "profiles" / "alpha"
+    startup_line = 'ANTHROPIC_API_KEY="DUMMY_KEY\\tPROFILE_A" # provider key\n'
+    _write(alpha / ".env", startup_line)
+    shell_export = "DUMMY_KEY\\tPROFILE_A"  # only the Agent's reading holds this value
+    _record_launch_home(monkeypatch, profiles, alpha)
+    _write(alpha / ".env", "ANTHROPIC_API_KEY=DUMMY_EDITED_LATER\n")  # a Settings edit after startup
+    parsed = []
+
+    def parse_bytes(raw):  # stand-in for the Agent's decode + tokenize of raw bytes
+        parsed.append(raw)
+        return {"ANTHROPIC_API_KEY": shell_export} if raw == startup_line.encode() else {}
+
+    monkeypatch.setattr(profiles, "_agent_env_file_reader", lambda: (lambda path: {"ANTHROPIC_API_KEY": "WRONG"}))
+    monkeypatch.setattr(profiles, "_agent_bytes_parser", lambda: parse_bytes)
+    assert profiles._matches_launch_home_env("ANTHROPIC_API_KEY", shell_export)
+    assert not profiles._matches_launch_home_env("ANTHROPIC_API_KEY", "DUMMY_EDITED_LATER")
+    assert not profiles._matches_launch_home_env("ANTHROPIC_API_KEY", "WRONG")
+    assert parsed == [startup_line.encode()]
+
+
+@pytest.mark.parametrize("startup_env", ["empty", "missing"])
+def test_the_agent_reading_of_a_launch_profile_env_without_values_is_kept_empty(monkeypatch, tmp_path, startup_env):
+    """Coverage: alpha's .env had no values at startup (comments only, or no file), so an empty Agent reading is its
+    real reading, not a read error: it is kept, and the file is not read again on later calls."""
+    from api import profiles
+
+    alpha = tmp_path / "profiles" / "alpha"
+    _write(alpha / ".env", "# DUMMY comment only\n")
+    _record_launch_home(monkeypatch, profiles, alpha)
+    if startup_env == "missing":
+        (alpha / ".env").unlink()
+        monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME_ENV_BYTES", None)
+    reads = []
+    monkeypatch.setattr(profiles, "_agent_env_file_reader", lambda: lambda path: reads.append(path) or {})
+    monkeypatch.setattr(profiles, "_agent_bytes_parser", lambda: None)  # an Agent without the byte parser
+    profiles._named_launch_home_readings()
+    profiles._named_launch_home_readings()
+    assert profiles._NAMED_LAUNCH_HOME_AGENT_READINGS == {str(alpha): {}}, "the empty reading was not kept"
+    assert len(reads) == (1 if startup_env == "empty" else 0), "the launch profile's .env was read again"
+
+
+# macOS's bash (Darwin's iswspace) counts the no-break spaces U+00A0, U+2007 and U+202F as [[:space:]] in a UTF-8
+# locale, so ctl.sh strips them like spaces there: alpha's line -> the value ctl.sh exported on a Mac.
+DARWIN_SHAPES = {
+    "nbsp_after_quoted": ('OPENROUTER_API_KEY="DUMMY_KEY_PROFILE_A"\u00a0# provider key\n', "DUMMY_KEY_PROFILE_A"),
+    "nbsp_unquoted": ("OPENROUTER_API_KEY=DUMMY_KEY_PROFILE_A\u00a0# provider key\n", "DUMMY_KEY_PROFILE_A"),
+    "figsp_unquoted": ("OPENROUTER_API_KEY=DUMMY_KEY_PROFILE_A\u2007# provider key\n", "DUMMY_KEY_PROFILE_A"),
+    "nnbsp_unquoted": ("OPENROUTER_API_KEY=DUMMY_KEY_PROFILE_A\u202f# provider key\n", "DUMMY_KEY_PROFILE_A"),
+    "nbsp_inside_key": ("OPENROU\u00a0TER_API_KEY=DUMMY_KEY_PROFILE_A\n", "DUMMY_KEY_PROFILE_A"),
+}
+
+
+def _root_scope_of_startup_value(monkeypatch, tmp_path, profiles, exported):
+    """operator_env() and root's ${VAR} binding for OPENROUTER_API_KEY = *exported* in the launch snapshot, by the
+    startup launcher readings alone (no Agent reading)."""
+    import api.paths as paths
+
+    root = tmp_path / "root"
+    root.mkdir(exist_ok=True)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root)
+    monkeypatch.setattr(profiles, "_agent_env_file_reader", lambda: profiles._read_dotenv_values)
+    monkeypatch.setattr(paths, "STARTUP_ENV", {"OPENROUTER_API_KEY": exported,
+                                               "OPERATOR_ONLY_TOKEN": "DUMMY_OPERATOR_TOKEN"})
+    return (profiles.operator_env().get("OPENROUTER_API_KEY"),
+            profiles.profile_env_binding(root).get("OPENROUTER_API_KEY"))
+
+
+@pytest.mark.parametrize("shape", list(DARWIN_SHAPES))
+def test_a_value_macos_ctl_sh_exported_is_recognised_with_darwins_blanks(monkeypatch, tmp_path, shape):
+    """The launcher reading takes the host C library's blanks: given Darwin's, the value macOS's bash exported from
+    alpha's .env is alpha's (null in root's scope); given glibc's, that value is not what the file says there."""
+    from api import profiles
+
+    build = getattr(profiles, "_launcher_utf8_space", None)
+    assert build is not None, "no host classifier: the UTF-8 reading's blanks are glibc's on every host"
+    line, exported = DARWIN_SHAPES[shape]
+    alpha = tmp_path / "profiles" / "alpha"
+    _write(alpha / ".env", line)
+    monkeypatch.setattr(profiles, "_LAUNCHER_UTF8_SPACE", build(lambda ch: ch in GLIBC_BLANKS))
+    _record_launch_home(monkeypatch, profiles, alpha)
+    assert _root_scope_of_startup_value(monkeypatch, tmp_path, profiles, exported) == (exported, exported), \
+        "precondition: with glibc's blanks no reading holds the value"
+    monkeypatch.setattr(profiles, "_LAUNCHER_UTF8_SPACE", build(lambda ch: ch in DARWIN_BLANKS))
+    _record_launch_home(monkeypatch, profiles, alpha)
+    assert _root_scope_of_startup_value(monkeypatch, tmp_path, profiles, exported) == (None, None), \
+        "a value macOS's ctl.sh sourced from alpha's .env reaches root's scope"
+
+
+def test_both_shells_exports_of_a_line_with_a_nul_are_recognised_and_nothing_else(monkeypatch, tmp_path):
+    """bash 4 and later drop a NUL; macOS's /bin/bash 3.2 ends the line at it, so ``C3=DUMMY\\0V3`` exports
+    ``DUMMY`` and a NUL inside a key's name exports nothing. Either export is alpha's; nothing else is."""
+    import api.paths as paths
+    from api import profiles
+
+    alpha = tmp_path / "profiles" / "alpha"
+    (alpha).mkdir(parents=True)
+    (alpha / ".env").write_bytes(b"C3=DUMMY\x00V3\nC\x005=DUMMY_C5\nC7=DUMMY_C7\n")
+    _record_launch_home(monkeypatch, profiles, alpha)
+    monkeypatch.setattr(profiles, "_agent_env_file_reader", lambda: profiles._read_dotenv_values)
+    operator_only = {"OPERATOR_ONLY_TOKEN": "DUMMY_OPERATOR_TOKEN"}
+
+    def operator_env_with(**exports):
+        monkeypatch.setattr(paths, "STARTUP_ENV", {**exports, **operator_only})
+        return profiles.operator_env()
+
+    assert operator_env_with(C3="DUMMY") == operator_only, "bash 3.2's export (cut at the NUL) reached operator_env()"
+    assert operator_env_with(C3="DUMMYV3", C5="DUMMY_C5") == operator_only, "bash 4's export reached operator_env()"
+    assert operator_env_with(C7="DUMMY_C7") == operator_only, "a line after the NUL lines was not read"
+    for value in ("V3", "DUMMY_", "DUMMY\x01V3"):  # neither shell's export: the operator's
+        assert operator_env_with(C3=value) == {"C3": value, **operator_only}
+    assert operator_env_with(C="DUMMY_C5") == {"C": "DUMMY_C5", **operator_only}, \
+        "a key cut at a NUL in its name was taken for one the launcher exported"
+    # bash 3.2 cuts only the line holding the NUL: the next line is read as usual
+    assert profiles._launcher_dotenv_values(alpha / ".env", nul_truncates=True) == {"C3": "DUMMY", "C7": "DUMMY_C7"}
+    assert profiles._launcher_dotenv_values(alpha / ".env") == {"C3": "DUMMYV3", "C5": "DUMMY_C5", "C7": "DUMMY_C7"}
+
+
+# ctl.sh sources these shapes of alpha's .env differently from Python's text handling (see the launcher reading
+# tests in tests/test_profile_secret_scope_isolation.py); the value it exported is still alpha's.
+PARITY_CHILD = r"""
+import json, os, sys
+
+repo = sys.argv[1]
+sys.path.insert(0, repo)
+if os.environ.get("HERMES_WEBUI_AGENT_DIR"):
+    sys.path.insert(1, os.environ["HERMES_WEBUI_AGENT_DIR"])
+os.chdir(repo)
+obs = {}
+try:
+    import api.config  # noqa: F401  (real startup: init_profile_state)
+    from api import profiles as P
+
+    def alpha_keys(mapping):
+        return sorted(k for k, v in mapping.items() if "PROFILE_A" in str(v))
+
+    obs["active_root"] = P._is_root_profile_home(P.get_process_profile_home())
+    obs["live"] = alpha_keys(os.environ)
+    obs["operator_env"] = alpha_keys(P.operator_env())
+    obs["binding"] = alpha_keys(P.profile_env_binding(P._DEFAULT_HERMES_HOME))
+except Exception as exc:  # surfaced by the parent assertion
+    import traceback
+    obs["error"] = repr(exc) + traceback.format_exc()[-1200:]
+print("RESULT " + json.dumps(obs, sort_keys=True), flush=True)
+os._exit(0)
+"""
+# The value before the NUL holds alpha's marker, so the export is alpha's whether bash drops the NUL (4 and later) or
+# ends the line there (3.2). A no-break space is a blank to macOS's bash, not to glibc's; U+3000 is one to both.
+PARITY_ALPHA_ENVS = {
+    "byte_not_utf8_elsewhere": b'# DUMMY profile file \xff\nOPENROUTER_API_KEY="DUMMY_KEY\\tPROFILE_A"\n',
+    "lone_cr": b"OPENROUTER_API_KEY=DUMMY_KEY_PROFILE_A\rDUMMY_TRAILER=x\n",
+    "nul": b"OPENROUTER_API_KEY=DUMMY_KEY_PROFILE_A\x00_TAIL\n",
+    "nbsp_after_quoted": 'OPENROUTER_API_KEY="DUMMY_KEY\\tPROFILE_A"\u00a0# provider key\n'.encode(),
+    "ideographic_space_before_comment": 'OPENROUTER_API_KEY=DUMMY_KEY_PROFILE_A\u3000# provider key\n'.encode(),
+    "em_space_inside_key": 'OPENROUTER\u2003_API_KEY="DUMMY_KEY\\tPROFILE_A"\n'.encode(),
+}
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("awk") is None, reason="needs bash and awk")
+@pytest.mark.parametrize("case", sorted(PARITY_ALPHA_ENVS))
+def test_root_scope_takes_no_value_ctl_sh_sourced_from_these_launch_profile_env_shapes(tmp_path, case):
+    obs = _run_named_launch_root_active(tmp_path, "ctl_sh", PARITY_CHILD, alpha_env=PARITY_ALPHA_ENVS[case])
+    assert obs["active_root"] is True, "precondition: root is active"
+    assert obs["live"] == ["OPENROUTER_API_KEY"], "precondition: ctl.sh exported alpha's value"
+    assert obs["operator_env"] == [], "a value ctl.sh sourced from alpha's .env reaches operator_env()"
+    assert obs["binding"] == [], "a value ctl.sh sourced from alpha's .env reaches root's ${VAR} binding"
 
 
 # Gateway URL/key provenance (#8432) reads the launch home's .env the same ways.
@@ -260,9 +501,11 @@ sys.path.insert(0, repo)
 if os.environ.get("HERMES_WEBUI_AGENT_DIR"):
     sys.path.insert(1, os.environ["HERMES_WEBUI_AGENT_DIR"])
 os.chdir(repo)
-NAMES = ("HERMES_WEBUI_GATEWAY_BASE_URL", "API_SERVER_KEY")
+NAMES = ("HERMES_WEBUI_GATEWAY_BASE_URL", "API_SERVER_KEY", "HERMES_WEBUI_GATEWAY_API_KEY")
 OWNERS = {"http://alpha-gw.invalid/a\tb": "alpha-decoded", "http://alpha-gw.invalid/a\\tb": "alpha-literal",
-          "DUMMY_KEY_PROFILE_A": "alpha", "DUMMY_KEY_PROFILE_C": "gamma"}
+          "DUMMY_KEY_PROFILE_A": "alpha", "DUMMY_KEY_PROFILE_B": "beta", "DUMMY_KEY_PROFILE_C": "gamma",
+          "http://operator-gw.invalid/o": "operator-url", "DUMMY_OPERATOR_OVERRIDE": "operator",
+          "http://root-gw.invalid/r": "root-url", "DUMMY_KEY_ROOT": "root"}
 obs = {}
 try:
     import api.config  # noqa: F401  (real startup: init_profile_state)
@@ -271,12 +514,11 @@ try:
 
     home = P.get_process_profile_home()
     obs["process_profile"] = "root" if P._is_root_profile_home(home) else home.name
-    obs["live"] = sorted(OWNERS.get(os.environ.get(k), "other") for k in NAMES)
-    obs["profile_sourced"] = {k: G._env_value_is_profile_sourced(P, k, os.environ[k]) for k in NAMES}
-    if obs["process_profile"] != "root":
-        gamma = P.get_hermes_home_for_profile("gamma")
-        obs["url_may_belong_to_a_profile"] = G._shared_url_may_belong_to_process_profile(gamma)
-        obs["gamma_endpoint"] = [OWNERS.get(v, "other") for v in G._gateway_endpoint_for_profile("gamma")]
+    obs["live"] = sorted(OWNERS.get(os.environ[k], "other") for k in NAMES if k in os.environ)
+    obs["profile_sourced"] = {k: G._env_value_is_profile_sourced(P, k, os.environ[k]) for k in NAMES if k in os.environ}
+    gamma = P.get_hermes_home_for_profile("gamma")
+    obs["url_may_belong_to_a_profile"] = G._shared_url_may_belong_to_process_profile(gamma)
+    obs["gamma_endpoint"] = [OWNERS.get(v, "other") for v in G._gateway_endpoint_for_profile("gamma")]
 except Exception as exc:  # surfaced by the parent assertion
     import traceback
     obs["error"] = repr(exc) + traceback.format_exc()[-1200:]
@@ -304,3 +546,264 @@ def test_gateway_values_the_launcher_sourced_from_the_named_launch_profile_env_a
         # A key-only profile does not pair its own key with a URL that may be alpha's own Gateway (#8432).
         assert obs["url_may_belong_to_a_profile"] is True
         assert obs["gamma_endpoint"] == [url_owner, "alpha"], "gamma's key is sent to alpha's gateway URL"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("awk") is None, reason="needs bash and awk")
+@pytest.mark.parametrize("active", ["root", "beta"])
+@pytest.mark.parametrize("launcher", sorted(EXPECTED_LIVE))
+def test_gateway_values_the_operator_exported_over_the_named_launch_profile_env_are_not_profile_sourced(
+        tmp_path, launcher, active):
+    """alpha's .env sets a Gateway URL and key; the operator exports its own after the launcher sourced that file.
+    Neither export is alpha's value, so both stay operator configuration (#8432)."""
+    others = {"beta": "BETA_OWN_KEY=DUMMY_KEY_PROFILE_B\n",
+              "gamma": "HERMES_WEBUI_GATEWAY_API_KEY=DUMMY_KEY_PROFILE_C\n"}
+    exports = "HERMES_WEBUI_GATEWAY_BASE_URL=http://operator-gw.invalid/o API_SERVER_KEY=DUMMY_OPERATOR_OVERRIDE"
+    obs = _run_named_launch_root_active(tmp_path, launcher, GATEWAY_CHILD, alpha_env=GATEWAY_ALPHA_ENV,
+                                        active=active, others=others, exports=exports)
+    assert obs["process_profile"] == active, "precondition: the saved active profile is the process profile"
+    assert obs["live"] == ["operator", "operator-url"], "precondition: the operator's exports replaced alpha's"
+    assert obs["profile_sourced"] == {"HERMES_WEBUI_GATEWAY_BASE_URL": False, "API_SERVER_KEY": False}, \
+        "an operator export is treated as a value from alpha's .env"
+    if active != "root":
+        assert obs["url_may_belong_to_a_profile"] is False, "the operator's Gateway URL is taken for a profile's"
+        assert obs["gamma_endpoint"] == ["operator-url", "gamma"]
+
+
+# Launched under root: the Gateway values ctl.sh sourced from root's .env are the shared settings.
+GATEWAY_ROOT_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL=http://root-gw.invalid/r\nAPI_SERVER_KEY=DUMMY_KEY_ROOT\n"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("awk") is None, reason="needs bash and awk")
+@pytest.mark.parametrize("active", ["root", "beta"])
+def test_gateway_values_ctl_sh_sourced_from_the_root_env_stay_shared(tmp_path, active):
+    """A key-only profile keeps root's shared URL with its own key; under a named active profile root's values are
+    not profile-sourced, while that profile's own Gateway key (mirrored from its .env) is (#8432)."""
+    others = {"beta": "HERMES_WEBUI_GATEWAY_API_KEY=DUMMY_KEY_PROFILE_B\n",
+              "gamma": "HERMES_WEBUI_GATEWAY_API_KEY=DUMMY_KEY_PROFILE_C\n"}
+    obs = _run_named_launch_root_active(tmp_path, "ctl_sh", GATEWAY_CHILD, alpha_env="ALPHA_OWN_KEY=DUMMY_KEY_PROFILE_A\n",
+                                        active=active, others=others, launch="root", root_env=GATEWAY_ROOT_ENV)
+    assert obs["process_profile"] == active, "precondition: the saved active profile is the process profile"
+    assert obs["url_may_belong_to_a_profile"] is False, "root's shared Gateway URL is taken for a profile's"
+    assert obs["gamma_endpoint"] == ["root-url", "gamma"]
+    if active != "root":
+        assert obs["live"] == ["beta", "root", "root-url"], "precondition: ctl.sh exported root's values"
+        assert obs["profile_sourced"] == {"HERMES_WEBUI_GATEWAY_BASE_URL": False, "API_SERVER_KEY": False,
+                                          "HERMES_WEBUI_GATEWAY_API_KEY": True}
+
+
+def test_the_profile_sourced_check_ignores_an_empty_value_and_fails_closed(monkeypatch, tmp_path):
+    from api import gateway_chat, profiles
+
+    alpha = tmp_path / "profiles" / "alpha"
+    _write(alpha / ".env", "API_SERVER_KEY=DUMMY_KEY_PROFILE_A\n")
+    _record_launch_home(monkeypatch, profiles, alpha)
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    assert gateway_chat._env_value_is_profile_sourced(profiles, "API_SERVER_KEY", "DUMMY_KEY_PROFILE_A") is True
+    assert gateway_chat._env_value_is_profile_sourced(profiles, "API_SERVER_KEY", "") is False, \
+        "an empty value configures nothing"
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError("DUMMY: profile home unavailable")
+
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", unavailable)
+    assert gateway_chat._env_value_is_profile_sourced(profiles, "API_SERVER_KEY", "DUMMY_KEY_PROFILE_A") is True, \
+        "an undeterminable launch home is not failed closed"
+
+
+# Launched under root with a saved active named profile, the Agent's launch env re-reads the keys the launcher
+# sourced from root's .env each time it is built (tests/test_profile_secret_scope_isolation.py); stand-in launch
+# policy, WebUI's own .env reader.
+LAUNCH_ENV_ORDER_CHILD = r"""
+import json, os, sys, types
+from pathlib import Path
+
+repo = sys.argv[1]
+sys.path.insert(0, repo)
+os.chdir(repo)
+pkg = types.ModuleType("tui_gateway")
+pkg.__path__ = []
+policy = types.ModuleType("tui_gateway.launch_profile_policy")
+policy._launch_env = lambda: {}
+pkg.launch_profile_policy = policy
+sys.modules.update({"tui_gateway": pkg, "tui_gateway.launch_profile_policy": policy, "agent.secret_scope": None})
+from api import profiles as P
+
+alpha = Path(P._DEFAULT_HERMES_HOME) / "profiles" / "alpha"
+P.get_process_profile_home = lambda: alpha
+P._install_operator_env_as_agent_launch_env()
+print("RESULT " + json.dumps(list(policy._launch_env())), flush=True)
+"""
+
+
+def test_the_launch_env_lists_its_keys_in_the_same_order_in_every_process(tmp_path):
+    home = tmp_path / "home"
+    plain = [f"DUMMY_ROOT_KEY_{i:02d}" for i in range(12)]
+    escaped = [f"DUMMY_ROOT_ESC_{i:02d}" for i in range(6)]
+    _write(home / ".hermes" / ".env", "".join(f"{k}=DUMMY_VALUE_{k}\n" for k in plain)
+           + "".join(f'{k}="DUMMY\\tVALUE_{k}"\n' for k in escaped))
+    launched = {**{k: f"DUMMY_VALUE_{k}" for k in plain}, **{k: f"DUMMY\tVALUE_{k}" for k in escaped}}  # ctl.sh's
+    orders = []
+    for seed in ("1", "2", "3", "4"):
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "TMPDIR": str(tmp_path), "LANG": "C.UTF-8",
+               "PYTHONDONTWRITEBYTECODE": "1", "PYTHONHASHSEED": seed, **launched}
+        cp = subprocess.run([sys.executable, "-c", LAUNCH_ENV_ORDER_CHILD, str(REPO)], env=env, cwd=str(REPO),
+                            capture_output=True, text=True, timeout=120)
+        lines = [line for line in cp.stdout.splitlines() if line.startswith("RESULT ")]
+        assert lines, f"child produced no result (rc={cp.returncode}): {cp.stderr[-1500:]}"
+        orders.append([k for k in json.loads(lines[-1][len("RESULT "):]) if k.startswith("DUMMY_ROOT_")])
+    assert orders[0] == plain + escaped, "the re-read keys are not in launch-env order"
+    assert all(order == orders[0] for order in orders), "the launch env's key order depends on the process"
+
+
+# Root as the process profile: a key only the launcher's reading of root's .env holds (ctl.sh drops a NUL in
+# the key's name; the Agent's reading keeps it) is not in root's own scope, so the launch env must keep it.
+ROOT_SCOPE_CHILD = r'''
+import json, os, sys, threading
+sys.path[:0] = [sys.argv[1], os.environ['HERMES_WEBUI_AGENT_DIR']]
+import api.config
+import cron.scheduler as CS
+from api import profiles as P
+from agent.secret_scope import current_secret_scope, get_secret
+from tui_gateway import launch_profile_policy as LPP
+key = 'OPENROUTER_API_KEY'
+root = P._DEFAULT_HERMES_HOME
+obs = {'root_active': P._is_root_profile_home(P.get_process_profile_home()),
+       'live': os.environ.get(key), 'launch_scope': LPP.launch_secret_scope(root).get(key)}
+with P.cron_profile_context_for_home(root):
+    tokens = CS._install_fire_secret_scope()
+try:
+    obs['cron_scope'] = (current_secret_scope() or {}).get(key)
+    obs['cron_get_secret'] = get_secret(key)
+finally:
+    CS._reset_fire_secret_scope(tokens)
+entered, release, done = threading.Event(), threading.Event(), threading.Event()
+def worker():
+    try:
+        with P.profile_env_for_background_worker('alpha', 'root scope test', scope_skill_modules=False):
+            entered.set()
+            release.wait(30)
+    finally:
+        entered.set()
+        done.set()
+threading.Thread(target=worker, daemon=True).start()
+assert entered.wait(30)
+try:
+    obs['worker_live'] = os.environ.get(key)
+    with P.cron_profile_context_for_home(root):
+        tokens = CS._install_fire_secret_scope()
+    try:
+        obs['cron_during_worker'] = get_secret(key)
+    finally:
+        CS._reset_fire_secret_scope(tokens)
+finally:
+    release.set()
+    assert done.wait(30)
+print('RESULT ' + json.dumps(obs), flush=True)
+os._exit(0)
+'''
+
+@needs_agent_scopes
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("awk") is None, reason="needs bash and awk")
+@pytest.mark.parametrize('line', [
+    'OPENROU\0TER_API_KEY=DUMMY_ROOT_KEY\n',
+    '\0OPENROUTER_API_KEY=DUMMY_ROOT_KEY\n',
+], ids=['nul_inside_key', 'nul_before_key'])
+def test_root_retains_the_provider_key_the_real_launcher_exported(tmp_path, line):
+    obs = _run_named_launch_root_active(tmp_path, 'ctl_sh', ROOT_SCOPE_CHILD, launch='root', root_env=line, exports='',
+                                       alpha_env='OPENROUTER_API_KEY=DUMMY_KEY_PROFILE_A\n')
+    assert obs['root_active'] is True
+    if bash_truncates_at_nul(LAUNCH_PATH):  # bash 3.2 ends the line at the NUL: the launcher exported no such key
+        assert obs['live'] is None, obs
+        assert obs['worker_live'] == 'DUMMY_KEY_PROFILE_A', obs
+        for field in ('launch_scope', 'cron_scope', 'cron_get_secret'):
+            assert obs[field] is None, (field, obs)
+        return
+    assert obs['live'] == 'DUMMY_ROOT_KEY'
+    assert obs['worker_live'] == 'DUMMY_KEY_PROFILE_A', obs
+    assert obs['cron_during_worker'] == 'DUMMY_ROOT_KEY', obs
+    assert obs['launch_scope'] == 'DUMMY_ROOT_KEY', obs
+    assert obs['cron_scope'] == 'DUMMY_ROOT_KEY', obs
+    assert obs['cron_get_secret'] == 'DUMMY_ROOT_KEY', obs
+
+
+# An operator export that is NOT what the real launcher exported from the file stays the operator's: no reading
+# may invent a value the launcher didn't export (a Unicode space bash doesn't count, or an unreadable file).
+OPERATOR_SCOPE_CHILD = r'''
+import json, os, sys
+sys.path.insert(0,sys.argv[1])
+if os.environ.get('HERMES_WEBUI_AGENT_DIR'):sys.path.insert(1,os.environ['HERMES_WEBUI_AGENT_DIR'])
+import api.config
+from api import profiles as P
+key='OPENROUTER_API_KEY'
+root=P._DEFAULT_HERMES_HOME
+obs={'live':os.environ.get(key),'operator_env':P.operator_env().get(key),
+     'root_binding':P.profile_env_binding(root).get(key),
+     'root_config':P.load_profile_config(root)['terminal']['docker_image']}
+if os.environ.get('HERMES_WEBUI_AGENT_DIR'):
+ from tui_gateway import launch_profile_policy as L
+ obs['root_agent_scope']=L.launch_secret_scope(root).get(key)
+print('RESULT '+json.dumps(obs),flush=True)
+os._exit(0)
+'''
+
+# Each line puts a Unicode space where a blank would make ctl.sh (in a UTF-8 locale) export the operator's value: it
+# does so only where the host's bash counts that character as [[:space:]] (U+00A0: macOS, not glibc; U+3000: both).
+# Then the operator's export equals one the launcher made, and is left out (fail closed); otherwise it survives.
+OPERATOR_EXPORT_LINES = {
+    'nbsp_before_comment': ('\u00a0', b'OPENROUTER_API_KEY=DUMMY_OPERATOR_OVERRIDE\xc2\xa0# provider comment\n'),
+    'nbsp_inside_key': ('\u00a0', b'OPENROU\xc2\xa0TER_API_KEY=DUMMY_OPERATOR_OVERRIDE\n'),
+    'ideographic_space_before_comment': (
+        '\u3000', 'OPENROUTER_API_KEY=DUMMY_OPERATOR_OVERRIDE\u3000# provider comment\n'.encode()),
+    'unclosed_quote': (None, b'OPENROUTER_API_KEY="DUMMY_OPERATOR_OVERRIDE\n'),
+}
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("awk") is None, reason="needs bash and awk")
+@pytest.mark.parametrize('case', list(OPERATOR_EXPORT_LINES))
+def test_operator_export_not_equal_to_real_launcher_export_survives(tmp_path, case):
+    space, line = OPERATOR_EXPORT_LINES[case]
+    obs=_run_named_launch_root_active(tmp_path, 'ctl_sh', OPERATOR_SCOPE_CHILD,
+        alpha_env=b'# DUMMY non-UTF8 comment \xff\n'+line,
+        exports='OPENROUTER_API_KEY=DUMMY_OPERATOR_OVERRIDE')
+    assert obs['live']=='DUMMY_OPERATOR_OVERRIDE'
+    launcher_exported_it = space is not None and space in bash_utf8_blanks(LAUNCH_PATH)  # the host's bash decides
+    expected = None if launcher_exported_it else 'DUMMY_OPERATOR_OVERRIDE'
+    for field in ['operator_env','root_binding']:
+        assert obs[field]==expected,(field,obs)
+    assert obs['root_config']==(expected or '${OPENROUTER_API_KEY}'),obs
+    if 'root_agent_scope' in obs:
+        assert obs['root_agent_scope']==expected,obs
+
+
+# A launcher-only root key kept in the launch env follows edits to root's .env and goes when removed.
+ROOT_EDITS_CHILD = r'''
+import json, os, sys
+from pathlib import Path
+sys.path[:0] = [sys.argv[1], os.environ['HERMES_WEBUI_AGENT_DIR']]
+import api.config
+from api import profiles as P
+from tui_gateway import launch_profile_policy as L
+root = Path(P._DEFAULT_HERMES_HOME)
+key = 'OPENROUTER_API_KEY'
+obs = {'initial': L._launch_env().get(key)}
+(root / '.env').write_bytes(b'OPENROU\0TER_API_KEY=DUMMY_ROOT_CHANGED\n')
+obs['changed'] = L._launch_env().get(key)
+(root / '.env').write_text('')
+obs['removed'] = L._launch_env().get(key)
+obs['scope_removed'] = L.launch_secret_scope(P.get_process_profile_home()).get(key)
+obs['live_after_removal'] = os.environ.get(key)
+print('RESULT ' + json.dumps(obs), flush=True)
+os._exit(0)
+'''
+
+@needs_agent_scopes
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("awk") is None, reason="needs bash and awk")
+@pytest.mark.parametrize('active',['root','beta'])
+def test_retained_launcher_only_root_key_tracks_edits_and_removal(tmp_path, active):
+    obs = _run_named_launch_root_active(tmp_path, 'ctl_sh', ROOT_EDITS_CHILD, launch='root', active=active,
+        root_env='OPENROU\0TER_API_KEY=DUMMY_ROOT_KEY\n', exports='', others={'beta':'BETA_OWN_KEY=DUMMY_BETA\n'})
+    if bash_truncates_at_nul(LAUNCH_PATH):  # bash 3.2 ends the line at the NUL: no key exported, none retained
+        assert obs == dict.fromkeys(('initial', 'changed', 'removed', 'scope_removed', 'live_after_removal'))
+        return
+    assert obs == {'initial':'DUMMY_ROOT_KEY','changed':'DUMMY_ROOT_CHANGED','removed':None,
+                   'scope_removed':None,'live_after_removal':'DUMMY_ROOT_KEY'}

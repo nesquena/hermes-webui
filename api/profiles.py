@@ -48,14 +48,35 @@ _INITIAL_HERMES_HOME = os.getenv('HERMES_HOME', '').strip()
 _INITIAL_PROCESS_ENV = dict(os.environ)
 
 
-def _read_dotenv_values(env_path) -> dict[str, str]:
-    """KEY=VALUE pairs of a .env file as the launchers read it (``export`` prefix and quotes stripped); {} on error."""
-    values: dict[str, str] = {}
+def _read_env_bytes(env_path) -> Optional[bytes]:
+    """A .env file's bytes; None when it can't be read."""
     try:
-        text = Path(env_path).expanduser().read_text(encoding="utf-8")
+        return Path(env_path).expanduser().read_bytes()
     except Exception:
+        return None
+
+
+def _env_lines(raw: Optional[bytes], *, nul_truncates=False) -> list[str]:
+    """.env bytes as the lines a launcher's ``read`` loop sees: split on ``\\n`` only (a lone CR, FF or VT stays
+    inside its line), and bytes that are not UTF-8 kept as the surrogate escapes ``os.environ`` holds for them, so
+    one such byte doesn't empty the whole reading. NUL bytes are dropped, as bash 4 and later do; with
+    *nul_truncates*, each line ends at its first NUL instead, as bash 3.2 (macOS's ``/bin/bash``) reads it."""
+    if raw is None:
+        return []
+    if nul_truncates:
+        return [line.split('\0', 1)[0] for line in raw.decode('utf-8', 'surrogateescape').split('\n')]
+    return raw.replace(b'\0', b'').decode('utf-8', 'surrogateescape').split('\n')
+
+
+def _dotenv_values_from_bytes(raw: Optional[bytes]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    # Match WebUI's actual strict UTF-8 text loader. The shell and Agent have
+    # separate byte readers; salvaging their bytes here invents extra provenance.
+    try:
+        lines = raw.decode('utf-8').splitlines() if raw is not None else []
+    except UnicodeDecodeError:
         return values
-    for line in text.splitlines():
+    for line in lines:
         line = line.strip()
         if not line or line.startswith('#') or '=' not in line:
             continue
@@ -69,54 +90,177 @@ def _read_dotenv_values(env_path) -> dict[str, str]:
     return values
 
 
-_LAUNCHER_DOUBLE_QUOTED = re.compile(r'^"((?:[^"\\]|\\.)*)"(\s*#.*)?\s*$')
-_LAUNCHER_SINGLE_QUOTED = re.compile(r"^'([^']*)'(\s*#.*)?\s*$")
+def _read_dotenv_values(env_path) -> dict[str, str]:
+    """KEY=VALUE pairs of a .env file as the launchers read it (``export`` prefix and quotes stripped); {} on error."""
+    return _dotenv_values_from_bytes(_read_env_bytes(env_path))
+
+
+_ASCII_SPACE = ' \t\n\r\f\v'  # [[:space:]] in the C/POSIX locale
+# [[:space:]] in a UTF-8 locale with glibc (GNU bash on Linux): NBSP, NEL and the figure and narrow no-break spaces
+# are not blanks there. The fallback off macOS when the host C library can't be asked (_launcher_utf8_space).
+_GLIBC_UTF8_SPACE = (
+    _ASCII_SPACE + '\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2008\u2009\u200a\u2028\u2029\u205f\u3000')
+# [[:space:]] in a UTF-8 locale on macOS (Darwin libc, stock /bin/bash 3.2 and Homebrew bash alike): glibc's set plus
+# the no-break spaces U+00A0, U+2007 and U+202F. The fallback there, so a Mac whose C library can't be asked still
+# reads the launcher the way its bash exported the file.
+_DARWIN_UTF8_SPACE = _GLIBC_UTF8_SPACE + '\u00a0\u2007\u202f'
+# The code points beyond ASCII a C library may count as blanks in a UTF-8 locale: glibc's, plus NEL (musl) and the
+# no-break spaces U+00A0, U+2007 and U+202F (Darwin, so macOS's bash strips them like spaces).
+_UTF8_SPACE_CANDIDATES = _GLIBC_UTF8_SPACE[len(_ASCII_SPACE):] + '\u0085\u00a0\u2007\u202f'
+
+
+def _fallback_utf8_space(platform=None) -> str:
+    """The blank set to use when the host C library can't be asked: Darwin's on macOS, glibc's elsewhere.
+
+    musl counts NEL (U+0085) and not U+1680, unlike glibc's table; musl has ``newlocale`` and ``iswspace_l``, so
+    there the C library is asked and this table matters only when ctypes can't load it."""
+    return _DARWIN_UTF8_SPACE if (platform or sys.platform) == 'darwin' else _GLIBC_UTF8_SPACE
+
+
+def _utf8_locale_names() -> list[str]:
+    """UTF-8 locales to classify characters in: the launch environment's own (``LC_ALL``, else ``LC_CTYPE``, else
+    ``LANG``, the precedence bash follows) when it is a UTF-8 one, then common names, the first the C library knows."""
+    own = next((_INITIAL_PROCESS_ENV[k] for k in ('LC_ALL', 'LC_CTYPE', 'LANG') if _INITIAL_PROCESS_ENV.get(k)), '')
+    names = ([own] if re.search(r'utf-?8', own, re.I) else []) + ['C.UTF-8', 'en_US.UTF-8', 'UTF-8']
+    return list(dict.fromkeys(names))
+
+
+def _host_utf8_iswspace():
+    """The host C library's ``iswspace`` in a UTF-8 locale, as a predicate on the candidate characters
+    (``_UTF8_SPACE_CANDIDATES``); None when it can't be asked.
+
+    bash matches ``[[:space:]]`` through the C library's classification of the locale it runs in, so this is the
+    blank set of the launcher's bash in a UTF-8 locale. ``iswspace`` answers for the calling thread's LC_CTYPE, which
+    needn't be UTF-8 here (``LC_ALL=C`` leaves it ASCII only; PEP 538 may or may not have coerced it), so the answer
+    is taken from a locale object of its own (``newlocale`` + ``iswspace_l``), freed before returning:
+    ``setlocale``/``uselocale`` are never called, so neither the process's nor any thread's locale changes."""
+    try:
+        import ctypes
+        import ctypes.util
+        import locale
+
+        libc = ctypes.CDLL(None)  # the C library this process already runs on
+        if not hasattr(libc, 'iswspace_l'):
+            libc = ctypes.CDLL(ctypes.util.find_library('c'))
+        newlocale, iswspace_l, freelocale = libc.newlocale, libc.iswspace_l, libc.freelocale
+        newlocale.restype, newlocale.argtypes = ctypes.c_void_p, (ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p)
+        iswspace_l.restype, iswspace_l.argtypes = ctypes.c_int, (ctypes.c_uint32, ctypes.c_void_p)
+        freelocale.restype, freelocale.argtypes = None, (ctypes.c_void_p,)
+        # LC_CTYPE_MASK: glibc and musl number the categories from 0 (mask 1 << LC_CTYPE); Darwin and the BSDs from
+        # 1, after LC_ALL = 0 (mask 1 << (LC_CTYPE - 1)). A wrong mask gets no UTF-8 answer: see _launcher_utf8_space.
+        mask = 1 << (locale.LC_CTYPE - 1 if locale.LC_ALL == 0 else locale.LC_CTYPE)
+        loc = next(filter(None, (newlocale(mask, name.encode(), None) for name in _utf8_locale_names())), None)
+        if not loc:
+            return None
+        try:
+            blanks = frozenset(c for c in _UTF8_SPACE_CANDIDATES if iswspace_l(ord(c), loc))
+        finally:
+            freelocale(loc)
+    except Exception:
+        return None
+    return blanks.__contains__
+
+
+def _launcher_utf8_space(iswspace=None) -> str:
+    """bash's ``[[:space:]]`` in a UTF-8 locale on this host: ASCII whitespace plus each candidate that *iswspace*
+    (a predicate on one character; the host C library's, ``_host_utf8_iswspace``, by default) counts as a blank.
+
+    The platform's table (``_fallback_utf8_space``: Darwin's on macOS, glibc's elsewhere) when the C library can't
+    be asked, or answers as no UTF-8 locale would (no candidate a blank: the C locale's answer)."""
+    try:
+        if iswspace is None:
+            iswspace = _host_utf8_iswspace()
+        blanks = ''.join(c for c in _UTF8_SPACE_CANDIDATES if iswspace(c)) if iswspace is not None else ''
+        if blanks:
+            return _ASCII_SPACE + blanks
+    except Exception:
+        logger.debug("Classifying Unicode blanks failed", exc_info=True)
+    logger.debug("No UTF-8 blank set from the C library; reading the launcher with the platform's table")
+    return _fallback_utf8_space()
+
+
+# The host's blank set, asked once at import: the launcher's bash ran on this host before Python started.
+_LAUNCHER_UTF8_SPACE = _launcher_utf8_space()
+_LAUNCHER_DOUBLE_QUOTED = r'^"((?:[^"\\]|\\.)*)"(\s*#.*)?\s*$'
+_LAUNCHER_SINGLE_QUOTED = r"^'([^']*)'(\s*#.*)?\s*$"
 _LAUNCHER_ESCAPES = {'n': '\n', 'r': '\r', 't': '\t', '"': '"', '\\': '\\'}
 
 
-def _launcher_dotenv_values(env_path) -> dict[str, str]:
-    """A .env file's values as ctl.sh's ``_apply_env_file_safely`` exports them; {} on error.
-
-    Double-quoted values decode ``\\n \\r \\t \\" \\\\`` (other escapes stay as written), single-quoted
-    values are literal, and an unquoted value ends at its first whitespace-then-``#``. The Agent's
-    ``.env`` reader decodes fewer escapes, so by-value provenance checks against both readings."""
+def _launcher_values_from_bytes(raw: Optional[bytes], *, unicode_spaces=False, nul_truncates=False) -> dict[str, str]:
+    space = _LAUNCHER_UTF8_SPACE if unicode_spaces else _ASCII_SPACE
+    space_re = '[' + re.escape(space) + ']'
     values: dict[str, str] = {}
-    try:
-        text = Path(env_path).expanduser().read_text(encoding="utf-8")
-    except Exception:
-        return values
-    for line in text.splitlines():
-        line = line.lstrip()
+    for line in _env_lines(raw, nul_truncates=nul_truncates):
+        line = line.lstrip(space)
         if not line or line.startswith('#'):
             continue
-        if re.match(r'export\s+', line):
-            line = re.sub(r'^export\s+', '', line)
+        if re.match(r'export' + space_re + '+', line):
+            line = re.sub(r'^export' + space_re + '+', '', line)
         if '=' not in line:
             continue
         key, value = line.split('=', 1)
-        key = re.sub(r'\s', '', key)
+        key = re.sub(space_re, '', key)
         if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key) or key in ('UID', 'GID', 'EUID', 'EGID', 'PPID'):
             continue
-        value = value.lstrip()
-        if m := _LAUNCHER_DOUBLE_QUOTED.match(value):
+        value = value.lstrip(space)
+        if m := re.match(_LAUNCHER_DOUBLE_QUOTED.replace(r'\s', space_re), value):
             # ctl.sh decodes through awk inside $(...), which drops trailing newlines.
             value = re.sub(r'\\(.)', lambda e: _LAUNCHER_ESCAPES.get(e.group(1), e.group(0)), m.group(1)).rstrip('\n')
-        elif m := _LAUNCHER_SINGLE_QUOTED.match(value):
+        elif m := re.match(_LAUNCHER_SINGLE_QUOTED.replace(r'\s', space_re), value):
             value = m.group(1)
         else:
-            value = re.split(r'\s#', value, maxsplit=1)[0].rstrip()
+            value = re.split(space_re + '#', value, maxsplit=1)[0].rstrip(space)
         values[key] = value
     return values
 
 
+def _launcher_dotenv_values(env_path, *, unicode_spaces=False, nul_truncates=False) -> dict[str, str]:
+    """A .env file's values as ctl.sh's ``_apply_env_file_safely`` exports them; {} on error.
+
+    Lines as bash's ``read`` gives them (``_env_lines``: NULs dropped, or with *nul_truncates* each line cut at its
+    first NUL). Double-quoted values decode ``\\n \\r \\t \\" \\\\``
+    (other escapes stay as written), single-quoted values are literal, and an unquoted value ends at its first
+    whitespace-then-``#``. Whitespace is the C/POSIX locale's (ASCII); with *unicode_spaces*, the blanks of the
+    host's bash in a UTF-8 locale (``_LAUNCHER_UTF8_SPACE``). The Agent's ``.env`` reader
+    decodes fewer escapes, so by-value provenance checks against every reading."""
+    return _launcher_values_from_bytes(_read_env_bytes(env_path), unicode_spaces=unicode_spaces,
+                                       nul_truncates=nul_truncates)
+
+
+def _launcher_nul_truncated_readings(raw: Optional[bytes]) -> tuple[dict[str, str], ...]:
+    """bash 3.2's readings of *raw* (each line cut at its first NUL), C/POSIX whitespace first, then UTF-8
+    whitespace; () when *raw* holds no NUL, where bash 4 and later read the same values.
+
+    Both shells' readings count, because which bash launched isn't recorded. Provenance is by value, so this errs
+    on the side of the profile: an operator export that equals the bash 3.2 reading of a line holding a NUL (the
+    part before the NUL) is taken for the launcher's and kept out of root's scope."""
+    if raw is None or b'\0' not in raw:
+        return ()
+    return tuple(_launcher_values_from_bytes(raw, unicode_spaces=u, nul_truncates=True) for u in (False, True))
+
+
+def _launcher_readings(env_path) -> tuple[dict[str, str], ...]:
+    """``_launcher_dotenv_values`` of one read of *env_path* by each launcher shell, always four in this order: NULs
+    dropped (bash 4 and later) with C/POSIX, then UTF-8 whitespace; then each line cut at its first NUL (bash 3.2)
+    the same two ways, which are the first two again when the file holds no NUL. An index names the same reading
+    on every read."""
+    raw = _read_env_bytes(env_path)
+    dropped = (_launcher_values_from_bytes(raw), _launcher_values_from_bytes(raw, unicode_spaces=True))
+    return (*dropped, *(_launcher_nul_truncated_readings(raw) or dropped))
+
+
 # The launch home's .env as it was at startup. Shell launchers (ctl.sh) source $HERMES_HOME/.env before Python
-# starts, so for a NAMED profile home those values sit in os.environ looking like launcher exports; this snapshot
-# is the provenance record that tells them apart (#8432).
-_INITIAL_HERMES_HOME_DOTENV = _read_dotenv_values(Path(_INITIAL_HERMES_HOME) / '.env') if _INITIAL_HERMES_HOME else {}
-# The same file as ctl.sh exported it (escapes decoded, inline comment dropped); the Agent's reading is recorded
-# at startup by _named_launch_home_readings().
-_INITIAL_HERMES_HOME_LAUNCHER_DOTENV = (
-    _launcher_dotenv_values(Path(_INITIAL_HERMES_HOME) / '.env') if _INITIAL_HERMES_HOME else {})
+# starts, so for a NAMED profile home those values sit in os.environ looking like launcher exports; these readings
+# of the bytes read here are the provenance record that tells them apart (#8432). A later edit changes none of them.
+_INITIAL_HERMES_HOME_ENV_BYTES = _read_env_bytes(Path(_INITIAL_HERMES_HOME) / '.env') if _INITIAL_HERMES_HOME else None
+_INITIAL_HERMES_HOME_DOTENV = _dotenv_values_from_bytes(_INITIAL_HERMES_HOME_ENV_BYTES)
+# The same bytes as ctl.sh exported them (escapes decoded, inline comment dropped), by both whitespace classes and,
+# where they hold a NUL, both shells' reading of it; the Agent's reading of them is recorded at startup by
+# _named_launch_home_readings().
+_INITIAL_HERMES_HOME_LAUNCHER_DOTENV = _launcher_values_from_bytes(_INITIAL_HERMES_HOME_ENV_BYTES)
+_INITIAL_HERMES_HOME_LAUNCHER_UNICODE_DOTENV = _launcher_values_from_bytes(
+    _INITIAL_HERMES_HOME_ENV_BYTES, unicode_spaces=True)
+_INITIAL_HERMES_HOME_LAUNCHER_NUL_TRUNCATED_DOTENVS = _launcher_nul_truncated_readings(_INITIAL_HERMES_HOME_ENV_BYTES)
 _NAMED_LAUNCH_HOME_AGENT_READINGS: dict[str, dict[str, str]] = {}
 _INITIAL_ISOLATED_PROFILE_OPT_IN = os.getenv('HERMES_WEBUI_ISOLATED_PROFILE', '').strip().lower()
 _ISOLATED_SYMLINK_WARNING_EMITTED = False
@@ -1495,19 +1639,71 @@ def _agent_env_file_reader():
 
 
 def _named_launch_home_readings() -> tuple[dict[str, str], ...]:
-    """The launch home's ``.env`` as it was at startup, by each reading a launcher's export can equal: WebUI's
-    and ctl.sh's (recorded at import) and the Agent's (``load_env_file``; what ``set -a; . file`` exports),
-    recorded by ``init_profile_state()``. A reading through WebUI's fallback reader (Agent not importable yet,
-    or without ``load_env_file``) is not recorded, so a later call takes the Agent's; WebUI's is already here."""
+    """The launch home's ``.env`` as it was at startup, by each reading a launcher's export can equal: WebUI's and
+    ctl.sh's (both whitespace classes; where the bytes hold a NUL, both as bash 4 and later drop it and as bash 3.2
+    ends the line at it) of the bytes read at import, and the Agent's (``load_env_file``) of those
+    same bytes, recorded by ``init_profile_state()``. A shell that sources the file (``set -a; . file``) exports
+    what the Agent's reading holds for the shapes the tests run (plain and quoted values, with or without an
+    inline comment, escapes left literal); other shell syntax is not emulated.
+
+    The Agent's reading is left out, and taken by a later call, while it can't be taken yet: the Agent's reader is
+    not importable (WebUI's fallback reader is never recorded), the file can't be read, or the Agent's reader
+    returns nothing where the other readings find values (a read error must not pin an empty reading). Where the
+    Agent exposes its byte parser, the Agent's reading is of the startup bytes themselves; otherwise, once the
+    file no longer holds its startup bytes, it is recorded as empty. Either way a later edit changes no reading."""
     if not _INITIAL_HERMES_HOME:
         return ()
     home = str(_INITIAL_HERMES_HOME)
+    startup = (_INITIAL_HERMES_HOME_DOTENV, _INITIAL_HERMES_HOME_LAUNCHER_DOTENV,
+               _INITIAL_HERMES_HOME_LAUNCHER_UNICODE_DOTENV, *_INITIAL_HERMES_HOME_LAUNCHER_NUL_TRUNCATED_DOTENVS)
     if home not in _NAMED_LAUNCH_HOME_AGENT_READINGS:
-        reader = _agent_env_file_reader()
-        if reader is _read_dotenv_values:
-            return _INITIAL_HERMES_HOME_DOTENV, _INITIAL_HERMES_HOME_LAUNCHER_DOTENV
-        _NAMED_LAUNCH_HOME_AGENT_READINGS[home] = reader(Path(home).expanduser() / '.env')
-    return _INITIAL_HERMES_HOME_DOTENV, _INITIAL_HERMES_HOME_LAUNCHER_DOTENV, _NAMED_LAUNCH_HOME_AGENT_READINGS[home]
+        reading = _agent_reading_of_startup_bytes(Path(home).expanduser() / '.env', startup)
+        if reading is None:
+            return startup
+        _NAMED_LAUNCH_HOME_AGENT_READINGS[home] = reading
+    return (*startup, _NAMED_LAUNCH_HOME_AGENT_READINGS[home])
+
+
+def _agent_bytes_parser():
+    """The Agent's own parse of raw ``.env`` bytes (what ``load_env_file`` applies to a file's bytes), or None
+    on an Agent that doesn't expose its decode and tokenize steps."""
+    try:
+        from agent import secret_scope as _scope
+    except Exception:
+        return None
+    decode = getattr(_scope, "_decode_env_bytes", None)
+    parse = getattr(_scope, "_parse_env_text", None)
+    if not (callable(decode) and callable(parse)):
+        return None
+    return lambda raw: dict(parse(decode(raw)))
+
+
+def _agent_reading_of_startup_bytes(env_path, startup_readings) -> Optional[dict[str, str]]:
+    """The Agent's reading of the bytes read at import; None: not available yet.
+
+    Where the Agent exposes its byte parser, the startup bytes themselves are parsed, so a later edit to the
+    file can't change the reading. Otherwise the file is read through ``load_env_file`` only while it still
+    holds the startup bytes, and recorded as empty once it doesn't."""
+    reader = _agent_env_file_reader()
+    if reader is _read_dotenv_values:
+        return None
+    if _INITIAL_HERMES_HOME_ENV_BYTES is None:
+        return {}  # nothing to read at startup
+    parse_bytes = _agent_bytes_parser()
+    if parse_bytes is not None:
+        try:
+            return parse_bytes(_INITIAL_HERMES_HOME_ENV_BYTES)
+        except Exception:
+            logger.debug("Hermes Agent's .env byte parser failed; falling back to reading the file", exc_info=True)
+    current = _read_env_bytes(env_path)
+    if current is None:
+        return None
+    if current != _INITIAL_HERMES_HOME_ENV_BYTES:
+        return {}  # edited since startup: the Agent's reading of the startup bytes can't be taken
+    reading = reader(env_path)
+    if (not reading and any(startup_readings)) or _read_env_bytes(env_path) != current:
+        return None
+    return reading
 
 
 def _matches_launch_home_env(key, value, readings=None) -> bool:
@@ -2493,29 +2689,39 @@ def _install_operator_env_as_agent_launch_env() -> None:
     load_env_file = _agent_env_file_reader()
     root_env = Path(_DEFAULT_HERMES_HOME) / '.env'
     root_dotenv: dict[str, str] = {}
-    root_launcher: dict[str, str] = {}
+    root_launchers: tuple[dict[str, str], ...] = ()
     if not _INITIAL_HERMES_HOME or _is_root_profile_home(_INITIAL_HERMES_HOME):
         root_dotenv = load_env_file(root_env)
-        root_launcher = _launcher_dotenv_values(root_env)
+        root_launchers = _launcher_readings(root_env)
         if not root_dotenv:
             logger.debug("No readable root .env values to leave out of the frozen launch env")
     launch_env = operator_env()
     # A key matches the root .env as the Agent reads it or as ctl.sh decoded it (double-quoted \n \r \t);
     # each is re-read the way it matched, so a saved active named profile keeps the value base gave it.
-    agent_keys = {k for k, v in launch_env.items() if _value_from_dotenv(k, v, root_dotenv)}
-    launcher_keys = {k for k, v in launch_env.items()
-                     if k not in agent_keys and _value_from_dotenv(k, v, root_launcher)}
-    root_keys = agent_keys | launcher_keys
+    # Both keep launch-env order (not a set's), so the launch env lists its keys in the same order in every process.
+    agent_keys = dict.fromkeys(k for k, v in launch_env.items() if _value_from_dotenv(k, v, root_dotenv))
+    launcher_keys: dict[str, int] = {}  # key -> index of the launcher reading it matched (_launcher_readings' order)
+    for k, v in launch_env.items():
+        i = next((i for i, dotenv in enumerate(root_launchers) if _value_from_dotenv(k, v, dotenv)), None)
+        if k not in agent_keys and i is not None:
+            launcher_keys[k] = i
+    root_keys = {*agent_keys, *launcher_keys}
     frozen = {k: v for k, v in launch_env.items() if k not in root_keys}
-    if not root_keys or _is_root_profile_home(get_process_profile_home()):
+    if _is_root_profile_home(get_process_profile_home()):
+        # Root's scope reads root's .env itself (as the Agent reads it), so those keys stay out. A key only the
+        # launcher's reading holds (ctl.sh dropped a NUL in its name, say) isn't in that scope: keep it, read
+        # fresh from the file on each build so a key removed in Settings goes too.
+        agent_keys = {}
+        launcher_keys = {k: i for k, i in launcher_keys.items() if k not in root_dotenv}
+    if not agent_keys and not launcher_keys:
         _lpp._launch_env = lambda: dict(frozen)
         return
 
     def _launch_env_with_current_root_values() -> dict[str, str]:
-        current = load_env_file(root_env)
-        decoded = _launcher_dotenv_values(root_env) if launcher_keys else {}
+        current = load_env_file(root_env) if agent_keys else {}
+        decoded = _launcher_readings(root_env) if launcher_keys else ()
         return {**frozen, **{k: current[k] for k in agent_keys if k in current},
-                **{k: decoded[k] for k in launcher_keys if k in decoded}}
+                **{k: decoded[i][k] for k, i in launcher_keys.items() if k in decoded[i]}}
 
     _lpp._launch_env = _launch_env_with_current_root_values
 
