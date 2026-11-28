@@ -419,8 +419,21 @@ def _render_messages_harness() -> str:
     # helper takes its insertAdjacentHTML fallback here, exactly as before.
     insert_block_source = _function_source(ui, "_insertSegmentBlock")
     sessions_js = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    # renderMessages() opens each row with _nextDateSepText(). The helper chain
+    # is the real one (including the server clock the day key now consults).
+    date_sep_names = (
+        "_recoveredAnchorText",
+        "_isEmptyRecoveredJournalAnchor",
+        "_fmtDateSep",
+        "_messageDateSepDayKey",
+        "_nextDateSepText",
+    )
     # renderMessages() delegates to these on every settled worklog pass.
-    evals = "".join(f"eval({json.dumps(_function_source(src, n))});" for src, n in (
+    evals = "let _serverTimeDelta = 0;" + f"eval({json.dumps(_function_source(sessions_js, '_serverNowMs'))});"
+    evals += "".join(
+        f"eval({json.dumps(_function_source(ui, n))});" for n in date_sep_names
+    )
+    evals += "".join(f"eval({json.dumps(_function_source(src, n))});" for src, n in (
         (ui, "_isDelegatedSubagentTranscript"), (ui, "_worklogGroupKey"),
         (ui, "_subagentOpenWorklogTurn"), (sessions_js, "_isChildSession"),
         (sessions_js, "_isDelegatedSubagentRow"), (ui, "renderMessages")))
