@@ -2508,13 +2508,43 @@ def drain_deferred_wakeups_for_session(
         leftover = [e for e in unread if str((e or {}).get("wakeup_prompt") or "").strip()]
         if leftover:
             first = leftover[0]
+            # Compression rotation: if this session has since been archived as
+            # a pre-compression snapshot, the live chat is its continuation and
+            # only the continuation's teardown drains its own key. Re-defer the
+            # remaining entries under the live id, or entries 2..N would wait
+            # on a drain that never happens.
+            #
+            # #9380 review (round 6): the drain's FIRST resolution can go
+            # stale mid-drain — the continuation itself may rotate (child-one
+            # -> child-two) after this resolver returned but before the
+            # survivors are persisted, stranding them on a key that just
+            # became sealed (reproduced by the maintainer: the first
+            # completion independently reaches child-two, whose teardown
+            # drains its own key and finds 0). Survivors must follow the
+            # FINAL validated delivery continuation, so the lineage is walked
+            # to its current tip before parking. A failed walk step keeps the
+            # deepest safely observed tip — survivors are never stranded on
+            # the originally captured key when a better tip was validated.
+            try:
+                from api.routes import resolve_wakeup_session_id
+                live_sid = resolve_wakeup_session_id(session_id)
+                for _ in range(4):
+                    try:
+                        _next_tip = resolve_wakeup_session_id(live_sid)
+                    except Exception:
+                        break
+                    if not _next_tip or _next_tip == live_sid:
+                        break
+                    live_sid = _next_tip
+            except Exception:
+                live_sid = session_id
             # Re-defer entries 2..N BEFORE starting the first turn, so they are
             # already persisted if the first wakeup's own teardown re-runs this
             # hook and tries to claim them. Preserve each entry's dispatch-claim
             # provenance so a retry is never re-classified as an agent read.
             for entry in leftover[1:]:
                 record_deferred_wakeup(
-                    session_id,
+                    live_sid,
                     str((entry or {}).get("process_id") or ""),
                     str((entry or {}).get("wakeup_prompt") or "").strip(),
                     consumed_claimed_by_dispatch=bool(
@@ -2680,6 +2710,20 @@ def _start_server_side_wakeup_turn(
     """
 
     def _runner() -> None:
+        # Compression rotation retarget: this wakeup (and every re-queue,
+        # discard, and busy-check below) is keyed by the session id that was
+        # live when the process completed. If that session has since been
+        # archived as a pre-compression snapshot, follow the durable lineage
+        # to the live continuation NOW — otherwise a 409 re-defer would park
+        # the prompt under the sealed parent's key, which the continuation's
+        # teardown drain never reads.
+        nonlocal session_id
+        try:
+            from api.routes import resolve_wakeup_session_id
+
+            session_id = resolve_wakeup_session_id(session_id)
+        except Exception:
+            pass
         try:
             from api.routes import start_session_turn
 
@@ -2728,13 +2772,37 @@ def _start_server_side_wakeup_turn(
                 # ``claim_deferred_wakeups`` still guarantees exactly-once
                 # delivery, and BG_TASK_COMPLETE_EVENTS_SEEN already deduped
                 # this process_id, so re-recording cannot double-fire.
+                #
+                # Requeue under the admission's FINAL validated target when
+                # the response carries one (#9380 round-4, finding 3): this
+                # caller may have resolved parent -> child-one while admission
+                # resolved further to child-two; parking under child-one
+                # strands the prompt on an intermediate sealed row.
+                _requeue_sid = str((resp or {}).get("session_id") or session_id)
                 if wakeup_prompt:
                     record_deferred_wakeup(
-                        session_id,
+                        _requeue_sid,
                         process_id,
                         wakeup_prompt,
                         consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
                     )
+                if (
+                    (resp or {}).get("error") == "compression_continuation_unconfirmed"
+                    and not retry_attempt
+                ):
+                    # The session is durably sealed but its continuation tip
+                    # could not be confirmed on this read (rotation mid-write,
+                    # tip churn, failed read). The sealed parent never gets
+                    # another turn teardown, so the re-deferred prompt would
+                    # otherwise wait on a drain that never runs. Schedule the
+                    # bounded one-shot retry drain (#7680 machinery): by then
+                    # the rotation write has landed and the drain's lineage
+                    # re-keying delivers it. Bounded by the attempt marker —
+                    # the retry drain runs with retry_attempt=1 and will not
+                    # reschedule, so a persistently unconfirmable tip parks
+                    # the prompt instead of looping.
+                    from api.routes import _schedule_deferred_wakeup_retry
+                    _schedule_deferred_wakeup_retry(_requeue_sid)
                 logger.debug(
                     "server-side wakeup raced an active turn for session %s; "
                     "re-deferred for redelivery on next teardown/turn",
@@ -2749,9 +2817,10 @@ def _start_server_side_wakeup_turn(
                 # the "launch-abort retry's own launch failed" case: the prompt
                 # must survive, and it must NOT loop — the retry timer is
                 # one-shot and nothing here reschedules it.
+                # Same admission-target rule as the 409 branch above.
                 if wakeup_prompt:
                     record_deferred_wakeup(
-                        session_id,
+                        str((resp or {}).get("session_id") or session_id),
                         process_id,
                         wakeup_prompt,
                         consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,

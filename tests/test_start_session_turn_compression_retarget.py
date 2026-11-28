@@ -1,0 +1,829 @@
+"""Server-side wakeups must retarget archived compression snapshots.
+
+Reproduces the "Failed to migrate compressed-session ownership: <old>-><new>"
+turn deaths seen in production logs: a background-process completion (or any
+deferred-wakeup delivery) is keyed by the session id that was live when the
+process was launched. If that session has since been rotated by context
+compression, the wakeup used to start a turn on the sealed pre-compression
+parent while the cached agent already owned the continuation id. At turn end
+the stream then attempted a SECOND ownership migration onto the already
+published continuation, which fails closed — the whole wakeup turn (including
+any real agent work it had done) died with a RuntimeError surfaced to the UI.
+
+The fix retargets start_session_turn to the durable compression continuation
+before any turn state is built, so the turn runs on the live session and no
+second migration is attempted.
+"""
+from __future__ import annotations
+
+import collections
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+
+class _FakeSession:
+    def __init__(self, sid, *, parent=None, snap=False, profile="work", updated=100.0):
+        self.session_id = sid
+        self.profile = profile
+        self.parent_session_id = parent
+        self.pre_compression_snapshot = snap
+        self.updated_at = updated
+        self.created_at = updated
+        self.model = "test-model"
+        self.model_provider = "test-provider"
+        self.workspace = "/tmp/ws-test"
+
+
+@pytest.fixture
+def _stub_routes(monkeypatch, tmp_path):
+    from api import routes as routes_mod
+    from api import config as config_mod
+
+    parent = _FakeSession("parent000001", snap=True, updated=100.0)
+    child = _FakeSession("child0000001", parent="parent000001", updated=200.0)
+    live = _FakeSession("live00000001", updated=300.0)
+
+    sessions = {s.session_id: s for s in (parent, child, live)}
+    monkeypatch.setattr(routes_mod, "get_session", lambda sid: sessions[sid])
+
+    # Resolver inputs: in-memory children only; no index, no sidecar scan.
+    monkeypatch.setattr(
+        routes_mod, "SESSIONS", collections.OrderedDict(sessions), raising=False
+    )
+    monkeypatch.setattr(routes_mod, "SESSION_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(config_mod, "SESSION_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(
+        routes_mod, "SESSION_INDEX_FILE", tmp_path / "_index.json", raising=False
+    )
+
+    # Short-circuit everything between the retarget seam and _start_run.
+    monkeypatch.setattr(
+        routes_mod,
+        "_resolve_chat_workspace_with_recovery",
+        lambda _s, _req: "/tmp/ws-test",
+    )
+    monkeypatch.setattr(
+        routes_mod,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider, **kwargs: (model, provider, model),
+    )
+
+    started = []
+
+    def _fake_start_run(s, **kwargs):
+        started.append((s.session_id, kwargs.get("source")))
+        return {"_status": 200, "stream_id": "stream-test", "session_id": s.session_id}
+
+    monkeypatch.setattr(routes_mod, "_start_run", _fake_start_run)
+
+    import api.background_process as bp_mod
+
+    monkeypatch.setattr(bp_mod, "get_session_channel", lambda _sid: None)
+
+    return routes_mod, started
+
+
+def test_wakeup_on_archived_snapshot_retargets_to_continuation(_stub_routes):
+    routes_mod, started = _stub_routes
+
+    resp = routes_mod.start_session_turn(
+        "parent000001", "background process finished", source="process_wakeup"
+    )
+
+    assert resp["_status"] == 200
+    # The turn must run on the live continuation, NOT the sealed parent.
+    # Before the fix this recorded "parent000001" and the turn later died in
+    # the post-turn ownership migration.
+    assert started == [("child0000001", "process_wakeup")]
+
+
+def test_wakeup_on_live_session_is_untouched(_stub_routes):
+    routes_mod, started = _stub_routes
+
+    resp = routes_mod.start_session_turn(
+        "live00000001", "background process finished", source="process_wakeup"
+    )
+
+    assert resp["_status"] == 200
+    assert started == [("live00000001", "process_wakeup")]
+
+
+def test_wakeup_on_snapshot_without_continuation_keeps_parent(_stub_routes):
+    routes_mod, started = _stub_routes
+    # Remove the continuation: the snapshot has no live descendant, so the
+    # turn proceeds on the parent exactly as before (no crash, no retarget).
+    orphan = _FakeSession("orphan000001", snap=True, updated=100.0)
+    sessions = {orphan.session_id: orphan}
+    routes_mod.get_session = lambda sid: sessions[sid]
+    routes_mod.SESSIONS = collections.OrderedDict()
+
+    resp = routes_mod.start_session_turn(
+        "orphan000001", "background process finished", source="process_wakeup"
+    )
+
+    assert resp["_status"] == 200
+    assert started == [("orphan000001", "process_wakeup")]
+
+
+def test_wakeup_with_unloadable_continuation_fails_closed(_stub_routes):
+    routes_mod, started = _stub_routes
+    # The lineage NAMES a continuation (it is visible in SESSIONS) but its
+    # row cannot be loaded. The sealed parent must not be reopened: the start
+    # is refused so the caller's 404 branch clears queued wakeup state rather
+    # than resurrecting archived history.
+    parent = routes_mod.SESSIONS["parent000001"]
+
+    def _get(sid):
+        if sid == "parent000001":
+            return parent
+        raise KeyError(sid)
+
+    routes_mod.get_session = _get
+
+    resp = routes_mod.start_session_turn(
+        "parent000001", "background process finished", source="process_wakeup"
+    )
+
+    assert resp == {"error": "Session not found", "_status": 404}
+    assert started == []
+
+
+def test_wakeup_requeue_follows_continuation_key(_stub_routes, monkeypatch):
+    """A 409 re-defer must park the prompt under the LIVE continuation key.
+
+    Before the fix the re-defer used the sealed parent's key; the
+    continuation's teardown drain only reads its own key, so the prompt
+    stayed behind with nothing left to drain it (Greptile finding on #9380).
+    """
+    import time
+
+    routes_mod, started = _stub_routes
+    import api.background_process as bp_mod
+    from api import config as config_mod
+
+    def _busy_start(sid, *args, **kwargs):
+        started.append((sid, kwargs.get("source")))
+        return {"_status": 409, "error": "session already has an active stream"}
+
+    monkeypatch.setattr(routes_mod, "start_session_turn", _busy_start)
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+
+    bp_mod._start_server_side_wakeup_turn(
+        "parent000001",
+        "[IMPORTANT: Background process proc-x completed (exit_code=0).]",
+        process_id="proc-x",
+    )
+
+    child_entries, parent_entries = [], []
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+            child_entries = list(
+                config_mod.DEFERRED_PROCESS_WAKEUPS.get("child0000001") or []
+            )
+            parent_entries = list(
+                config_mod.DEFERRED_PROCESS_WAKEUPS.get("parent000001") or []
+            )
+        if child_entries:
+            break
+        time.sleep(0.05)
+
+    assert child_entries, "re-deferred prompt must be keyed to the live continuation"
+    assert not parent_entries, "nothing may be parked under the sealed parent's key"
+    # The turn start itself was also attempted under the continuation id.
+    assert started == [("child0000001", "process_wakeup")]
+
+
+def test_multi_completion_drain_rekeys_survivors_to_continuation(_stub_routes):
+    """Entries 2..N of a multi-completion drain survive under the LIVE key.
+
+    Maintainer finding on #9380: ``drain_deferred_wakeups_for_session``
+    re-defers entries 2..N under the ORIGINAL (sealed-parent) key before
+    starting the first wakeup. The first wakeup retargets to the
+    continuation, but the continuation's teardown only drains its own key,
+    so the survivors were stranded on the archived parent forever.
+    """
+    import time
+
+    routes_mod, started = _stub_routes
+    import api.background_process as bp_mod
+    from api import config as config_mod
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+    assert bp_mod.record_deferred_wakeup("parent000001", "proc-a", "prompt A")
+    assert bp_mod.record_deferred_wakeup(
+        "parent000001",
+        "proc-b",
+        "prompt B",
+        consumed_claimed_by_dispatch=True,
+    )
+
+    assert bp_mod.drain_deferred_wakeups_for_session("parent000001") == 1
+
+    deadline = time.time() + 5
+    while time.time() < deadline and not started:
+        time.sleep(0.05)
+    assert started == [("child0000001", "process_wakeup")]
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        parent_entries = list(
+            config_mod.DEFERRED_PROCESS_WAKEUPS.get("parent000001") or []
+        )
+        child_entries = list(
+            config_mod.DEFERRED_PROCESS_WAKEUPS.get("child0000001") or []
+        )
+    assert not parent_entries, "survivors must not stay on the sealed parent"
+    assert [e["wakeup_prompt"] for e in child_entries] == ["prompt B"]
+    assert (
+        child_entries[0].get("consumed_claimed_by_dispatch") is True
+    ), "dispatch-claim provenance must survive the re-key"
+
+    # Subsequent delivery: the continuation's own teardown drains its key.
+    assert bp_mod.drain_deferred_wakeups_for_session("child0000001") == 1
+    deadline = time.time() + 5
+    while time.time() < deadline and len(started) < 2:
+        time.sleep(0.05)
+    assert started == [
+        ("child0000001", "process_wakeup"),
+        ("child0000001", "process_wakeup"),
+    ]
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("child0000001")
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+
+
+def _three_generation_graph(routes_mod):
+    """sealedparent -> child-one -> child-two (mid-drain rotation fixture)."""
+    parent = _FakeSession("sealedparent", snap=True, profile="default", updated=100.0)
+    child_one = _FakeSession(
+        "childone00001", parent="sealedparent", profile="default", updated=200.0
+    )
+    child_two = _FakeSession(
+        "childtwo00001", parent="childone00001", profile="default", updated=300.0
+    )
+    sessions = {s.session_id: s for s in (parent, child_one, child_two)}
+    routes_mod.get_session = lambda sid: sessions[sid]
+    routes_mod.SESSIONS = collections.OrderedDict(sessions)
+
+
+def test_multi_completion_drain_rotation_published_before_first_resolve(
+    _stub_routes, monkeypatch
+):
+    """#9380 round-6 acceptance, publication order 1 (positive control).
+
+    The child-one -> child-two rotation is ALREADY published when the drain
+    first resolves: survivors must park under child-two and child-two's own
+    later teardown must deliver one of them. Green before and after the fix;
+    pinned as the maintainer asked, so the stable-lineage path cannot regress.
+    """
+    import time
+
+    routes_mod, started = _stub_routes
+    _three_generation_graph(routes_mod)
+    monkeypatch.setattr(
+        routes_mod,
+        "resolve_wakeup_session_id",
+        lambda sid: {"sealedparent": "childtwo00001", "childone00001": "childtwo00001"}.get(
+            sid, sid
+        ),
+    )
+
+    import api.background_process as bp_mod
+    from api import config as config_mod
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+    assert bp_mod.record_deferred_wakeup("sealedparent", "proc-a", "prompt A")
+    assert bp_mod.record_deferred_wakeup(
+        "sealedparent",
+        "proc-b",
+        "prompt B",
+        consumed_claimed_by_dispatch=True,
+    )
+
+    assert bp_mod.drain_deferred_wakeups_for_session("sealedparent") == 1
+    deadline = time.time() + 5
+    while time.time() < deadline and not started:
+        time.sleep(0.05)
+    assert started == [("childtwo00001", "process_wakeup")]
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("sealedparent")
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("childone00001")
+        survivors = list(config_mod.DEFERRED_PROCESS_WAKEUPS.get("childtwo00001") or [])
+    assert [e["wakeup_prompt"] for e in survivors] == ["prompt B"]
+    assert (
+        survivors[0].get("consumed_claimed_by_dispatch") is True
+    ), "dispatch-claim provenance must survive the re-key"
+
+    # Subsequent delivery through the tip's own teardown drain.
+    assert bp_mod.drain_deferred_wakeups_for_session("childtwo00001") == 1
+    deadline = time.time() + 5
+    while time.time() < deadline and len(started) < 2:
+        time.sleep(0.05)
+    assert started == [
+        ("childtwo00001", "process_wakeup"),
+        ("childtwo00001", "process_wakeup"),
+    ]
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("childtwo00001")
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+
+
+def test_multi_completion_drain_rotation_published_mid_drain(
+    _stub_routes, monkeypatch
+):
+    """#9380 round-6 acceptance, publication order 2 (the maintainer's strand).
+
+    The drain's FIRST resolution still sees child-one; the child-one ->
+    child-two rotation is published mid-drain, before survivors are
+    persisted. Parking survivors under the once-captured child-one strands
+    them on a key that just became sealed: the first completion independently
+    reaches child-two, and child-two's teardown drain reads its own key and
+    finds 0. Survivors must follow the FINAL validated delivery continuation,
+    so the drain walks the lineage to its current tip before parking. Red on
+    the pre-fix code: the survivor stays under childone00001 and the
+    child-two teardown drain returns 0.
+    """
+    import time
+
+    routes_mod, started = _stub_routes
+    _three_generation_graph(routes_mod)
+    calls = {"n": 0}
+
+    def _rotating_resolver(sid):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "childone00001"  # pre-rotation view of the parent
+        return {"sealedparent": "childtwo00001", "childone00001": "childtwo00001"}.get(
+            sid, sid
+        )
+
+    monkeypatch.setattr(routes_mod, "resolve_wakeup_session_id", _rotating_resolver)
+
+    import api.background_process as bp_mod
+    from api import config as config_mod
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+    assert bp_mod.record_deferred_wakeup("sealedparent", "proc-a", "prompt A")
+    assert bp_mod.record_deferred_wakeup(
+        "sealedparent",
+        "proc-b",
+        "prompt B",
+        consumed_claimed_by_dispatch=True,
+    )
+
+    assert bp_mod.drain_deferred_wakeups_for_session("sealedparent") == 1
+    deadline = time.time() + 5
+    while time.time() < deadline and not started:
+        time.sleep(0.05)
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("sealedparent")
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("childone00001"), (
+            "survivors must not stay under the key that went stale mid-drain"
+        )
+        survivors = list(config_mod.DEFERRED_PROCESS_WAKEUPS.get("childtwo00001") or [])
+    assert [e["wakeup_prompt"] for e in survivors] == ["prompt B"], (
+        "the survivor must be parked under the FINAL validated continuation"
+    )
+    assert survivors[0].get("consumed_claimed_by_dispatch") is True
+
+    # Reachability, not just placement: the tip's teardown drain delivers it.
+    assert bp_mod.drain_deferred_wakeups_for_session("childtwo00001") == 1
+    deadline = time.time() + 5
+    while time.time() < deadline and len(started) < 2:
+        time.sleep(0.05)
+    assert len(started) == 2
+    assert started[-1] == ("childtwo00001", "process_wakeup")
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("childtwo00001")
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+
+
+def test_sealed_parent_with_closed_continuation_is_refused(_stub_routes, monkeypatch, tmp_path):
+    """A durably sealed parent whose tip was explicitly closed is refused.
+
+    Maintainer finding on #9380: ``durable_compression_continuation``
+    returns ``(True, None)`` when the tip row ended with an explicit
+    ``session_reset``. The optional-id helper loses the sealed flag, and
+    admission fell through to a recording launch on the archived parent
+    (200). Neither sealed row is a safe write target — fail closed.
+    """
+    state = pytest.importorskip("hermes_state")
+    from api import profiles
+
+    monkeypatch.syspath_prepend(str(Path(state.__file__).parent))
+    db = state.SessionDB(tmp_path / "state.db")
+    db.create_session("sealedparent", source="webui")
+    db.create_session("closedchild", source="tui", parent_session_id="sealedparent")
+    db.end_session("sealedparent", "compression")
+    db.end_session("closedchild", "idle_timeout")
+    conn = sqlite3.connect(tmp_path / "state.db")
+    conn.execute(
+        "UPDATE sessions SET end_reason='session_reset' WHERE id='closedchild'"
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        profiles, "_resolve_profile_home_for_name", lambda name: str(tmp_path)
+    )
+
+    routes_mod, started = _stub_routes
+    parent = _FakeSession("sealedparent", snap=True, profile="default", updated=100.0)
+    sessions = {parent.session_id: parent}
+    routes_mod.get_session = lambda sid: sessions[sid]
+    routes_mod.SESSIONS = collections.OrderedDict(sessions)
+
+    resp = routes_mod.start_session_turn(
+        "sealedparent", "background process finished", source="process_wakeup"
+    )
+
+    assert resp == {"error": "Session not found", "_status": 404}
+    assert started == []
+
+    conn.close()
+    db.close()
+
+
+class _ChurnReader:
+    """Fake persistence reader whose tip read churns between the two calls.
+
+    Reproduces the transient ``(True, None)`` the Greptile P1 on #9380 called
+    out: the seal is real but the tip could not be confirmed on this pass
+    (a newer rotation landed mid-read). The same shape covers a read that
+    raises after the seal was found.
+    """
+
+    def __init__(self, *, churn=True, raises=False):
+        self._tip_calls = 0
+        self._churn = churn
+        self._raises = raises
+
+    def get_session(self, sid):
+        if sid == "sealedparent":
+            return {
+                "id": sid,
+                "end_reason": "compression",
+                "profile_name": "default",
+            }
+        return {
+            "id": sid,
+            "end_reason": None,
+            "profile_name": "default",
+            "source": "tui",
+        }
+
+    def get_compression_tip(self, sid):
+        self._tip_calls += 1
+        if self._raises:
+            raise RuntimeError("database is locked")
+        if self._churn and self._tip_calls > 1:
+            return "childtwo"
+        return "childone"
+
+    def close(self):
+        # Churn is per-pass, not per-connection: every seal_state call must
+        # see the same first-read/second-read divergence.
+        self._tip_calls = 0
+
+
+def _seal_state_for(reader, monkeypatch, tmp_path):
+    from api import compression_continuation as cc
+    from api import profiles
+
+    (tmp_path / "state.db").touch()
+    monkeypatch.setattr(
+        profiles, "_resolve_profile_home_for_name", lambda name: str(tmp_path)
+    )
+    monkeypatch.setattr(cc, "open_compression_reads", lambda _p: reader)
+    return cc.compression_seal_state(
+        _FakeSession("sealedparent", profile="default")
+    )
+
+
+def test_seal_state_splits_confirmed_closure_from_transient(tmp_path, monkeypatch):
+    """compression_seal_state must not conflate churn/read-failure with closure."""
+    sealed, tip, state = _seal_state_for(_ChurnReader(churn=False), monkeypatch, tmp_path)
+    assert (sealed, tip, state) == (True, "childone", "open")
+
+    sealed, tip, state = _seal_state_for(_ChurnReader(churn=True), monkeypatch, tmp_path)
+    assert (sealed, tip, state) == (True, None, "unconfirmed")
+
+    sealed, tip, state = _seal_state_for(_ChurnReader(raises=True), monkeypatch, tmp_path)
+    assert (sealed, tip, state) == (True, None, "unconfirmed")
+
+    # The 2-tuple wrapper keeps its exact previous semantics for old callers.
+    from api.compression_continuation import durable_compression_continuation
+
+    assert durable_compression_continuation(
+        _FakeSession("sealedparent", profile="default")
+    ) == (True, None)
+
+
+def test_sealed_parent_with_unconfirmable_tip_refuses_retryably(
+    _stub_routes, monkeypatch, tmp_path
+):
+    """Greptile P1 on #9380: a transient null tip must not become a 404.
+
+    A 404 at admission is terminal for the wakeup callers — they drop the
+    prompt AND clear every queued wakeup for the session. When the tip merely
+    could not be confirmed on this read the refusal is a 409 so the prompt
+    survives for the bounded retry drain.
+    """
+    _seal_state_for(_ChurnReader(churn=True), monkeypatch, tmp_path)
+
+    routes_mod, started = _stub_routes
+    parent = _FakeSession("sealedparent", snap=True, profile="default", updated=100.0)
+    sessions = {parent.session_id: parent}
+    routes_mod.get_session = lambda sid: sessions[sid]
+    routes_mod.SESSIONS = collections.OrderedDict(sessions)
+
+    resp = routes_mod.start_session_turn(
+        "sealedparent", "background process finished", source="process_wakeup"
+    )
+
+    assert resp == {
+        "error": "compression_continuation_unconfirmed",
+        "_status": 409,
+        "retryable": True,
+    }
+    assert started == []
+
+
+def test_unconfirmed_refusal_is_transient_for_the_delegation_budget(
+    _stub_routes, monkeypatch, tmp_path
+):
+    """Greptile P1 on #9380 (round 5): the delegation caller must refund.
+
+    ``_start_async_delegation_wakeup_turn`` classifies refusals through
+    ``_wakeup_refusal_is_transient`` and only refunds the bounded
+    delivery-attempt budget when it says transient. The classifier has no
+    idea of this error string — it trusts the payload's own ``retryable``
+    flag — so the route's real refusal must carry it. Red on the pre-fix
+    refusal: the same call without the flag classifies terminal and a
+    temporary continuation read could terminally drop a completed
+    delegation while its session is still alive.
+    """
+    _seal_state_for(_ChurnReader(churn=True), monkeypatch, tmp_path)
+
+    routes_mod, started = _stub_routes
+    parent = _FakeSession("sealedparent", snap=True, profile="default", updated=100.0)
+    sessions = {parent.session_id: parent}
+    routes_mod.get_session = lambda sid: sessions[sid]
+    routes_mod.SESSIONS = collections.OrderedDict(sessions)
+
+    import api.background_process as bp_mod
+
+    resp = routes_mod.start_session_turn(
+        "sealedparent", "delegation result", source="delegation_wakeup"
+    )
+    assert resp is not None and resp.get("_status") == 409
+    assert bp_mod._wakeup_refusal_is_transient(resp, 409) is True, (
+        "the unconfirmed refusal must classify transient so the delegation "
+        "delivery attempt is refunded, not consumed"
+    )
+    assert started == []
+
+
+def test_unconfirmed_refusal_requeues_prompt_and_schedules_bounded_retry(
+    _stub_routes, monkeypatch
+):
+    """The wakeup caller must re-defer AND arm one bounded retry drain.
+
+    A sealed parent never gets another turn teardown, so a plain re-defer
+    would park the prompt on a key nothing drains again. The 409 branch
+    schedules the #7680 one-shot retry timer — but only for the first
+    attempt: the retry drain runs with retry_attempt=1 and must not
+    reschedule, so a persistently unconfirmable tip parks instead of looping.
+    """
+    import time
+
+    routes_mod, started = _stub_routes
+    import api.background_process as bp_mod
+    from api import config as config_mod
+
+    def _unconfirmed_start(sid, *args, **kwargs):
+        started.append((sid, kwargs.get("source")))
+        return {
+            "_status": 409,
+            "error": "compression_continuation_unconfirmed",
+        }
+
+    scheduled = []
+    monkeypatch.setattr(routes_mod, "start_session_turn", _unconfirmed_start)
+    monkeypatch.setattr(
+        routes_mod,
+        "_schedule_deferred_wakeup_retry",
+        lambda sid, **kwargs: scheduled.append(sid),
+    )
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+
+    bp_mod._start_server_side_wakeup_turn(
+        "parent000001",
+        "[IMPORTANT: Background process proc-y completed (exit_code=0).]",
+        process_id="proc-y",
+    )
+
+    def _wait_for(predicate):
+        deadline = time.time() + 5
+        while time.time() < deadline and not predicate():
+            time.sleep(0.05)
+
+    def _child_entries():
+        with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+            return list(config_mod.DEFERRED_PROCESS_WAKEUPS.get("child0000001") or [])
+
+    _wait_for(lambda: scheduled or _child_entries())
+    assert scheduled == ["child0000001"], (
+        "the retry timer must be armed once, keyed to the live continuation"
+    )
+    entries = _child_entries()
+    assert entries and entries[0]["wakeup_prompt"].startswith("[IMPORTANT:"), (
+        "the prompt must be re-deferred under the continuation key, not dropped"
+    )
+
+    # Bounded: the retry drain's own delivery (retry_attempt=1) must NOT
+    # schedule another timer.
+    scheduled.clear()
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+    bp_mod._start_server_side_wakeup_turn(
+        "parent000001",
+        "[IMPORTANT: Background process proc-z completed (exit_code=0).]",
+        process_id="proc-z",
+        retry_attempt=1,
+    )
+    _wait_for(_child_entries)
+    assert scheduled == [], "the retry drain must not reschedule itself"
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+
+
+class _RotatingTipReader:
+    """The tip row itself carries end_reason='compression' — ordinary rotation.
+
+    Reviewer replay on #9380 round 4: the continuation (child-one) was itself
+    compressed into child-two through the real publication API. The tip row is
+    an intermediate node of a LIVE lineage, not a confirmed deletion or an
+    explicit reset. Classifying it terminal let the 404 cleanup empty the
+    current AND previously queued wakeup state.
+    """
+
+    def __init__(self, *, tip_after=None):
+        self._tip_after = tip_after
+        self._tip_calls = 0
+
+    def get_session(self, sid):
+        if sid == "sealedparent":
+            return {"id": sid, "end_reason": "compression", "profile_name": "default"}
+        return {
+            "id": sid,
+            "end_reason": "compression",
+            "profile_name": "default",
+            "source": "tui",
+        }
+
+    def get_compression_tip(self, sid):
+        self._tip_calls += 1
+        if self._tip_after and self._tip_calls > 1:
+            return self._tip_after
+        return "childone"
+
+    def close(self):
+        self._tip_calls = 0
+
+
+def test_continuation_compressed_again_is_never_terminal(tmp_path, monkeypatch):
+    """Ordinary continuation compression must stay retryable, never terminal."""
+    sealed, tip, state = _seal_state_for(_RotatingTipReader(), monkeypatch, tmp_path)
+    assert (sealed, tip, state) == (True, None, "unconfirmed")
+
+    # Tip pointer moved mid-read (child-one -> child-two published between
+    # the first read and the terminal revalidation): still never terminal.
+    sealed, tip, state = _seal_state_for(
+        _RotatingTipReader(tip_after="childtwo"), monkeypatch, tmp_path
+    )
+    assert (sealed, tip, state) == (True, None, "unconfirmed")
+
+
+def test_established_seal_survives_transient_resolver_failure(_stub_routes, monkeypatch):
+    """Round-4 finding 2: admission must carry established sealing authority.
+
+    Reviewer replay: admission read (sealed=True, tip=child-one, state=open),
+    then the optional-id helper re-read durable state and ONLY that second
+    read transiently failed — no continuation — and the recording launch
+    received the sealed parent with status 200. The sealed path now uses the
+    tip established at admission; the legacy helper is never consulted for a
+    parent already proven sealed.
+    """
+    from api import compression_continuation as cc
+
+    routes_mod, started = _stub_routes
+    monkeypatch.setattr(
+        cc, "compression_seal_state", lambda _s: (True, "child0000001", "open")
+    )
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(routes_mod, "_pre_compression_continuation_session_id", _boom)
+
+    resp = routes_mod.start_session_turn(
+        "parent000001", "background process finished", source="process_wakeup"
+    )
+
+    assert resp["_status"] == 200
+    assert started == [("child0000001", "process_wakeup")], (
+        "an established seal must retarget to its tip, never fall through "
+        "to the sealed parent because a later durable read wobbled"
+    )
+
+
+def test_busy_requeue_follows_admission_target_after_late_rotation(
+    _stub_routes, monkeypatch
+):
+    """Round-4 finding 3: requeue under the FINAL admission target.
+
+    Reviewer replay: the caller resolved parent -> child-one, then child-one
+    was compressed into child-two before admission read durable state.
+    Admission attempted child-two and got the ordinary busy 409, but the
+    requeue parked the prompt under child-one — an intermediate sealed row
+    nothing drains again. The response now carries admission's validated
+    identity and the caller requeues (and would retry-timer) under it.
+    """
+    import time
+
+    from api import compression_continuation as cc
+    import api.background_process as bp_mod
+    from api import config as config_mod
+
+    routes_mod, started = _stub_routes
+
+    child2 = _FakeSession("child0000002", parent="child0000001", updated=250.0)
+    sessions = dict(routes_mod.SESSIONS)
+    sessions["child0000002"] = child2
+    routes_mod.get_session = lambda sid: sessions[sid]
+
+    reads = []
+
+    def _rotating_seal_state(_s):
+        reads.append(1)
+        if len(reads) == 1:
+            return True, "child0000001", "open"  # caller's early resolution
+        return True, "child0000002", "open"  # admission sees the newer tip
+
+    monkeypatch.setattr(cc, "compression_seal_state", _rotating_seal_state)
+
+    def _busy_start_run(s, **kwargs):
+        started.append((s.session_id, kwargs.get("source")))
+        return {"_status": 409, "error": "session already has an active stream"}
+
+    monkeypatch.setattr(routes_mod, "_start_run", _busy_start_run)
+
+    scheduled = []
+    monkeypatch.setattr(
+        routes_mod,
+        "_schedule_deferred_wakeup_retry",
+        lambda sid, **kwargs: scheduled.append(sid),
+    )
+
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+
+    bp_mod._start_server_side_wakeup_turn(
+        "parent000001",
+        "[IMPORTANT: Background process proc-w completed (exit_code=0).]",
+        process_id="proc-w",
+    )
+
+    entries = []
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+            entries = list(
+                config_mod.DEFERRED_PROCESS_WAKEUPS.get("child0000002") or []
+            )
+        if entries:
+            break
+        time.sleep(0.05)
+
+    assert started == [("child0000002", "process_wakeup")]
+    assert entries and entries[0]["wakeup_prompt"].startswith("[IMPORTANT:"), (
+        "the busy prompt must be requeued under admission's final target"
+    )
+    with config_mod.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("child0000001"), (
+            "nothing may be parked under the intermediate sealed row"
+        )
+        assert not config_mod.DEFERRED_PROCESS_WAKEUPS.get("parent000001")
+        config_mod.DEFERRED_PROCESS_WAKEUPS.clear()
+    assert scheduled == [], "a busy 409 must not arm the unconfirmed retry timer"

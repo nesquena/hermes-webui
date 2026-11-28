@@ -14759,6 +14759,26 @@ def _pre_compression_continuation_session_id(session) -> str | None:
     return _resolve_from_rows(rows)
 
 
+def resolve_wakeup_session_id(session_id: str) -> str:
+    """Follow durable compression lineage for a wakeup-keyed session id.
+
+    Deferred wakeups are keyed by the session id that was live when the
+    background event was recorded. If that session has since been archived by
+    context compression, the turn AND the retry-queue key must follow the live
+    continuation: a prompt re-deferred under the sealed parent's key waits on
+    a drain the continuation's teardown never performs. Returns the original
+    id when there is no archived-snapshot lineage to follow.
+    """
+    try:
+        session = get_session(session_id)
+    except KeyError:
+        return session_id
+    continuation_sid = _pre_compression_continuation_session_id(session)
+    if continuation_sid and continuation_sid != session_id:
+        return continuation_sid
+    return session_id
+
+
 def _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, request_profile) -> bool:
     """Confirm one bounded compression edge from current on-disk metadata."""
     snapshot_meta = _persisted_session_meta_prefix(snapshot_sid)
@@ -31763,6 +31783,111 @@ def start_session_turn(
         # session this file's body names. The wakeup callers drop a 404.
         return {"error": "Session not found", "_status": 404}
 
+    # A durably sealed parent with no safe continuation tip is not a legal
+    # turn target: the retarget helper below cannot name a tip, and starting
+    # on the sealed snapshot would resurrect archived history and re-trigger
+    # the ownership collision this admission exists to prevent. Refuse before
+    # constructing a turn. Legacy orphan snapshots without durable sealing
+    # authority keep the existing bounded child hunt.
+    #
+    # The refusal splits by CONFIRMATION, not just by a null tip
+    # (#9380 review, greptile P1): a 404 here is terminal for the wakeup
+    # callers — they drop the prompt AND clear every queued wakeup for the
+    # session. Only a tip that was read cleanly and is confirmed closed or
+    # deleted earns that. When the tip merely could not be confirmed on this
+    # pass (rotation mid-write, tip churn, failed read) the refusal is a 409:
+    # the wakeup caller re-defers the prompt and schedules one bounded retry
+    # drain, so a transient read never strands or destroys a real wakeup.
+    try:
+        from api.compression_continuation import compression_seal_state
+        _sealed_parent, _durable_tip, _seal_state = compression_seal_state(s)
+    except Exception:
+        _sealed_parent, _durable_tip, _seal_state = False, None, "unsealed"
+    if _sealed_parent and not _durable_tip:
+        if _seal_state == "unconfirmed":
+            logger.info(
+                "start_session_turn: %s is durably sealed but its continuation "
+                "could not be confirmed on this read; refusing retryably",
+                session_id,
+            )
+            # ``retryable: True`` is part of this refusal's contract, not
+            # decoration (#9380 review, greptile P1 round 5): the async
+            # delegation wakeup classifies refusals through
+            # ``_wakeup_refusal_is_transient`` and only refunds the bounded
+            # delivery-attempt budget for transient ones. Without the flag a
+            # temporary continuation-read failure would consume attempts and
+            # could terminally drop an already-completed delegation while its
+            # session is still alive.
+            return {
+                "error": "compression_continuation_unconfirmed",
+                "_status": 409,
+                "retryable": True,
+            }
+        logger.warning(
+            "start_session_turn: %s is durably sealed with a confirmed-closed "
+            "continuation; refusing to start a server-side turn on it",
+            session_id,
+        )
+        return {"error": "Session not found", "_status": 404}
+
+    # Compression-rotation retarget: server-side wakeups (process completion,
+    # deferred-wakeup drains, retry timers, gateway delegation) are keyed by the
+    # session id that was live when the event was recorded. If that session has
+    # since been archived as a pre-compression snapshot, the live chat is its
+    # continuation. Starting the turn on the sealed parent instead lets the
+    # cached agent (already bound to the continuation id) rotate ownership a
+    # second time at turn end; that migration fails closed against the already
+    # published continuation and the whole wakeup turn dies with
+    # "Failed to migrate compressed-session ownership". Retarget to the durable
+    # continuation so the turn runs on the live session from the start.
+    #
+    # When admission already established durable sealing authority, carry it
+    # through instead of re-deriving it (#9380 round-4, finding 2): a second
+    # durable read can transiently fail and silently fall through to the
+    # sealed row we just proved is not a legal target. The legacy bounded
+    # child hunt stays only for snapshots WITHOUT durable sealing authority.
+    if _sealed_parent:
+        _continuation_sid = _durable_tip
+    else:
+        try:
+            _continuation_sid = _pre_compression_continuation_session_id(s)
+        except Exception:
+            _continuation_sid = None
+    if _continuation_sid and _continuation_sid != session_id:
+        try:
+            _continuation_session = get_session(_continuation_sid)
+        except KeyError:
+            # The lineage names a continuation that cannot be loaded. The
+            # parent is a sealed snapshot — starting a turn on it would
+            # resurrect archived history and re-trigger the ownership
+            # collision this retarget exists to prevent. Fail closed; the
+            # wakeup callers' 404 branch clears the queued state.
+            logger.warning(
+                "start_session_turn: %s names continuation %s that cannot "
+                "load; refusing to start on the sealed parent",
+                session_id,
+                _continuation_sid,
+            )
+            return {"error": "Session not found", "_status": 404}
+        if getattr(_continuation_session, "_sidecar_names_other_session", None):
+            # #8852: the continuation's own sidecar is corrupt — same
+            # fail-closed rule; neither sealed row is a safe write target.
+            logger.warning(
+                "start_session_turn: continuation %s of %s has a mismatched "
+                "sidecar; refusing to start",
+                _continuation_sid,
+                session_id,
+            )
+            return {"error": "Session not found", "_status": 404}
+        logger.info(
+            "start_session_turn: %s is an archived compression snapshot; "
+            "retargeting server-side turn to continuation %s",
+            session_id,
+            _continuation_sid,
+        )
+        session_id = _continuation_sid
+        s = _continuation_session
+
     try:
         workspace = _resolve_chat_workspace_with_recovery(s, None)
     except WorkspaceBindingPersistenceError as e:
@@ -31924,7 +32049,17 @@ def start_session_turn(
         # journal closed as start_compensated); report the retryable refusal.
         refusal = dict(exc.payload)
         refusal["_status"] = exc.status
+        refusal["session_id"] = session_id
         return refusal
+
+    # Carry the admission's FINAL validated target into every response
+    # (#9380 round-4, finding 3): the wakeup caller may have resolved the
+    # lineage earlier (parent -> child-one) while admission resolved further
+    # (child-one -> child-two). A busy 409 requeued under the caller's older
+    # id strands the prompt on an intermediate sealed row. The stamped id is
+    # what the caller must requeue and retry under.
+    if isinstance(resp, dict):
+        resp["session_id"] = session_id
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
     # Option Z starts this turn server-side, so NO browser EventSource is

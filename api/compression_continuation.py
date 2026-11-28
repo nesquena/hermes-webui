@@ -67,8 +67,23 @@ def open_compression_reads(path):
     return SessionDB(path, read_only=True)
 
 
-def durable_compression_continuation(session):
-    """Return (sealed, resumable tip), without making a recovery write.
+def compression_seal_state(session):
+    """Return (sealed, resumable_tip, state), without making a recovery write.
+
+    ``state`` separates a confirmed dead lineage from one that merely could
+    not be confirmed on this pass — callers that DESTROY queued state on a
+    null tip (wakeup admission drops a 404 and clears the whole deferred
+    queue) must not treat a transient read outcome as deletion:
+
+      "unsealed"          -- not a durable compression parent; (False, None).
+      "open"              -- sealed with a resumable tip; (True, tip).
+      "closed_confirmed"  -- sealed; the tip row was read cleanly and is
+                             explicitly closed (session_reset etc.), deleted,
+                             or structurally invalid. Terminal.
+      "unconfirmed"       -- sealed, but the tip could not be confirmed this
+                             pass: no tip row yet (rotation may still be
+                             mid-write), the tip churned between reads, or a
+                             read failed after the seal was found. Retryable.
 
     A known sealed parent without a safe tip stays sealed (no sidecar fallback).
     Older Agent installations without this read API retain legacy behavior.
@@ -78,52 +93,88 @@ def durable_compression_continuation(session):
     sid = str(getattr(session, "session_id", "") or "")
     profile = str(getattr(session, "profile", None) or "default")
     if not sid or (profile != "default" and not _PROFILE_ID_RE.fullmatch(profile)):
-        return False, None
+        return False, None, "unsealed"
     db = None
     sealed = False
     try:
         path = Path(_resolve_profile_home_for_name(profile)) / "state.db"
         if not path.is_file():
-            return False, None
+            return False, None, "unsealed"
         db = open_compression_reads(path)
         # Establish the complete read API before accepting SQLite authority.
         # Old Agents must retain legacy sidecar recovery, not a sealed null tip.
         for name in ('get_session', 'get_compression_tip'):
             method = getattr(db, name, None)
             if not callable(method):
-                return False, None
+                return False, None, "unsealed"
             try:
                 inspect.signature(method).bind(sid)
             except (TypeError, ValueError):
-                return False, None
+                return False, None, "unsealed"
         parent = db.get_session(sid)
         if not parent or parent.get("end_reason") != "compression":
-            return False, None
+            return False, None, "unsealed"
         sealed = True
         tip = db.get_compression_tip(sid)
         if not tip or tip == sid:
-            return True, None
+            # No tip row yet. The rotation write may still be landing; a
+            # missing tip is not a confirmed deletion.
+            return True, None, "unconfirmed"
+
+        def _closed_or_churn():
+            # A terminal classification is only valid while the durable tip
+            # pointer still names the row being classified. If a newer
+            # rotation published a different tip mid-read, the lineage moved
+            # under us: retryable, never terminal (#9380 round-4, finding 1).
+            if db.get_compression_tip(sid) != tip:
+                return True, None, "unconfirmed"
+            return True, None, "closed_confirmed"
+
         child = db.get_session(tip)
-        if not child or not _is_local_interactive_persisted_source(child.get("source")):
-            return True, None
+        if not child:
+            # The durable tip names a row that is gone: confirmed deletion.
+            return _closed_or_churn()
+        if not _is_local_interactive_persisted_source(child.get("source")):
+            return _closed_or_churn()
         for row in (parent, child):
             if row.get("profile_name") not in (None, "", profile):
-                return True, None
+                return _closed_or_churn()
         # Only the observed automatic idle closure is resumable here. Explicit
         # resets/closures and unknown future reasons must not become redirects.
         reason = child.get("end_reason")
+        if reason == "compression":
+            # The continuation itself was rotated again — ordinary
+            # compression, not an explicit reset or deletion. The durable tip
+            # pointer is about to name the grandchild; revalidate rather than
+            # terminate, so queued wakeups are never cleared for a live
+            # lineage (#9380 round-4, finding 1).
+            return True, None, "unconfirmed"
         if reason not in (None, "", "idle_timeout"):
-            return True, None
+            return _closed_or_churn()
         if child.get("ended_at") is not None and reason != "idle_timeout":
-            return True, None
+            return _closed_or_churn()
         if db.get_compression_tip(sid) != tip:
-            return True, None
-        return True, tip
+            # The tip changed under us mid-read: a newer rotation is in
+            # flight. Retryable, not terminal.
+            return True, None, "unconfirmed"
+        return True, tip, "open"
     except (ImportError, AttributeError, TypeError):
-        return sealed, None
+        return sealed, None, ("unconfirmed" if sealed else "unsealed")
     except Exception:
         logger.debug("Could not resolve durable compression continuation", exc_info=True)
-        return sealed, None
+        return sealed, None, ("unconfirmed" if sealed else "unsealed")
     finally:
         if db is not None:
             db.close()
+
+
+def durable_compression_continuation(session):
+    """Return (sealed, resumable tip), without making a recovery write.
+
+    Thin wrapper over :func:`compression_seal_state` for callers that do not
+    distinguish a confirmed-closed tip from an unconfirmable one. Callers
+    that discard or clear queued wakeup state on a null tip must use the
+    three-value form and refuse retryably on "unconfirmed".
+    """
+    sealed, tip, _state = compression_seal_state(session)
+    return sealed, tip
