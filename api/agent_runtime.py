@@ -9,6 +9,7 @@ mixed runtime and require a clean WebUI restart instead.
 from __future__ import annotations
 
 import errno
+import logging
 import math
 import os
 from pathlib import Path
@@ -26,6 +27,32 @@ from api.config import (
     _DEFAULT_STATE_HOME,
 )
 from api.subprocess_utils import windows_hide_flags
+
+logger = logging.getLogger(__name__)
+
+# A stale-runtime verdict has two very different causes: the Agent checkout really
+# moved, or the Git read that proves it merely failed (binary missing, index lock,
+# slow disk, sandboxed PATH). Both end in the same fail-closed 409 — that contract
+# is deliberate (#7407), and slow reads already get a ten-second budget (#7920).
+# What was missing is any trace of *which* one happened: `_read_agent_revision`
+# returned None silently, so an operator who saw the restart demand had no way to
+# tell "someone updated the Agent" from "git could not run for a moment".
+# These warnings are observability only; they change no return value and no
+# decision. Keep every one of them single-line and bounded so a chatty Git can
+# never flood the log through this hot admission path.
+_GIT_FAILURE_DETAIL_MAX = 200
+
+
+def _git_failure_detail(result: subprocess.CompletedProcess) -> str:
+    """Return a short, single-line Git failure detail suitable for a log line."""
+    raw = (result.stderr or "").strip() or (result.stdout or "").strip()
+    detail = " ".join(raw.split())
+    if not detail:
+        return "(no output)"
+    if len(detail) > _GIT_FAILURE_DETAIL_MAX:
+        return detail[:_GIT_FAILURE_DETAIL_MAX] + "..."
+    return detail
+
 
 _RESTART_REQUIRED_MESSAGE = (
     "Hermes Agent was updated while Hermes WebUI was running. "
@@ -66,7 +93,14 @@ def _read_agent_revision(
     *,
     module_path: Path | None = None,
 ) -> str | None:
-    """Return the tracked Agent HEAD within one total Git-read budget."""
+    """Return the tracked Agent HEAD within one total Git-read budget.
+
+    Returns ``None`` for every unreadable state. The admission guard turns that
+    into a stale verdict on purpose (#7407), so nothing here relaxes the
+    contract. What the warnings add is the *reason*: without them an operator
+    facing the restart demand cannot tell "the Agent checkout moved" from "Git
+    could not be read for a moment", and both look identical from the UI.
+    """
     deadline = time.monotonic() + _GIT_REVISION_TIMEOUT_SECONDS
 
     def remaining_timeout() -> float:
@@ -76,16 +110,27 @@ def _read_agent_revision(
         return remaining
 
     if agent_dir is None:
+        logger.warning(
+            "agent revision unreadable: no Agent source directory was resolved"
+        )
         return None
 
     if module_path is None:
         module = sys.modules.get("run_agent")
         module_file = getattr(module, "__file__", None)
         if not module_file:
+            logger.warning(
+                "agent revision unreadable: the loaded run_agent module has no __file__"
+            )
             return None
         try:
             module_path = Path(module_file).resolve()
-        except (OSError, RuntimeError, TypeError):
+        except (OSError, RuntimeError, TypeError) as exc:
+            logger.warning(
+                "agent revision unreadable: cannot resolve the run_agent path %r: %s",
+                module_file,
+                exc,
+            )
             return None
 
     try:
@@ -98,9 +143,27 @@ def _read_agent_revision(
             creationflags=windows_hide_flags(),
         )
         if worktree_result.returncode != 0:
+            logger.warning(
+                "agent revision unreadable: git rev-parse --show-toplevel failed in "
+                "%s (rc=%s): %s",
+                agent_dir,
+                worktree_result.returncode,
+                _git_failure_detail(worktree_result),
+            )
             return None
         worktree = Path(worktree_result.stdout.strip()).resolve()
-        relative_module = module_path.relative_to(worktree).as_posix()
+
+        try:
+            relative_module = module_path.relative_to(worktree).as_posix()
+        except ValueError:
+            logger.warning(
+                "agent revision unreadable: the run_agent module %s is outside the "
+                "worktree root %s",
+                module_path,
+                worktree,
+            )
+            return None
+
         tracked_result = subprocess.run(
             [
                 "git",
@@ -119,7 +182,15 @@ def _read_agent_revision(
             creationflags=windows_hide_flags(),
         )
         if tracked_result.returncode != 0:
+            logger.warning(
+                "agent revision unreadable: git ls-files --error-unmatch failed for "
+                "%s (rc=%s): %s",
+                relative_module,
+                tracked_result.returncode,
+                _git_failure_detail(tracked_result),
+            )
             return None
+
         revision_result = subprocess.run(
             ["git", "-C", str(worktree), "rev-parse", "--verify", "HEAD"],
             check=False,
@@ -128,14 +199,32 @@ def _read_agent_revision(
             timeout=remaining_timeout(),
             creationflags=windows_hide_flags(),
         )
-    except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError):
+    except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError) as exc:
+        logger.warning(
+            "agent revision unreadable: a Git read failed in %s: %s", agent_dir, exc
+        )
         return None
 
     # Scheduling/process-creation overhead can exceed a subprocess timeout.
     if time.monotonic() >= deadline:
+        logger.warning(
+            "agent revision unreadable: the %ss Git read budget expired before the "
+            "HEAD read completed in %s",
+            _GIT_REVISION_TIMEOUT_SECONDS,
+            agent_dir,
+        )
         return None
     revision = revision_result.stdout.strip()
-    return revision if revision_result.returncode == 0 and revision else None
+    if revision_result.returncode != 0 or not revision:
+        logger.warning(
+            "agent revision unreadable: git rev-parse --verify HEAD failed in %s "
+            "(rc=%s): %s",
+            agent_dir,
+            revision_result.returncode,
+            _git_failure_detail(revision_result),
+        )
+        return None
+    return revision
 
 
 _AGENT_SOURCE_DIR: Path | None = None
@@ -425,6 +514,21 @@ def ensure_agent_runtime_current() -> None:
         fresh_revision = None
     if fresh_revision == _AGENT_REVISION:
         return
+
+    if fresh_revision is None:
+        logger.warning(
+            "agent runtime admission failed: the on-disk revision was unreadable while "
+            "%s was loaded, so this request is refused (fail-closed). The preceding "
+            "'agent revision unreadable' warning names the failing Git step.",
+            _AGENT_REVISION,
+        )
+    else:
+        logger.warning(
+            "agent runtime admission failed: the loaded revision %s no longer matches "
+            "the on-disk %s; restart WebUI before retrying.",
+            _AGENT_REVISION,
+            fresh_revision,
+        )
 
     # Automatic restart needs an Agent-owned success receipt bound to this
     # transaction, final revision and healthy environment, plus an atomic
