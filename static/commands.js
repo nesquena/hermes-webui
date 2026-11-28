@@ -1,5 +1,5 @@
 const _WEBUI_DISPATCHABLE_AGENT_COMMANDS = new Set([
-  'reload-mcp','reload-skills','codex-runtime','credits',
+  'reload-mcp','reload-skills','codex-runtime','credits','review',
   'moa','sessions','resume','pet'
 ]);
 // ── Slash commands ──────────────────────────────────────────────────────────
@@ -718,7 +718,9 @@ async function _runAgentCommandTransport(text,_meta){
   const transportCommand=_canonicalizeSlashCommandToken(command,_meta);
   const data=await api('/api/commands/exec',{
     method:'POST',
-    body:JSON.stringify({command:transportCommand})
+    // master canonicalizes the token before transport (#8203); this branch also
+    // forwards the session so /review can scope the shared review engine.
+    body:JSON.stringify({command:transportCommand,session_id:(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)||''})
   });
   return String(data&&data.output||'(no output)');
 }
