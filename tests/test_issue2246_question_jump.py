@@ -14,6 +14,8 @@ def test_assistant_footer_gets_completed_turn_question_jump_button():
     assert "const questionRawIdxByAssistantRawIdx=new Map()" in UI_JS
     assert "questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx)" in UI_JS
     assert "row.id=_userMessageDomId(rawIdx)" in UI_JS
+    # Finality must use source adjacency, not the next mounted row across a gap.
+    assert "const nextRendered=visWithIdx[renderVisibleIdxs[vi]+1];" in UI_JS
     assert "const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant')" in UI_JS
     # #3114 superseded the turn-final-only gate: the jump-to-question button now
     # renders on every assistant message that has a resolvable question target,

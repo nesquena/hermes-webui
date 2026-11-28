@@ -53,7 +53,7 @@ def test_active_session_idle_reconcile_clears_stale_busy_and_inflight_state():
     assert "updateSendBtn()" in body, "composer controls must reflect the idle state after cleanup"
     assert "hideApprovalCard(true)" in body, "stale approval UI must be cleared when server says the run is idle"
     assert "hideLiveRunStatus(sid)" in body, "stale live footer must be cleared when server says the run is idle"
-    assert "clearLiveToolCards()" in body, "stale live-only tool cards must not survive idle reconciliation"
+    assert "clearLiveToolCards({preserveDom:true})" in body, "idle status cleanup must retain live DOM until transcript replacement captures its reader"
     assert "_scheduleActiveSessionIdleReload(sid)" in body, (
         "idle reconciliation must reload the current transcript from server truth "
         "so missed stream_end events do not leave the active pane stale"
