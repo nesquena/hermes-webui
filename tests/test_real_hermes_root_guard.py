@@ -1,8 +1,10 @@
 """The suite-level real-Hermes-root guard (tests/_real_hermes_root_guard.py) and HOME sandbox."""
+import json
 import os
 import pathlib
 import shutil
 import sqlite3
+import subprocess
 import sys
 import urllib.parse
 from contextlib import contextmanager
@@ -145,6 +147,44 @@ def test_installing_again_keeps_paths_allowed_earlier(tmp_path, monkeypatch):
         assert guard.violation(root / "profiles" / "new") is not None
 
 
+def test_a_profile_created_before_a_reinstall_is_still_reported(tmp_path, monkeypatch):
+    """The profiles/ snapshot is the session's first one: install() runs again mid-session, and a profile a child
+    process created before that point must still reach the end-of-run check (the only place that sees it)."""
+    with _simulated_real_root(tmp_path) as root:
+        monkeypatch.setattr(guard, "real_roots", lambda: [os.path.realpath(root)])
+        monkeypatch.setitem(guard._STATE, "profiles", dict(guard._STATE["profiles"]))
+        guard.install([tmp_path / "repo"])
+        # a child process: audit hooks are per-interpreter, so this is the leak the guard can only see afterwards
+        subprocess.run([sys.executable, "-c",
+                        "import pathlib, sys; pathlib.Path(sys.argv[1]).mkdir()",
+                        str(root / "profiles" / "leaked")], check=True)
+        guard.install([tmp_path / "repo"])  # the re-executed conftest.py
+        assert [p for p in guard._profiles_changes() if "leaked" in p and str(root) in p], guard._profiles_changes()
+
+
+@pytest.mark.parametrize("via", ["install", "allow"])
+@pytest.mark.parametrize("broad", ["the-root-itself", "the-roots-parent"])
+def test_an_allowed_path_that_is_or_contains_a_real_root_still_guards_it(tmp_path, monkeypatch, via, broad):
+    """An allowed root wins over a protected one, so --basetemp=~/.hermes (a root) or --basetemp=~ (its parent)
+    must not exempt the whole root for the session. install() and allow() (pytest_configure adds --basetemp after
+    install) both drop such an entry, and a narrower allowance under the root keeps working."""
+    with _simulated_real_root(tmp_path) as root:
+        basetemp = root if broad == "the-root-itself" else root.parent
+        monkeypatch.setattr(guard, "real_roots", lambda: [os.path.realpath(root)])
+        monkeypatch.setitem(guard._STATE, "profiles", dict(guard._STATE["profiles"]))
+        if via == "install":
+            guard.install([tmp_path / "repo", basetemp])
+        else:
+            guard.install([tmp_path / "repo"])
+            guard.allow(basetemp)
+        assert guard.violation(root / "profiles" / "new") is not None
+        assert guard.violation(root / "config.yaml") is not None
+        assert guard.violation(root / "allowed-scratch" / "kept") is None  # a real scratch dir stays allowed
+        with pytest.raises(guard.RealHermesRootWriteError):
+            (root / "profiles" / "new").mkdir()
+        assert not (root / "profiles" / "new").exists()
+
+
 def test_bytecode_under_a_discovered_agent_checkout_is_not_refused(tmp_path):
     """Discovery prefers <HERMES_HOME>/hermes-agent, so a profile home's checkout sits at
     <root>/profiles/<name>/hermes-agent; importing it writes bytecode there."""
@@ -216,6 +256,23 @@ def test_session_keeps_playwrights_default_browser_cache():
         pytest.skip("no linkable Playwright browser cache on this machine")
     for src, rel in linked:
         assert os.path.realpath(conftest.SANDBOX_HOME / rel) == os.path.realpath(src), rel
+
+
+def test_session_mirrors_the_xdg_data_home_agent_checkout():
+    """api/startup.py's last discovery step also looks in $XDG_DATA_HOME/hermes-agent (default ~/.local/share).
+    HOME moves into the sandbox, so that checkout must be linked there too, as the other real ones are."""
+    conftest = _conftest_module()
+    xdg_agent = pathlib.Path(os.environ.get("XDG_DATA_HOME", "").strip()
+                             or conftest.HOME / ".local" / "share").expanduser() / "hermes-agent"
+    mirrored = {str(rel): src for src, rel in conftest._HOME_DIR_LINKS}
+    if not xdg_agent.is_relative_to(conftest.HOME):
+        assert xdg_agent not in mirrored.values(), "an XDG_DATA_HOME outside HOME needs no sandbox link"
+        return  # discovery reads the absolute variable, which the sandbox does not change
+    rel = xdg_agent.relative_to(conftest.HOME).as_posix()
+    assert mirrored.get(rel) == xdg_agent
+    if not xdg_agent.is_dir() or rel in set(conftest._LINK_FAILED):  # nothing to link, or no symlink privilege
+        pytest.skip("no XDG_DATA_HOME Agent checkout to link on this machine")
+    assert os.path.realpath(conftest.SANDBOX_HOME / rel) == os.path.realpath(xdg_agent)
 
 
 @pytest.mark.parametrize("env, uses_default", [
@@ -297,3 +354,120 @@ def test_test_server_child_inherits_the_sandbox(test_server):
     assert child.get(guard.ENV) == os.environ[guard.ENV]
     for key in ("HOME", "HERMES_REAL_HOME", "LOCALAPPDATA", "HERMES_HOME"):
         assert guard.violation(os.path.join(child[key], "x")) is None, f"child {key} is inside a real Hermes root"
+
+
+# ── #9087 clauses 3, 5 and 6 ──────────────────────────────────────────────────
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+# The Agent checkout at the Windows native root's layout: the one a missing symlink privilege hides.
+_AGENT_LINK_REL = "AppData/Local/hermes/hermes-agent"
+# The live session exports these; a child session must derive its own paths or it would share (and clean) ours.
+_SESSION_ENV = ("HERMES_WEBUI_TEST_PORT", "HERMES_WEBUI_TEST_STATE_DIR", "HERMES_WEBUI_STATE_DIR",
+                "HERMES_WEBUI_TEST_STATE_ROOT", "HERMES_WEBUI_AGENT_DIR")
+
+
+def _child_session_env(tmp_path, **extra):
+    """A fresh session's environment: the parent's derived paths removed, its own state root beneath *tmp_path*."""
+    env = dict(os.environ)
+    for name in _SESSION_ENV:
+        env.pop(name, None)
+    env["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
+    env["HERMES_WEBUI_TEST_STATE_ROOT"] = str(tmp_path / "state-root")
+    env.update(extra)
+    return env
+
+
+def _child_session_paths(tmp_path, **extra):
+    """Import tests/conftest.py in a child process (a fresh session) and report the paths it derived."""
+    program = (
+        "import json, os\n"
+        "import tests.conftest as c\n"
+        "print('CONFTEST ' + json.dumps({'pid': os.getpid(), 'pinned': c.TEST_PORT_PINNED,\n"
+        "    'state': str(c.TEST_STATE_DIR), 'home': str(c.SANDBOX_HOME),\n"
+        "    'agent_dir': os.environ.get('HERMES_WEBUI_AGENT_DIR', '')}))\n"
+    )
+    done = subprocess.run([sys.executable, "-c", program], cwd=str(_REPO_ROOT),
+                          env=_child_session_env(tmp_path, **extra), capture_output=True, text=True, timeout=300)
+    assert done.returncode == 0, done.stderr[-2000:]
+    line = next(l for l in done.stdout.splitlines() if l.startswith("CONFTEST "))
+    return json.loads(line[len("CONFTEST "):])
+
+
+def test_a_pinned_port_gives_each_concurrent_run_its_own_dirs(tmp_path):
+    """#9087 clause 6: with HERMES_WEBUI_TEST_PORT pinned, two concurrent runs from one checkout derived the same
+    state dir and the same SANDBOX_HOME, and the first to finish removed it under the other. The derived names
+    must be per process (the sandbox home derives from the state-dir name), while an explicit pin stays verbatim."""
+    first = _child_session_paths(tmp_path, HERMES_WEBUI_TEST_PORT="24123")
+    second = _child_session_paths(tmp_path, HERMES_WEBUI_TEST_PORT="24123")
+    assert first["pinned"] and second["pinned"]
+    assert first["pid"] != second["pid"]
+    assert first["state"] != second["state"], f"two runs sharing one pinned port derived the same state dir: {first['state']}"
+    assert first["home"] != second["home"], f"two runs sharing one pinned port derived the same sandbox home: {first['home']}"
+    assert first["home"] == first["state"] + "-home"
+    explicit = _child_session_paths(tmp_path, HERMES_WEBUI_TEST_PORT="24123",
+                                    HERMES_WEBUI_TEST_STATE_DIR=str(tmp_path / "explicit"))
+    assert os.path.realpath(explicit["state"]) == os.path.realpath(tmp_path / "explicit")
+
+
+@pytest.mark.parametrize("failed, preset, expected", [
+    ([_AGENT_LINK_REL], "", True),                                # the native-root link failed: use the real checkout
+    ([_AGENT_LINK_REL], "/opt/agent", False),                     # the operator pinned one: never override it
+    ([], "", False),                                             # the link is in place
+    ([".hermes/hermes-agent"], "", False),                        # another pair failing is not this clause
+])
+def test_agent_dir_override_only_for_a_failed_native_root_link(tmp_path, failed, preset, expected):
+    """A failed LOCALAPPDATA Agent link hides the checkout the Agent's native root discovery reads; the session
+    may only repair that by naming the real checkout, and only when the operator has not named one."""
+    src = tmp_path / "hermes-agent"
+    src.mkdir()
+    pairs = ((tmp_path / ".hermes" / "hermes-agent", ".hermes/hermes-agent"), (src, _AGENT_LINK_REL))
+    decide = getattr(guard, "agent_dir_override", None)
+    assert callable(decide), "the guard must decide the failed-link fallback in one helper"
+    override = decide(set(failed), pairs, {"HERMES_WEBUI_AGENT_DIR": preset})
+    assert (override is not None) is expected
+    if expected:
+        assert os.path.realpath(str(override)) == os.path.realpath(src)
+
+
+def test_session_points_agent_discovery_at_the_real_checkout_when_the_link_fails():
+    """#9087 clause 5: without symlink privilege the LOCALAPPDATA Agent link fails, and in-process discovery loses
+    the only checkout the Agent's Windows native root reads. The session must fall back to the real checkout
+    through HERMES_WEBUI_AGENT_DIR (the explicit, highest-priority candidate), or skip with a clear message.
+    The equality is required only when the session chose the fallback, because an explicit operator choice wins."""
+    conftest = _conftest_module()
+    sources = {rel: src for src, rel in conftest._HOME_DIR_LINKS}
+    if _AGENT_LINK_REL not in set(conftest._LINK_FAILED):
+        pytest.skip("symlinks work here: the Agent link is in place")
+    src = sources.get(_AGENT_LINK_REL)
+    if src is None or not src.is_dir():
+        pytest.skip("no Agent checkout at the LOCALAPPDATA layout on this machine")
+    assert os.environ.get("HERMES_WEBUI_AGENT_DIR"), \
+        "a failed Agent link must fall back to HERMES_WEBUI_AGENT_DIR, not silently lose discovery"
+    if getattr(conftest, "_agent_override", None) is not None:
+        assert os.path.realpath(os.environ["HERMES_WEBUI_AGENT_DIR"]) == os.path.realpath(src)
+
+
+def test_the_guard_failure_reaches_pytests_summary_line(tmp_path):
+    """#9087 clause 3: the banner printed from pytest_sessionfinish lands before pytest's own summary, so the last
+    line still read 'N passed' in green while the exit status was 1. The failure must reach the reporter's stats
+    (or the summary hook) so the summary agrees with the exit status."""
+    root = tmp_path / "fake-root" / ".hermes"
+    (root / "profiles" / "default").mkdir(parents=True)
+    case = tmp_path / "case"
+    case.mkdir()
+    (case / "test_profile_from_a_child_process.py").write_text(
+        "import os, pathlib, subprocess, sys\n\n"
+        "def test_a_child_process_creates_a_profile():\n"
+        "    root = pathlib.Path(os.environ['REPRO_FAKE_ROOT'])\n"
+        "    subprocess.run([sys.executable, '-c',\n"
+        "                    'import pathlib, sys; pathlib.Path(sys.argv[1]).mkdir()',\n"
+        "                    str(root / 'profiles' / 'leaked')], check=True)\n",
+        encoding="utf-8")
+    env = _child_session_env(tmp_path, HERMES_WEBUI_TEST_REAL_HERMES_ROOTS=str(root), REPRO_FAKE_ROOT=str(root))
+    done = subprocess.run([sys.executable, "-m", "pytest", "-p", "tests.conftest", "-q", "-p", "no:cacheprovider",
+                           "--rootdir", str(case), str(case / "test_profile_from_a_child_process.py")],
+                          cwd=str(_REPO_ROOT), env=env, capture_output=True, text=True, timeout=900)
+    lines = [line.strip() for line in done.stdout.splitlines() if line.strip()]
+    assert done.returncode == 1, (done.returncode, done.stdout[-3000:])
+    assert any("REAL HERMES ROOT CHANGED" in line for line in lines), done.stdout[-3000:]
+    assert "error" in lines[-1].lower(), f"pytest's last line must agree with the exit status, got {lines[-1]!r}"
+
