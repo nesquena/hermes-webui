@@ -965,6 +965,10 @@ function mobileSwitchPanel(name){
   }
 }
 
+const _btnRunBg=$('btnRunBg');
+if(_btnRunBg) _btnRunBg.onclick=()=>{
+  if(typeof runSessionInBackground==='function') return runSessionInBackground();
+};
 $('btnSend').onclick=()=>{
   if(typeof handleComposerPrimaryAction==='function') return handleComposerPrimaryAction();
   if(window._micActive){
