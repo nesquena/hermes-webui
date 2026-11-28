@@ -653,6 +653,11 @@ def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
     return p.exists()
 
 
+def _sidecar_stem_names_session(stem: str, session_id: str) -> bool:
+    """Accept the canonical name and the supported Hermes-core legacy alias."""
+    return stem == session_id or stem == f"session_{session_id}"
+
+
 def _write_session_index(updates=None, *, session_dir: Path | None = None, session_index_file: Path | None = None):
     """Update the session index file.
 
@@ -685,7 +690,9 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                     if s:
                         c = s.compact()
                         sid = c.get('session_id')
-                        if sid:
+                        # Check ownership before dedup: a larger foreign copy
+                        # must not claim the owner's row. Preserve legacy aliases.
+                        if sid and _sidecar_stem_names_session(p.stem, sid):
                             # Dedup by session_id: prefer entry with more messages
                             # (handles old-format session_xxx.json files alongside
                             #  WebUI-format xxx.json with the same session_id)
@@ -736,7 +743,17 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                 raise ValueError("session index must be a list")
             with LOCK:
                 in_memory_ids = set(SESSIONS.keys())
-                updated_map = {s.session_id: s.compact() for s in updates}
+                # #8861: refuse updates loaded from a sidecar whose body names
+                # another session. Such an object carries that other session's
+                # id, so patching it in would replace the other session's row
+                # with this file's metadata (the #8861 sidebar overwrite, via
+                # whichever caller produced the object). Skipping the update
+                # fails closed: the existing row stays exactly as it is.
+                updated_map = {
+                    s.session_id: s.compact()
+                    for s in updates
+                    if not getattr(s, '_sidecar_names_other_session', None)
+                }
 
             existing = [
                 e for e in existing
@@ -9977,6 +9994,15 @@ def all_sessions(
                 if 'last_message_at' not in s:
                     _diag_stage(diag, "all_sessions.backfill_load")
                     full = _load_session_for_listing(s.get('session_id'))  # never saves (#9007)
+                    # #8861: the same stem/body contract as the recovery pass
+                    # below. A row keyed ``copy-8852`` whose file names
+                    # ``victim-8852`` must not be re-keyed onto the owner:
+                    # replacing index[i] with that compact() hands the owner's
+                    # id to the copy's metadata, and the backfill write then
+                    # overwrites the owner's row. Keep the row as-is and write
+                    # nothing back for it.
+                    if full and str(getattr(full, 'session_id', '') or '') != str(s.get('session_id') or ''):
+                        continue
                     if full:
                         index[i] = full.compact(sidebar_metadata_only=sidebar_metadata_only)
                         backfilled.append(full)
@@ -10029,6 +10055,21 @@ def all_sessions(
                     except Exception:
                         sidecar = None
                     if not sidecar:
+                        continue
+                    # #8861: a sidecar whose body names another session must
+                    # never be recovered under that other id. ``missing`` is
+                    # enumerated by file stem, so a copy (``copy-8852.json``
+                    # whose body names ``victim-8852``) looked like a missing
+                    # row on every listing, and its stub overwrote the owner's
+                    # row — in the response and in _index.json alike. A stem
+                    # only recovers a row when the file's body names the stem
+                    # itself; anything else is skipped. Fail closed: no row is
+                    # written and the owner's row is left untouched.
+                    if str(getattr(sidecar, 'session_id', '') or '') != sid:
+                        logger.debug(
+                            "Skipping index recovery for %s.json: its body names %r",
+                            sid, getattr(sidecar, 'session_id', None),
+                        )
                         continue
                     index_map[sidecar.session_id] = sidecar.compact(
                         include_runtime=True,
@@ -10100,6 +10141,14 @@ def all_sessions(
     # Full scan fallback
     _diag_stage(diag, "all_sessions.full_scan")
     out = []
+    # #8861: this path has no index to trust, so every sidecar is admitted on
+    # its own: only a file whose NAME names its session may list it, and the
+    # fuller copy wins when the same id appears twice — the same admission +
+    # dedup rule the rebuild uses (~695-703). Without it a foreign copy whose
+    # body names its owner's id (Copy.json carrying session_id=victim) is
+    # listed as the owner's row titled "Copy", which is #8861's first
+    # reproduction row.
+    seen_ids: dict[str, "Session"] = {}
     # #4985: the tombstone is intentionally NOT a blind-drop filter on the
     # full-scan fallback either. A tombstoned sid whose sidecar is still
     # on disk must be loaded here so the post-recovery prune helper
@@ -10113,9 +10162,16 @@ def all_sessions(
         if p.name.startswith('_'): continue
         try:
             s = _load_session_for_listing(p.stem)  # never saves (#9007)
-            if s: out.append(s)
+            if not s: continue
+            sid = s.session_id
+            if not sid or not _sidecar_stem_names_session(p.stem, sid):
+                continue
+            prev = seen_ids.get(sid)
+            if prev is None or len(s.messages) > len(prev.messages):
+                seen_ids[sid] = s
         except Exception:
             logger.debug("Failed to load session from %s", p)
+    out = list(seen_ids.values())
     _diag_stage(diag, "all_sessions.full_scan_overlay")
     for s in SESSIONS.values():
         if all(s.session_id != x.session_id for x in out): out.append(s)
