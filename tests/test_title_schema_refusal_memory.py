@@ -14,11 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from api import streaming
-from api.streaming import (
-    _TITLE_RESPONSE_FORMAT,
-    _send_title_request,
-    generate_title_raw_via_agent,
-)
+from api.streaming import generate_title_raw_via_agent
 
 # Real endpoint wording: a refusal of the schema field, and an error that
 # removing the schema cannot repair.
@@ -40,12 +36,23 @@ def _response(content):
 
 @pytest.fixture(autouse=True)
 def _clear_title_schema_refusals():
-    """The refusal memory is module-level; isolate tests from each other."""
-    with streaming._TITLE_SCHEMA_REFUSALS_LOCK:
-        streaming._TITLE_SCHEMA_REFUSALS.clear()
+    """The refusal memory is module-level; isolate tests from each other.
+
+    ``getattr`` keeps this fixture importable on the frozen master baseline,
+    where the memo does not exist yet: the tests then fail on their behavioral
+    assertions instead of erroring in setup.
+    """
+    memo = getattr(streaming, "_TITLE_SCHEMA_REFUSALS", None)
+    lock = getattr(streaming, "_TITLE_SCHEMA_REFUSALS_LOCK", None)
+    if memo is not None and lock is not None:
+        with lock:
+            memo.clear()
     yield
-    with streaming._TITLE_SCHEMA_REFUSALS_LOCK:
-        streaming._TITLE_SCHEMA_REFUSALS.clear()
+    memo = getattr(streaming, "_TITLE_SCHEMA_REFUSALS", None)
+    lock = getattr(streaming, "_TITLE_SCHEMA_REFUSALS_LOCK", None)
+    if memo is not None and lock is not None:
+        with lock:
+            memo.clear()
 
 
 def _agent(create, provider, model, base_url="http://localhost:1234/v1"):
@@ -88,7 +95,7 @@ def test_refusal_is_remembered_and_the_next_title_skips_the_schema():
     agent = _agent(create, "custom", "deepseek-chat")
     assert generate_title_raw_via_agent(agent, "q", "a") == ("Docker Volume Permissions", "llm")
     assert ["response_format" in c for c in calls] == [True, False]
-    assert any(key[:2] == ("custom", "deepseek-chat") for key in streaming._TITLE_SCHEMA_REFUSALS)
+    assert any(key[:2] == ("custom", "deepseek-chat") for key in getattr(streaming, "_TITLE_SCHEMA_REFUSALS", set()))
 
     # The next title on the same route does not send the schema again.
     calls.clear()
@@ -97,30 +104,36 @@ def test_refusal_is_remembered_and_the_next_title_skips_the_schema():
     assert calls[0].get("response_format") is None
 
 
-def test_send_layer_memory_is_keyed_by_provider_and_model():
-    sent = []
+def test_agent_route_memory_is_keyed_by_provider_and_model():
+    """A different model or provider still gets the schema."""
+    calls = []
 
-    def send(response_format):
-        sent.append(response_format)
-        if response_format is not None:
+    def reject(**kwargs):
+        calls.append(("reject", "response_format" in kwargs))
+        if "response_format" in kwargs:
             raise _StatusError(400, _SCHEMA_REJECTED)
-        return "sent"
+        return _response("Remembered")
 
-    # Refused once: recorded, and the request is resent without the schema.
-    assert _send_title_request(send, "custom", "deepseek-chat") == "sent"
-    assert sent == [_TITLE_RESPONSE_FORMAT, None]
-    sent.clear()
-    # Same provider and model: no schema.
-    assert _send_title_request(send, "custom", "deepseek-chat") == "sent"
-    assert sent == [None]
-    sent.clear()
+    def accept(**kwargs):
+        calls.append(("accept", "response_format" in kwargs))
+        return _response("Fresh Route")
+
+    # Refused once on (custom, deepseek-chat): recorded, and the request is
+    # resent without the schema.
+    assert generate_title_raw_via_agent(_agent(reject, "custom", "deepseek-chat"), "q", "a") == ("Remembered", "llm")
+    assert calls == [("reject", True), ("reject", False)]
+    calls.clear()
+    # Same provider and model: the schema is skipped.
+    assert generate_title_raw_via_agent(_agent(accept, "custom", "deepseek-chat"), "q", "a") == ("Fresh Route", "llm")
+    assert calls == [("accept", False)]
+    calls.clear()
     # A different model on the same provider still gets the schema.
-    assert _send_title_request(send, "custom", "deepseek-reasoner") == "sent"
-    assert sent == [_TITLE_RESPONSE_FORMAT, None]
-    sent.clear()
+    assert generate_title_raw_via_agent(_agent(accept, "custom", "deepseek-reasoner"), "q", "a") == ("Fresh Route", "llm")
+    assert calls == [("accept", True)]
+    calls.clear()
     # A different provider with the remembered model still gets the schema.
-    assert _send_title_request(send, "together", "deepseek-chat") == "sent"
-    assert sent == [_TITLE_RESPONSE_FORMAT, None]
+    assert generate_title_raw_via_agent(_agent(accept, "together", "deepseek-chat"), "q", "a") == ("Fresh Route", "llm")
+    assert calls == [("accept", True)]
 
 
 def test_context_length_error_is_not_remembered():
@@ -133,7 +146,7 @@ def test_context_length_error_is_not_remembered():
     agent = _agent(create, "custom", "ctx-limited")
     assert generate_title_raw_via_agent(agent, "q", "a") == (None, "llm_error")
     assert calls and all("response_format" in c for c in calls)
-    assert not streaming._TITLE_SCHEMA_REFUSALS
+    assert not getattr(streaming, "_TITLE_SCHEMA_REFUSALS", set())
 
     # The next title still sends the schema: this error keeps the schema.
     calls.clear()
@@ -141,23 +154,22 @@ def test_context_length_error_is_not_remembered():
     assert calls and all("response_format" in c for c in calls)
 
 
-def test_concurrent_first_refusals_record_the_pair_once():
-    sent = []
-    lock = threading.Lock()
-
-    def send(response_format):
-        with lock:
-            sent.append(response_format)
-        if response_format is not None:
-            raise _StatusError(400, _SCHEMA_REJECTED)
-        return "sent"
-
+def test_concurrent_first_refusals_record_the_route_once():
+    calls = []
+    calls_lock = threading.Lock()
     results = []
     barrier = threading.Barrier(8)
 
+    def create(**kwargs):
+        with calls_lock:
+            calls.append("response_format" in kwargs)
+        if "response_format" in kwargs:
+            raise _StatusError(400, _SCHEMA_REJECTED)
+        return _response("Concurrent")
+
     def worker():
         barrier.wait()
-        results.append(_send_title_request(send, "custom", "deepseek-chat"))
+        results.append(generate_title_raw_via_agent(_agent(create, "custom", "deepseek-chat"), "q", "a"))
 
     threads = [threading.Thread(target=worker) for _ in range(8)]
     for t in threads:
@@ -165,9 +177,10 @@ def test_concurrent_first_refusals_record_the_pair_once():
     for t in threads:
         t.join()
 
-    assert results == ["sent"] * 8
-    assert ("custom", "deepseek-chat", None, None) in streaming._TITLE_SCHEMA_REFUSALS
-    assert len(streaming._TITLE_SCHEMA_REFUSALS) == 1
+    assert results == [("Concurrent", "llm")] * 8
+    memo = getattr(streaming, "_TITLE_SCHEMA_REFUSALS", set())
+    assert len(memo) == 1
+    assert next(iter(memo))[:2] == ("custom", "deepseek-chat")
 
 
 @pytest.mark.parametrize("changes", ["endpoint", "profile"])

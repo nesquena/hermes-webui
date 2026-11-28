@@ -841,7 +841,7 @@ def test_amharic_pin_on_the_agent_route_too(monkeypatch):
     monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "Amharic"})
     monkeypatch.setattr(
         streaming, "generate_title_raw_via_agent",
-        lambda agent, user_text, assistant_text, pinned_language='': ("የስህተት መላ ፍለጋ", "llm_stub"),
+        lambda agent, user_text, assistant_text, pinned_language='', profile_home=None: ("የስህተት መላ ፍለጋ", "llm_stub"),
     )
 
     title, _, _ = streaming._generate_llm_session_title_for_agent(
